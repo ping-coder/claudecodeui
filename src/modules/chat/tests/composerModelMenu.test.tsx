@@ -135,10 +135,35 @@ test('the trigger marks ultracode only while it is on', () => {
   const on = renderMenu({ ultracode: true });
   const onTrigger = on.getByRole('button', { name: /^Select model and reasoning effort/ });
   const indicator = onTrigger.querySelector('[data-testid="composer-ultracode-indicator"]');
-  assert.ok(indicator, 'the trigger shows the ultracode icon');
+  assert.ok(indicator, 'the trigger shows the ultracode badge');
   assert.equal(indicator?.getAttribute('aria-hidden'), 'true');
+  // The badge names the mode in text, and the whole chip turns purple with
+  // the Workflow icon, so it reads without opening the menu.
+  assert.equal(indicator?.textContent, 'Ultracode');
+  assert.match(onTrigger.className, /purple/);
+  assert.doesNotMatch(offTrigger.className, /purple/);
+  assert.ok(onTrigger.querySelector('svg.lucide-workflow'), 'the trigger shows the ultracode icon');
+  assert.equal(offTrigger.querySelector('svg.lucide-workflow'), null);
   assert.match(onTrigger.getAttribute('aria-label') ?? '', /Ultracode on/);
   assert.match(onTrigger.getAttribute('title') ?? '', /Ultracode on/);
+});
+
+test('turning ultracode on keeps the chip as wide as before on phones, the badge showing from sm up', () => {
+  // A wider chip with the badge pushed the composer's controls onto a second
+  // row on 390-412px phones. Below sm the purple chip and the icon say it.
+  const off = renderMenu({ ultracode: false });
+  const offTrigger = off.getByRole('button', { name: /^Select model and reasoning effort/ });
+  assert.ok(offTrigger.classList.contains('max-w-20'));
+  off.unmount();
+
+  const on = renderMenu({ ultracode: true });
+  const onTrigger = on.getByRole('button', { name: /^Select model and reasoning effort/ });
+  const phoneWidths = Array.from(onTrigger.classList).filter((name) => /^max-w-/.test(name));
+  assert.deepEqual(phoneWidths, ['max-w-24'], 'the room the icon needs, and no more');
+  const indicator = onTrigger.querySelector('[data-testid="composer-ultracode-indicator"]');
+  assert.ok(indicator?.classList.contains('hidden'), 'no badge on phones');
+  assert.ok(indicator?.classList.contains('sm:inline-block'), 'the badge from sm up');
+  assert.doesNotMatch(onTrigger.textContent ?? '', /\bUC\b/, 'no short tag');
 });
 
 test('nothing renders when there is no effort, model or ultracode to choose', () => {

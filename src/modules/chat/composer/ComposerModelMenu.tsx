@@ -116,7 +116,8 @@ function ComposerModelMenu({
   const ariaLabel = t('composer.modelMenu', {
     defaultValue: 'Select model and reasoning effort',
   });
-  // The trigger only shows an icon for ultracode, so its name says it too.
+  // The trigger marks ultracode only visually (its colour, icon and badge are
+  // hidden from assistive technology), so its name says it too.
   const triggerAriaLabel = ultracode
     ? `${ariaLabel} (${t('composer.ultracodeOn', { defaultValue: 'Ultracode on' })})`
     : ariaLabel;
@@ -131,9 +132,16 @@ function ComposerModelMenu({
           setIsOpen((current) => !current);
         }}
         className={cn(
-          'flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56',
-          // The ultracode icon gets its own room on phones instead of eating the label's.
-          ultracode ? 'max-w-24' : 'max-w-20',
+          'flex h-8 shrink-0 items-center gap-1 rounded-lg border px-2 text-xs font-medium text-foreground transition-colors',
+          // With ultracode on, the whole chip turns the workflow cards' purple,
+          // and from sm up a badge names the mode, so it reads at a glance
+          // without opening the menu. On phones the chip keeps the width it
+          // had (the icon gets its own room instead of eating the label's), so
+          // turning ultracode on never moves the composer's controls onto a
+          // second row.
+          ultracode
+            ? 'max-w-24 border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/15 sm:max-w-72 dark:border-purple-400/50'
+            : 'max-w-20 border-border/60 bg-muted/40 hover:bg-muted sm:max-w-56',
         )}
         aria-haspopup="menu"
         aria-expanded={isOpen}
@@ -141,15 +149,20 @@ function ComposerModelMenu({
         title={triggerAriaLabel}
       >
         {ultracode && (
-          <Workflow
-            aria-hidden
-            data-testid="composer-ultracode-indicator"
-            className="h-3.5 w-3.5 shrink-0 text-purple-500 dark:text-purple-400"
-          />
+          <Workflow aria-hidden className="h-3.5 w-3.5 shrink-0 text-purple-600 dark:text-purple-300" />
         )}
         <span className="truncate">{triggerLabel}</span>
         {hasModelSection && hasEffortSection && effort !== DEFAULT_EFFORT_VALUE && (
           <span className="hidden shrink-0 capitalize text-muted-foreground sm:inline">· {effortLabel}</span>
+        )}
+        {ultracode && (
+          <span
+            data-testid="composer-ultracode-indicator"
+            aria-hidden
+            className="hidden shrink-0 rounded bg-purple-600 px-1 py-px text-[10px] font-semibold uppercase leading-4 tracking-wide text-white dark:bg-purple-500 sm:inline-block"
+          >
+            {ultracodeLabel}
+          </span>
         )}
       </button>
 
