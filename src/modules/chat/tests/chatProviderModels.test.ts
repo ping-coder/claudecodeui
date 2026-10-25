@@ -65,6 +65,7 @@ test('each provider gets its own model from its own storage key', async () => {
   localStorage.setItem('cursor-model', 'cursor-stored');
   localStorage.setItem('codex-model', 'codex-stored');
   localStorage.setItem('opencode-model', 'opencode-stored');
+  localStorage.setItem('agy-model', 'agy-stored');
 
   const { result } = await renderProviderState();
 
@@ -74,6 +75,7 @@ test('each provider gets its own model from its own storage key', async () => {
   assert.equal(result.current.providerModels.cursor, 'cursor-stored');
   assert.equal(result.current.providerModels.codex, 'codex-stored');
   assert.equal(result.current.providerModels.opencode, 'opencode-stored');
+  assert.equal(result.current.providerModels.agy, 'agy-stored');
 });
 
 test('a provider with no stored model falls back to its own default, not another provider’s', async () => {

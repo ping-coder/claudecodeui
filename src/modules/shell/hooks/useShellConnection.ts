@@ -21,6 +21,7 @@ type UseShellConnectionOptions = {
   initialCommandRef: MutableRefObject<string | null | undefined>;
   isPlainShellRef: MutableRefObject<boolean>;
   bypassPermissionsRef: MutableRefObject<boolean>;
+  modelRef: MutableRefObject<string | null | undefined>;
   isDarkModeRef: MutableRefObject<boolean>;
   onProcessCompleteRef: MutableRefObject<((exitCode: number) => void) | null | undefined>;
   isInitialized: boolean;
@@ -48,6 +49,7 @@ export function useShellConnection({
   initialCommandRef,
   isPlainShellRef,
   bypassPermissionsRef,
+  modelRef,
   isDarkModeRef,
   onProcessCompleteRef,
   isInitialized,
@@ -179,6 +181,8 @@ export function useShellConnection({
               // Launch-time flag: bypass mode can only join the CLI's
               // shift+tab cycle when claude starts with it.
               bypassPermissions: bypassPermissionsRef.current,
+              // Launch-time as well: agy's --model only applies at start.
+              ...(modelRef.current ? { model: modelRef.current } : {}),
               // Launch-time too: a CLI picks its colours when it starts.
               colorScheme: isDarkModeRef.current ? 'dark' : 'light',
             });
@@ -212,6 +216,7 @@ export function useShellConnection({
     },
     [
       bypassPermissionsRef,
+      modelRef,
       clearTerminalScreen,
       fitAddonRef,
       handleSocketMessage,

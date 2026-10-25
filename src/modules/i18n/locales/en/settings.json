@@ -385,6 +385,8 @@
       "connected": "Connected",
       "notConnected": "Not connected",
       "disconnected": "Disconnected",
+      "notInstalled": "Not installed",
+      "cliNotInstalled": "The {{agent}} CLI is not installed on this machine",
       "checkingAuth": "Checking authentication status...",
       "loggedInAs": "Logged in as {{email}}",
       "authenticatedUser": "authenticated user"
@@ -401,6 +403,9 @@
       },
       "opencode": {
         "description": "OpenCode CLI assistant"
+      },
+      "agy": {
+        "description": "Antigravity CLI assistant"
       }
     },
     "connectionStatus": "Connection Status",
@@ -424,6 +429,11 @@
       "reAuthDescription": "Sign in with a different account or refresh credentials",
       "button": "Login",
       "reLoginButton": "Re-login"
+    },
+    "terminalLogin": {
+      "title": "Sign in from a terminal",
+      "description": "Run <code>{{command}}</code> once in a terminal on this machine to sign in.",
+      "installDescription": "Install the {{agent}} CLI on this machine, then run <code>{{command}}</code> once in a terminal to sign in."
     },
     "error": "Error: {{error}}"
   },

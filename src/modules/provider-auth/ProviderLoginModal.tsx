@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 
 import { StandaloneShell } from '@/modules/standalone-shell';
+import { PROVIDER_TERMINAL_SIGN_IN_COMMANDS } from '@/shared/constants';
 import { IS_PLATFORM } from '@/shared/utils';
 import type { LLMProvider } from '@/shared/types';
 
@@ -38,7 +39,13 @@ const getProviderCommand = ({
   provider: LLMProvider;
   customCommand?: string;
   isAuthenticated: boolean;
-}) => {
+}): string | null => {
+  // A provider the user signs into from their own terminal (Antigravity) gets
+  // no embedded login shell at all, whatever command a caller passes.
+  if (PROVIDER_TERMINAL_SIGN_IN_COMMANDS[provider]) {
+    return null;
+  }
+
   if (customCommand) {
     return customCommand;
   }
@@ -59,7 +66,9 @@ const getProviderCommand = ({
     return 'opencode auth login';
   }
 
-  return 'claude --dangerously-skip-permissions /login';
+  // No other provider's command is a safe stand-in, so an unknown provider
+  // gets no shell at all rather than Claude's login.
+  return null;
 };
 
 const getProviderTitle = (provider: LLMProvider) => {
@@ -85,6 +94,10 @@ export default function ProviderLoginModal({
   }
 
   const command = getProviderCommand({ provider, customCommand, isAuthenticated });
+  if (!command) {
+    return null;
+  }
+
   const title = getProviderTitle(provider);
 
   const handleComplete = (exitCode: number) => {

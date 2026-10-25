@@ -120,14 +120,19 @@ export const MCP_PROVIDER_NAMES: Record<McpProvider, string> = {
   cursor: 'Cursor',
   codex: 'Codex',
   opencode: 'OpenCode',
+  agy: 'Antigravity',
 };
 
-/** Scopes each provider can install an MCP server into; drives the scope selector and validation. */
+/**
+ * Scopes each provider can install an MCP server into; drives the scope selector and validation.
+ * Antigravity has none: CloudCLI does not manage its MCP servers (the settings dialog shows it no MCP tab).
+ */
 export const MCP_SUPPORTED_SCOPES: Record<McpProvider, McpScope[]> = {
   claude: ['user', 'project', 'local'],
   cursor: ['user', 'project'],
   codex: ['user', 'project'],
   opencode: ['user', 'project'],
+  agy: [],
 };
 
 /** Transports each provider can talk to an MCP server over; drives the transport selector and validation. */
@@ -136,6 +141,7 @@ export const MCP_SUPPORTED_TRANSPORTS: Record<McpProvider, McpTransport[]> = {
   cursor: ['stdio', 'http'],
   codex: ['stdio', 'http'],
   opencode: ['stdio', 'http'],
+  agy: [],
 };
 
 /** Transports offered when configuring a global (provider-agnostic) MCP server. */
@@ -147,6 +153,7 @@ export const MCP_SUPPORTS_WORKING_DIRECTORY: Record<McpProvider, boolean> = {
   cursor: false,
   codex: true,
   opencode: false,
+  agy: false,
 };
 
 // ---------------------------
@@ -208,13 +215,30 @@ export const CODE_EDITOR_DEFAULTS = {
  * Per-provider preference key holding that provider's tool-permission
  * settings, sent with every `chat.send`.
  *
- * `opencode` intentionally maps to its own key even though no settings UI
- * writes it yet: without the entry the lookup would fall through to Claude's
- * key and OpenCode sessions would silently inherit Claude's `skipPermissions`.
+ * `opencode` and `agy` intentionally map to their own keys even though no
+ * settings UI writes them yet: without the entry the lookup would fall through
+ * to Claude's key and those sessions would silently inherit Claude's
+ * `skipPermissions`.
  */
 export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPreferenceKey> = {
   claude: 'claudePermissions',
   cursor: 'cursorPermissions',
   codex: 'codexPermissions',
   opencode: 'opencodePermissions',
+  agy: 'agyPermissions',
+};
+
+// ---------------------------
+
+//----------------- PROVIDER SIGN-IN ------------
+
+/**
+ * Providers that CloudCLI cannot sign in from the browser, mapped to the CLI
+ * command the user runs once in their own terminal to sign in. The onboarding
+ * and settings account views show this command as a hint in place of the Login
+ * button, and the provider-auth login modal refuses to open its embedded login
+ * shell for these providers.
+ */
+export const PROVIDER_TERMINAL_SIGN_IN_COMMANDS: Partial<Record<LLMProvider, string>> = {
+  agy: 'agy',
 };

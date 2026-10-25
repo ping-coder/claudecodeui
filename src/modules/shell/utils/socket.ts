@@ -13,6 +13,8 @@ type ShellInitMessage = {
   isPlainShell: boolean;
   forceRestart?: boolean;
   bypassPermissions?: boolean;
+  // The model to start the CLI on; only an agy shell reads it (--model).
+  model?: string;
   // The app theme at launch, so the server can start a CLI in the colour scheme
   // the terminal is painted in.
   colorScheme?: 'light' | 'dark';

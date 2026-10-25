@@ -5,7 +5,7 @@ import type { NavigateFunction } from 'react-router-dom';
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */
-export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode';
+export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'agy';
 
 /**
  * One selectable model in a provider's model menu, including its optional reasoning-effort choices.
@@ -1338,13 +1338,14 @@ export type ProviderAuthSubscriptionOverride = {
   subscriptionEmail: string | null;
 };
 
-/** Sign-in state of one LLM provider CLI - whether it is authenticated, the account email and method, plus in-flight loading and error state - polled by the provider-auth module and rendered by the settings and onboarding account views. `subscriptionOverride` is only present when an API key is bypassing a valid subscription login. */
+/** Sign-in state of one LLM provider CLI - whether it is authenticated, the account email and method, plus in-flight loading and error state - polled by the provider-auth module and rendered by the settings and onboarding account views. `installed` is whether the server found the provider's CLI, and is absent while that is unknown (before the first answer, or when the status request failed). `subscriptionOverride` is only present when an API key is bypassing a valid subscription login. */
 export type ProviderAuthStatus = {
   authenticated: boolean;
   email: string | null;
   method: string | null;
   error: string | null;
   loading: boolean;
+  installed?: boolean;
   subscriptionOverride?: ProviderAuthSubscriptionOverride;
 };
 
@@ -1378,10 +1379,10 @@ export type QuickSettingsHandleStyle = CSSProperties;
 /** The per-provider agent context the agents settings tab builds once and hands to each of its sections. */
 export type AgentContextByProvider = Record<AgentProvider, AgentContext>;
 
-/** The per-provider data the agents settings tab hands to its sections: that provider's auth status and the callback that starts its login flow. */
+/** The per-provider data the agents settings tab hands to its sections: that provider's auth status and the callback that starts its login flow, absent for a provider the user can only sign into from a terminal (see PROVIDER_TERMINAL_SIGN_IN_COMMANDS). */
 export type AgentContext = {
   authStatus: ProviderAuthStatus;
-  onLogin: () => void;
+  onLogin?: () => void;
 };
 
 /** Identifier of a top-level section in the settings dialog; use it whenever a tab is stored, compared or requested so deep links, the sidebar and the command palette all agree on the same set of names. */

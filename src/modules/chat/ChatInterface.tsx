@@ -127,6 +127,8 @@ function ChatInterface({
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsImageAttachments,
+    supportsFileAttachments,
   } = useChatProviderState({
     selectedSession,
     selectedProject,
@@ -251,6 +253,8 @@ function ChatInterface({
     currentProviderModel,
     currentProviderEffort,
     currentProviderUltracode,
+    supportsImageAttachments,
+    supportsFileAttachments,
     isLoading: isProcessing,
     processingSessions,
     canAbortSession,
@@ -464,7 +468,9 @@ function ChatInterface({
         ? t('messageTypes.codex')
         : provider === 'opencode'
             ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-          : t('messageTypes.claude');
+          : provider === 'agy'
+            ? t('messageTypes.agy', { defaultValue: 'Antigravity' })
+            : t('messageTypes.claude');
 
   if (!selectedProject) {
     return (
@@ -619,6 +625,7 @@ function ChatInterface({
           getRootProps={getRootProps as (...args: unknown[]) => Record<string, unknown>}
           getInputProps={getInputProps as (...args: unknown[]) => Record<string, unknown>}
           openAttachmentPicker={openAttachmentPicker}
+          attachmentsSupported={supportsImageAttachments || supportsFileAttachments}
           inputHighlightRef={inputHighlightRef}
           renderInputWithMentions={renderInputWithMentions}
           textareaRef={textareaRef}

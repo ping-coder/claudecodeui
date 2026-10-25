@@ -31,6 +31,7 @@ const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "codex", name: "OpenAI" },
   { id: "cursor", name: "Cursor" },
   { id: "opencode", name: "OpenCode" },
+  { id: "agy", name: "Antigravity" },
 ];
 
 const MOD_KEY =
@@ -78,6 +79,7 @@ function getProviderDisplayName(p: LLMProvider) {
   if (p === "cursor") return "Cursor";
   if (p === "codex") return "Codex";
   if (p === "opencode") return "OpenCode";
+  if (p === "agy") return "Antigravity";
   return "Claude";
 }
 
@@ -328,6 +330,10 @@ export default function ProviderSelectionEmptyState({
                 opencode: t("providerSelection.readyPrompt.opencode", {
                   model: providerModels.opencode,
                   defaultValue: "Ready with OpenCode {{model}}",
+                }),
+                agy: t("providerSelection.readyPrompt.agy", {
+                  model: providerModels.agy,
+                  defaultValue: "Ready to use Antigravity with {{model}}. Start typing your message below.",
                 }),
               }[provider]
             }

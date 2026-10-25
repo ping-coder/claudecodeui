@@ -59,6 +59,7 @@ function renderConnection() {
       initialCommandRef: ref<string | null | undefined>(null),
       isPlainShellRef: ref(false),
       bypassPermissionsRef: ref(false),
+      modelRef: ref<string | null>(null),
       isDarkModeRef: ref(true),
       onProcessCompleteRef: ref<((exitCode: number) => void) | null | undefined>(null),
       isInitialized: true,

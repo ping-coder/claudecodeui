@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import '@xterm/xterm/css/xterm.css';
+import { api } from '@/shared/api';
 import type { Project, ProjectSession } from '@/shared/types';
 import { useShellRuntime } from '@/modules/shell/hooks/useShellRuntime';
 import { sendSocketMessage } from '@/modules/shell/utils/socket';
-import { getSessionTitle } from '@/shared/utils';
+import { getProviderModelStorageKey, getSessionTitle } from '@/shared/utils';
 import { readSelectedProvider } from '@/shared/selectedProvider';
+import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
+import { readUserPreference } from '@/shared/userSettings';
 import { getClaudeSettings } from '@/modules/chat';
 import ShellConnectionOverlay from '@/modules/shell/ShellConnectionOverlay';
 import ShellEmptyState from '@/modules/shell/ShellEmptyState';
@@ -36,6 +39,43 @@ type ShellProps = {
   isActive?: boolean;
 };
 
+/** The part of the session active-model answer the shell reads. */
+type SessionActiveModelResponse = {
+  success?: boolean;
+  data?: {
+    model?: string | null;
+    /** `default`: the session recorded nothing, and `model` is only the catalog default. */
+    source?: 'session' | 'provider' | 'default';
+  };
+};
+
+/** The model recorded for one agy session, tagged with the session it belongs to. */
+type RecordedSessionModel = {
+  sessionId: string;
+  model: string | null;
+};
+
+/** CLIs whose shell launch honours bypass, each seeded from its own setting. */
+const SHELL_BYPASS_PROVIDERS = new Set(['claude', 'agy']);
+
+/** A CLI's persisted chat skip-permissions setting, the shell toggle's starting value. */
+const readShellBypassSeed = (provider: string): boolean => {
+  if (provider === 'claude') {
+    return getClaudeSettings().skipPermissions;
+  }
+  if (provider === 'agy') {
+    const stored = readUserPreference<{ skipPermissions?: unknown }>(PROVIDER_PERMISSION_PREFERENCE_KEYS.agy, {});
+    return stored?.skipPermissions === true;
+  }
+  return false;
+};
+
+/** A stored model id usable as --model; empty and 'default' mean the CLI's own default. */
+const readShellModel = (stored: string | null): string | null => {
+  const model = stored?.trim();
+  return model && model !== 'default' ? model : null;
+};
+
 /** Exported through the shell barrel: the standalone-shell module renders it as a full-page terminal and the task-master module embeds it in its setup modal to run TaskMaster's init command. */
 export default function Shell({
   selectedProject = null,
@@ -49,16 +89,74 @@ export default function Shell({
 }: ShellProps) {
   const { t } = useTranslation('chat');
   const [isRestarting, setIsRestarting] = useState(false);
-  // Seeded from the chat composer's persisted permission setting; the header
-  // toggle only changes this shell's launches, not the chat setting.
-  const [bypassPermissions, setBypassPermissions] = useState(
-    () => getClaudeSettings().skipPermissions,
-  );
+  // Header-toggle choices per CLI. Each CLI starts from its own chat
+  // permission setting (see readShellBypassSeed); the toggle only changes this
+  // shell's launches, never the chat setting, and never leaks between CLIs.
+  const [bypassOverrides, setBypassOverrides] = useState<Partial<Record<string, boolean>>>({});
   const [cliPromptOptions, setCliPromptOptions] = useState<CliPromptOption[] | null>(null);
   const promptCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartAfterInitRef = useRef(false);
   const onOutputRef = useRef<(() => void) | null>(null);
+
+  const shellProvider = isPlainShell
+    ? 'plain-shell'
+    : selectedSession?.__provider || readSelectedProvider();
+  const supportsBypass = SHELL_BYPASS_PROVIDERS.has(shellProvider);
+  const bypassPermissions = supportsBypass
+    && (bypassOverrides[shellProvider] ?? readShellBypassSeed(shellProvider));
+
+  // The agy session this terminal resumes, if it resumes one.
+  const resumedAgySessionId = shellProvider === 'agy' ? selectedSession?.id || null : null;
+  // The model that session recorded, fetched because the chat runs each
+  // session on its own recorded model, while the provider-wide pick in
+  // localStorage may come from another session. Tagged with its session so an
+  // answer that lands after the user picked another session is never used.
+  const [recordedSessionModel, setRecordedSessionModel] = useState<RecordedSessionModel | null>(null);
+
+  useEffect(() => {
+    if (!resumedAgySessionId) {
+      return;
+    }
+
+    let cancelled = false;
+    const loadRecordedSessionModel = async () => {
+      try {
+        const response = await api.providers.sessionActiveModel('agy', resumedAgySessionId);
+        if (!response.ok) {
+          return;
+        }
+        const body = (await response.json()) as SessionActiveModelResponse;
+        if (cancelled || !body.success) {
+          return;
+        }
+        setRecordedSessionModel({
+          sessionId: resumedAgySessionId,
+          model: body.data?.source === 'default' ? null : readShellModel(body.data?.model ?? null),
+        });
+      } catch (error) {
+        // The terminal then resumes without --model, on the conversation's own model.
+        if (!cancelled) {
+          console.error('Error loading the agy session model for the shell:', error);
+        }
+      }
+    };
+
+    void loadRecordedSessionModel();
+    return () => {
+      cancelled = true;
+    };
+  }, [resumedAgySessionId]);
+
+  // A resumed agy session starts on the model it recorded, the one the chat
+  // sends for it. Until that answer arrives, or if it fails, no model is
+  // passed and agy keeps the conversation's own. A new agy terminal starts on
+  // the model the chat composer last picked for agy.
+  const shellModel = shellProvider !== 'agy'
+    ? null
+    : resumedAgySessionId
+      ? (recordedSessionModel?.sessionId === resumedAgySessionId ? recordedSessionModel.model : null)
+      : readShellModel(localStorage.getItem(getProviderModelStorageKey('agy')));
 
   const {
     terminalContainerRef,
@@ -75,7 +173,10 @@ export default function Shell({
     selectedSession,
     initialCommand,
     isPlainShell,
+    // Only CLIs with a visible toggle (seeded from their own setting) may
+    // launch with bypass, so no CLI inherits another's skip-permissions.
     bypassPermissions,
+    model: shellModel,
     minimal,
     autoConnect,
     isRestarting,
@@ -216,17 +317,13 @@ export default function Shell({
     }, SHELL_RESTART_DELAY_MS);
   }, []);
 
-  const shellProvider = isPlainShell
-    ? 'plain-shell'
-    : selectedSession?.__provider || readSelectedProvider();
-
   const handleToggleBypassPermissions = useCallback(() => {
-    setBypassPermissions((enabled) => !enabled);
+    setBypassOverrides((current) => ({ ...current, [shellProvider]: !bypassPermissions }));
     // The flag only applies at launch, so a running CLI must be restarted.
     if (isConnected) {
       handleRestartShell();
     }
-  }, [handleRestartShell, isConnected]);
+  }, [bypassPermissions, handleRestartShell, isConnected, shellProvider]);
 
   const handleDisconnectShell = useCallback(() => {
     restartAfterInitRef.current = false;
@@ -315,7 +412,7 @@ export default function Shell({
         restartLabel={t('shell.actions.restart')}
         restartTitle={t('shell.actions.restartTitle')}
         disableRestart={isRestarting || !isInitialized}
-        showBypassToggle={shellProvider === 'claude'}
+        showBypassToggle={supportsBypass}
         bypassEnabled={bypassPermissions}
         onToggleBypass={handleToggleBypassPermissions}
         bypassLabel={t('shell.actions.bypass')}

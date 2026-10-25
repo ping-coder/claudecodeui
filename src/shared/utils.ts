@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-import type { Project, ProjectSession, QuickSettingsTab, SlashCommand } from '@/shared/types';
+import type { LLMProvider, Project, ProjectSession, QuickSettingsTab, SlashCommand } from '@/shared/types';
 
 //----------------- DEPLOYMENT MODE ------------
 
@@ -272,3 +272,15 @@ export const buildModelRunOptions = (selection: {
   effort: selection.effort,
   ...(typeof selection.ultracode === 'boolean' ? { ultracode: selection.ultracode } : {}),
 });
+
+// ---------------------------
+
+//----------------- PROVIDER MODEL PREFERENCE ------------
+
+/**
+ * localStorage key holding the user's default model for one provider (the
+ * model the chat composer last picked for it). Written by the chat module's
+ * provider state; read by the Shell tab so an agy terminal starts on the same
+ * model as the chat.
+ */
+export const getProviderModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;

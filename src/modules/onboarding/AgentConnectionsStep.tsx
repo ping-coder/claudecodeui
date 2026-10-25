@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 
+import { PROVIDER_TERMINAL_SIGN_IN_COMMANDS } from '@/shared/constants';
 import type { LLMProvider, ProviderAuthStatusMap } from '@/shared/types';
 import AgentConnectionCard from '@/modules/onboarding/AgentConnectionCard';
 
@@ -37,9 +38,16 @@ const providerCards = [
     iconContainerClassName: 'bg-zinc-100 dark:bg-zinc-800',
     loginButtonClassName: 'bg-zinc-800 hover:bg-zinc-900 dark:bg-zinc-700 dark:hover:bg-zinc-600',
   },
+  {
+    provider: 'agy' as const,
+    title: 'Antigravity',
+    connectedClassName: 'bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800',
+    iconContainerClassName: 'bg-cyan-100 dark:bg-cyan-900/30',
+    // No loginButtonClassName: Antigravity is signed into from a terminal, so its card has no Login button.
+  },
 ];
 
-/** Rendered by Onboarding as its second step, listing every CLI provider the user can log into. */
+/** Rendered by Onboarding as its second step, listing every CLI provider and how to sign into it. */
 export default function AgentConnectionsStep({
   providerStatuses,
   onOpenProviderLogin,
@@ -55,18 +63,23 @@ export default function AgentConnectionsStep({
       </div>
 
       <div className="-mr-1 max-h-[38vh] space-y-2 overflow-y-auto pr-1">
-        {providerCards.map((providerCard) => (
-          <AgentConnectionCard
-            key={providerCard.provider}
-            provider={providerCard.provider}
-            title={providerCard.title}
-            status={providerStatuses[providerCard.provider]}
-            connectedClassName={providerCard.connectedClassName}
-            iconContainerClassName={providerCard.iconContainerClassName}
-            loginButtonClassName={providerCard.loginButtonClassName}
-            onLogin={() => onOpenProviderLogin(providerCard.provider)}
-          />
-        ))}
+        {providerCards.map((providerCard) => {
+          const terminalSignInCommand = PROVIDER_TERMINAL_SIGN_IN_COMMANDS[providerCard.provider];
+          return (
+            <AgentConnectionCard
+              key={providerCard.provider}
+              provider={providerCard.provider}
+              title={providerCard.title}
+              status={providerStatuses[providerCard.provider]}
+              connectedClassName={providerCard.connectedClassName}
+              iconContainerClassName={providerCard.iconContainerClassName}
+              loginButtonClassName={providerCard.loginButtonClassName}
+              // A provider signed into from a terminal gets a hint, never the embedded login shell.
+              onLogin={terminalSignInCommand ? undefined : () => onOpenProviderLogin(providerCard.provider)}
+              terminalSignInCommand={terminalSignInCommand}
+            />
+          );
+        })}
       </div>
 
       <p className="text-center text-xs text-muted-foreground">{t('onboarding.agentsLaterHint')}</p>

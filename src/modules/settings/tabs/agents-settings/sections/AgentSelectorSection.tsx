@@ -1,3 +1,4 @@
+import { PROVIDER_TERMINAL_SIGN_IN_COMMANDS } from '@/shared/constants';
 import { LLMProviderLogo, PillBar, Pill } from '@/shared/ui';
 import type { AgentContextByProvider, AgentProvider } from '@/shared/types';
 
@@ -13,6 +14,7 @@ const AGENT_NAMES: Record<AgentProvider, string> = {
   cursor: 'Cursor',
   codex: 'Codex',
   opencode: 'OpenCode',
+  agy: 'Antigravity',
 };
 
 /** Rendered by AgentsSettingsTab to pick which agent provider the tab is configuring. */
@@ -29,7 +31,13 @@ export default function AgentSelectorSection({
           const dotColor =
             agent === 'claude' ? 'bg-blue-500' :
             agent === 'cursor' ? 'bg-purple-500' :
-            agent === 'opencode' ? 'bg-zinc-500' : 'bg-foreground/60';
+            agent === 'opencode' ? 'bg-zinc-500' :
+            agent === 'agy' ? 'bg-cyan-500' : 'bg-foreground/60';
+          const { authStatus } = agentContextById[agent];
+          // As in the account panel: an agent signed into from a terminal whose
+          // CLI is not installed is not connected, even with its token present.
+          const isConnected = authStatus.authenticated
+            && !(PROVIDER_TERMINAL_SIGN_IN_COMMANDS[agent] && authStatus.installed === false);
 
           return (
             <Pill
@@ -40,8 +48,8 @@ export default function AgentSelectorSection({
             >
               <LLMProviderLogo provider={agent} className="h-4 w-4 flex-shrink-0" />
               <span className="truncate">{AGENT_NAMES[agent]}</span>
-              {agentContextById[agent].authStatus.authenticated && (
-                <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${dotColor}`} />
+              {isConnected && (
+                <span data-testid="agent-connected-dot" className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${dotColor}`} />
               )}
             </Pill>
           );

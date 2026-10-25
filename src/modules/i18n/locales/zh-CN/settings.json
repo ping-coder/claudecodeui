@@ -363,6 +363,8 @@
       "connected": "已连接",
       "notConnected": "未连接",
       "disconnected": "已断开",
+      "notInstalled": "未安装",
+      "cliNotInstalled": "此机器上未安装 {{agent}} CLI",
       "checkingAuth": "正在检查认证状态...",
       "loggedInAs": "登录为 {{email}}",
       "authenticatedUser": "已认证用户"
@@ -379,6 +381,9 @@
       },
       "opencode": {
         "description": "OpenCode CLI 助手"
+      },
+      "agy": {
+        "description": "Antigravity CLI 助手"
       }
     },
     "connectionStatus": "连接状态",
@@ -389,6 +394,11 @@
       "reAuthDescription": "使用其他账户登录或刷新凭据",
       "button": "登录",
       "reLoginButton": "重新登录"
+    },
+    "terminalLogin": {
+      "title": "在终端中登录",
+      "description": "在此机器的终端中运行一次 <code>{{command}}</code> 即可登录。",
+      "installDescription": "请先在此机器上安装 {{agent}} CLI，然后在终端中运行一次 <code>{{command}}</code> 完成登录。"
     },
     "error": "错误：{{error}}"
   },

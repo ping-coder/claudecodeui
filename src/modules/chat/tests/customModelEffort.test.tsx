@@ -183,6 +183,29 @@ test('OpenCode offers its effort levels even when no visible built-in model decl
   assert.deepEqual(created[0]?.input.effort, { values: ['none', 'high'] });
 });
 
+test('Antigravity gets its own model library tab, with its effort levels', async () => {
+  const { actions, created } = createActions();
+  const catalog: Partial<Record<LLMProvider, ProviderModelsDefinition>> = {
+    ...CATALOG,
+    agy: {
+      OPTIONS: [{ value: 'auto', label: 'Gemini Pro Next', isCustom: false }],
+      DEFAULT: 'auto',
+      EFFORT_LEVELS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    },
+  };
+  render(<ModelLibraryPanel initialProvider="agy" providerModelCatalog={catalog} actions={actions} />);
+
+  // Without a tab of its own the panel opened on no tab and had no label for it.
+  screen.getByRole('button', { name: /Antigravity/, pressed: true });
+  screen.getByText('Reasoning levels');
+  fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'Pinned Flash' } });
+  fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'gemini-3.8-flash-high' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+
+  await waitFor(() => assert.equal(created.length, 1));
+  assert.equal(created[0]?.provider, 'agy');
+});
+
 test('providers without effort support show no effort levels and send none', async () => {
   const { actions, created } = createActions();
   render(<ModelLibraryPanel initialProvider="cursor" providerModelCatalog={CATALOG} actions={actions} />);

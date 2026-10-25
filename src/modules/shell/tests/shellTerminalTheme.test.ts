@@ -274,6 +274,7 @@ test('the shell init message tells the server which colour scheme the terminal i
       initialCommandRef: ref<string | null | undefined>(null),
       isPlainShellRef: ref(false),
       bypassPermissionsRef: ref(false),
+      modelRef: ref<string | null>(null),
       isDarkModeRef,
       onProcessCompleteRef: ref<((exitCode: number) => void) | null | undefined>(null),
       isInitialized: true,

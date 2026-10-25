@@ -1,5 +1,5 @@
 import { Check } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { LLMProviderLogo } from '@/shared/ui';
 import type { LLMProvider, ProviderAuthStatus } from '@/shared/types';
@@ -10,8 +10,12 @@ type AgentConnectionCardProps = {
   status: ProviderAuthStatus;
   connectedClassName: string;
   iconContainerClassName: string;
-  loginButtonClassName: string;
-  onLogin: () => void;
+  /** Colours of the Login button; only needed alongside `onLogin`. */
+  loginButtonClassName?: string;
+  /** Opens the embedded login shell; absent for a provider signed into from a terminal. */
+  onLogin?: () => void;
+  /** The command that signs the provider in from a terminal, shown in place of the Login button. */
+  terminalSignInCommand?: string;
 };
 
 /** Rendered by onboarding's AgentConnectionsStep to show one CLI provider's connection state. */
@@ -23,15 +27,30 @@ export default function AgentConnectionCard({
   iconContainerClassName,
   loginButtonClassName,
   onLogin,
+  terminalSignInCommand,
 }: AgentConnectionCardProps) {
   const { t } = useTranslation('auth');
-  const containerClassName = status.authenticated ? connectedClassName : 'border-border bg-card';
+  // For a provider signed into from a terminal, a missing CLI or a missing
+  // sign-in is explained by the hint below rather than shown as an error. An
+  // unknown install state (the status request failed) still shows the error.
+  const hintExplainsStatus = Boolean(terminalSignInCommand) && status.installed !== undefined;
+  // Checked before `authenticated`: such a provider's sign-in can outlive its
+  // CLI (the token stays after agy is removed), and nothing runs without the
+  // CLI, so it must not read as connected.
+  const isNotInstalled = Boolean(terminalSignInCommand) && status.installed === false;
+  const isConnected = status.authenticated && !isNotInstalled;
+  const containerClassName = isConnected ? connectedClassName : 'border-border bg-card';
+  const needsSignIn = !isConnected && !status.loading;
 
   const statusText = status.loading
     ? t('onboarding.checking')
-    : status.authenticated
-      ? status.email || t('onboarding.connected')
-      : status.error || t('onboarding.notConnected');
+    : isNotInstalled
+      ? t('onboarding.notInstalled')
+      : status.authenticated
+        ? status.email || t('onboarding.connected')
+        : hintExplainsStatus
+          ? t('onboarding.notConnected')
+          : status.error || t('onboarding.notConnected');
 
   return (
     <div className={`rounded-xl border px-3 py-2.5 transition-colors ${containerClassName}`}>
@@ -44,16 +63,26 @@ export default function AgentConnectionCard({
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
               {title}
-              {status.authenticated && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />}
+              {isConnected && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />}
             </div>
             <div className="truncate text-xs text-muted-foreground" title={statusText}>{statusText}</div>
+            {needsSignIn && terminalSignInCommand && (
+              <p className="mt-0.5 text-xs text-muted-foreground" data-testid="terminal-sign-in-hint">
+                <Trans
+                  ns="auth"
+                  i18nKey={isNotInstalled ? 'onboarding.terminalInstallHint' : 'onboarding.terminalSignInHint'}
+                  values={{ command: terminalSignInCommand, agent: title }}
+                  components={{ code: <code className="rounded bg-muted px-1 font-mono text-[11px] text-foreground" /> }}
+                />
+              </p>
+            )}
           </div>
         </div>
 
-        {!status.authenticated && !status.loading && (
+        {needsSignIn && onLogin && (
           <button
             onClick={onLogin}
-            className={`${loginButtonClassName} flex-shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium text-white transition-colors`}
+            className={`${loginButtonClassName ?? ''} flex-shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium text-white transition-colors`}
           >
             {t('onboarding.login')}
           </button>

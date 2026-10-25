@@ -91,6 +91,10 @@ const seedAllProviderSettings = () => {
     allowedTools: ['opencode-tool'],
     skipPermissions: false,
   });
+  writeUserPreference('agyPermissions', {
+    allowedTools: ['agy-tool'],
+    skipPermissions: false,
+  });
 };
 
 beforeEach(() => {
@@ -121,6 +125,7 @@ test.each<[LLMProvider, string]>([
   ['cursor', 'cursor-tool'],
   ['codex', 'codex-tool'],
   ['opencode', 'opencode-tool'],
+  ['agy', 'agy-tool'],
 ])('a %s send carries the tools stored under that provider own preference', async (provider, tool) => {
   seedAllProviderSettings();
 
@@ -137,6 +142,10 @@ test('skipPermissions follows the sending provider, not Claude', async () => {
 
   const opencodeOptions = await submit('opencode');
   assert.equal(opencodeOptions.skipPermissions, false);
+
+  // `skipPermissions` would become agy's --dangerously-skip-permissions flag.
+  const agyOptions = await submit('agy');
+  assert.equal(agyOptions.skipPermissions, false);
 });
 
 test('a provider with nothing stored sends empty tool settings, not Claude settings', async () => {

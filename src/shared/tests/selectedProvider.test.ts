@@ -28,6 +28,14 @@ test('a stored provider is read back', () => {
   assert.equal(readSelectedProvider(), 'codex');
 });
 
+test('a stored Antigravity choice is read back instead of being reset to claude', () => {
+  // The reader only trusts values on its own provider list. A provider missing
+  // from it silently came back as Claude, so the shell, new sessions and
+  // optimistic messages were all tagged with the wrong provider after a reload.
+  writeSelectedProvider('agy');
+  assert.equal(readSelectedProvider(), 'agy');
+});
+
 test('a value that is not a known provider falls back instead of being trusted', () => {
   // Only one of the previous readers validated; the rest returned this verbatim.
   writeUserPreference('selectedProvider', 'not-a-provider');

@@ -14,6 +14,8 @@ type UseShellRuntimeOptions = {
   initialCommand: string | null | undefined;
   isPlainShell: boolean;
   bypassPermissions: boolean;
+  // Model to launch the CLI on; null leaves the CLI on its own default.
+  model?: string | null;
   minimal: boolean;
   autoConnect: boolean;
   isRestarting: boolean;
@@ -41,6 +43,7 @@ export function useShellRuntime({
   initialCommand,
   isPlainShell,
   bypassPermissions,
+  model = null,
   minimal,
   autoConnect,
   isRestarting,
@@ -58,6 +61,7 @@ export function useShellRuntime({
   const initialCommandRef = useRef(initialCommand);
   const isPlainShellRef = useRef(isPlainShell);
   const bypassPermissionsRef = useRef(bypassPermissions);
+  const modelRef = useRef(model);
   const isDarkModeRef = useRef(isDarkMode);
   const onProcessCompleteRef = useRef(onProcessComplete);
   const lastSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
@@ -69,9 +73,10 @@ export function useShellRuntime({
     initialCommandRef.current = initialCommand;
     isPlainShellRef.current = isPlainShell;
     bypassPermissionsRef.current = bypassPermissions;
+    modelRef.current = model;
     isDarkModeRef.current = isDarkMode;
     onProcessCompleteRef.current = onProcessComplete;
-  }, [selectedProject, selectedSession, initialCommand, isPlainShell, bypassPermissions, isDarkMode, onProcessComplete]);
+  }, [selectedProject, selectedSession, initialCommand, isPlainShell, bypassPermissions, model, isDarkMode, onProcessComplete]);
 
   const closeSocket = useCallback(() => {
     const activeSocket = wsRef.current;
@@ -115,6 +120,7 @@ export function useShellRuntime({
     initialCommandRef,
     isPlainShellRef,
     bypassPermissionsRef,
+    modelRef,
     isDarkModeRef,
     onProcessCompleteRef,
     isInitialized,

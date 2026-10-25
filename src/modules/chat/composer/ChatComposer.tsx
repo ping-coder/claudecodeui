@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
   ClipboardEvent,
+  DragEvent,
   FormEvent,
   KeyboardEvent,
   MouseEvent,
@@ -42,6 +43,17 @@ type MentionableFile = {
   name: string;
   path: string;
 };
+
+// How long the notice explaining refused dropped files stays up.
+const REFUSED_DROP_NOTICE_MS = 4000;
+
+// Whether a drag carries files rather than text or a link, read the same way
+// react-dropzone reads it ('application/x-moz-file' is Firefox's type).
+const dragCarriesFiles = (event: DragEvent<HTMLElement>): boolean => (
+  Array.from(event.dataTransfer?.types ?? []).some(
+    (type) => type === 'Files' || type === 'application/x-moz-file',
+  )
+);
 
 type ChatComposerProps = {
   pendingPermissionRequests: PendingPermissionRequest[];
@@ -103,6 +115,12 @@ type ChatComposerProps = {
   getRootProps: (...args: unknown[]) => Record<string, unknown>;
   getInputProps: (...args: unknown[]) => Record<string, unknown>;
   openAttachmentPicker: () => void;
+  /**
+   * False when the active provider takes no attachments. The attach button is
+   * then disabled and says why, dragging shows no drop overlay, and dropped
+   * files are refused with a notice saying why.
+   */
+  attachmentsSupported?: boolean;
   inputHighlightRef: RefObject<HTMLDivElement>;
   renderInputWithMentions: (text: string) => ReactNode;
   textareaRef: RefObject<HTMLTextAreaElement>;
@@ -180,6 +198,7 @@ export default function ChatComposer({
   getRootProps,
   getInputProps,
   openAttachmentPicker,
+  attachmentsSupported = true,
   inputHighlightRef,
   renderInputWithMentions,
   textareaRef,
@@ -252,6 +271,23 @@ export default function ChatComposer({
   const isRecording = voiceState === 'recording';
   const isTranscribing = voiceState === 'transcribing';
 
+  // When files were last dropped on the composer of a provider that takes no
+  // attachments, or null once the notice saying so has timed out. The drop
+  // zone still catches such a drop, so the browser does not open the file, and
+  // the files are not attached. Without the notice the drop would seem to do
+  // nothing at all. A new drop restarts the countdown.
+  const [refusedDropAt, setRefusedDropAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (refusedDropAt === null) return;
+    const timer = setTimeout(() => setRefusedDropAt(null), REFUSED_DROP_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [refusedDropAt]);
+  // Runs ahead of the drop zone's own drop handler, which still cancels the
+  // drop and hands the files to the composer state that refuses them.
+  const handleRefusedDrop = useCallback((event: DragEvent<HTMLElement>) => {
+    if (dragCarriesFiles(event)) setRefusedDropAt(Date.now());
+  }, []);
+
   // Detect if the AskUserQuestion interactive panel is active
   const hasQuestionPanel = pendingPermissionRequests.some(
     (r) => r.toolName === 'AskUserQuestion'
@@ -270,6 +306,11 @@ export default function ChatComposer({
     : sendByCtrlEnter
       ? t('input.hintText.ctrlEnter')
       : t('input.hintText.enter');
+  const attachmentsUnsupportedLabel = t('input.attachmentsUnsupported', {
+    provider: providerLabel,
+    defaultValue: '{{provider}} does not support attachments yet',
+  });
+  const attachButtonLabel = attachmentsSupported ? t('input.attachFiles') : attachmentsUnsupportedLabel;
   const submitAriaLabel = canQueueDraft
     ? hasQueuedDraft
       ? t('input.queue.append', { defaultValue: 'Add to queued message' })
@@ -316,6 +357,16 @@ export default function ChatComposer({
           >
             {t('composer.editing.cancel')}
           </button>
+        </div>
+      )}
+
+      {refusedDropAt !== null && !attachmentsSupported && (
+        <div
+          role="alert"
+          className="mx-auto mb-2 flex max-w-[54.25rem] items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-foreground"
+        >
+          <PaperclipIcon className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          <span className="min-w-0 flex-1">{attachmentsUnsupportedLabel}</span>
         </div>
       )}
 
@@ -384,9 +435,9 @@ export default function ChatComposer({
             isTextareaExpanded ? 'chat-input-expanded' : '',
             hasActivityIndicator ? 'rounded-t-none' : '',
           ].filter(Boolean).join(' ')}
-          {...getRootProps()}
+          {...getRootProps(attachmentsSupported ? undefined : { onDrop: handleRefusedDrop })}
         >
-          {isDragActive && (
+          {isDragActive && attachmentsSupported && (
             <div className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-primary/15">
               <div className="rounded-xl border border-border/30 bg-card p-4 shadow-lg">
                 <svg className="mx-auto mb-2 h-8 w-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -411,7 +462,9 @@ export default function ChatComposer({
                       key={`${file.name}-${file.lastModified}-${index}`}
                       file={file}
                       onRemove={() => onRemoveAttachment(index)}
-                      error={fileErrors.get(file.name)}
+                      // Attached before switching to a provider that takes none:
+                      // marked so they are removed rather than sent and refused.
+                      error={attachmentsSupported ? fileErrors.get(file.name) : attachButtonLabel}
                     />
                   ))}
                 </div>
@@ -447,9 +500,10 @@ export default function ChatComposer({
         <PromptInputFooter className="flex-wrap gap-y-1">
           <PromptInputTools className="min-w-0">
             <PromptInputButton
-              tooltip={{ content: t('input.attachFiles') }}
+              tooltip={{ content: attachButtonLabel }}
               onClick={openAttachmentPicker}
-              aria-label={t('input.attachFiles')}
+              aria-label={attachButtonLabel}
+              disabled={!attachmentsSupported}
             >
               <PaperclipIcon />
             </PromptInputButton>

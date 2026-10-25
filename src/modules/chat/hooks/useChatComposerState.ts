@@ -52,6 +52,14 @@ type UseChatComposerStateArgs = {
    * NULL or absent means it cannot, and sends leave `ultracode` out entirely.
    */
   currentProviderUltracode?: boolean | null;
+  /**
+   * Whether the active provider accepts image attachments and other file
+   * attachments. Absent means it does. A file of a kind the provider rejects is
+   * never attached. The drop zone stays on either way, because it is what stops
+   * the browser from opening a file dropped on the composer.
+   */
+  supportsImageAttachments?: boolean;
+  supportsFileAttachments?: boolean;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
@@ -212,6 +220,8 @@ export function useChatComposerState({
   currentProviderModel,
   currentProviderEffort,
   currentProviderUltracode,
+  supportsImageAttachments = true,
+  supportsFileAttachments = true,
   isLoading,
   processingSessions,
   canAbortSession,
@@ -613,6 +623,15 @@ export function useChatComposerState({
           return false;
         }
 
+        // Sending it would only fail the turn: the provider's runtime rejects
+        // attachments of a kind it cannot take.
+        const isSupportedKind = file.type.startsWith('image/')
+          ? supportsImageAttachments
+          : supportsFileAttachments;
+        if (!isSupportedKind) {
+          return false;
+        }
+
         if (file.size > MAX_ATTACHMENT_SIZE) {
           const fileName = file.name || 'Unknown file';
           setFileErrors((previous) => {
@@ -633,7 +652,7 @@ export function useChatComposerState({
     if (validFiles.length > 0) {
       setAttachedFiles((previous) => [...previous, ...validFiles].slice(0, MAX_ATTACHMENT_COUNT));
     }
-  }, []);
+  }, [supportsFileAttachments, supportsImageAttachments]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -660,6 +679,12 @@ export function useChatComposerState({
     [handleAttachmentFiles],
   );
 
+  // Never `disabled`, even for a provider that takes no attachments. Disabled,
+  // the dropzone removes the composer's drop handler, yet its document listener
+  // still leaves drops inside the composer to that handler. Nothing cancels
+  // them, so the browser opens the dropped file (Firefox and Safari replace the
+  // app with it). Enabled, it cancels the drop, and handleAttachmentFiles
+  // refuses the files the provider cannot take.
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     maxSize: MAX_ATTACHMENT_SIZE,
     maxFiles: MAX_ATTACHMENT_COUNT,

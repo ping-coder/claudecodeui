@@ -11,6 +11,7 @@ import type { PendingPermissionRequest, PermissionMode,
   ProviderModelsDefinition } from '@/shared/types';
 import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
 import { readSelectedProvider, writeSelectedProvider } from '@/shared/selectedProvider';
+import { getProviderModelStorageKey } from '@/shared/utils';
 
 const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly string[]>> = {
   // Superset used only before the model catalog loads. Per-model metadata
@@ -23,6 +24,10 @@ const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly stri
   // valid Max/Ultra selection from being reset during catalog hydration.
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   opencode: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  // Every Antigravity model offers the same levels (passed on as `--effort`);
+  // without this entry its effort menu would stay hidden until the
+  // capabilities request lands.
+  agy: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const toProviderEffortOptions = (
@@ -34,12 +39,14 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   cursor: 'gpt-5.3-codex',
   codex: 'gpt-5.4',
   opencode: 'anthropic/claude-sonnet-4-5',
+  // Empty on purpose: the backend catalog's DEFAULT (the model agy's own
+  // settings.json names, else 'auto') then wins on first use, and a send made
+  // before the catalog loads passes no --model, so agy uses that same default.
+  agy: '',
 };
 
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'agy'];
 
-/** localStorage key holding the user's default model for one provider. */
-const providerModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;
 
 /** localStorage key holding the user's default reasoning effort for one provider. */
 const providerEffortStorageKey = (provider: LLMProvider): string => `${provider}-effort`;
@@ -94,6 +101,16 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
   cursor: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   codex: ['default', 'acceptEdits', 'bypassPermissions'],
   opencode: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+  agy: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+};
+
+/**
+ * Fallback attachment support used only until the backend capability matrix
+ * has loaded (or when it fails). Every other provider accepts both images and
+ * files, so only the exception is listed and the rest default to supported.
+ */
+const FALLBACK_PROVIDER_ATTACHMENT_SUPPORT: Partial<Record<LLMProvider, boolean>> = {
+  agy: false,
 };
 
 type ProviderCapabilities = {
@@ -280,7 +297,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   // that validates them arrives asynchronously per provider.
   const [providerModels, setProviderModels] = useState<Record<LLMProvider, string>>(() => {
     return PROVIDERS.reduce<Record<LLMProvider, string>>((acc, targetProvider) => {
-      acc[targetProvider] = localStorage.getItem(providerModelStorageKey(targetProvider))
+      acc[targetProvider] = localStorage.getItem(getProviderModelStorageKey(targetProvider))
         || FALLBACK_DEFAULT_MODEL[targetProvider];
       return acc;
     }, {} as Record<LLMProvider, string>);
@@ -336,7 +353,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         ? previous
         : { ...previous, [targetProvider]: model }
     ));
-    localStorage.setItem(providerModelStorageKey(targetProvider), model);
+    localStorage.setItem(getProviderModelStorageKey(targetProvider), model);
   }, []);
 
   const setStoredProviderEffort = useCallback((targetProvider: LLMProvider, effort: string) => {
@@ -554,7 +571,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         continue;
       }
 
-      const storageKey = providerModelStorageKey(targetProvider);
+      const storageKey = getProviderModelStorageKey(targetProvider);
       const currentModel = providerModels[targetProvider];
       const nextModel = pickStoredOrCurrent(storageKey, currentModel, catalog);
 
@@ -657,6 +674,19 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
    */
   const supportsMessageEditing = Boolean(providerCapabilities?.[provider]?.supportsMessageEditing);
   const supportsSessionForking = Boolean(providerCapabilities?.[provider]?.supportsSessionForking);
+
+  /**
+   * Whether the composer may attach images and other files for the active
+   * provider. Unlike the two flags above these default to the fallback map
+   * rather than to false, so the attachment controls of the providers that
+   * accept attachments do not flicker off while the matrix loads.
+   */
+  const supportsImageAttachments = providerCapabilities?.[provider]?.supportsImages
+    ?? FALLBACK_PROVIDER_ATTACHMENT_SUPPORT[provider]
+    ?? true;
+  const supportsFileAttachments = providerCapabilities?.[provider]?.supportsFiles
+    ?? FALLBACK_PROVIDER_ATTACHMENT_SUPPORT[provider]
+    ?? true;
 
   const resolvePermissionModeForProvider = useCallback((
     targetProvider: LLMProvider,
@@ -1084,5 +1114,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsImageAttachments,
+    supportsFileAttachments,
   };
 }
