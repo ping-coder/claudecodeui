@@ -2,9 +2,11 @@ import { Database } from 'better-sqlite3';
 
 import {
   APP_CONFIG_TABLE_SCHEMA_SQL,
+  buildProviderModelsTableSql,
   LAST_SCANNED_AT_SQL,
   NOTIFICATION_CHANNEL_ENDPOINTS_TABLE_SCHEMA_SQL,
   PROJECTS_TABLE_SCHEMA_SQL,
+  PROVIDER_MODELS_ALLOWED_PROVIDERS,
   PROVIDER_MODELS_TABLE_SCHEMA_SQL,
   PUSH_SUBSCRIPTIONS_TABLE_SCHEMA_SQL,
   SESSION_DRAFTS_TABLE_SCHEMA_SQL,
@@ -49,6 +51,14 @@ const tableExists = (db: Database, tableName: string): boolean =>
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
       .get(tableName)
   );
+
+/** Returns the CREATE TABLE statement SQLite stored for `tableName`, or null when the table does not exist. */
+const getTableSql = (db: Database, tableName: string): string | null => {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName) as { sql: string | null } | undefined;
+  return row?.sql ?? null;
+};
 
 const getTableInfo = (db: Database, tableName: string): TableInfoRow[] =>
   db.prepare(`PRAGMA table_info(${tableName})`).all() as TableInfoRow[];
@@ -575,6 +585,117 @@ const addProviderModelEffortColumns = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'provider_models', columnNames, 'effort_default', 'TEXT DEFAULT NULL');
 };
 
+/**
+ * Reads the values of a `CHECK (provider IN (...))` constraint from stored
+ * table SQL, or returns null when the SQL has no such constraint.
+ *
+ * Only the IN list is compared, never the whole statement: `ADD COLUMN`
+ * splices text into the stored SQL and a table rename quotes the table name,
+ * so an up-to-date table rarely matches the schema text verbatim.
+ */
+const readProviderCheckList = (tableSql: string): string[] | null => {
+  const match = /CHECK\s*\(\s*["`[]?provider["`\]]?\s+IN\s*\(([^)]*)\)\s*\)/i.exec(tableSql);
+  if (!match) {
+    return null;
+  }
+
+  return Array.from(match[1].matchAll(/'((?:[^']|'')*)'/g), (literal) => literal[1].replaceAll("''", "'"));
+};
+
+/**
+ * Widens the `provider_models.provider` CHECK constraint on databases created
+ * before a provider joined `PROVIDER_MODELS_ALLOWED_PROVIDERS`.
+ *
+ * SQLite cannot alter a CHECK constraint and `CREATE TABLE IF NOT EXISTS`
+ * leaves an existing table alone, so without this rebuild an upgraded install
+ * rejects the new provider's custom models with "CHECK constraint failed".
+ * The table is rebuilt only when its stored constraint lacks a wanted
+ * provider, and the rebuilt constraint keeps every provider the stored one
+ * accepted, so it is never narrowed. A table without the constraint, or with
+ * columns this build does not know (copying would drop them), is left alone.
+ *
+ * Runs after the effort columns are added, so an upgraded table already has
+ * every column the copy carries (a column it lacked would only get its
+ * default). Rows keep their ids, and the AUTOINCREMENT counter keeps its
+ * high-water mark: ids of deleted rows are never handed out again, so a stale
+ * record id held by an open client cannot address a different model.
+ */
+const widenProviderModelsProviderCheck = (db: Database): void => {
+  const tableSql = getTableSql(db, 'provider_models');
+  const storedProviders = tableSql ? readProviderCheckList(tableSql) : null;
+  if (!storedProviders || storedProviders.length === 0) {
+    return;
+  }
+
+  const missingProviders = PROVIDER_MODELS_ALLOWED_PROVIDERS.filter(
+    (provider) => !storedProviders.includes(provider),
+  );
+  if (missingProviders.length === 0) {
+    return;
+  }
+
+  const allowedProviders = [...new Set<string>([...PROVIDER_MODELS_ALLOWED_PROVIDERS, ...storedProviders])];
+  const storedColumnNames = getTableInfo(db, 'provider_models').map((column) => column.name);
+
+  // Inside a transaction this pragma is a silent no-op, so it must come first.
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN TRANSACTION');
+    db.exec('DROP TABLE IF EXISTS provider_models__new');
+    db.exec(buildProviderModelsTableSql('provider_models__new', allowedProviders));
+
+    const columnNames = getTableInfo(db, 'provider_models__new').map((column) => column.name);
+    const unknownColumnNames = storedColumnNames.filter((name) => !columnNames.includes(name));
+    if (unknownColumnNames.length > 0) {
+      db.exec('ROLLBACK');
+      console.warn(
+        `Skipping migration: provider_models has columns this build does not know (${unknownColumnNames.join(', ')}), `
+        + `so its provider check was not widened to accept ${missingProviders.join(', ')}`,
+      );
+      return;
+    }
+
+    console.log(`Running migration: Rebuilding provider_models to accept ${missingProviders.join(', ')}`);
+    // Read before the old table is dropped: dropping it deletes its counter row.
+    const previousSequence = db
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'provider_models'")
+      .get() as { seq: number } | undefined;
+    const copiedColumns = columnNames.filter((name) => storedColumnNames.includes(name)).join(', ');
+    db.exec(`
+      INSERT INTO provider_models__new (${copiedColumns})
+      SELECT ${copiedColumns} FROM provider_models
+    `);
+    // Create-copy-drop-rename, never renaming the old table aside: a rename
+    // rewrites REFERENCES clauses in other tables to follow the renamed table.
+    db.exec('DROP TABLE provider_models');
+    db.exec('ALTER TABLE provider_models__new RENAME TO provider_models');
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order
+      ON provider_models(provider, sort_order, id)
+    `);
+
+    // The copy only set the counter to MAX(id) (0 for an empty table); put
+    // back the old high-water mark when it was higher.
+    if (previousSequence) {
+      const raised = db
+        .prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'provider_models'")
+        .run(previousSequence.seq);
+      if (raised.changes === 0) {
+        db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('provider_models', ?)")
+          .run(previousSequence.seq);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (migrationError) {
+    if (db.inTransaction) {
+      db.exec('ROLLBACK');
+    }
+    throw migrationError;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+};
+
 const ensureProjectsForSessionPaths = (db: Database): void => {
   if (!tableExists(db, 'sessions')) {
     return;
@@ -623,6 +744,8 @@ export const runMigrations = (db: Database) => {
       ON provider_models(provider, sort_order, id)
     `);
     addProviderModelEffortColumns(db);
+    // After the effort columns exist, so the rebuild copies every column.
+    widenProviderModelsProviderCheck(db);
     db.exec(USER_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(SESSION_DRAFTS_TABLE_SCHEMA_SQL);
     db.exec(SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL);

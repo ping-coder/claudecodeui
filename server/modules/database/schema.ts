@@ -1,3 +1,5 @@
+import type { LLMProvider } from '@/shared/types.js';
+
 const USER_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,7 +173,32 @@ CREATE TABLE IF NOT EXISTS app_config (
 `;
 
 /**
- * Persistent custom-model library used by the Providers module.
+ * Providers the `provider_models.provider` CHECK constraint accepts, in the
+ * order they are written into the DDL.
+ *
+ * Consumed by `buildProviderModelsTableSql` below, by migrations.ts, which
+ * compares it with the list stored in an existing database, and by
+ * tests/helpers/check-database-copy.ts, which verifies a migrated copy of a
+ * real database accepts every provider. SQLite cannot
+ * alter a CHECK constraint in place and `CREATE TABLE IF NOT EXISTS` never
+ * touches an existing table, so a provider added here only reaches upgraded
+ * databases through the `widenProviderModelsProviderCheck` table rebuild.
+ */
+export const PROVIDER_MODELS_ALLOWED_PROVIDERS: readonly LLMProvider[] = [
+  'claude',
+  'cursor',
+  'codex',
+  'opencode',
+  'agy',
+];
+
+/** Renders `values` as a comma-separated list of SQL string literals. */
+const toSqlStringList = (values: readonly string[]): string =>
+  values.map((value) => `'${value.replaceAll("'", "''")}'`).join(', ');
+
+/**
+ * Persistent custom-model library used by the Providers module, built for a
+ * table called `tableName`.
  *
  * Only user-created models are stored here. Predefined models remain source-
  * controlled in each provider's `-models.provider.ts` adapter so they can be
@@ -182,11 +209,22 @@ CREATE TABLE IF NOT EXISTS app_config (
  * reasoning-effort levels the user declared for the model; both stay NULL when
  * none were declared. They sit after the timestamps so fresh installs match the
  * column order that `runMigrations` produces on upgraded databases.
+ *
+ * Consumed by `PROVIDER_MODELS_TABLE_SCHEMA_SQL` (fresh installs) and by
+ * `widenProviderModelsProviderCheck` in migrations.ts, which rebuilds the table
+ * as `provider_models__new`, so both paths share one column list. Widening the
+ * provider list needs that rebuild: existing databases keep the constraint
+ * they were created with. `allowedProviders` defaults to
+ * `PROVIDER_MODELS_ALLOWED_PROVIDERS`; the migration passes a superset so a
+ * rebuild never drops a provider the stored constraint already accepts.
  */
-export const PROVIDER_MODELS_TABLE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS provider_models (
+export const buildProviderModelsTableSql = (
+  tableName: string,
+  allowedProviders: readonly string[] = PROVIDER_MODELS_ALLOWED_PROVIDERS,
+): string => `
+CREATE TABLE IF NOT EXISTS ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider TEXT NOT NULL CHECK (provider IN ('claude', 'cursor', 'codex', 'opencode')),
+    provider TEXT NOT NULL CHECK (provider IN (${toSqlStringList(allowedProviders)})),
     model_id TEXT NOT NULL,
     model_name TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -197,6 +235,13 @@ CREATE TABLE IF NOT EXISTS provider_models (
     UNIQUE(provider, model_id)
 );
 `;
+
+/**
+ * `provider_models` DDL with the current provider list. Consumed by
+ * `INIT_SCHEMA_SQL` below and by `runMigrations` (migrations.ts), which create
+ * the table on installs that lack it.
+ */
+export const PROVIDER_MODELS_TABLE_SCHEMA_SQL = buildProviderModelsTableSql('provider_models');
 
 /**
  * Per-user application preferences that used to live in browser localStorage.
