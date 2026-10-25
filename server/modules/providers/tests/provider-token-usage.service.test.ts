@@ -10,6 +10,7 @@ import {
   createProviderTokenUsageService,
   summarizeClaudeTokenUsage,
 } from '@/modules/providers/services/provider-token-usage.service.js';
+import { createAgyTestRoots, placeAgyTranscript } from '@/modules/providers/tests/fixtures/agy/agy-test-roots.js';
 import { AppError } from '@/shared/utils.js';
 
 function createSessionRow(overrides: Record<string, unknown> = {}) {
@@ -370,5 +371,68 @@ test('Codex token usage falls back to the whole file when the tail has no token_
     assert.equal(usage.used, 6);
   } finally {
     await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+const AGY_CONVERSATION_ID = '6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b';
+
+test('agy token usage is the latest planner step of the conversation transcript', async () => {
+  const roots = await createAgyTestRoots();
+  try {
+    placeAgyTranscript(roots.legacyRoot, AGY_CONVERSATION_ID);
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({ provider: 'agy', provider_session_id: AGY_CONVERSATION_ID }),
+      getAgyDataRoots: () => [roots.cliRoot, roots.legacyRoot],
+    });
+
+    // Input and cache reads together are the prompt; no context window is known.
+    assert.deepEqual(await service.getSessionTokenUsage('app-session'), {
+      used: 23_030,
+      inputTokens: 23_000,
+      outputTokens: 30,
+      breakdown: { input: 23_000, output: 30 },
+    });
+  } finally {
+    await roots.restore();
+  }
+});
+
+test('agy token usage reads the conversation of a session discovered from disk through the default roots', async () => {
+  const roots = await createAgyTestRoots();
+  try {
+    placeAgyTranscript(roots.cliRoot, AGY_CONVERSATION_ID, 'transcript.jsonl');
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({
+        session_id: AGY_CONVERSATION_ID,
+        provider: 'agy',
+        provider_session_id: AGY_CONVERSATION_ID,
+      }),
+    });
+
+    const usage = await service.getSessionTokenUsage(AGY_CONVERSATION_ID);
+
+    assert.equal(usage.used, 1_005);
+    assert.equal(usage.total, undefined);
+  } finally {
+    await roots.restore();
+  }
+});
+
+test('agy token usage is zero, not a 404, while a conversation has no transcript', async () => {
+  const roots = await createAgyTestRoots();
+  try {
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({ provider: 'agy', provider_session_id: AGY_CONVERSATION_ID }),
+      getAgyDataRoots: () => [roots.cliRoot, roots.legacyRoot],
+    });
+
+    assert.deepEqual(await service.getSessionTokenUsage('app-session'), {
+      used: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      breakdown: { input: 0, output: 0 },
+    });
+  } finally {
+    await roots.restore();
   }
 });

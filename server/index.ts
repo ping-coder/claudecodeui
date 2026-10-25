@@ -85,17 +85,12 @@ const app = express();
 const server = http.createServer(app);
 const queryClaude = providerRuntimeService.getRunner('claude');
 const queryCursor = providerRuntimeService.getRunner('cursor');
-const queryCodex = providerRuntimeService.getRunner('codex');
-const queryOpenCode = providerRuntimeService.getRunner('opencode');
 const gitRoutes = createGitModule({
     queryClaude,
     queryCursor,
 });
 const agentRoutes = createAgentModule({
-    queryClaude,
-    queryCursor,
-    queryCodex,
-    queryOpenCode,
+    getRunner: (provider) => providerRuntimeService.getRunner(provider),
 });
 
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.

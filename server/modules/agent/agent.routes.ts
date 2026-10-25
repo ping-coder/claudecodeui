@@ -3,12 +3,12 @@ import path from 'path';
 
 import express from 'express';
 
-import type { ProviderRunFunction } from '@/shared/types.js';
+import type { LLMProvider, ProviderRunFunction } from '@/shared/types.js';
 
 import { normalizeProjectPath } from '../../shared/utils.js';
 
 /** The providers an Agent API run can start: the ones with a runtime and a model catalog. */
-const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode'];
+const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode', 'agy'];
 
 /** What the route reads off a session row it continues: the row, not the request, says which provider and project a session belongs to. */
 type AgentSessionRow = {
@@ -37,10 +37,11 @@ type AgentRouterDependencies = {
   };
   /** The live-run registry the chat socket uses; registering here is what puts an API run on the running-sessions list. */
   runs: Pick<typeof import('../websocket/index.js').chatRunRegistry, 'startRun' | 'completeRunIfCurrent' | 'isProcessing'>;
-  queryClaude: ProviderRunFunction;
-  queryCursor: ProviderRunFunction;
-  queryCodex: ProviderRunFunction;
-  queryOpenCode: ProviderRunFunction;
+  /**
+   * The provider runtime service's runner for one provider. Only called for
+   * providers in AGENT_RUN_PROVIDERS, so a new provider needs no new wiring.
+   */
+  getRunner(provider: LLMProvider): ProviderRunFunction;
   GithubClient: typeof import('@octokit/rest').Octokit;
 };
 
@@ -61,10 +62,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   const providerModelsService = dependencies.models;
   const sessionGateway = dependencies.sessions;
   const runRegistry = dependencies.runs;
-  const queryClaudeSDK = dependencies.queryClaude;
-  const spawnCursor = dependencies.queryCursor;
-  const queryCodex = dependencies.queryCodex;
-  const spawnOpenCode = dependencies.queryOpenCode;
+  const getRunner = dependencies.getRunner;
   const Octokit = dependencies.GithubClient;
   const router = express.Router();
 
@@ -631,7 +629,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *                          - Source for auto-generated branch names (if createBranch=true and no branchName)
    *                          - Fallback for PR title if no commits are made
    *
-   * @param {string} provider - (Optional) AI provider to use. Options: 'claude' | 'cursor' | 'codex' | 'opencode'
+   * @param {string} provider - (Optional) AI provider to use. Options: 'claude' | 'cursor' | 'codex' | 'opencode' | 'agy'
    *                           Default: 'claude'
    *
    * @param {boolean} stream - (Optional) Enable Server-Sent Events (SSE) streaming for real-time updates.
@@ -774,7 +772,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    * Input Validations (400 Bad Request):
    *   - Either githubUrl OR projectPath must be provided (not neither)
    *   - message must be non-empty string
-   *   - provider must be 'claude', 'cursor', 'codex', or 'opencode'
+   *   - provider must be 'claude', 'cursor', 'codex', 'opencode', or 'agy'
    *   - createBranch/createPR requires githubUrl OR projectPath (not neither)
    *   - branchName must pass Git naming rules (if provided)
    *
@@ -910,7 +908,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     }
 
     if (requestedProvider !== null && !AGENT_RUN_PROVIDERS.includes(requestedProvider)) {
-      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", or "opencode"' });
+      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", "opencode", or "agy"' });
     }
 
     // Validate GitHub branch/PR creation requirements
@@ -1042,7 +1040,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       // A request without `model` runs on the catalog's DEFAULT, the value
       // /api/providers/:provider/models and the API docs advertise. It is the
       // first custom model while the provider lists only custom models.
-      // Only the four runnable providers have a catalog: a continued legacy
+      // Only the runnable providers have a catalog: a continued legacy
       // session whose provider is no longer registered must not fail here.
       const providerModels = AGENT_RUN_PROVIDERS.includes(provider)
         ? await providerModelsService.getProviderModels(provider)
@@ -1058,7 +1056,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       if (provider === 'claude') {
         console.log('🤖 Starting Claude SDK session');
 
-        await queryClaudeSDK(message.trim(), {
+        await getRunner('claude')(message.trim(), {
           projectPath: finalProjectPath,
           cwd: finalProjectPath,
           sessionId: appSessionId,
@@ -1071,7 +1069,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       } else if (provider === 'cursor') {
         console.log('🖱️ Starting Cursor CLI session');
 
-        await spawnCursor(message.trim(), {
+        await getRunner('cursor')(message.trim(), {
           projectPath: finalProjectPath,
           cwd: finalProjectPath,
           sessionId: appSessionId,
@@ -1081,7 +1079,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       } else if (provider === 'codex') {
         console.log('🤖 Starting Codex SDK session');
 
-        await queryCodex(message.trim(), {
+        await getRunner('codex')(message.trim(), {
           projectPath: finalProjectPath,
           cwd: finalProjectPath,
           sessionId: appSessionId,
@@ -1092,7 +1090,18 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       } else if (provider === 'opencode') {
         console.log('Starting OpenCode CLI session');
 
-        await spawnOpenCode(message.trim(), {
+        await getRunner('opencode')(message.trim(), {
+          projectPath: finalProjectPath,
+          cwd: finalProjectPath,
+          sessionId: appSessionId,
+          model: model || providerModels?.DEFAULT,
+          effort,
+          permissionMode: 'bypassPermissions' // Agent runs are non-interactive, like the other providers above
+        }, run.writer);
+      } else if (provider === 'agy') {
+        console.log('Starting Antigravity CLI session');
+
+        await getRunner('agy')(message.trim(), {
           projectPath: finalProjectPath,
           cwd: finalProjectPath,
           sessionId: appSessionId,

@@ -277,9 +277,71 @@ test('the capabilities route reports which providers can run ultracode', async (
     assert.equal(response.status, 200);
     assert.deepEqual(
       Object.fromEntries(payload.data.providers.map((row) => [row.provider, row.supportsUltracode])),
-      { claude: true, cursor: false, codex: false, opencode: false },
+      { claude: true, cursor: false, codex: false, opencode: false, agy: false },
     );
   });
+});
+
+test('agy routes: new chats, capabilities, status, catalog and the read-only facets', async () => {
+  // A throwaway HOME and data root, and an agy that is not installed: nothing
+  // may reach the real ~/.gemini or run the real CLI.
+  const isolatedEnv = ['HOME', 'AGY_CLI_PATH', 'AGY_DATA_DIRS'].map((key) => [key, process.env[key]] as const);
+  const agyHome = await mkdtemp(path.join(os.tmpdir(), 'provider-routes-agy-'));
+  process.env.HOME = agyHome;
+  process.env.AGY_CLI_PATH = path.join(agyHome, 'not-installed', 'agy');
+  process.env.AGY_DATA_DIRS = path.join(agyHome, 'agy-data');
+
+  try {
+    await withProviderServer(async (baseUrl, workspacePath) => {
+      const readData = async (route: string, init?: RequestInit) => {
+        const response = await fetch(`${baseUrl}/api/providers${route}`, init);
+        return { status: response.status, data: (await response.json() as { data: any }).data };
+      };
+
+      const created = await readData('/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'agy', projectPath: workspacePath, initialMessage: 'Hello agy' }),
+      });
+      assert.equal(created.status, 201);
+      assert.equal(sessionsDb.getSessionById(created.data.sessionId)?.provider, 'agy');
+
+      const capabilities = await readData('/agy/capabilities');
+      assert.equal(capabilities.status, 200);
+      assert.equal(capabilities.data.provider, 'agy');
+      assert.equal(capabilities.data.supportsImages, false);
+
+      const auth = await readData('/agy/auth/status');
+      assert.equal(auth.status, 200);
+      assert.equal(auth.data.provider, 'agy');
+      assert.equal(auth.data.installed, false);
+      assert.equal(auth.data.authenticated, false);
+
+      // Not installed: the built-in catalog, without spawning anything.
+      const catalog = await readData('/agy/models');
+      assert.equal(catalog.status, 200);
+      assert.equal(catalog.data.models.DEFAULT, 'auto');
+      assert.equal(catalog.data.models.OPTIONS.length, 19);
+      assert.deepEqual(catalog.data.models.EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max']);
+
+      const mcp = await readData('/agy/mcp/servers');
+      assert.equal(mcp.status, 200);
+      assert.deepEqual(mcp.data.scopes, { user: [], local: [], project: [] });
+
+      const skills = await readData('/agy/skills');
+      assert.equal(skills.status, 200);
+      assert.deepEqual(skills.data.skills, []);
+    });
+  } finally {
+    for (const [key, value] of isolatedEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await rm(agyHome, { recursive: true, force: true });
+  }
 });
 
 test('model routes expose immutable defaults and full custom model CRUD', async () => {

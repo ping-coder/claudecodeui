@@ -19,14 +19,11 @@ import { IS_PLATFORM } from '@/shared/utils.js';
 
 import { createAgentRouter } from './agent.routes.js';
 
-type AgentExternalDependencies = Pick<
-  Parameters<typeof createAgentRouter>[0],
-  'queryClaude' | 'queryCursor' | 'queryCodex' | 'queryOpenCode'
->;
+type AgentExternalDependencies = Pick<Parameters<typeof createAgentRouter>[0], 'getRunner'>;
 
 /**
- * Assembles the production Agent router while accepting provider runners from
- * the centralized provider runtime service.
+ * Assembles the production Agent router while accepting the provider runner
+ * lookup from the centralized provider runtime service.
  */
 export function createAgentModule(externalDependencies: AgentExternalDependencies) {
   return createAgentRouter({

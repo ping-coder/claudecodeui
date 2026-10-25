@@ -4,11 +4,22 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
+import { classifyAgyDataPath } from '@/modules/providers/list/agy/agy-store.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
+import { getAgyDataRoots } from '@/shared/agy-cli-path.js';
 import type { LLMProvider } from '@/shared/types.js';
 
 type WatcherEventType = 'add' | 'change';
+
+type ProviderWatchTarget = {
+  provider: LLMProvider;
+  rootPath: string;
+  ignored: (filePath: string) => boolean;
+  depth: number;
+  /** False for roots another program owns: those are watched only if they already exist. */
+  createIfMissing: boolean;
+};
 
 const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> = [
   {
@@ -61,12 +72,7 @@ const IGNORED_FILE_SUFFIXES = ['.tmp', '.swp'];
 export function createWatcherIgnoredMatcher(rootPath: string): (filePath: string) => boolean {
   return (filePath: string) => {
     const relativePath = path.relative(rootPath, filePath);
-    // Outside the root is `..` as a whole component, or an absolute result
-    // (another drive on Windows). A child called `..archive` is still inside.
-    const isOutsideRoot = relativePath === '..'
-      || relativePath.startsWith(`..${path.sep}`)
-      || path.isAbsolute(relativePath);
-    if (!relativePath || isOutsideRoot) {
+    if (!relativePath || isOutsideWatchRoot(relativePath)) {
       return false;
     }
 
@@ -79,6 +85,63 @@ export function createWatcherIgnoredMatcher(rootPath: string): (filePath: string
     return segments.some((segment) => IGNORED_DIRECTORY_NAMES.has(segment));
   };
 }
+
+// Outside the root is `..` as a whole component, or an absolute result
+// (another drive on Windows). A child called `..archive` is still inside.
+function isOutsideWatchRoot(relativePath: string): boolean {
+  return relativePath === '..'
+    || relativePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativePath);
+}
+
+/**
+ * Builds chokidar's `ignored` matcher for one agy data root: an allow-list on
+ * top of the shared rules. Only the conversation index (and its WAL) and the
+ * path down to each conversation's transcript are watched; the rest of agy's
+ * data (`conversations/`, binaries, logs, and brain artifacts such as
+ * `scratch/`, `.user_uploaded/`, `chunks/`, `steps/`, `messages/`, `tasks/`)
+ * is never walked. The index's `-shm` is ignored: agy's connections touch it
+ * on every access, and it holds no conversation data.
+ *
+ * Exported for the providers module's tests, which run it against chokidar on
+ * a real directory tree.
+ */
+export function createAgyWatcherIgnoredMatcher(rootPath: string): (filePath: string) => boolean {
+  const isIgnoredBySharedRules = createWatcherIgnoredMatcher(rootPath);
+  return (filePath: string) => {
+    if (isIgnoredBySharedRules(filePath)) {
+      return true;
+    }
+    const relativePath = path.relative(rootPath, filePath);
+    if (!relativePath || isOutsideWatchRoot(relativePath)) {
+      return false;
+    }
+    return classifyAgyDataPath(rootPath, filePath) === null;
+  };
+}
+
+/** brain (1) / <id> (2) / .system_generated (3) / logs (4) holds the transcripts. */
+const AGY_WATCH_DEPTH = 4;
+
+/**
+ * agy rewrites its index WAL and a transcript many times per turn. Each file
+ * is synced once it has been quiet this long, and at least this often while
+ * it keeps changing.
+ */
+const AGY_FILE_EVENT_DEBOUNCE_MS = 1_000;
+const AGY_FILE_EVENT_MAX_WAIT_MS = 5_000;
+
+const AGY_INDEX_FILE_NAME = 'conversation_summaries.db';
+const AGY_INDEX_WAL_FILE_NAME = `${AGY_INDEX_FILE_NAME}-wal`;
+const AGY_TRANSCRIPT_FILE_NAMES = new Set(['transcript_full.jsonl', 'transcript.jsonl']);
+
+type PendingAgyFileEvent = {
+  eventType: WatcherEventType;
+  firstQueuedAt: number;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const pendingAgyFileEvents = new Map<string, PendingAgyFileEvent>();
 
 const PROJECTS_UPDATE_DEBOUNCE_MS = 500;
 const PROJECTS_UPDATE_MAX_WAIT_MS = 2_000;
@@ -104,13 +167,86 @@ let watcherRescheduleAfterRefresh = false;
 
 /**
  * Filters watcher events to provider-specific session artifact file types.
+ *
+ * Exported for the providers module's tests.
  */
-function isWatcherTargetFile(provider: LLMProvider, filePath: string): boolean {
+export function isWatcherTargetFile(provider: LLMProvider, filePath: string): boolean {
   if (provider === 'opencode') {
     return path.basename(filePath) === 'opencode.db';
   }
 
+  if (provider === 'agy') {
+    // agy commits land in the WAL; the main file only changes on checkpoint.
+    const baseName = path.basename(filePath);
+    if (baseName === AGY_INDEX_FILE_NAME || baseName === AGY_INDEX_WAL_FILE_NAME) {
+      return true;
+    }
+    const logsDirectory = path.dirname(filePath);
+    return AGY_TRANSCRIPT_FILE_NAMES.has(baseName)
+      && path.basename(logsDirectory) === 'logs'
+      && path.basename(path.dirname(logsDirectory)) === '.system_generated';
+  }
+
   return filePath.endsWith('.jsonl');
+}
+
+/**
+ * Debounces agy file events per file. The index and its WAL share one entry
+ * (keyed by the index path), since either change means the index changed.
+ */
+function queueAgyFileEvent(eventType: WatcherEventType, filePath: string): void {
+  if (!isWatcherTargetFile('agy', filePath)) {
+    return;
+  }
+
+  const eventPath = path.basename(filePath) === AGY_INDEX_WAL_FILE_NAME
+    ? path.join(path.dirname(filePath), AGY_INDEX_FILE_NAME)
+    : filePath;
+  const now = Date.now();
+  const pending = pendingAgyFileEvents.get(eventPath);
+  if (pending) {
+    clearTimeout(pending.timer);
+  }
+
+  const firstQueuedAt = pending?.firstQueuedAt ?? now;
+  const queuedEventType: WatcherEventType = pending?.eventType === 'add' ? 'add' : eventType;
+  const delay = Math.min(AGY_FILE_EVENT_DEBOUNCE_MS, Math.max(0, firstQueuedAt + AGY_FILE_EVENT_MAX_WAIT_MS - now));
+  const timer = setTimeout(() => {
+    pendingAgyFileEvents.delete(eventPath);
+    void onUpdate(queuedEventType, eventPath, 'agy');
+  }, delay);
+  pendingAgyFileEvents.set(eventPath, { eventType: queuedEventType, firstQueuedAt, timer });
+}
+
+/**
+ * Every root to watch. agy's roots are resolved now (they honour
+ * `AGY_DATA_DIRS`) and belong to agy, so they are never created.
+ */
+function listProviderWatchTargets(): ProviderWatchTarget[] {
+  return [
+    ...PROVIDER_WATCH_PATHS.map(({ provider, rootPath }) => ({
+      provider,
+      rootPath,
+      ignored: createWatcherIgnoredMatcher(rootPath),
+      depth: 6,
+      createIfMissing: true,
+    })),
+    ...getAgyDataRoots().map((rootPath) => ({
+      provider: 'agy' as const,
+      rootPath,
+      ignored: createAgyWatcherIgnoredMatcher(rootPath),
+      depth: AGY_WATCH_DEPTH,
+      createIfMissing: false,
+    })),
+  ];
+}
+
+async function isExistingDirectory(directoryPath: string): Promise<boolean> {
+  try {
+    return (await fsPromises.stat(directoryPath)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function clearPendingWatcherFlushTimer(): void {
@@ -243,16 +379,24 @@ export async function initializeSessionsWatcher(): Promise<void> {
     failures: initialSync.failures,
   });
 
-  for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
+  for (const { provider, rootPath, ignored, depth, createIfMissing } of listProviderWatchTargets()) {
     try {
-      await fsPromises.mkdir(rootPath, { recursive: true });
+      if (createIfMissing) {
+        await fsPromises.mkdir(rootPath, { recursive: true });
+      } else if (!(await isExistingDirectory(rootPath))) {
+        // chokidar would watch the nearest existing parent instead and miss
+        // nested files once the root appears; a later root is still indexed
+        // by every full sync and watched from the next start.
+        console.log(`Skipping session watcher for provider "${provider}": ${rootPath} does not exist`);
+        continue;
+      }
 
       const watcher = chokidar.watch(rootPath, {
-        ignored: createWatcherIgnoredMatcher(rootPath),
+        ignored,
         persistent: true,
         ignoreInitial: true,
         followSymlinks: false,
-        depth: 6,
+        depth,
         // Polling reaches filesystems that native events cannot: WSL's /mnt/c,
         // network shares, some container mounts. Where native events do work,
         // chokidar's own CHOKIDAR_USEPOLLING=false overrides this and a finished
@@ -264,9 +408,17 @@ export async function initializeSessionsWatcher(): Promise<void> {
 
       watcher
         .on('add', (filePath: string) => {
+          if (provider === 'agy') {
+            queueAgyFileEvent('add', filePath);
+            return;
+          }
           void onUpdate('add', filePath, provider);
         })
         .on('change', (filePath: string) => {
+          if (provider === 'agy') {
+            queueAgyFileEvent('change', filePath);
+            return;
+          }
           void onUpdate('change', filePath, provider);
         })
         .on('error', (error: unknown) => {
@@ -290,6 +442,10 @@ export async function initializeSessionsWatcher(): Promise<void> {
  */
 export async function closeSessionsWatcher(): Promise<void> {
   clearPendingWatcherFlushTimer();
+  for (const pending of pendingAgyFileEvents.values()) {
+    clearTimeout(pending.timer);
+  }
+  pendingAgyFileEvents.clear();
 
   await Promise.all(
     watchers.map(async (watcher) => {

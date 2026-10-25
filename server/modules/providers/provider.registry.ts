@@ -1,3 +1,4 @@
+import { AgyProvider } from '@/modules/providers/list/agy/agy.provider.js';
 import { ClaudeProvider } from '@/modules/providers/list/claude/claude.provider.js';
 import { CodexProvider } from '@/modules/providers/list/codex/codex.provider.js';
 import { CursorProvider } from '@/modules/providers/list/cursor/cursor.provider.js';
@@ -11,6 +12,7 @@ const providers: Record<LLMProvider, IProvider> = {
   codex: new CodexProvider(),
   cursor: new CursorProvider(),
   opencode: new OpenCodeProvider(),
+  agy: new AgyProvider(),
 };
 
 /**

@@ -180,6 +180,12 @@ export interface IProviderSkills {
  * `ProviderMcpServer` records used by routes and frontend state.
  */
 export interface IProviderMcp {
+  /**
+   * Whether this provider manages MCP servers in `scope` at all. "Add to (or
+   * remove from) every provider" skips providers that answer false instead
+   * of reporting their unsupported-scope error as a failure.
+   */
+  supportsScope(scope: McpScope): boolean;
   listServers(options?: { workspacePath?: string }): Promise<Record<McpScope, ProviderMcpServer[]>>;
   listServersForScope(scope: McpScope, options?: { workspacePath?: string }): Promise<ProviderMcpServer[]>;
   upsertServer(input: UpsertProviderMcpServerInput): Promise<ProviderMcpServer>;

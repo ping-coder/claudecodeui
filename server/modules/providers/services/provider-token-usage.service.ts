@@ -6,6 +6,8 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { readAgyTranscript, summarizeAgyTranscriptTokenUsage } from '@/modules/providers/list/agy/agy-store.js';
+import { getAgyDataRoots } from '@/shared/agy-cli-path.js';
 import type { AnyRecord } from '@/shared/types.js';
 import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
 
@@ -21,6 +23,7 @@ type ProviderTokenUsageServiceDependencies = {
   getSessionById: (sessionId: string) => SessionRow | null | undefined;
   getHomeDirectory: () => string;
   getOpenCodeDatabasePath: () => string;
+  getAgyDataRoots: () => string[];
   fileExists: (filePath: string) => boolean;
   readDirectory: (directoryPath: string) => Promise<Dirent[]>;
   readTextFile: (filePath: string) => Promise<string>;
@@ -66,6 +69,7 @@ const defaultDependencies: ProviderTokenUsageServiceDependencies = {
   getSessionById: (sessionId) => sessionsDb.getSessionById(sessionId),
   getHomeDirectory: () => os.homedir(),
   getOpenCodeDatabasePath,
+  getAgyDataRoots: () => getAgyDataRoots(),
   fileExists: (filePath) => fsSync.existsSync(filePath),
   readDirectory: (directoryPath) => fsp.readdir(directoryPath, { withFileTypes: true }),
   readTextFile: (filePath) => fsp.readFile(filePath, 'utf8'),
@@ -458,6 +462,18 @@ export function createProviderTokenUsageService(
         }
 
         return readOpenCodeTokenUsage(databasePath, providerSessionId);
+      }
+
+      if (session.provider === 'agy') {
+        // A conversation with no transcript yet (or no reported usage) simply
+        // has none so far; that is not a missing session.
+        const transcript = await readAgyTranscript(providerSessionId, dependencies.getAgyDataRoots());
+        return summarizeAgyTranscriptTokenUsage(transcript) ?? {
+          used: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          breakdown: { input: 0, output: 0 },
+        };
       }
 
       if (session.provider === 'codex') {

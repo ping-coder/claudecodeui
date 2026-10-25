@@ -66,7 +66,7 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'agy';
 
 /**
  * One selectable model row in a provider model catalog.
@@ -1644,4 +1644,178 @@ export type CliApplication = {
  */
 export type SandboxCommandService = {
   execute(argumentsList: string[]): Promise<number>;
+};
+
+// ---------------------------
+//----------------- AGY (ANTIGRAVITY CLI) STREAM TYPES ------------
+/**
+ * Token counts agy reports on an `agent_response` step that reached DONE (per
+ * step) and on the final `result` event (cumulative over the whole
+ * conversation, so never shown as the current turn's usage).
+ */
+export type AgyUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  thinking_tokens?: number;
+  cache_read_tokens?: number;
+  total_tokens?: number;
+};
+
+/**
+ * One `step_update` from `agy --output-format stream-json`. The same
+ * `step_index` arrives first as ACTIVE and then as DONE. `step_type` is a
+ * closed vocabulary (`user_input`, `system_message`, `agent_response`, `tool`
+ * seen so far); consumers must log and ignore any other value. Agent text
+ * streams through `text_delta`; tool steps carry `tool_info.parameters` on
+ * ACTIVE and `tool_info.output` on DONE. The stream never carries thinking
+ * text, only `usage.thinking_tokens`.
+ */
+export type AgyStepUpdate = {
+  conversation_id?: string;
+  step_index?: number;
+  state?: 'ACTIVE' | 'DONE' | string;
+  step_type?: 'user_input' | 'system_message' | 'agent_response' | 'tool' | string;
+  text_delta?: string;
+  tool_name?: string;
+  tool_info?: {
+    name?: string;
+    parameters?: Record<string, unknown>;
+    output?: unknown;
+  };
+  duration_seconds?: number;
+  usage?: AgyUsage;
+};
+
+/**
+ * One NDJSON line of `agy --output-format stream-json`.
+ *
+ * - `init` names the conversation (`conversation_id`), which is the provider
+ *   session id a new chat binds to; no log scan or DB polling is needed.
+ * - `step_update` carries progress; see `AgyStepUpdate`.
+ * - `result` ends the run; its `usage` and `duration_seconds` are cumulative
+ *   over the conversation. A `status` other than `SUCCESS` is a failure that
+ *   may still carry a partial `response`.
+ *
+ * Produced by the agy runtime's line parser and consumed by the agy sessions
+ * provider's `normalizeMessage`, which maps step updates to chat messages.
+ */
+export type AgyStreamEvent =
+  | {
+    event: 'init';
+    conversation_id?: string;
+    init?: { model?: string; cwd?: string; tools?: string[]; permission_mode?: string };
+  }
+  | { event: 'step_update'; step_update?: AgyStepUpdate }
+  | {
+    event: 'result';
+    result?: {
+      conversation_id?: string;
+      status?: string;
+      response?: string;
+      duration_seconds?: number;
+      num_turns?: number;
+      usage?: AgyUsage;
+    };
+  };
+
+// ---------------------------
+//----------------- AGY (ANTIGRAVITY CLI) STORE TYPES ------------
+/**
+ * One top-level conversation listed in an agy data root's
+ * `conversation_summaries.db`, as the agy store reads it.
+ *
+ * Child conversations (subagents) and killed ones are filtered out before a
+ * summary is built, and so are rows whose id is not a valid conversation id.
+ * When the same conversation appears in several roots, only the copy with the
+ * newest `lastModifiedMs` is kept and `root` names the root it came from.
+ *
+ * - `projectPath` is the first `workspace_uris` entry as a decoded file path,
+ *   or the home directory when the conversation has no usable workspace.
+ * - `title` is agy's title, else its preview, else the first user message of
+ *   the transcript, else the root's `history.jsonl` display text; null when
+ *   none of them has text (the synchronizer then applies its fallback name).
+ * - `preview` is agy's own preview text, kept so a name derived from it can be
+ *   replaced once agy titles the conversation.
+ * - `lastModifiedMs` comes from `last_modified_time`; for agy's zero value it
+ *   falls back to the transcript's mtime, then the conversation database's
+ *   mtime, and is null when nothing on disk dates the conversation.
+ *
+ * Produced by the agy store and consumed by the agy session synchronizer.
+ */
+export type AgyConversationSummary = {
+  conversationId: string;
+  root: string;
+  title: string | null;
+  preview: string | null;
+  projectPath: string;
+  lastModifiedMs: number | null;
+};
+
+/**
+ * One step (one JSONL row) of an agy transcript, read from
+ * `<root>/brain/<conversation id>/.system_generated/logs/transcript_full.jsonl`
+ * or, when that is missing, the shortened `transcript.jsonl`.
+ *
+ * `type` is the step kind: `USER_INPUT`, `PLANNER_RESPONSE`, `GENERIC` (the
+ * result of a tool call) or `SYSTEM_MESSAGE`; readers ignore other kinds.
+ * Planner steps carry `thinking`, `content`, `tool_calls` (`{ name, args }`,
+ * where `args` and each of its values may be JSON-encoded strings) and their
+ * token counts. In `transcript.jsonl`, the fields named in `truncated_fields`
+ * were cut short. Every field is agy's and only partly verified, so all of
+ * them are `unknown` and must be read defensively.
+ */
+export type AgyTranscriptStep = {
+  step_index?: unknown;
+  source?: unknown;
+  type?: unknown;
+  status?: unknown;
+  created_at?: unknown;
+  content?: unknown;
+  thinking?: unknown;
+  tool_calls?: unknown;
+  input_tokens?: unknown;
+  cache_read_tokens?: unknown;
+  output_tokens?: unknown;
+  truncated_fields?: unknown;
+  [key: string]: unknown;
+};
+
+/**
+ * One parsed agy transcript and where it was read from.
+ *
+ * `isComplete` is false when only the shortened `transcript.jsonl` exists, so
+ * some step fields may be truncated. `modifiedAt` is the file's mtime (ISO),
+ * a stable fallback time for steps without a readable `created_at`.
+ * Malformed lines (such as a row agy is still writing) are skipped.
+ *
+ * Produced by the agy store; consumed by the agy sessions provider (history)
+ * and the provider token-usage service.
+ */
+export type AgyTranscript = {
+  conversationId: string;
+  root: string;
+  filePath: string;
+  isComplete: boolean;
+  modifiedAt: string;
+  steps: AgyTranscriptStep[];
+};
+
+/**
+ * Context usage of an agy conversation, from the token counts of one model
+ * response: `inputTokens` is the whole prompt (new plus cache-read tokens)
+ * and `used` adds the response's output. It has the shape OpenCode's history
+ * reader and usage endpoint return, without a `total` (agy reports no context
+ * window size).
+ *
+ * Built by `buildAgyTokenUsage`; returned by the agy sessions provider's
+ * history and by the provider token-usage service.
+ */
+export type AgyTokenUsage = {
+  used: number;
+  inputTokens: number;
+  outputTokens: number;
+  breakdown: {
+    input: number;
+    output: number;
+  };
 };

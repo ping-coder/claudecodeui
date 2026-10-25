@@ -50,7 +50,9 @@ export const providerMcpService = {
   },
 
   /**
-   * Adds one HTTP/stdio MCP server to every provider.
+   * Adds one HTTP/stdio MCP server to every provider that manages MCP servers
+   * in the requested scope. Providers without that scope (Antigravity has
+   * none) are left out of the results rather than reported as failures.
    */
   async addMcpServerToAllProviders(
     input: Omit<UpsertProviderMcpServerInput, 'scope'> & { scope?: Exclude<McpScope, 'local'> },
@@ -66,6 +68,9 @@ export const providerMcpService = {
     const results: Array<{ provider: LLMProvider; created: boolean; error?: string }> = [];
     const providers = providerRegistry.listProviders();
     for (const provider of providers) {
+      if (!provider.mcp.supportsScope(scope)) {
+        continue;
+      }
       try {
         await provider.mcp.upsertServer({ ...input, scope });
         results.push({ provider: provider.id, created: true });
@@ -84,14 +89,19 @@ export const providerMcpService = {
   /**
    * Removes one MCP server from every provider. Mirrors `addMcpServerToAllProviders`
    * by iterating the live provider registry, so callers stay in sync with which
-   * providers exist instead of maintaining their own provider list.
+   * providers exist instead of maintaining their own provider list, and by
+   * skipping providers that do not manage the scope.
    */
   async removeMcpServerFromAllProviders(
     input: { name: string; scope?: McpScope; workspacePath?: string },
   ): Promise<Array<{ provider: LLMProvider; removed: boolean; error?: string }>> {
+    const scope = input.scope ?? 'project';
     const results: Array<{ provider: LLMProvider; removed: boolean; error?: string }> = [];
     const providers = providerRegistry.listProviders();
     for (const provider of providers) {
+      if (!provider.mcp.supportsScope(scope)) {
+        continue;
+      }
       try {
         const result = await provider.mcp.removeServer(input);
         results.push({ provider: provider.id, removed: result.removed });

@@ -131,6 +131,27 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
+  agy: {
+    provider: 'agy',
+    // Mapped by the runtime onto agy's flags: `--mode accept-edits`,
+    // `--mode plan` and `--dangerously-skip-permissions`; see
+    // resolveAgyPermissionFlags in the agy runtime adapter. agy's own `auto`
+    // mode stays out until what it allows is confirmed.
+    permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+    defaultPermissionMode: 'default',
+    // The runtime refuses attachments rather than dropping them silently.
+    supportsImages: false,
+    supportsFiles: false,
+    supportsAbort: true,
+    supportsPermissionRequests: false,
+    supportsTokenUsage: true,
+    supportsEffort: true,
+    // Passed on as agy's `--effort`.
+    effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    supportsUltracode: false,
+    supportsMessageEditing: false,
+    supportsSessionForking: false,
+  },
 };
 
 /**

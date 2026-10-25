@@ -20,6 +20,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import type {
+  AgyTokenUsage,
   AnyRecord,
   ApiSuccessShape,
   AppErrorOptions,
@@ -1120,6 +1121,175 @@ export function unwrapJsonStringLiteral(value: string): string {
   } catch {
     return value;
   }
+}
+
+// ---------------------------
+//----------------- AGY (ANTIGRAVITY CLI) TRANSCRIPT UTILITIES ------------
+// `2026-10-25 12:56:42.887272639+00:00`, Go's `time.Time` text with an optional
+// fraction of any length, a `T` or space separator, and a `Z`, `+hh:mm`,
+// `+hhmm` or ` +0000 UTC` zone.
+const AGY_DATETIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}(?::?\d{2})?)?(?:\s+[A-Za-z]+)?$/;
+
+const AGY_EPOCH_START_YEAR = 1970;
+
+// Epoch numbers are told apart by magnitude: today is ~1.8e9 seconds, ~1.8e12
+// milliseconds, ~1.8e15 microseconds and ~1.8e18 nanoseconds.
+function agyEpochNumberToMs(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  if (value >= 1e17) {
+    return Math.floor(value / 1e6);
+  }
+  if (value >= 1e14) {
+    return Math.floor(value / 1e3);
+  }
+  if (value >= 1e11) {
+    return Math.floor(value);
+  }
+  return Math.floor(value * 1000);
+}
+
+function agyDatetimeTextToMs(text: string): number | null {
+  const match = AGY_DATETIME_PATTERN.exec(text);
+  if (!match) {
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  const [, year, month, day, hour, minute, second, fraction = '', zone] = match;
+  // Go's zero value (`0001-01-01 00:00:00+00:00`) means "never set".
+  if (Number(year) < AGY_EPOCH_START_YEAR) {
+    return null;
+  }
+
+  // Truncate, never round: a millisecond rounded up could fall after a
+  // `since` cursor taken in that same millisecond and skip the row.
+  const milliseconds = Number(`${fraction}000`.slice(0, 3));
+  let millis = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    milliseconds,
+  );
+  if (zone && zone !== 'Z') {
+    const sign = zone.startsWith('-') ? -1 : 1;
+    const digits = zone.slice(1).replace(':', '');
+    const offsetMinutes = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4) || '0');
+    millis -= sign * offsetMinutes * 60_000;
+  }
+
+  return Number.isFinite(millis) && millis > 0 ? millis : null;
+}
+
+/**
+ * Parses an agy timestamp into milliseconds since the epoch, or null when it
+ * names no real moment.
+ *
+ * agy's Go store writes `datetime` columns as text with nanosecond precision
+ * and a numeric offset (`2026-10-25 12:56:42.887272639+00:00`), which neither
+ * `Date.parse` nor `normalizeProviderTimestamp` reads reliably, and an unset
+ * time as Go's zero value (`0001-01-01 00:00:00+00:00`). Fractions are cut to
+ * whole milliseconds. Anything before 1970, unparsable or not a positive
+ * finite number yields null, so callers fall back to file times instead of
+ * "now" (a "now" makes every scan move and un-archive the session). Epoch
+ * numbers in seconds, milliseconds, microseconds or nanoseconds, numeric
+ * strings and protobuf-style `{ seconds, nanos }` objects are accepted too.
+ *
+ * Used by the agy store (index `last_modified_time`) and the agy sessions
+ * provider (transcript `created_at`).
+ */
+export function parseAgyTimestampMs(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return agyEpochNumberToMs(value);
+  }
+
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) {
+      return null;
+    }
+    return /^\d+(?:\.\d+)?$/.test(text) ? agyEpochNumberToMs(Number(text)) : agyDatetimeTextToMs(text);
+  }
+
+  const record = readObjectRecord(value);
+  if (record && record.seconds !== undefined) {
+    const seconds = Number(record.seconds);
+    const nanos = Number(record.nanos ?? 0);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return null;
+    }
+    return seconds * 1000 + (Number.isFinite(nanos) ? Math.floor(nanos / 1e6) : 0);
+  }
+
+  return null;
+}
+
+const AGY_USER_REQUEST_PATTERN = /<USER_REQUEST>([\s\S]*?)(?:<\/USER_REQUEST>|$)/;
+const AGY_PROMPT_METADATA_PATTERN = /<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>[\s\S]*?(?:<\/\1>|$)/g;
+
+/**
+ * Recovers what the user typed from an agy `USER_INPUT` step.
+ *
+ * agy stores a prompt wrapped as `<USER_REQUEST>…</USER_REQUEST>` next to
+ * blocks it adds itself (`<ADDITIONAL_METADATA>`, `<USER_SETTINGS_CHANGE>`).
+ * The text inside the wrapper is returned, trimmed and without those blocks;
+ * content without a wrapper is returned as it is (trimmed, agy's blocks still
+ * removed). A wrapper cut short by transcript truncation runs to the end. The
+ * `<images_input>` / `<files_input>` attachment blocks are left in place for
+ * the caller's `parseImagesInputTag` / `parseFilesInputTag`.
+ *
+ * Used by the agy sessions provider (user turns in history) and the agy store
+ * (a conversation's first prompt as its fallback title).
+ */
+export function unwrapAgyUserInput(content: string): string {
+  const request = AGY_USER_REQUEST_PATTERN.exec(content);
+  const text = request ? request[1] : content;
+  return text.replace(AGY_PROMPT_METADATA_PATTERN, '').trim();
+}
+
+function readAgyTokenCount(value: unknown): number {
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/**
+ * Builds the context usage summary for one agy model response from its token
+ * counts (`input_tokens`, `cache_read_tokens`, `output_tokens`, as both the
+ * stream's `usage` and transcript planner steps name them). Input and
+ * cache-read tokens together are the prompt the response saw; thinking tokens
+ * are not added because agy's own `total_tokens` leaves them out. Returns
+ * undefined when the counts are missing or all zero.
+ *
+ * Used by the agy store's transcript usage summary (history `tokenUsage` and
+ * the provider token-usage service). The agy runtime's live `token_budget`
+ * should use it for the latest response too, so the counter does not change
+ * when the session reloads.
+ */
+export function buildAgyTokenUsage(
+  usage: { input_tokens?: unknown; cache_read_tokens?: unknown; output_tokens?: unknown } | null | undefined,
+): AgyTokenUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  const inputTokens = readAgyTokenCount(usage.input_tokens) + readAgyTokenCount(usage.cache_read_tokens);
+  const outputTokens = readAgyTokenCount(usage.output_tokens);
+  const used = inputTokens + outputTokens;
+  if (used <= 0) {
+    return undefined;
+  }
+
+  return {
+    used,
+    inputTokens,
+    outputTokens,
+    breakdown: { input: inputTokens, output: outputTokens },
+  };
 }
 
 // ---------------------------

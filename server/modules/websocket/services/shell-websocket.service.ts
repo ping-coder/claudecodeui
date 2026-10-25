@@ -5,6 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
+import { resolveAgyCliPath } from '@/shared/agy-cli-path.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -21,6 +22,8 @@ type ShellIncomingMessage = {
   forceRestart?: boolean;
   bypassPermissions?: boolean;
   colorScheme?: string;
+  // The model chosen for the session's provider; only the agy launch uses it.
+  model?: string;
 };
 
 type ShellColorScheme = 'light' | 'dark';
@@ -250,6 +253,14 @@ function buildShellCommand(
     return otherProgram(initialCommand || 'opencode');
   }
 
+  if (provider === 'agy') {
+    if (!resumeSessionId && initialCommand) {
+      // A caller's own command is launched as given, as for claude and opencode.
+      return otherProgram(initialCommand);
+    }
+    return otherProgram(buildAgyShellCommand(message, resumeSessionId));
+  }
+
   // Launching with the flag is what unlocks "bypass permissions" in the CLI's
   // shift+tab permission-mode cycle; it cannot be enabled from inside a
   // session started without it.
@@ -269,6 +280,52 @@ function buildShellCommand(
     return otherProgram(initialCommand);
   }
   return { command: `claude${launchFlags}`, claudeFollowsAppTheme: theme.followsAppTheme };
+}
+
+// agy model ids are slugs such as `gemini-3.8-flash-high`. An id must start
+// with a letter or digit, so it is never read as a flag, and hold nothing a
+// shell would interpret; any other value is left out of the launch.
+const SAFE_AGY_MODEL_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.\-:/@+]*$/;
+
+// Printed instead of the shell's bare "command not found" when no agy exists.
+const AGY_NOT_INSTALLED_MESSAGE =
+  'Antigravity CLI (agy) is not installed on this machine. Install it, or set AGY_CLI_PATH to its full path and restart CloudCLI.';
+
+/**
+ * Builds the Antigravity CLI launch. A conversation is resumed when there is
+ * one, falling back to a fresh agy when that fails, as for claude and codex.
+ * agy installs into `~/.local/bin`, which a service PATH often lacks, so the
+ * binary that `resolveAgyCliPath` finds is run by its quoted full path. When
+ * the lookup finds none, a bare `agy` still gets the shell's own lookup (the
+ * only one that knows Windows' `.exe` and `.cmd` names), and a shell that
+ * cannot find it either says what is missing.
+ */
+function buildAgyShellCommand(message: ShellIncomingMessage, resumeSessionId: string): string {
+  const isWindows = os.platform() === 'win32';
+  const agyPath = resolveAgyCliPath();
+  // PowerShell runs a quoted path only through its call operator.
+  const agy = agyPath ? `${isWindows ? '& ' : ''}${quoteShellArgument(agyPath)}` : 'agy';
+  const model = readString(message.model);
+  const modelFlag =
+    model !== 'default' && SAFE_AGY_MODEL_ID_PATTERN.test(model) ? ` --model "${model}"` : '';
+  const bypassFlag = readBoolean(message.bypassPermissions) ? ' --dangerously-skip-permissions' : '';
+  const freshLaunch = `${agy}${modelFlag}${bypassFlag}`;
+
+  let launch = freshLaunch;
+  if (resumeSessionId) {
+    const resumeLaunch = `${agy} --conversation "${resumeSessionId}"${modelFlag}${bypassFlag}`;
+    launch = isWindows
+      ? `${resumeLaunch}; if ($LASTEXITCODE -ne 0) { ${freshLaunch} }`
+      : `${resumeLaunch} || ${freshLaunch}`;
+  }
+  if (agyPath) {
+    return launch;
+  }
+
+  const notInstalled = quoteShellArgument(AGY_NOT_INSTALLED_MESSAGE);
+  return isWindows
+    ? `if (Get-Command agy -ErrorAction SilentlyContinue) { ${launch} } else { Write-Host ${notInstalled}; exit 127 }`
+    : `if command -v agy >/dev/null 2>&1; then ${launch}; else echo ${notInstalled}; exit 127; fi`;
 }
 
 // Claude Code's built-in theme ids (the `/theme` picker of CLI 2.1.280). A
@@ -788,8 +845,10 @@ export function handleShellConnection(
               : provider === 'codex'
                 ? 'Codex'
                 : provider === 'opencode'
-                    ? 'OpenCode'
-                  : 'Claude';
+                  ? 'OpenCode'
+                  : provider === 'agy'
+                    ? 'Antigravity'
+                    : 'Claude';
           welcomeMsg = hasSession && resumeSessionId
             ? `\x1b[36mResuming ${providerName} session ${resumeSessionId} in: ${projectPath}\x1b[0m\r\n`
             : `\x1b[36mStarting new ${providerName} session in: ${projectPath}\x1b[0m\r\n`;

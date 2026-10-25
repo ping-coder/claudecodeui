@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { AGY_PREDEFINED_MODELS } from '@/modules/providers/list/agy/agy-models.provider.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
 import { CODEX_PREDEFINED_MODELS } from '@/modules/providers/list/codex/codex-models.provider.js';
 import { CURSOR_PREDEFINED_MODELS } from '@/modules/providers/list/cursor/cursor-models.provider.js';
@@ -17,6 +18,7 @@ const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   codex: CODEX_PREDEFINED_MODELS,
   cursor: CURSOR_PREDEFINED_MODELS,
   opencode: OPENCODE_PREDEFINED_MODELS,
+  agy: AGY_PREDEFINED_MODELS,
 };
 
 test('capability effort levels cover every level a curated model declares', () => {
@@ -42,7 +44,7 @@ test('only Claude can run ultracode', () => {
       .map((capabilities) => [capabilities.provider, capabilities.supportsUltracode]),
   );
 
-  assert.deepEqual(supportsUltracode, { claude: true, cursor: false, codex: false, opencode: false });
+  assert.deepEqual(supportsUltracode, { claude: true, cursor: false, codex: false, opencode: false, agy: false });
 });
 
 test('ultracode is a switch beside the effort levels, never one of them', () => {
@@ -60,4 +62,21 @@ test('ultracode is a switch beside the effort levels, never one of them', () => 
       }
     }
   }
+});
+
+test('Antigravity declares what its runtime implements', () => {
+  const capabilities = providerCapabilitiesService.getProviderCapabilities('agy');
+
+  // No `auto`: agy's own auto mode is not mapped until what it allows is confirmed.
+  assert.deepEqual(capabilities.permissionModes, ['default', 'acceptEdits', 'bypassPermissions', 'plan']);
+  assert.equal(capabilities.defaultPermissionMode, 'default');
+  // The runtime refuses attachments, so the composer must not offer them.
+  assert.equal(capabilities.supportsImages, false);
+  assert.equal(capabilities.supportsFiles, false);
+  assert.equal(capabilities.supportsAbort, true);
+  assert.equal(capabilities.supportsPermissionRequests, false);
+  assert.equal(capabilities.supportsTokenUsage, true);
+  assert.deepEqual(capabilities.effortLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(capabilities.supportsMessageEditing, false);
+  assert.equal(capabilities.supportsSessionForking, false);
 });

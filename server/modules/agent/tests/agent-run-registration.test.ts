@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import * as nodeCrypto from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import express from 'express';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, sessionsDb, userDb } from '@/modules/database/index.js';
+import { providerRuntimeService } from '@/modules/providers/index.js';
 import { chatRunRegistry, connectedClients } from '@/modules/websocket/index.js';
-import type { NormalizedMessage } from '@/shared/types.js';
+import type { LLMProvider, NormalizedMessage } from '@/shared/types.js';
 import { createNormalizedMessage } from '@/shared/utils.js';
 
 import { createAgentRouter } from '../agent.routes.js';
@@ -26,7 +28,7 @@ import { createAgentRouter } from '../agent.routes.js';
  */
 
 type AgentDependencies = Parameters<typeof createAgentRouter>[0];
-type RunFunction = AgentDependencies['queryClaude'];
+type RunFunction = ReturnType<AgentDependencies['getRunner']>;
 
 async function withIsolatedDatabase(run: () => Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -49,8 +51,13 @@ async function withIsolatedDatabase(run: () => Promise<void>): Promise<void> {
   }
 }
 
-function createDependencies(queryClaude: RunFunction): AgentDependencies {
-  const unexpected = async (): Promise<never> => { throw new Error('unexpected provider call'); };
+/** `queryClaude` runs Claude sessions; `otherRunners` the providers a test also expects. Any other runner fails the request. */
+function createDependencies(
+  queryClaude: RunFunction,
+  otherRunners: Partial<Record<LLMProvider, RunFunction>> = {},
+): AgentDependencies {
+  const unexpected: RunFunction = async (): Promise<never> => { throw new Error('unexpected provider call'); };
+  const runners: Partial<Record<LLMProvider, RunFunction>> = { claude: queryClaude, ...otherRunners };
   return {
     fileSystem: { access: async () => undefined } as unknown as AgentDependencies['fileSystem'],
     crypto: nodeCrypto,
@@ -72,10 +79,7 @@ function createDependencies(queryClaude: RunFunction): AgentDependencies {
       },
     },
     runs: chatRunRegistry,
-    queryClaude,
-    queryCursor: unexpected as RunFunction,
-    queryCodex: unexpected as RunFunction,
-    queryOpenCode: unexpected as RunFunction,
+    getRunner: (provider) => runners[provider] ?? unexpected,
     GithubClient: class {} as unknown as AgentDependencies['GithubClient'],
   };
 }
@@ -248,11 +252,12 @@ test('a continued session runs under its own provider and project, as a chat sen
     const dependencies = createDependencies(async (_command, options, writer) => {
       claudeCalls.push(options);
       writer.send(createNormalizedMessage({ kind: 'complete', provider: 'claude', sessionId: null, exitCode: 0 }));
+    }, {
+      codex: async (_command, options, writer) => {
+        codexCalls.push(options);
+        writer.send(createNormalizedMessage({ kind: 'complete', provider: 'codex', sessionId: null, exitCode: 0 }));
+      },
     });
-    dependencies.queryCodex = async (_command, options, writer) => {
-      codexCalls.push(options);
-      writer.send(createNormalizedMessage({ kind: 'complete', provider: 'codex', sessionId: null, exitCode: 0 }));
-    };
     await withAgentServer(dependencies, async (baseUrl) => {
       // No provider named: the row's, not the default.
       const continued = await post(baseUrl, { projectPath: '/home/test/project', message: 'More', sessionId: 'app-codex', stream: false });
@@ -345,4 +350,75 @@ test('a non-streaming run answers with the assistant\'s replies, its token usage
       assert.deepEqual(body.tokens, { inputTokens: 100, outputTokens: 30, cacheReadTokens: 60, cacheCreationTokens: 10, totalTokens: 130 });
     });
   });
+});
+
+test('an Antigravity API run goes through the agy runtime and maps the session to agy\'s conversation', async () => {
+  // The real runtime service against the fake agy CLI, in a throwaway HOME:
+  // neither the real agy nor ~/.gemini is touched.
+  const fakeAgy = fileURLToPath(new URL('../../providers/tests/fixtures/agy/fake-agy.mjs', import.meta.url));
+  const sandbox = await mkdtemp(path.join(tmpdir(), 'agent-agy-run-'));
+  const savedEnv = ['HOME', 'AGY_CLI_PATH', 'AGY_DATA_DIRS', 'FAKE_AGY_SCENARIO', 'FAKE_AGY_ARGV_FILE']
+    .map((key) => [key, process.env[key]] as const);
+  const projectPath = path.join(sandbox, 'project');
+  const cliHome = path.join(sandbox, 'home', '.gemini', 'antigravity-cli');
+  await mkdir(projectPath, { recursive: true });
+  await mkdir(cliHome, { recursive: true });
+  await writeFile(path.join(cliHome, 'antigravity-oauth-token'), 'placeholder');
+  process.env.HOME = path.join(sandbox, 'home');
+  process.env.AGY_CLI_PATH = fakeAgy;
+  process.env.AGY_DATA_DIRS = path.join(sandbox, 'agy-data');
+  process.env.FAKE_AGY_ARGV_FILE = path.join(sandbox, 'argv.jsonl');
+  delete process.env.FAKE_AGY_SCENARIO;
+
+  try {
+    await withIsolatedDatabase(async () => {
+      // The caller the route resolves (user 1) exists, so the run's
+      // notifications go through the real preferences lookup.
+      const user = userDb.createUser('agy-api-user', 'not-a-real-hash');
+      const unexpected: RunFunction = async () => { throw new Error('only agy should run'); };
+      const dependencies = createDependencies(unexpected, { agy: providerRuntimeService.getRunner('agy') });
+      dependencies.users = { getFirstUser: () => ({ id: Number(user.id), username: user.username }) };
+      dependencies.models = {
+        getProviderModels: async () => ({ OPTIONS: [{ value: 'auto', label: 'Gemini Pro Next' }], DEFAULT: 'auto' }),
+      } as unknown as AgentDependencies['models'];
+
+      await withAgentServer(dependencies, async (baseUrl) => {
+        const response = await post(baseUrl, { projectPath, message: 'Hi there', provider: 'agy', stream: false });
+        assert.equal(response.status, 200);
+        const body = await response.json() as {
+          success: boolean;
+          sessionId: string;
+          providerSessionId: string;
+          tokens: { inputTokens: number; outputTokens: number };
+        };
+
+        assert.equal(body.success, true);
+        assert.equal(body.providerSessionId, '3f2b8c1e-5d4a-4e6f-9a7b-0c1d2e3f4a5b');
+        assert.deepEqual([body.tokens.inputTokens, body.tokens.outputTokens], [2000, 30]);
+        const row = sessionsDb.getSessionById(body.sessionId);
+        assert.equal(row?.provider, 'agy');
+        assert.equal(row?.provider_session_id, body.providerSessionId, 'the conversation id is mapped onto the app row');
+        assert.deepEqual(chatRunRegistry.listRunningRuns(), []);
+      });
+
+      const launches = (await readFile(path.join(sandbox, 'argv.jsonl'), 'utf8')).trim().split('\n')
+        .map((line) => JSON.parse(line) as { argv: string[]; cwd: string });
+      const turn = launches.find((launch) => launch.argv[0] === '-p');
+      assert.ok(turn, 'agy ran the turn');
+      assert.equal(turn.cwd, projectPath);
+      // Agent runs are non-interactive, as for the other providers.
+      assert.deepEqual(turn.argv, [
+        '-p', 'Hi there', '--output-format', 'stream-json', '--model', 'auto', '--dangerously-skip-permissions',
+      ]);
+    });
+  } finally {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });

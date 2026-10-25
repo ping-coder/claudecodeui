@@ -15,6 +15,10 @@ const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = fixtureHome;
 process.env.USERPROFILE = fixtureHome;
+// agy reads AGY_DATA_DIRS instead of HOME when it is set; clear it (and the
+// binary override) so the sync pass cannot reach a real Antigravity store.
+delete process.env.AGY_DATA_DIRS;
+delete process.env.AGY_CLI_PATH;
 
 const { providerRegistry } = await import('@/modules/providers/provider.registry.js');
 const { sessionSynchronizerService } = await import(

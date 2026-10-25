@@ -313,7 +313,8 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
       workspacePath,
     });
 
-    assert.equal(globalResult.length, 4);
+    // Antigravity manages no MCP scope, so it is skipped rather than reported as failed.
+    assert.deepEqual(globalResult.map((entry) => entry.provider), ['claude', 'codex', 'cursor', 'opencode']);
     assert.ok(globalResult.every((entry) => entry.created === true));
 
     const claudeProject = await readJson(path.join(workspacePath, '.mcp.json'));
@@ -347,3 +348,59 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
   }
 });
 
+
+/**
+ * Antigravity's MCP config is not managed by CloudCLI: it lists nothing,
+ * rejects writes in every scope, and the "all providers" helpers skip it, so
+ * nothing is ever written under ~/.gemini.
+ */
+test('providerMcpService keeps agy MCP read-only and skips it when adding to or removing from every provider', { concurrency: false }, async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-mcp-agy-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await fs.mkdir(workspacePath, { recursive: true });
+
+  const restoreHomeDir = patchHomeDir(tempRoot);
+  try {
+    assert.deepEqual(
+      await providerMcpService.listProviderMcpServers('agy', { workspacePath }),
+      { user: [], local: [], project: [] },
+    );
+    assert.deepEqual(await providerMcpService.listProviderMcpServersForScope('agy', 'user'), []);
+
+    for (const scope of ['user', 'local', 'project'] as const) {
+      await assert.rejects(
+        providerMcpService.upsertProviderMcpServer('agy', {
+          name: 'agy-server',
+          scope,
+          transport: 'stdio',
+          command: 'npx',
+          workspacePath,
+        }),
+        (error: unknown) => error instanceof AppError && error.code === 'MCP_SCOPE_NOT_SUPPORTED' && error.statusCode === 400,
+      );
+      await assert.rejects(
+        providerMcpService.removeProviderMcpServer('agy', { name: 'agy-server', scope, workspacePath }),
+        (error: unknown) => error instanceof AppError && error.code === 'MCP_SCOPE_NOT_SUPPORTED',
+      );
+    }
+
+    const added = await providerMcpService.addMcpServerToAllProviders({
+      name: 'global-user-stdio',
+      scope: 'user',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'global-server'],
+    });
+    assert.equal(added.some((entry) => entry.provider === 'agy'), false);
+    assert.ok(added.every((entry) => entry.created === true));
+
+    const removed = await providerMcpService.removeMcpServerFromAllProviders({ name: 'global-user-stdio', scope: 'user' });
+    assert.equal(removed.some((entry) => entry.provider === 'agy'), false);
+    assert.ok(removed.every((entry) => entry.removed === true && entry.error === undefined));
+
+    await assert.rejects(fs.access(path.join(tempRoot, '.gemini')));
+  } finally {
+    restoreHomeDir();
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});

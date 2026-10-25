@@ -84,6 +84,17 @@ test('models command falls back to claude for unsupported providers', async () =
   assert.equal(data.current.provider, 'claude');
 });
 
+test('models command reports Antigravity as itself instead of falling back to claude', async () => {
+  const result = await executeCommand('/models', { provider: 'agy' });
+  const data = result.data as { current: { provider: string; providerLabel: string }; available: object };
+  assert.equal(data.current.provider, 'agy');
+  assert.equal(data.current.providerLabel, 'Antigravity');
+  assert.deepEqual(Object.keys(data.available), ['agy']);
+
+  const status = await executeCommand('/status', { provider: 'agy' });
+  assert.equal((status.data as { provider: string }).provider, 'agy');
+});
+
 test('models command reports the model recorded for the session', async () => {
   const result = await executeCommand(
     '/models',

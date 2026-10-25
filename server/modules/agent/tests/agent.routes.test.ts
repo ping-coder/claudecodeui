@@ -7,13 +7,20 @@ import test from 'node:test';
 
 import express from 'express';
 
+import type { LLMProvider } from '@/shared/types.js';
+
 import { createAgentRouter } from '../agent.routes.js';
 
 type AgentDependencies = Parameters<typeof createAgentRouter>[0];
+type AgentRunFunction = ReturnType<AgentDependencies['getRunner']>;
 
-function createDependencies(
-  overrides: Partial<AgentDependencies> = {},
-): AgentDependencies {
+function createDependencies({
+  runners = {},
+  ...overrides
+}: Partial<AgentDependencies> & {
+  /** Provider runtimes by provider id; the runner of any other provider fails the request if called. */
+  runners?: Partial<Record<LLMProvider, AgentRunFunction>>;
+} = {}): AgentDependencies {
   const unexpectedProviderCall = async (): Promise<never> => {
     throw new Error('Provider runtime should not be called');
   };
@@ -47,10 +54,7 @@ function createDependencies(
       completeRunIfCurrent: () => undefined,
       isProcessing: () => false,
     },
-    queryClaude: unexpectedProviderCall as AgentDependencies['queryClaude'],
-    queryCursor: unexpectedProviderCall as AgentDependencies['queryCursor'],
-    queryCodex: unexpectedProviderCall as AgentDependencies['queryCodex'],
-    queryOpenCode: unexpectedProviderCall as AgentDependencies['queryOpenCode'],
+    getRunner: (provider) => runners[provider] ?? unexpectedProviderCall,
     GithubClient: class {} as unknown as AgentDependencies['GithubClient'],
     ...overrides,
   };
@@ -201,7 +205,7 @@ test('Agent route reuses a matching checkout without cloning or deleting it', as
     models: {
       getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default-model' }),
     } as unknown as AgentDependencies['models'],
-    queryClaude: (async () => undefined) as AgentDependencies['queryClaude'],
+    runners: { claude: async () => undefined },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -231,9 +235,11 @@ test('Agent route starts opencode on the catalog default when the request names 
     models: {
       getProviderModels: async (provider: string) => ({ OPTIONS: [], DEFAULT: `${provider}-catalog-default` }),
     } as unknown as AgentDependencies['models'],
-    queryOpenCode: (async (_prompt: string, options: { model?: string }) => {
-      opencodeCalls.push(options);
-    }) as unknown as AgentDependencies['queryOpenCode'],
+    runners: {
+      opencode: (async (_prompt: string, options: { model?: string }) => {
+        opencodeCalls.push(options);
+      }) as unknown as AgentRunFunction,
+    },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -263,9 +269,11 @@ test('Agent route starts codex on the catalog default when the request names no 
       // and `DEFAULT`, with nothing wrapped around it.
       getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'catalog-default' }),
     } as unknown as AgentDependencies['models'],
-    queryCodex: (async (_prompt: string, options: { model?: string }) => {
-      codexCalls.push(options);
-    }) as unknown as AgentDependencies['queryCodex'],
+    runners: {
+      codex: (async (_prompt: string, options: { model?: string }) => {
+        codexCalls.push(options);
+      }) as unknown as AgentRunFunction,
+    },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -296,7 +304,7 @@ async function runWithoutModel(
   const catalogReads: string[] = [];
   const recordModel = (async (_prompt: string, options: { model?: string }) => {
     models.push(options.model);
-  }) as unknown as AgentDependencies['queryClaude'];
+  }) as unknown as AgentRunFunction;
 
   await withAgentServer(createDependencies({
     fileSystem: {
@@ -308,8 +316,7 @@ async function runWithoutModel(
         return catalogs[catalogProvider];
       },
     } as unknown as AgentDependencies['models'],
-    queryClaude: recordModel,
-    queryCursor: recordModel,
+    runners: { claude: recordModel, cursor: recordModel },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -427,13 +434,13 @@ test('Agent route reads no model catalog for a continued session of an unregiste
  * options each provider runtime was started with.
  */
 async function runWithBody(
-  provider: 'claude' | 'codex' | 'opencode',
+  provider: 'claude' | 'codex' | 'opencode' | 'agy',
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>[]> {
   const calls: Record<string, unknown>[] = [];
   const recordOptions = (async (_prompt: string, options: Record<string, unknown>) => {
     calls.push(options);
-  }) as unknown as AgentDependencies['queryClaude'];
+  }) as unknown as AgentRunFunction;
 
   await withAgentServer(createDependencies({
     fileSystem: {
@@ -442,9 +449,7 @@ async function runWithBody(
     models: {
       getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'catalog-default' }),
     } as unknown as AgentDependencies['models'],
-    queryClaude: recordOptions,
-    queryCodex: recordOptions,
-    queryOpenCode: recordOptions,
+    runners: { claude: recordOptions, codex: recordOptions, opencode: recordOptions, agy: recordOptions },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -482,10 +487,87 @@ test('Agent route passes the ultracode switch to Claude as a boolean', async () 
   assert.equal(legacyCall.ultracode, undefined);
 });
 
-test('Agent route does not pass ultracode to Codex or OpenCode', async () => {
-  for (const provider of ['codex', 'opencode'] as const) {
+test('Agent route does not pass ultracode to Codex, OpenCode or Antigravity', async () => {
+  for (const provider of ['codex', 'opencode', 'agy'] as const) {
     const [call] = await runWithBody(provider, { effort: 'high', ultracode: true });
     assert.equal(call.effort, 'high');
     assert.equal('ultracode' in call, false, `${provider} must not receive ultracode`);
   }
+});
+
+test('Agent route runs Antigravity non-interactively on the catalog default', async () => {
+  const [call] = await runWithBody('agy', { effort: 'high' });
+
+  assert.equal(call.model, 'catalog-default');
+  assert.equal(call.effort, 'high');
+  assert.equal(call.permissionMode, 'bypassPermissions');
+  assert.equal(call.cwd, '/home/test/project');
+  assert.equal(call.sessionId, 'app-session-1');
+});
+
+test('Agent route continues an Antigravity session found by the sync through its runner', async () => {
+  const calls: Array<{ provider: LLMProvider; options: Record<string, unknown> }> = [];
+  const catalogReads: string[] = [];
+  const requestedRunners: LLMProvider[] = [];
+
+  await withAgentServer(createDependencies({
+    fileSystem: {
+      access: async () => undefined,
+    } as unknown as AgentDependencies['fileSystem'],
+    models: {
+      getProviderModels: async (provider: string) => {
+        catalogReads.push(provider);
+        return { OPTIONS: [], DEFAULT: 'auto' };
+      },
+    } as unknown as AgentDependencies['models'],
+    sessions: {
+      getSessionById: () => null,
+      // An id the caller kept from agy itself resolves to the indexed row.
+      getSessionByProviderSessionId: () => ({
+        session_id: 'agy-app-session',
+        provider: 'agy',
+        provider_session_id: '3f2b8c1e-5d4a-4e6f-9a7b-0c1d2e3f4a5b',
+        project_path: '/home/test/project',
+      }),
+      createAppSession: () => { throw new Error('a continued session must not create a row'); },
+    },
+    getRunner: (provider) => {
+      requestedRunners.push(provider);
+      return (async (_prompt: string, options: Record<string, unknown>) => {
+        calls.push({ provider, options });
+      }) as unknown as AgentRunFunction;
+    },
+  }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectPath: '/home/test/project',
+        message: 'Continue',
+        sessionId: '3f2b8c1e-5d4a-4e6f-9a7b-0c1d2e3f4a5b',
+        stream: false,
+      }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.deepEqual(requestedRunners, ['agy']);
+  assert.deepEqual(catalogReads, ['agy']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.sessionId, 'agy-app-session');
+  assert.equal(calls[0].options.model, 'auto');
+});
+
+test('Agent route names agy among the providers it accepts when refusing an unknown one', async () => {
+  await withAgentServer(createDependencies(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectPath: '/home/test/project', message: 'Run', provider: 'gemini', stream: false }),
+    });
+    const body = await response.json() as { error: string };
+
+    assert.equal(response.status, 400);
+    assert.match(body.error, /"agy"/);
+  });
 });

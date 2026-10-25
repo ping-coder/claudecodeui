@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -323,6 +323,68 @@ function withClaudeConfig(body: (fixture: ClaudeConfigFixture) => void, homeName
 const themeSettingsPath = (theme: string) =>
   path.join(os.homedir(), '.cloudcli', `claude-shell-theme-${theme}.json`);
 const themeFlag = (theme: string) => ` --settings '${themeSettingsPath(theme)}'`;
+
+type AgyCliFixture = {
+  root: string;
+  home: string;
+  /** The fake agy, or where it would be when `installed` is false. */
+  agyPath: string;
+  /** The only PATH entry while `body` runs; it is empty. */
+  pathDirectory: string;
+};
+
+/**
+ * Runs `body` with a fake agy at AGY_CLI_PATH, AGY_DATA_DIRS cleared, a
+ * throwaway HOME and PATH reduced to an empty folder, so neither a real agy
+ * nor the user's ~/.gemini can leak into a launch. `installed: false` unsets
+ * AGY_CLI_PATH too, so the lookup finds no agy at all. The pty is stubbed, so
+ * nothing runs the fake unless a test runs a launch line itself.
+ */
+function withAgyCli<T>(
+  body: (fixture: AgyCliFixture) => T,
+  { installed = true, agyFolderName = 'agy-bin' } = {},
+): T {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-agy-'));
+  const home = path.join(root, 'home');
+  const pathDirectory = path.join(root, 'empty-path');
+  const agyPath = path.join(root, agyFolderName, 'agy');
+  fs.mkdirSync(home);
+  fs.mkdirSync(pathDirectory);
+  const savedEnv = {
+    AGY_CLI_PATH: process.env.AGY_CLI_PATH,
+    AGY_DATA_DIRS: process.env.AGY_DATA_DIRS,
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    PATH: process.env.PATH,
+  };
+  if (installed) {
+    fs.mkdirSync(path.dirname(agyPath));
+    fs.writeFileSync(agyPath, '');
+    process.env.AGY_CLI_PATH = agyPath;
+  } else {
+    delete process.env.AGY_CLI_PATH;
+  }
+  delete process.env.AGY_DATA_DIRS;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.PATH = pathDirectory;
+
+  try {
+    return body({ root, home, agyPath, pathDirectory });
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// The launch line of a fake agy in a folder whose name has no quote in it.
+const agyLaunch = (agyPath: string) => `${os.platform() === 'win32' ? '& ' : ''}'${agyPath}'`;
 
 // The flag outranks the user's own settings, so a dark Shell tab must not send
 // one: it would turn a daltonized or ANSI theme back into the plain dark one.
@@ -687,9 +749,10 @@ test('claude launches report the app theme they started in, also on reattach', (
       launch(dependencies, { provider: 'claude' }, projectPath),
       launch(dependencies, { provider: 'claude', initialCommand: 'claude /login', colorScheme: 'light' }, projectPath),
       launch(dependencies, { provider: 'codex', colorScheme: 'light' }, projectPath),
+      withAgyCli(() => launch(dependencies, { provider: 'agy', colorScheme: 'light' }, projectPath)),
       launch(dependencies, { provider: 'plain-shell', isPlainShell: true, colorScheme: 'light' }, projectPath),
     ];
-    assert.deepEqual(silentLaunches.map(themeFrames), [[], [], [], []]);
+    assert.deepEqual(silentLaunches.map(themeFrames), [[], [], [], [], []]);
   });
 });
 
@@ -735,14 +798,193 @@ test('other shells and initial commands only get the COLORFGBG hint', () => {
     launch(dependencies, { provider: 'claude', initialCommand: loginCommand, colorScheme: 'light' }, projectPath);
     launch(dependencies, { provider: 'codex', colorScheme: 'light' }, projectPath);
     launch(dependencies, { provider: 'codex', colorScheme: 'dark' }, projectPath);
+    const agyPath = withAgyCli(({ agyPath: fakeAgyPath }) => {
+      launch(dependencies, { provider: 'agy', colorScheme: 'light' }, projectPath);
+      return fakeAgyPath;
+    });
 
     assert.deepEqual(
       calls.map((call) => call.command),
-      ['npx task-master init', loginCommand, 'codex', 'codex']
+      ['npx task-master init', loginCommand, 'codex', 'codex', agyLaunch(agyPath)]
     );
     assert.deepEqual(
       calls.map((call) => call.env.COLORFGBG),
-      ['0;15', '0;15', '0;15', '15;0']
+      ['0;15', '0;15', '0;15', '15;0', '0;15']
     );
   });
+});
+
+const AGY_CONVERSATION_ID = '0f6b2c1e-8d3a-4f5b-9c7e-2a1d3b4c5e6f';
+const AGY_NOT_INSTALLED_MESSAGE =
+  'Antigravity CLI (agy) is not installed on this machine. Install it, or set AGY_CLI_PATH to its full path and restart CloudCLI.';
+
+// The service PATH often lacks agy's install folder, so a bare `agy` would
+// not be found: the launch names the binary the lookup found, quoted.
+test('agy launches by its resolved, quoted path and resumes the conversation when there is one', (t) => {
+  if (os.platform() === 'win32') {
+    t.skip('asserts the bash launch and POSIX paths');
+    return;
+  }
+  withAgyCli(({ root, agyPath }) => {
+    const resumable = spawnRecorder(AGY_CONVERSATION_ID);
+    const neverRun = spawnRecorder(null);
+    const unsafe = spawnRecorder(`${AGY_CONVERSATION_ID}; rm -rf ~`);
+
+    const resumedSocket = launch(resumable.dependencies, { provider: 'agy', hasSession: true });
+    const freshSocket = launch(resumable.dependencies, { provider: 'agy' });
+    // An app session that never ran has no conversation id yet.
+    launch(neverRun.dependencies, { provider: 'agy', hasSession: true });
+    launch(unsafe.dependencies, { provider: 'agy', hasSession: true });
+    // A caller's own command is launched as given, as for claude and opencode.
+    launch(neverRun.dependencies, { provider: 'agy', hasSession: true, initialCommand: 'agy --help' });
+
+    const agy = `'${agyPath.replace(/'/g, `'\\''`)}'`;
+    assert.deepEqual(resumable.calls.map((call) => [call.shell, ...call.args]), [
+      ['bash', '-c', `${agy} --conversation "${AGY_CONVERSATION_ID}" || ${agy}`],
+      ['bash', '-c', agy],
+    ]);
+    assert.deepEqual(neverRun.calls.map((call) => call.command), [agy, 'agy --help']);
+    assert.deepEqual(unsafe.calls.map((call) => call.command), [agy]);
+    // Spelled out once, so the quoting is not only checked against itself.
+    assert.equal(resumable.calls[1].command, `'${root}/agy'\\''s bin/agy'`);
+
+    const welcome = (socket: ReturnType<typeof createFakeSocket>) =>
+      (JSON.parse(socket.frames[0]) as { data: string }).data;
+    assert.match(welcome(resumedSocket), new RegExp(`Resuming Antigravity session ${AGY_CONVERSATION_ID} in: `));
+    assert.match(welcome(freshSocket), /Starting new Antigravity session in: /);
+  }, { agyFolderName: "agy's bin" });
+});
+
+test('agy starts with --dangerously-skip-permissions for bypass and --model for a chosen model', (t) => {
+  if (os.platform() === 'win32') {
+    t.skip('asserts the bash launch');
+    return;
+  }
+  withAgyCli(({ agyPath }) => {
+    const { calls, dependencies } = spawnRecorder(AGY_CONVERSATION_ID);
+    const agy = agyLaunch(agyPath);
+
+    launch(dependencies, { provider: 'agy', bypassPermissions: true });
+    launch(dependencies, { provider: 'agy', model: 'gemini-3.8-flash-high' });
+    launch(dependencies, { provider: 'agy', model: 'vendor/model-1.5:latest@2026+exp' });
+    launch(dependencies, { provider: 'agy', hasSession: true, model: 'auto', bypassPermissions: true });
+    // Never passed: no model, the default one, and ids a shell or agy would misread.
+    const ignoredModels = ['', 'default', '--help', '-m', 'a b', 'x;rm -rf ~', '$(id)', '`id`', "it's", 'a"b', 42, null];
+    for (const model of ignoredModels) {
+      launch(dependencies, { provider: 'agy', model });
+    }
+
+    const flags = ' --model "auto" --dangerously-skip-permissions';
+    assert.deepEqual(calls.map((call) => call.command), [
+      `${agy} --dangerously-skip-permissions`,
+      `${agy} --model "gemini-3.8-flash-high"`,
+      `${agy} --model "vendor/model-1.5:latest@2026+exp"`,
+      `${agy} --conversation "${AGY_CONVERSATION_ID}"${flags} || ${agy}${flags}`,
+      ...ignoredModels.map(() => agy),
+    ]);
+  });
+});
+
+// PowerShell runs a quoted path only through its call operator, `&`.
+test('agy launches through PowerShell on Windows', (t) => {
+  if (os.platform() === 'win32') {
+    t.skip('asserts POSIX paths');
+    return;
+  }
+  withAgyCli(({ root, agyPath }) => {
+    const { calls, dependencies } = spawnRecorder(AGY_CONVERSATION_ID);
+    t.mock.method(os, 'platform', () => 'win32');
+
+    launch(dependencies, { provider: 'agy', hasSession: true, bypassPermissions: true });
+    launch(dependencies, { provider: 'agy', model: 'gemini-flash-next' });
+
+    const agy = `& '${agyPath.replace(/['’]/g, '$&$&')}'`;
+    const bypass = ' --dangerously-skip-permissions';
+    assert.deepEqual(calls.map((call) => [call.shell, ...call.args]), [
+      [
+        'powershell.exe',
+        '-Command',
+        `${agy} --conversation "${AGY_CONVERSATION_ID}"${bypass}; if ($LASTEXITCODE -ne 0) { ${agy}${bypass} }`,
+      ],
+      ['powershell.exe', '-Command', `${agy} --model "gemini-flash-next"`],
+    ]);
+    assert.equal(calls[1].command, `& '${root}/agy''s ’’bin’’/agy' --model "gemini-flash-next"`);
+  }, { agyFolderName: "agy's ’bin’" });
+});
+
+// Without an explicit message the user would only see the shell's
+// "agy: command not found" and exit code 127.
+test('a missing agy says it is not installed instead of "command not found"', (t) => {
+  if (os.platform() === 'win32') {
+    t.skip('asserts the bash launch first');
+    return;
+  }
+  withAgyCli(({ root }) => {
+    const { calls, dependencies } = spawnRecorder(AGY_CONVERSATION_ID);
+
+    launch(dependencies, { provider: 'agy' });
+    launch(dependencies, { provider: 'agy', hasSession: true, bypassPermissions: true });
+    // An AGY_CLI_PATH that names no file is not an installation either.
+    process.env.AGY_CLI_PATH = path.join(root, 'missing', 'agy');
+    const socket = launch(dependencies, { provider: 'agy' });
+    t.mock.method(os, 'platform', () => 'win32');
+    launch(dependencies, { provider: 'agy', hasSession: true });
+
+    const guarded = (agyLaunchLine: string) =>
+      `if command -v agy >/dev/null 2>&1; then ${agyLaunchLine}; else echo '${AGY_NOT_INSTALLED_MESSAGE}'; exit 127; fi`;
+    const bypass = ' --dangerously-skip-permissions';
+    assert.deepEqual(calls.map((call) => call.command), [
+      guarded('agy'),
+      guarded(`agy --conversation "${AGY_CONVERSATION_ID}"${bypass} || agy${bypass}`),
+      guarded('agy'),
+      `if (Get-Command agy -ErrorAction SilentlyContinue) { agy --conversation "${AGY_CONVERSATION_ID}"; ` +
+        `if ($LASTEXITCODE -ne 0) { agy } } else { Write-Host '${AGY_NOT_INSTALLED_MESSAGE}'; exit 127 }`,
+    ]);
+    // Still a provider launch: the welcome line names Antigravity.
+    assert.match((JSON.parse(socket.frames[0]) as { data: string }).data, /Starting new Antigravity session in: /);
+  }, { installed: false });
+});
+
+// Runs a launch line the way the pty does, `bash -c`, but never with the
+// user's own startup files: HOME is the fixture's, and stdin is not a socket
+// (libuv's default), which some bash builds take for an ssh session and answer
+// by sourcing ~/.bashrc.
+function runBash(bashPath: string, command: string, home: string, pathDirectory: string) {
+  return spawnSync(bashPath, ['-c', command], {
+    env: { HOME: home, PATH: pathDirectory },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+  });
+}
+
+// The launch lines are shell code, so they are also run once through bash: a
+// fake agy that prints its arguments stands in for the real one.
+test('the agy launch lines work when bash runs them', (t) => {
+  if (os.platform() === 'win32') {
+    t.skip('runs bash');
+    return;
+  }
+  // Looked up before the fixture empties PATH.
+  const bashPath = execFileSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim();
+  withAgyCli(({ home, agyPath, pathDirectory }) => {
+    fs.writeFileSync(agyPath, '#!/bin/sh\nprintf \'%s\\n\' "$@"\n');
+    fs.chmodSync(agyPath, 0o755);
+    const { calls, dependencies } = spawnRecorder(AGY_CONVERSATION_ID);
+    launch(dependencies, { provider: 'agy', hasSession: true, model: 'auto' });
+
+    const result = runBash(bashPath, calls[0].command, home, pathDirectory);
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, `--conversation\n${AGY_CONVERSATION_ID}\n--model\nauto\n`);
+    assert.equal(result.status, 0);
+  }, { agyFolderName: "agy's bin" });
+
+  withAgyCli(({ home, pathDirectory }) => {
+    const { calls, dependencies } = spawnRecorder();
+    launch(dependencies, { provider: 'agy' });
+
+    const result = runBash(bashPath, calls[0].command, home, pathDirectory);
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, `${AGY_NOT_INSTALLED_MESSAGE}\n`);
+    assert.equal(result.status, 127);
+  }, { installed: false });
 });

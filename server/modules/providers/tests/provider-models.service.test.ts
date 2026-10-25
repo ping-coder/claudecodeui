@@ -444,6 +444,7 @@ test('allowed effort levels come from the provider, not from the built-in models
     codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     cursor: [],
     opencode: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
+    agy: ['low', 'medium', 'high', 'xhigh', 'max'],
   };
   for (const [provider, levels] of Object.entries(expectedLevels) as Array<[LLMProvider, string[]]>) {
     assert.deepEqual((await service.getProviderModels(provider)).EFFORT_LEVELS, levels, provider);
