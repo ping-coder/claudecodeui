@@ -361,7 +361,7 @@ slices with that same helper. Either way the caller cannot tell which path serve
 | --- | --- |
 | Key | App session id. |
 | Validity | `transcriptPath` + `mtimeMs` + `size` from one `fsp.stat` per request. A mismatch re-parses. |
-| Eligible providers | Claude and Codex only — they parse `session.jsonl_path` itself. Cursor (`store.db`) and OpenCode (shared SQLite) pass `transcriptPath: null` and bypass the cache, because the JSONL's stat says nothing about their history. |
+| Eligible providers | Claude and Codex only — they parse `session.jsonl_path` itself. Cursor (`store.db`), OpenCode (shared SQLite), and Antigravity (agy's own transcripts) pass `transcriptPath: null` and bypass the cache, because the JSONL's stat says nothing about their history. |
 | Budget | `MAX_CACHED_TRANSCRIPT_FILE_BYTES = 256 MB` of source-file bytes and `MAX_CACHE_ENTRIES = 8`, LRU by re-insertion. The newest entry is never evicted. |
 | Concurrency | `pendingLoads` — concurrent requests for one session share a single parse. |
 | Invalidation | None, by design. Anything that changes history (a turn, an edit, a rewind, a fork) touches the file, so the next `stat` misses. |
@@ -377,8 +377,9 @@ Note what a page contains: every provider reduces its transcript to renderable r
 slicing, so `total` counts renderable rows and a page of N rows is N rows the user sees.
 Standalone `tool_result` rows are already gone — Claude and Codex drop them in
 `prepareTranscriptMessages` (which also unifies ask-tool calls, collapses consecutive checklist
-snapshots and caps tool output), Cursor filters `kind === 'tool_result'` itself, and OpenCode's
-normalizer never emits one. This does not hold for live frames — see
+snapshots and caps tool output), Cursor filters `kind === 'tool_result'` itself, OpenCode's
+normalizer never emits one, and Antigravity attaches each tool's result to its `tool_use` row.
+This does not hold for live frames — see
 [the realtime stream](./02-realtime-stream.md).
 
 ---
@@ -600,7 +601,7 @@ of ~1 GB with seven thousand.
 | `normalizedToChatMessages` | The `WeakMap` projection cache invalidation keys, and `useChatMessages.test.ts` which pins object reuse across prepends and streaming. |
 | `LazyMessageRow` / `useLazyRowObserver` | Search jumps, which address rows by `data-message-timestamp` on the permanent wrapper, and scroll anchor restore, which selects `.chat-message` inside the *mounted* content ([scrolling](./05-scrolling.md)). |
 | `INITIAL_MOUNTED_TAIL_ROWS` | The initial scroll-to-bottom, which relies on the newest rows having real measured heights. |
-| The history cache's key or validity check | `sessions.service.test.ts` and the Cursor/OpenCode bypass — their history does not live in `jsonl_path`. |
+| The history cache's key or validity check | `sessions.service.test.ts` and the Cursor/OpenCode/Antigravity bypass — their history does not live in `jsonl_path`. |
 | `prepareTranscriptMessages` | The live-vs-history divergence documented in [the realtime stream](./02-realtime-stream.md) and the tool grouping in [the tool view](./06-tool-view.md). |
 | `truncateAt` or `replacesAnchorId` | `history_truncated` emission order in the gateway ([websocket transport](./01-websocket-transport.md)) and `removeOptimisticUserEchoes`. |
 | `visibleMessageCount` or who writes it | All four writers: `INITIAL_VISIBLE_MESSAGES` on session change, `+SESSION_MESSAGES_PAGE_SIZE` on prepend, `Infinity` on "Load all", `Math.max` with `resolveSearchWindowSize` on a search jump, plus `loadEarlierMessages` stepping 100. A shrink anywhere can scroll the transcript out from under the user. |

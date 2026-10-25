@@ -412,9 +412,11 @@ with the same REST refresh as the fallback.
 **RULE: the watcher discovers conversations independently of the app, and its rows are keyed
 by the provider id until the app claims them.**
 
-`sessions-watcher.service.ts` watches four provider directories with chokidar in polling mode
+`sessions-watcher.service.ts` watches each provider's directories with chokidar in polling mode
 (`usePolling`, a 6 s interval, `depth: 6`, `ignoreInitial`), keeps only `*.jsonl` files —
 `opencode.db` for OpenCode — and calls `sessionSynchronizerService.synchronizeProviderFile`.
+For Antigravity it keeps `conversation_summaries.db`, its `-wal` file and the
+`transcript*.jsonl` logs, and it watches agy's folders only when they already exist.
 Indexed ids are queued and flushed with a 500 ms debounce and a 2 s maximum wait
 (`PROJECTS_UPDATE_DEBOUNCE_MS`, `PROJECTS_UPDATE_MAX_WAIT_MS`), then handed to
 `broadcastSessionUpsertedBatch`, which walks the client set once for the whole batch.
@@ -431,6 +433,8 @@ How rows are claimed:
 - OpenCode avoids the race up front: its synchronizer falls back to
   `findLatestPendingAppSession` to claim the newest app row for that project still missing a
   provider id.
+- Antigravity never claims pending rows: its runtime records the conversation id as soon as
+  agy's `init` event names it.
 
 `session-synchronizer.service.ts` adds two guarantees beyond indexing. Concurrent callers
 share one scan (opening the UI fires `/api/projects` and `/api/projects/archived` at once),

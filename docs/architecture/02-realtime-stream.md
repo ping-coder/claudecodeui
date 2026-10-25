@@ -42,10 +42,10 @@ it.
    row count stays flat while the text grows. `finalizeStreaming` rewrites that same array
    slot — new id, `kind: 'text'`, `role: 'assistant'` — so React reconciles instead of
    remounting.
-4. **Whether you see deltas at all depends on the provider.** Cursor and OpenCode stream;
-   Claude and Codex do not. Claude's live prose arrives as complete `text` rows, one per
-   assistant message. Code that assumes "assistant reply implies `stream_delta`" is wrong
-   for half the providers, and the half it is wrong for is the default one.
+4. **Whether you see deltas at all depends on the provider.** Cursor, OpenCode, and
+   Antigravity stream; Claude and Codex do not. Claude's live prose arrives as complete
+   `text` rows, one per assistant message. Code that assumes "assistant reply implies
+   `stream_delta`" is wrong for two of the five providers, and one of them is the default.
 5. **`complete` is the only terminal event. `error` is just a row.** Providers emit
    `error` for mid-run stderr and keep running. Clearing the busy state on `error` leaves
    a live run writing into a UI that believes it is idle.
@@ -108,7 +108,7 @@ sequenceDiagram
     GW->>CLI: runtime.run with the app session id
     CLI-->>REG: session_created announcing the provider-native id
     Note over REG: swallowed and recorded, never forwarded
-    CLI-->>REG: text rows for Claude and Codex, stream_delta for Cursor and OpenCode
+    CLI-->>REG: text rows for Claude and Codex, stream_delta for Cursor, OpenCode and Antigravity
     REG-->>WSC: sessionId rewritten to the app id, seq stamped, buffered
     WSC-->>UI: dispatched to every listener
     CLI-->>REG: tool_use carrying a toolId
@@ -145,18 +145,18 @@ table is about **what arrives over the socket during a run** — a provider mark
 only" produces that kind when its transcript is read back over REST, which is why a
 reload can make the transcript look completely different from what streamed.
 
-| Kind | Claude | Codex | Cursor | OpenCode |
-| --- | --- | --- | --- | --- |
-| `text` | yes, whole assistant messages | yes | history only | history only |
-| `stream_delta` | **no** | **no** | yes, one per assistant chunk | yes, from `text` parts |
-| `stream_end` | **no** | **no** | **never** | yes, from `step_finish` |
-| `thinking` | yes | yes | history only | yes, from `reasoning` parts |
-| `tool_use` | yes | yes | history only | yes |
-| `tool_result` | yes, a separate frame | yes, a separate frame | history only | **never** — attached to the `tool_use` frame instead |
-| `error` | yes | yes | yes, from stderr and spawn failures | yes |
-| `status` with `text: 'token_budget'` | yes | yes | no | yes, once at process exit |
-| `permission_request` / `permission_resolved` / `permission_cancelled` | yes, the only provider | no | no | no |
-| `complete` | yes, exactly one | yes | yes | yes |
+| Kind | Claude | Codex | Cursor | OpenCode | Antigravity |
+| --- | --- | --- | --- | --- | --- |
+| `text` | yes, whole assistant messages | yes | history only | history only | history only |
+| `stream_delta` | **no** | **no** | yes, one per assistant chunk | yes, from `text` parts | yes, from `agent_response` text deltas |
+| `stream_end` | **no** | **no** | **never** | yes, from `step_finish` | yes, when the `agent_response` step is done |
+| `thinking` | yes | yes | history only | yes, from `reasoning` parts | history only |
+| `tool_use` | yes | yes | history only | yes | yes, when a tool step becomes active |
+| `tool_result` | yes, a separate frame | yes, a separate frame | history only | **never** — attached to the `tool_use` frame instead | yes, a separate frame when the tool step is done |
+| `error` | yes | yes | yes, from stderr and spawn failures | yes | yes, one row when a run fails |
+| `status` with `text: 'token_budget'` | yes | yes | no | yes, once at process exit | yes, once at process exit |
+| `permission_request` / `permission_resolved` / `permission_cancelled` | yes, the only provider | no | no | no | no |
+| `complete` | yes, exactly one | yes | yes | yes | yes, exactly one |
 
 Two entries deserve the emphasis:
 
@@ -362,9 +362,9 @@ pins both directions. The counter shows context-window occupancy, not the turn's
 feeding it a summed `result.usage` is what made it bounce before commit `ab13376d`.
 
 The other arm of the `status` branch — the one that writes `statusText` and `canInterrupt`
-into the activity map — **has no producer today.** All three `status` emitters
+into the activity map — **has no producer today.** All four `status` emitters
 (`claude-runtime.provider.js:968`, `codex-runtime.provider.js:406`,
-`opencode-runtime.provider.js:338`) send `text: 'token_budget'`. The arm is live code
+`opencode-runtime.provider.js:338`, `agy-runtime.provider.ts`) send `text: 'token_budget'`. The arm is live code
 kept for a provider that reports progress text; do not delete it expecting nothing to
 change, and do not assume the status text you see in the UI came from it.
 
