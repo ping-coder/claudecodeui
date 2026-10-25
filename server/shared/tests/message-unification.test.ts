@@ -46,6 +46,40 @@ test('Claude task-tracker calls become one evolving checklist', () => {
   );
 });
 
+test('a deleted task leaves the checklist, as the client replay of the raw calls drops it', () => {
+  const unified = prepareTranscriptMessages([
+    taskCall('TaskCreate', 't1', { subject: 'Read notes' }, { task: { id: '1' } }),
+    taskCall('TaskCreate', 't2', { subject: 'Run tests' }, { task: { id: '2' } }),
+    taskCall('TaskCreate', 't3', { subject: 'Ship it' }, { task: { id: '3' } }),
+    prose(),
+    taskCall('TaskUpdate', 't4', { taskId: '3', status: 'deleted' }, {
+      success: true,
+      taskId: '3',
+      updatedFields: ['status'],
+      statusChange: { from: 'pending', to: 'deleted' },
+    }),
+    prose(),
+    taskCall('TaskUpdate', 't5', { taskId: '1', status: 'completed' }, { success: true }),
+  ]);
+
+  const snapshots = unified.filter((entry) => entry.toolName === 'TodoWrite');
+  assert.deepEqual(snapshots.map((entry) => entry.toolId), ['t3', 't4', 't5'], 'the deletion changed the list, so its snapshot is kept');
+  assert.deepEqual(todosOf(snapshots[1]), ['pending:Read notes', 'pending:Run tests']);
+  assert.deepEqual(todosOf(snapshots[2]), ['completed:Read notes', 'pending:Run tests']);
+});
+
+test('a task the tracker reports as deleted leaves the checklist', () => {
+  const unified = prepareTranscriptMessages([
+    taskCall('TaskCreate', 't1', { subject: 'Read notes' }, { task: { id: '1' } }),
+    taskCall('TaskCreate', 't2', { subject: 'Run tests' }, { task: { id: '2' } }),
+    prose(),
+    taskCall('TaskGet', 't3', { taskId: '2' }, { task: { id: '2', subject: 'Run tests', status: 'deleted' } }),
+  ]);
+
+  const listed = unified.filter((entry) => entry.toolName === 'TodoWrite').at(-1);
+  assert.deepEqual(todosOf(listed!), ['pending:Read notes']);
+});
+
 test('a task listing keeps the wording each task was created with', () => {
   const unified = prepareTranscriptMessages([
     taskCall('TaskCreate', 't1', { subject: 'Read notes', activeForm: 'Reading notes' }, { task: { id: '1' } }),
@@ -196,7 +230,7 @@ test('a huge tool output is capped, and says how much it dropped', () => {
   const content = String(unified.toolResult?.content);
   assert.ok(content.length < body.length / 2, 'the output must not survive at full size');
   assert.match(content, /… 80000 more characters$/);
-  const nested = (unified.toolResult?.toolUseResult as { file: { base64: string } }).file.base64;
+  const nested = (unified.toolResult?.toolUseResult as { file: { base64: string } } | undefined)?.file.base64;
   assert.equal(nested, content, 'the structured copy is capped the same way');
 });
 

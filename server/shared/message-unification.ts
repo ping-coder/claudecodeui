@@ -223,6 +223,19 @@ class ChecklistState {
     }
 
     const single = readObjectRecord(result?.task);
+
+    // A deleted task leaves the list. Kept as pending, it would come back on
+    // every history load, and the client, which drops it while replaying the
+    // raw calls streamed live, would count it again once a refresh swapped
+    // those calls for this snapshot.
+    if (input.status === 'deleted' || single?.status === 'deleted') {
+      const deletedId = readNonEmptyString(input.taskId) || readNonEmptyString(single?.id);
+      if (deletedId) {
+        this.entries.delete(deletedId);
+      }
+      return;
+    }
+
     if (single) {
       this.upsertTask(single, {
         content: readNonEmptyString(input.subject),
