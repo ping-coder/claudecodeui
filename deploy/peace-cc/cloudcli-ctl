@@ -14,6 +14,9 @@ REPO_URL="https://github.com/ping-coder/claudecodeui.git"
 UPSTREAM_URL="https://github.com/siteboon/claudecodeui.git"
 HEALTH_URL="http://127.0.0.1:3001/health"
 KEEP_RELEASES=8
+DB_BACKUP_DIR="${SHARED_DIR}/db-backups"
+KEEP_DB_BACKUPS=8
+DEFAULT_DATABASE_PATH="${HOME}/.cloudcli/auth.db"
 
 log() {
   printf "\033[1;34m[cloudcli-ctl %s]\033[0m %s\n" "$(date '+%H:%M:%S')" "$*"
@@ -39,6 +42,89 @@ wait_for_health() {
   return 1
 }
 
+# The database the service uses: the first DATABASE_PATH= line of shared/.env
+# (the unit's EnvironmentFile), else the server's default location.
+resolve_database_path() {
+  local db_path=""
+  if [ -f "${SHARED_DIR}/.env" ]; then
+    db_path=$(grep -m1 '^DATABASE_PATH=' "${SHARED_DIR}/.env" | cut -d= -f2- || true)
+    db_path="${db_path%$'\r'}"
+    db_path="${db_path#"${db_path%%[![:space:]]*}"}"
+    db_path="${db_path%"${db_path##*[![:space:]]}"}"
+    # systemd strips one pair of surrounding quotes from EnvironmentFile values.
+    case "$db_path" in
+      \"*\" | \'*\') db_path="${db_path:1:${#db_path}-2}" ;;
+    esac
+  fi
+  printf '%s\n' "${db_path:-$DEFAULT_DATABASE_PATH}"
+}
+
+# Online backup of the live database into ${DB_BACKUP_DIR}/auth-<release_id>.db,
+# keeping the newest KEEP_DB_BACKUPS. Returns non-zero on any failure so the
+# deploy stops before the new release (and its migrations) starts. Backups hold
+# password hashes and tokens, hence the 0700 directory and 0600 files.
+backup_database() {
+  local release_id="$1"
+  local db_path backup_file tmp_file backup_js
+  db_path=$(resolve_database_path)
+  # The service resolves a relative path against its own working directory,
+  # so checking it from here could silently skip the backup.
+  if [ "${db_path#/}" = "$db_path" ]; then
+    err "DATABASE_PATH '${db_path}' in ${SHARED_DIR}/.env is not an absolute path."
+    return 1
+  fi
+  if [ ! -f "$db_path" ]; then
+    log "No database at ${db_path}; skipping the pre-deploy backup."
+    return 0
+  fi
+
+  backup_file="${DB_BACKUP_DIR}/auth-${release_id}.db"
+  tmp_file="${backup_file}.tmp"
+  log "Backing up ${db_path} -> ${backup_file}..."
+  (umask 077 && mkdir -p "$DB_BACKUP_DIR") || return 1
+  chmod 700 "$DB_BACKUP_DIR" || return 1
+  rm -f "$tmp_file" "${tmp_file}-journal"
+
+  # SQLite's backup API, not cp: the service may be writing while we copy.
+  # Arguments: <better-sqlite3 module dir> <source db> <backup file>.
+  backup_js=$(cat <<'JS'
+const [modulePath, sourcePath, targetPath] = process.argv.slice(1);
+const Database = require(modulePath);
+(async () => {
+  // Read-only, so a deploy can never write to the live database; the busy
+  // timeout waits out a write the running service is committing.
+  const source = new Database(sourcePath, { readonly: true, fileMustExist: true, timeout: 10000 });
+  try {
+    // One step copies every page under a single read lock, instead of 100-page
+    // steps that restart from scratch whenever the service writes in between.
+    await source.backup(targetPath, { progress: () => 0x7fffffff });
+  } finally {
+    source.close();
+  }
+  const copy = new Database(targetPath, { readonly: true, fileMustExist: true });
+  try {
+    const result = copy.pragma('integrity_check', { simple: true });
+    if (result !== 'ok') throw new Error(`integrity_check on the backup returned: ${result}`);
+  } finally {
+    copy.close();
+  }
+})().catch((error) => {
+  console.error(`Database backup failed: ${error && error.message ? error.message : error}`);
+  process.exit(1);
+});
+JS
+)
+  if ! (umask 077 && node -e "$backup_js" "${REPO_DIR}/node_modules/better-sqlite3" "$db_path" "$tmp_file"); then
+    rm -f "$tmp_file" "${tmp_file}-journal"
+    return 1
+  fi
+  { chmod 600 "$tmp_file" && mv -f "$tmp_file" "$backup_file"; } || return 1
+  log "Database backup passed integrity_check: ${backup_file}"
+
+  ls -1t "$DB_BACKUP_DIR"/auth-*.db 2>/dev/null | tail -n +$((KEEP_DB_BACKUPS + 1)) | xargs -r rm -f -- \
+    || err "Could not prune old database backups in ${DB_BACKUP_DIR}."
+}
+
 cmd_deploy() {
   local target_ref="${1:-origin/main}"
   mkdir -p "$RELEASES_DIR" "$SHARED_DIR"
@@ -56,14 +142,14 @@ cmd_deploy() {
   log "Fetching latest commits from origin..."
   git fetch origin --prune --tags
 
-  # Resolve target_ref to full commit SHA
-  if ! git rev-parse --verify "${target_ref}^{commit}" >/dev/null 2>&1; then
-    if git rev-parse --verify "origin/${target_ref}^{commit}" >/dev/null 2>&1; then
-      target_ref="origin/${target_ref}"
-    else
-      err "Cannot resolve git ref: ${target_ref}"
-      exit 1
-    fi
+  # Resolve target_ref to full commit SHA. A branch name means origin/<branch>
+  # first: fetch never moves the local branch of the same name, so a stale
+  # local main would otherwise deploy an old commit.
+  if git rev-parse --verify --quiet "refs/remotes/origin/${target_ref}^{commit}" >/dev/null 2>&1; then
+    target_ref="refs/remotes/origin/${target_ref}"
+  elif ! git rev-parse --verify --quiet "${target_ref}^{commit}" >/dev/null 2>&1; then
+    err "Cannot resolve git ref: ${target_ref}"
+    exit 1
   fi
 
   local commit_sha commit_short commit_msg
@@ -111,6 +197,14 @@ COMMIT_SHORT=${commit_short}
 COMMIT_MSG=${commit_msg}
 DEPLOYED_AT=$(date -Is)
 EOF
+
+  # Before 'current' switches: the new release migrates the database when it
+  # starts, and neither the automatic nor a manual rollback restores data.
+  if ! backup_database "$release_id"; then
+    err "Database backup failed; aborting before switching releases (the running service is untouched)."
+    rm -rf "$release_path"
+    exit 1
+  fi
 
   local old_target=""
   if [ -L "$CURRENT_LINK" ] && [ -e "$CURRENT_LINK" ]; then

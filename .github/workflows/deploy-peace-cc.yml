@@ -30,6 +30,32 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'peace-cc' || inputs.target == '' }}
     runs-on: [self-hosted, peace-cc]
     steps:
+      - name: Update cloudcli-ctl from this commit
+        shell: bash
+        env:
+          CTL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # github.sha, not inputs.ref: dispatching an old ref must not downgrade the tool.
+          repo="$HOME/apps/cloudcli/repo"
+          ctl="$HOME/apps/cloudcli/bin/cloudcli-ctl"
+          if [ ! -d "$repo/.git" ]; then
+            echo "::warning::$repo is not a git checkout yet; keeping the installed cloudcli-ctl (deploy clones the repo)."
+            exit 0
+          fi
+          git -C "$repo" fetch origin --prune --tags
+          if ! git -C "$repo" cat-file -e "${CTL_SHA}:deploy/peace-cc/cloudcli-ctl" 2>/dev/null; then
+            echo "::warning::${CTL_SHA} has no deploy/peace-cc/cloudcli-ctl; keeping the installed copy."
+            exit 0
+          fi
+          mkdir -p "$(dirname "$ctl")"
+          trap 'rm -f "$ctl.new"' EXIT
+          git -C "$repo" show "${CTL_SHA}:deploy/peace-cc/cloudcli-ctl" > "$ctl.new"
+          bash -n "$ctl.new"
+          chmod +x "$ctl.new"
+          mv -f "$ctl.new" "$ctl"
+          echo "cloudcli-ctl updated from ${CTL_SHA}."
+
       - name: Deploy release snapshot & verify health
         env:
           TARGET_REF: ${{ inputs.ref || github.sha }}
@@ -56,6 +82,32 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'peacecloudtop' || inputs.target == '' }}
     runs-on: [self-hosted, peacecloudtop]
     steps:
+      - name: Update cloudcli-ctl from this commit
+        shell: bash
+        env:
+          CTL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # github.sha, not inputs.ref: dispatching an old ref must not downgrade the tool.
+          repo="$HOME/apps/cloudcli/repo"
+          ctl="$HOME/apps/cloudcli/bin/cloudcli-ctl"
+          if [ ! -d "$repo/.git" ]; then
+            echo "::warning::$repo is not a git checkout yet; keeping the installed cloudcli-ctl (deploy clones the repo)."
+            exit 0
+          fi
+          git -C "$repo" fetch origin --prune --tags
+          if ! git -C "$repo" cat-file -e "${CTL_SHA}:deploy/peace-cc/cloudcli-ctl" 2>/dev/null; then
+            echo "::warning::${CTL_SHA} has no deploy/peace-cc/cloudcli-ctl; keeping the installed copy."
+            exit 0
+          fi
+          mkdir -p "$(dirname "$ctl")"
+          trap 'rm -f "$ctl.new"' EXIT
+          git -C "$repo" show "${CTL_SHA}:deploy/peace-cc/cloudcli-ctl" > "$ctl.new"
+          bash -n "$ctl.new"
+          chmod +x "$ctl.new"
+          mv -f "$ctl.new" "$ctl"
+          echo "cloudcli-ctl updated from ${CTL_SHA}."
+
       - name: Deploy release snapshot & verify health
         env:
           TARGET_REF: ${{ inputs.ref || github.sha }}
