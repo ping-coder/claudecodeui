@@ -13,10 +13,11 @@ import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
 import { readSelectedProvider, writeSelectedProvider } from '@/shared/selectedProvider';
 
 const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly string[]>> = {
-  // Superset used only before the model catalog loads; `ultracode` belongs to the
-  // xhigh-capable models alone, but listing it here keeps a stored ultracode
-  // selection from being reset during catalog hydration.
-  claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+  // Superset used only before the model catalog loads. Per-model metadata
+  // narrows this once available; listing every level any Claude model accepts
+  // keeps a stored xhigh or max selection from being reset during catalog
+  // hydration. Ultracode is not an effort level; see providerUltracode.
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   // Superset used only before the model catalog loads. Per-model metadata
   // narrows this once available; including the GPT-5.6 tiers here prevents a
   // valid Max/Ultra selection from being reset during catalog hydration.
@@ -39,6 +40,48 @@ const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
 
 /** localStorage key holding the user's default model for one provider. */
 const providerModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;
+
+/** localStorage key holding the user's default reasoning effort for one provider. */
+const providerEffortStorageKey = (provider: LLMProvider): string => `${provider}-effort`;
+
+/** localStorage key holding the user's default ultracode switch ('true' or 'false') for one provider. */
+const providerUltracodeStorageKey = (provider: LLMProvider): string => `${provider}-ultracode`;
+
+/**
+ * Effort value older builds stored for Claude Code's ultracode, back when it
+ * was offered as a sixth effort level meaning "xhigh plus workflows". Ultracode
+ * is now a separate switch that combines with any level.
+ */
+const LEGACY_ULTRACODE_EFFORT = 'ultracode';
+
+/** Effort level a stored legacy `ultracode` effort always ran at. */
+const LEGACY_ULTRACODE_EFFORT_LEVEL = 'xhigh';
+
+/**
+ * Rewrites a stored legacy `ultracode` effort into its current shape: effort
+ * xhigh with the ultracode switch on. It has to run before the effort state
+ * reads storage, because the catalog no longer lists `ultracode` as an effort
+ * and the reconcile effect would otherwise reset it to the default level and
+ * lose the choice. Idempotent, so React re-running initializers is harmless.
+ */
+const migrateLegacyUltracodeEffort = (targetProvider: LLMProvider): void => {
+  if (localStorage.getItem(providerEffortStorageKey(targetProvider)) !== LEGACY_ULTRACODE_EFFORT) {
+    return;
+  }
+
+  localStorage.setItem(providerEffortStorageKey(targetProvider), LEGACY_ULTRACODE_EFFORT_LEVEL);
+  localStorage.setItem(providerUltracodeStorageKey(targetProvider), 'true');
+};
+
+/**
+ * Fallback ultracode support used only until the backend capability matrix
+ * has loaded (or when it fails, or comes from a server that predates the
+ * `supportsUltracode` capability). The per-model catalog flag still decides
+ * whether the current model can run it.
+ */
+const FALLBACK_PROVIDER_ULTRACODE_SUPPORT: Partial<Record<LLMProvider, boolean>> = {
+  claude: true,
+};
 
 /**
  * Fallback permission-mode matrix used only until the backend capability
@@ -63,6 +106,8 @@ type ProviderCapabilities = {
   supportsPermissionRequests: boolean;
   supportsTokenUsage: boolean;
   supportsEffort?: boolean;
+  /** Absent from servers that predate ultracode as a separate switch. */
+  supportsUltracode?: boolean;
   supportsMessageEditing?: boolean;
   supportsSessionForking?: boolean;
 };
@@ -104,6 +149,8 @@ type SessionSelectionApiResponse = {
     sessionId?: string | null;
     model?: string | null;
     effort?: string | null;
+    /** NULL means the session has not recorded an ultracode choice yet. */
+    ultracode?: boolean | null;
     /**
      * `session` and `provider` are real answers for this session; `default`
      * means the backend had nothing recorded and returned the catalog default,
@@ -118,10 +165,107 @@ type SessionProviderSelection = {
   sessionId: string;
   model: string | null;
   effort: string | null;
+  /** NULL means nothing is recorded, so the per-provider default applies. */
+  ultracode: boolean | null;
+};
+
+/** The per-session fields a composer choice can change. */
+type SessionSelectionFields = Pick<SessionProviderSelection, 'model' | 'effort' | 'ultracode'>;
+
+type SessionSelectionField = keyof SessionSelectionFields;
+
+/**
+ * Everything known about one session's recorded model, effort and ultracode,
+ * in layers so that no answer can overwrite a newer one. Every load and save
+ * takes a number from one per-hook counter, which orders them on this client:
+ * - `loaded`: the latest active-model load to land, issued at `loadedSeq`;
+ *   null until one lands;
+ * - `confirmed`: what the server stored for a choice. Among saves of one field
+ *   the latest started wins, whatever order they settle in, and a confirmed
+ *   value beats any load issued before its save settled (that load may predate
+ *   the write);
+ * - `pending`: choices whose save is still in flight, shown at once; only the
+ *   save that set an entry clears it, and a failed save just drops it.
+ */
+type SessionSelectionLayers = {
+  loaded: SessionSelectionFields | null;
+  loadedSeq: number;
+  confirmed: Partial<Record<SessionSelectionField, { value: unknown; startedSeq: number; settledSeq: number }>>;
+  pending: Partial<Record<SessionSelectionField, { value: unknown; startedSeq: number }>>;
+};
+
+const EMPTY_SESSION_SELECTION_LAYERS: SessionSelectionLayers = {
+  loaded: null,
+  loadedSeq: 0,
+  confirmed: {},
+  pending: {},
 };
 
 const getSessionSelectionKey = (provider: LLMProvider, sessionId: string): string => (
   `${provider}:${sessionId}`
+);
+
+/** Reads one field through the layers: an in-flight choice, else a save newer than the load, else the load. */
+const resolveSessionSelectionField = <TField extends SessionSelectionField>(
+  layers: SessionSelectionLayers,
+  field: TField,
+): SessionSelectionFields[TField] | null => {
+  const pending = layers.pending[field];
+  if (pending) {
+    return pending.value as SessionSelectionFields[TField];
+  }
+
+  const confirmed = layers.confirmed[field];
+  if (confirmed && confirmed.settledSeq > layers.loadedSeq) {
+    return confirmed.value as SessionSelectionFields[TField];
+  }
+
+  return layers.loaded ? layers.loaded[field] : null;
+};
+
+/** Returns `layersByKey` with one session's layers replaced by `update` of them (empty layers if none yet). */
+const updateSessionSelectionLayers = (
+  layersByKey: Record<string, SessionSelectionLayers>,
+  sessionKey: string,
+  update: (layers: SessionSelectionLayers) => SessionSelectionLayers,
+): Record<string, SessionSelectionLayers> => {
+  const layers = layersByKey[sessionKey] ?? EMPTY_SESSION_SELECTION_LAYERS;
+  const nextLayers = update(layers);
+  return nextLayers === layers ? layersByKey : { ...layersByKey, [sessionKey]: nextLayers };
+};
+
+/** Drops the in-flight choice of `field` if the save started at `startedSeq` is still the one that set it. */
+const dropPendingSessionChoice = (
+  layers: SessionSelectionLayers,
+  field: SessionSelectionField,
+  startedSeq: number,
+): SessionSelectionLayers => {
+  if (layers.pending[field]?.startedSeq !== startedSeq) {
+    return layers;
+  }
+
+  const pending = { ...layers.pending };
+  delete pending[field];
+  return { ...layers, pending };
+};
+
+/** Records what the server stored for `field` and clears the save's own in-flight choice. */
+const confirmSessionChoice = (
+  layers: SessionSelectionLayers,
+  field: SessionSelectionField,
+  confirmed: { value: unknown; startedSeq: number; settledSeq: number },
+): SessionSelectionLayers => {
+  const withoutPending = dropPendingSessionChoice(layers, field, confirmed.startedSeq);
+  const previous = withoutPending.confirmed[field];
+  if (previous && previous.startedSeq > confirmed.startedSeq) {
+    return withoutPending;
+  }
+  return { ...withoutPending, confirmed: { ...withoutPending.confirmed, [field]: confirmed } };
+};
+
+/** Reads a recorded ultracode choice from an API answer; anything but a boolean means none. */
+const readResponseUltracode = (body: SessionSelectionApiResponse): boolean | null => (
+  typeof body.data?.ultracode === 'boolean' ? body.data.ultracode : null
 );
 
 export function useChatProviderState({ selectedSession, selectedProject: _selectedProject }: UseChatProviderStateArgs) {
@@ -143,7 +287,21 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   });
   const [providerEfforts, setProviderEfforts] = useState<Partial<Record<LLMProvider, string>>>(() => {
     return PROVIDERS.reduce<Partial<Record<LLMProvider, string>>>((acc, targetProvider) => {
-      acc[targetProvider] = localStorage.getItem(`${targetProvider}-effort`) || DEFAULT_EFFORT_VALUE;
+      // Before the read, so a legacy `ultracode` effort arrives as xhigh and
+      // the ultracode initializer below sees the switch it implied.
+      migrateLegacyUltracodeEffort(targetProvider);
+      acc[targetProvider] = localStorage.getItem(providerEffortStorageKey(targetProvider)) || DEFAULT_EFFORT_VALUE;
+      return acc;
+    }, {});
+  });
+  // Every provider's default ultracode switch, kept apart from the effort
+  // because the two combine freely. Unlike the effort it is never reconciled
+  // against the current model: a model that cannot run ultracode only hides the
+  // switch, so the preference survives a detour through such a model. Must stay
+  // declared after providerEfforts, whose initializer migrates legacy storage.
+  const [providerUltracode, setProviderUltracode] = useState<Partial<Record<LLMProvider, boolean>>>(() => {
+    return PROVIDERS.reduce<Partial<Record<LLMProvider, boolean>>>((acc, targetProvider) => {
+      acc[targetProvider] = localStorage.getItem(providerUltracodeStorageKey(targetProvider)) === 'true';
       return acc;
     }, {});
   });
@@ -165,9 +323,12 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const [providerModelsLoading, setProviderModelsLoading] = useState(true);
 
   const providerModelsRequestIdRef = useRef(0);
-  const sessionSelectionLoadRequestIdRef = useRef(0);
-  const sessionModelMutationIdRef = useRef(0);
-  const sessionEffortMutationIdRef = useRef(0);
+  // The counter that orders session-selection loads and saves; see SessionSelectionLayers.
+  const sessionSelectionSeqRef = useRef(0);
+  const nextSessionSelectionSeq = useCallback((): number => {
+    sessionSelectionSeqRef.current += 1;
+    return sessionSelectionSeqRef.current;
+  }, []);
 
   const setStoredProviderModel = useCallback((targetProvider: LLMProvider, model: string) => {
     setProviderModels((previous) => (
@@ -184,7 +345,16 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         ? previous
         : { ...previous, [targetProvider]: effort }
     ));
-    localStorage.setItem(`${targetProvider}-effort`, effort);
+    localStorage.setItem(providerEffortStorageKey(targetProvider), effort);
+  }, []);
+
+  const setStoredProviderUltracode = useCallback((targetProvider: LLMProvider, ultracode: boolean) => {
+    setProviderUltracode((previous) => (
+      previous[targetProvider] === ultracode
+        ? previous
+        : { ...previous, [targetProvider]: ultracode }
+    ));
+    localStorage.setItem(providerUltracodeStorageKey(targetProvider), ultracode ? 'true' : 'false');
   }, []);
 
   const loadProviderModels = useCallback(async () => {
@@ -274,6 +444,14 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     return Boolean(FALLBACK_PROVIDER_EFFORT_VALUES[targetProvider]?.length);
   }, [providerCapabilities]);
 
+  const getSupportsUltracodeForProvider = useCallback((targetProvider: LLMProvider): boolean => {
+    const capabilitySupport = providerCapabilities?.[targetProvider]?.supportsUltracode;
+    if (typeof capabilitySupport === 'boolean') {
+      return capabilitySupport;
+    }
+    return FALLBACK_PROVIDER_ULTRACODE_SUPPORT[targetProvider] ?? false;
+  }, [providerCapabilities]);
+
   const pickStoredOrCurrent = (
     storageKey: string,
     current: string,
@@ -300,6 +478,26 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
 
     return definition.OPTIONS.find((option) => option.value === model) ?? null;
   }, [providerModelCatalog]);
+
+  const getModelSupportsUltracode = useCallback((
+    targetProvider: LLMProvider,
+    model: string,
+  ): boolean => {
+    if (!getSupportsUltracodeForProvider(targetProvider)) {
+      return false;
+    }
+
+    // Until the provider's catalog arrives the switch stays offered rather
+    // than flickering in; nothing is reset either way.
+    if (!providerModelCatalog[targetProvider]) {
+      return true;
+    }
+
+    // A model the catalog does not list (e.g. a raw versioned id recorded by an
+    // external session) cannot run it: the runtime drops ultracode for models
+    // it cannot find in the catalog.
+    return getModelOption(targetProvider, model)?.supportsUltracode === true;
+  }, [getModelOption, getSupportsUltracodeForProvider, providerModelCatalog]);
 
   const getEffortOptionsForModel = useCallback((
     targetProvider: LLMProvider,
@@ -385,7 +583,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       }
 
       nextEfforts[targetProvider] = nextEffort;
-      localStorage.setItem(`${targetProvider}-effort`, nextEffort);
+      localStorage.setItem(providerEffortStorageKey(targetProvider), nextEffort);
       hasUpdates = true;
     }
 
@@ -470,70 +668,68 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       : getDefaultPermissionModeForProvider(targetProvider);
   }, [getDefaultPermissionModeForProvider, getPermissionModesForProvider]);
 
-  /** Model and reasoning effort recorded for the open session by the backend. */
-  const [sessionSelection, setSessionSelection] = useState<SessionProviderSelection | null>(null);
+  // Model, reasoning effort and ultracode recorded for each session the user
+  // has had open, layered so a slow load or save never overwrites a newer
+  // answer (see SessionSelectionLayers). Keyed by session rather than holding
+  // only the open one, so a save that settles after the user moved on still
+  // lands on its own session and a return visit starts from what is known.
+  const [sessionSelectionLayers, setSessionSelectionLayers] = useState<Record<string, SessionSelectionLayers>>({});
   const selectedSessionId = selectedSession?.id?.trim() || null;
   const selectedSessionProvider = selectedSession?.__provider ?? provider;
   const selectedSessionKey = selectedSessionId
     ? getSessionSelectionKey(selectedSessionProvider, selectedSessionId)
     : null;
-  const selectedSessionKeyRef = useRef<string | null>(selectedSessionKey);
-  selectedSessionKeyRef.current = selectedSessionKey;
 
-  const activeSessionSelection = sessionSelection
-    && selectedSessionId
-    && sessionSelection.sessionId === selectedSessionId
-    && sessionSelection.provider === selectedSessionProvider
-    ? sessionSelection
+  const selectedSessionLayers = selectedSessionKey ? sessionSelectionLayers[selectedSessionKey] : undefined;
+  const activeSessionSelection: SessionProviderSelection | null = selectedSessionLayers && selectedSessionId
+    ? {
+      provider: selectedSessionProvider,
+      sessionId: selectedSessionId,
+      model: resolveSessionSelectionField(selectedSessionLayers, 'model'),
+      effort: resolveSessionSelectionField(selectedSessionLayers, 'effort'),
+      ultracode: resolveSessionSelectionField(selectedSessionLayers, 'ultracode'),
+    }
     : null;
   const sessionModel = activeSessionSelection?.model ?? null;
 
   useEffect(() => {
-    const requestId = sessionSelectionLoadRequestIdRef.current + 1;
-    sessionSelectionLoadRequestIdRef.current = requestId;
-
     if (!selectedSessionId) {
-      setSessionSelection(null);
       return;
     }
 
     let cancelled = false;
     const targetProvider = selectedSessionProvider;
-    const targetSessionKey = getSessionSelectionKey(targetProvider, selectedSessionId);
+    const targetSessionId = selectedSessionId;
+    const targetSessionKey = getSessionSelectionKey(targetProvider, targetSessionId);
+    const issuedSeq = nextSessionSelectionSeq();
 
     const loadSessionSelection = async () => {
       try {
-        const response = await api.providers.sessionActiveModel(targetProvider, selectedSessionId);
+        const response = await api.providers.sessionActiveModel(targetProvider, targetSessionId);
         const body = (await response.json()) as SessionSelectionApiResponse;
-        if (
-          cancelled
-          || sessionSelectionLoadRequestIdRef.current !== requestId
-          || selectedSessionKeyRef.current !== targetSessionKey
-        ) {
+        if (cancelled) {
           return;
         }
 
         const resolvedModel = body.data?.model?.trim();
-        const resolvedEffort = body.data?.effort?.trim() || null;
-        setSessionSelection({
-          provider: targetProvider,
-          sessionId: selectedSessionId,
+        const loadedFields: SessionSelectionFields = {
           model: body.success && resolvedModel && body.data?.source !== 'default' ? resolvedModel : null,
-          effort: body.success ? resolvedEffort : null,
-        });
+          effort: body.success ? body.data?.effort?.trim() || null : null,
+          ultracode: body.success ? readResponseUltracode(body) : null,
+        };
+        setSessionSelectionLayers((layersByKey) => updateSessionSelectionLayers(
+          layersByKey,
+          targetSessionKey,
+          // An older load of this session landing after a newer one changes nothing.
+          (layers) => (issuedSeq <= layers.loadedSeq
+            ? layers
+            : { ...layers, loaded: loadedFields, loadedSeq: issuedSeq }),
+        ));
       } catch (error) {
-        if (
-          !cancelled
-          && sessionSelectionLoadRequestIdRef.current === requestId
-          && selectedSessionKeyRef.current === targetSessionKey
-        ) {
+        // Whatever is already known for the session stays; with nothing known
+        // the per-provider defaults show, as before any load.
+        if (!cancelled) {
           console.error('Error loading the session model and reasoning effort:', error);
-          setSessionSelection({
-            provider: targetProvider,
-            sessionId: selectedSessionId,
-            model: null,
-            effort: null,
-          });
         }
       }
     };
@@ -542,14 +738,95 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     return () => {
       cancelled = true;
     };
-  }, [selectedSessionId, selectedSessionProvider]);
+  }, [nextSessionSelectionSeq, selectedSessionId, selectedSessionProvider]);
+
+  /**
+   * Shows one session choice at once and saves it. A successful save records
+   * the stored value; a failed one drops only this choice, so the field falls
+   * back to the newest known answer and other choices made meanwhile stay.
+   * Loads are never cancelled for a choice: the layers merge them underneath.
+   * `readLoadedFields` lets a response that carries the session's whole
+   * recorded selection count as a load issued when the save started, since the
+   * server read the row after that.
+   */
+  const saveSessionChoice = useCallback(async <TValue extends string | boolean>(
+    sessionKey: string,
+    field: SessionSelectionField,
+    value: TValue,
+    save: () => Promise<Response>,
+    readStoredValue: (body: SessionSelectionApiResponse) => TValue,
+    failureMessage: string,
+    readLoadedFields?: (body: SessionSelectionApiResponse) => SessionSelectionFields,
+  ): Promise<TValue> => {
+    const startedSeq = nextSessionSelectionSeq();
+    setSessionSelectionLayers((layersByKey) => updateSessionSelectionLayers(
+      layersByKey,
+      sessionKey,
+      (layers) => ({ ...layers, pending: { ...layers.pending, [field]: { value, startedSeq } } }),
+    ));
+
+    try {
+      const response = await save();
+      const body = (await response.json()) as SessionSelectionApiResponse;
+      if (!response.ok || !body.success) {
+        throw new Error(failureMessage);
+      }
+
+      const storedValue = readStoredValue(body);
+      const loadedFields = readLoadedFields?.(body);
+      const settledSeq = nextSessionSelectionSeq();
+      setSessionSelectionLayers((layersByKey) => updateSessionSelectionLayers(
+        layersByKey,
+        sessionKey,
+        (layers) => {
+          const withLoad = loadedFields && startedSeq > layers.loadedSeq
+            ? { ...layers, loaded: loadedFields, loadedSeq: startedSeq }
+            : layers;
+          return confirmSessionChoice(withLoad, field, { value: storedValue, startedSeq, settledSeq });
+        },
+      ));
+      return storedValue;
+    } catch (error) {
+      setSessionSelectionLayers((layersByKey) => updateSessionSelectionLayers(
+        layersByKey,
+        sessionKey,
+        (layers) => dropPendingSessionChoice(layers, field, startedSeq),
+      ));
+      throw error;
+    }
+  }, [nextSessionSelectionSeq]);
+
+  /**
+   * Records session fields the server already changed on its own, so the open
+   * session shows what it now runs: a custom-model rename moves the model, and
+   * a delete moves it to the fallback and clears the recorded effort and
+   * ultracode (null falls back to the per-provider defaults).
+   */
+  const confirmServerSessionFields = useCallback((
+    sessionKey: string,
+    fields: Partial<SessionSelectionFields>,
+  ) => {
+    const seq = nextSessionSelectionSeq();
+    setSessionSelectionLayers((layersByKey) => updateSessionSelectionLayers(
+      layersByKey,
+      sessionKey,
+      (layers) => (Object.keys(fields) as SessionSelectionField[]).reduce(
+        (nextLayers, field) => confirmSessionChoice(nextLayers, field, {
+          value: fields[field],
+          startedSeq: seq,
+          settledSeq: seq,
+        }),
+        layers,
+      ),
+    ));
+  }, [nextSessionSelectionSeq]);
 
   /**
    * Applies a model choice.
    *
    * The pick always becomes the per-provider default so the next new chat
-   * inherits it, and — when a session is open — is also recorded against that
-   * session so reopening it later restores this model.
+   * inherits it, and — when a session is open — is shown for that session at
+   * once and recorded against it so reopening it later restores this model.
    */
   const selectProviderModel = useCallback(async (
     targetProvider: LLMProvider,
@@ -563,45 +840,26 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       return { scope: 'default' as const, model };
     }
 
-    // A pending GET represents the state before this click and must not win
-    // if it resolves after the mutation.
-    sessionSelectionLoadRequestIdRef.current += 1;
-    const mutationId = sessionModelMutationIdRef.current + 1;
-    sessionModelMutationIdRef.current = mutationId;
-    const targetSessionKey = getSessionSelectionKey(targetProvider, normalizedSessionId);
-
-    const response = await api.providers.setSessionActiveModel(
-      targetProvider,
-      normalizedSessionId,
+    const storedModel = await saveSessionChoice(
+      getSessionSelectionKey(targetProvider, normalizedSessionId),
+      'model',
       model,
+      () => api.providers.setSessionActiveModel(targetProvider, normalizedSessionId, model),
+      (body) => body.data?.model?.trim() || model,
+      'Unable to change the active model for this session.',
+      // The answer also carries the session's recorded effort and ultracode.
+      (body) => ({
+        model: body.data?.model?.trim() || model,
+        effort: body.data?.effort?.trim() || null,
+        ultracode: readResponseUltracode(body),
+      }),
     );
-
-    const body = (await response.json()) as SessionSelectionApiResponse;
-    if (!response.ok || !body.success) {
-      throw new Error('Unable to change the active model for this session.');
-    }
-
-    const storedModel = body.data?.model?.trim() || model;
-    if (
-      sessionModelMutationIdRef.current === mutationId
-      && selectedSessionKeyRef.current === targetSessionKey
-    ) {
-      setSessionSelection((current) => ({
-        provider: targetProvider,
-        sessionId: normalizedSessionId,
-        model: storedModel,
-        effort: current?.provider === targetProvider && current.sessionId === normalizedSessionId
-          ? current.effort
-          : body.data?.effort?.trim() || null,
-      }));
-    }
     return { scope: 'session' as const, model: storedModel };
-  }, [setStoredProviderModel]);
+  }, [saveSessionChoice, setStoredProviderModel]);
 
   /**
-   * Applies an effort choice optimistically and persists it for the open
-   * session. Mutation counters keep slower earlier requests from overwriting
-   * the latest click.
+   * Applies an effort choice: it always becomes the per-provider default, and
+   * with a session open it is shown at once and persisted for that session.
    */
   const selectProviderEffort = useCallback(async (
     targetProvider: LLMProvider,
@@ -615,65 +873,44 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       return { scope: 'default' as const, effort };
     }
 
-    sessionSelectionLoadRequestIdRef.current += 1;
-    const mutationId = sessionEffortMutationIdRef.current + 1;
-    sessionEffortMutationIdRef.current = mutationId;
-    const targetSessionKey = getSessionSelectionKey(targetProvider, normalizedSessionId);
-    const previousSelection = sessionSelection?.provider === targetProvider
-      && sessionSelection.sessionId === normalizedSessionId
-      ? sessionSelection
-      : null;
-
-    setSessionSelection({
-      provider: targetProvider,
-      sessionId: normalizedSessionId,
-      model: previousSelection?.model ?? null,
+    const storedEffort = await saveSessionChoice(
+      getSessionSelectionKey(targetProvider, normalizedSessionId),
+      'effort',
       effort,
-    });
+      () => api.providers.setSessionActiveEffort(targetProvider, normalizedSessionId, effort),
+      (body) => body.data?.effort?.trim() || effort,
+      'Unable to change the reasoning effort for this session.',
+    );
+    return { scope: 'session' as const, effort: storedEffort };
+  }, [saveSessionChoice, setStoredProviderEffort]);
 
-    try {
-      const response = await api.providers.setSessionActiveEffort(
-        targetProvider,
-        normalizedSessionId,
-        effort,
-      );
-      const body = (await response.json()) as SessionSelectionApiResponse;
-      if (!response.ok || !body.success) {
-        throw new Error('Unable to change the reasoning effort for this session.');
-      }
+  /**
+   * Applies an ultracode on/off choice the same way selectProviderEffort
+   * applies an effort: it always becomes the per-provider default, and with a
+   * session open it is shown at once and persisted for that session.
+   */
+  const selectProviderUltracode = useCallback(async (
+    targetProvider: LLMProvider,
+    ultracode: boolean,
+    sessionId?: string | null,
+  ) => {
+    setStoredProviderUltracode(targetProvider, ultracode);
 
-      const storedEffort = body.data?.effort?.trim() || effort;
-      if (
-        sessionEffortMutationIdRef.current === mutationId
-        && selectedSessionKeyRef.current === targetSessionKey
-      ) {
-        setSessionSelection((current) => ({
-          provider: targetProvider,
-          sessionId: normalizedSessionId,
-          model: current?.provider === targetProvider && current.sessionId === normalizedSessionId
-            ? current.model
-            : previousSelection?.model ?? null,
-          effort: storedEffort,
-        }));
-      }
-
-      return { scope: 'session' as const, effort: storedEffort };
-    } catch (error) {
-      if (
-        sessionEffortMutationIdRef.current === mutationId
-        && selectedSessionKeyRef.current === targetSessionKey
-      ) {
-        setSessionSelection((current) => (
-          current?.provider === targetProvider
-          && current.sessionId === normalizedSessionId
-          && current.effort === effort
-            ? previousSelection
-            : current
-        ));
-      }
-      throw error;
+    const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!normalizedSessionId) {
+      return { scope: 'default' as const, ultracode };
     }
-  }, [sessionSelection, setStoredProviderEffort]);
+
+    const storedUltracode = await saveSessionChoice(
+      getSessionSelectionKey(targetProvider, normalizedSessionId),
+      'ultracode',
+      ultracode,
+      () => api.providers.setSessionActiveUltracode(targetProvider, normalizedSessionId, ultracode),
+      (body) => readResponseUltracode(body) ?? ultracode,
+      'Unable to change ultracode for this session.',
+    );
+    return { scope: 'session' as const, ultracode: storedUltracode };
+  }, [saveSessionChoice, setStoredProviderUltracode]);
 
   // The open session's model wins over the per-provider default, so switching
   // sessions shows (and sends) what each session actually runs with.
@@ -690,6 +927,15 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         ?? DEFAULT_EFFORT_VALUE,
     );
   }, [activeSessionSelection?.effort, currentProviderModel, provider, providerEfforts, reconcileStoredEffort]);
+  // NULL hides the switch and keeps ultracode out of sends: the provider or the
+  // current model cannot run it. Otherwise the session's recorded choice wins
+  // over the per-provider default, as with the effort.
+  const currentProviderUltracode = useMemo<boolean | null>(() => {
+    if (!getModelSupportsUltracode(provider, currentProviderModel)) {
+      return null;
+    }
+    return activeSessionSelection?.ultracode ?? providerUltracode[provider] ?? false;
+  }, [activeSessionSelection?.ultracode, currentProviderModel, getModelSupportsUltracode, provider, providerUltracode]);
   const currentProviderModelOptions = useMemo(
     () => providerModelCatalog[provider]?.OPTIONS ?? [],
     [provider, providerModelCatalog],
@@ -744,17 +990,16 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     if (providerModels[targetProvider] === existing.value) {
       setStoredProviderModel(targetProvider, result.model.value);
     }
-    if (provider === targetProvider && sessionModel === existing.value) {
-      setSessionSelection((current) => current ? {
-        ...current,
-        model: result.model.value,
-      } : current);
+    if (provider === targetProvider && sessionModel === existing.value && selectedSessionKey) {
+      confirmServerSessionFields(selectedSessionKey, { model: result.model.value });
     }
   }, [
     applyProviderCatalog,
+    confirmServerSessionFields,
     provider,
     providerModels,
     readModelMutationResponse,
+    selectedSessionKey,
     sessionModel,
     setStoredProviderModel,
   ]);
@@ -774,17 +1019,17 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     if (providerModels[targetProvider] === existing.value) {
       setStoredProviderModel(targetProvider, result.models.DEFAULT);
     }
-    if (provider === targetProvider && sessionModel === existing.value) {
-      setSessionSelection((current) => current ? {
-        ...current,
-        model: result.models.DEFAULT,
-      } : current);
+    if (provider === targetProvider && sessionModel === existing.value && selectedSessionKey) {
+      // Mirrors the server, which also clears the session's effort and ultracode.
+      confirmServerSessionFields(selectedSessionKey, { model: result.models.DEFAULT, effort: null, ultracode: null });
     }
   }, [
     applyProviderCatalog,
+    confirmServerSessionFields,
     provider,
     providerModels,
     readModelMutationResponse,
+    selectedSessionKey,
     sessionModel,
     setStoredProviderModel,
   ]);
@@ -821,6 +1066,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     setStoredProviderModel,
     currentProviderEffort,
     currentProviderEffortOptions,
+    currentProviderUltracode,
     currentProviderModel,
     currentProviderModelOptions,
     permissionMode,
@@ -834,6 +1080,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    selectProviderUltracode,
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,

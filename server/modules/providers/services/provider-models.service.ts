@@ -11,13 +11,31 @@ import type {
   ProviderModelsDefinition,
   ProviderSessionModel,
 } from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError, splitLegacyUltracodeEffort } from '@/shared/utils.js';
 
 /** Session-row access the service needs, narrowed so tests can stub it. */
 type ProviderModelsSessionStore = {
-  getSessionById(sessionId: string): { model: string | null; effort: string | null } | null;
+  getSessionById(sessionId: string): {
+    model: string | null;
+    effort: string | null;
+    /** 1 on, 0 off, NULL when no ultracode choice has been recorded. */
+    ultracode: number | null;
+  } | null;
   setSessionModel(sessionId: string, model: string): void;
   setSessionEffort(sessionId: string, effort: string): void;
+  setSessionUltracode(sessionId: string, ultracode: boolean): void;
+};
+
+/**
+ * What `setSessionEffort` and `setSessionUltracode` report back: the session's
+ * recorded effort and ultracode choices after the write.
+ */
+type RecordedSessionReasoning = {
+  provider: LLMProvider;
+  sessionId: string;
+  effort: string | null;
+  ultracode: boolean | null;
+  source: 'session';
 };
 
 /** SQLite catalog operations used by the Providers service and its unit fakes. */
@@ -50,30 +68,44 @@ const customModelsOnlyConfigKey = (provider: LLMProvider): string => (
 );
 
 /**
+ * Claude Code only runs ultracode on models that accept xhigh effort, so a
+ * custom model of a provider that supports ultracode can run it exactly when
+ * it declares this level.
+ */
+const ULTRACODE_REQUIRED_EFFORT_LEVEL = 'xhigh';
+
+/**
  * Converts a stored custom row into a catalog option.
  *
  * `effort` is emitted in the same shape predefined models use, so the composer
  * and every runtime's effort validation treat declared levels identically.
  * Rows without declared levels omit `effort` on purpose: the composer then
  * hides Reasoning and runtimes send no effort, instead of guessing levels the
- * model might reject.
+ * model might reject. `supportsUltracode` is derived the same way, from the
+ * declared levels, and omitted when false like on predefined models.
  */
 const toCustomProviderModelOption = (
   record: CustomProviderModelRecord,
-): ProviderModelOption => ({
-  value: record.modelId,
-  label: record.model,
-  recordId: record.recordId,
-  isCustom: true,
-  ...(record.effort
-    ? {
-      effort: {
-        ...(record.effort.default ? { default: record.effort.default } : {}),
-        values: record.effort.values.map((value) => ({ value })),
-      },
-    }
-    : {}),
-});
+): ProviderModelOption => {
+  const supportsUltracode = providerCapabilitiesService.getProviderCapabilities(record.provider).supportsUltracode
+    && Boolean(record.effort?.values.includes(ULTRACODE_REQUIRED_EFFORT_LEVEL));
+
+  return {
+    value: record.modelId,
+    label: record.model,
+    recordId: record.recordId,
+    isCustom: true,
+    ...(record.effort
+      ? {
+        effort: {
+          ...(record.effort.default ? { default: record.effort.default } : {}),
+          values: record.effort.values.map((value) => ({ value })),
+        },
+      }
+      : {}),
+    ...(supportsUltracode ? { supportsUltracode: true } : {}),
+  };
+};
 
 /**
  * Effort levels a custom model of this provider may declare, weakest first:
@@ -344,17 +376,29 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     };
   };
 
+  /**
+   * Reads the model, effort and ultracode choices recorded on one session row.
+   *
+   * A legacy `ultracode` effort is read as xhigh with ultracode on: the
+   * migration rewrites stored rows, but an old queued or scheduled message
+   * replayed by an older build could still write the token back.
+   */
   const readRecordedSessionSelection = (
     sessionId: string,
-  ): { model: string | null; effort: string | null } | null => {
+  ): { model: string | null; effort: string | null; ultracode: boolean | null } | null => {
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       return null;
     }
 
+    const { effort, ultracode } = splitLegacyUltracodeEffort({
+      effort: session.effort?.trim() || null,
+      ultracode: typeof session.ultracode === 'number' ? session.ultracode !== 0 : null,
+    });
     return {
       model: session.model?.trim() || null,
-      effort: session.effort?.trim() || null,
+      effort,
+      ultracode,
     };
   };
 
@@ -389,6 +433,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       sessionId: normalizedSessionId,
       model: normalizedModel,
       effort: recordedSelection.effort,
+      ultracode: recordedSelection.ultracode,
       source: 'session',
     };
   };
@@ -399,27 +444,70 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
    * Like `setSessionModel`, this ignores an id that has not been allocated by
    * the session gateway yet. The websocket send path records it once the row
    * exists, so a pre-session composer choice is not lost.
+   *
+   * A frontend cached from before ultracode became a separate switch can still
+   * post the legacy `ultracode` effort; it is stored as xhigh with ultracode on.
    */
   const setSessionEffort = (
     provider: LLMProvider,
     sessionId: string,
     effort: string,
-  ): { provider: LLMProvider; sessionId: string; effort: string; source: 'session' } | null => {
+  ): RecordedSessionReasoning | null => {
     const normalizedSessionId = sessionId.trim();
-    const normalizedEffort = effort.trim();
+    const { effort: normalizedEffort, ultracode: legacyUltracode } = splitLegacyUltracodeEffort<{
+      effort: string;
+      ultracode?: boolean;
+    }>({ effort: effort.trim() });
     if (!normalizedSessionId || !normalizedEffort) {
       return null;
     }
 
-    if (!readRecordedSessionSelection(normalizedSessionId)) {
+    const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
+    if (!recordedSelection) {
       return null;
     }
 
     sessions.setSessionEffort(normalizedSessionId, normalizedEffort);
+    if (legacyUltracode !== undefined) {
+      sessions.setSessionUltracode(normalizedSessionId, legacyUltracode);
+    }
     return {
       provider,
       sessionId: normalizedSessionId,
       effort: normalizedEffort,
+      ultracode: legacyUltracode ?? recordedSelection.ultracode,
+      source: 'session',
+    };
+  };
+
+  /**
+   * Records whether one session runs with ultracode on.
+   *
+   * Mirrors `setSessionEffort`: called from the active-ultracode route when the
+   * user flips the switch and from `chat.send` on every turn that carries a
+   * choice, and ignores an id that has no session row yet.
+   */
+  const setSessionUltracode = (
+    provider: LLMProvider,
+    sessionId: string,
+    ultracode: boolean,
+  ): RecordedSessionReasoning | null => {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) {
+      return null;
+    }
+
+    const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
+    if (!recordedSelection) {
+      return null;
+    }
+
+    sessions.setSessionUltracode(normalizedSessionId, ultracode);
+    return {
+      provider,
+      sessionId: normalizedSessionId,
+      effort: recordedSelection.effort,
+      ultracode,
       source: 'session',
     };
   };
@@ -450,6 +538,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
           sessionId: normalizedSessionId,
           model: recordedSelection.model,
           effort: recordedSelection.effort,
+          ultracode: recordedSelection.ultracode,
           source: 'session',
         };
       }
@@ -467,6 +556,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
           sessionId: normalizedSessionId,
           model: resolvedProviderModel,
           effort: recordedSelection?.effort ?? null,
+          ultracode: recordedSelection?.ultracode ?? null,
           source: 'provider',
         };
       }
@@ -476,6 +566,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         sessionId: normalizedSessionId,
         model: normalizedRequestedModel || providerCatalog.DEFAULT,
         effort: recordedSelection?.effort ?? null,
+        ultracode: recordedSelection?.ultracode ?? null,
         source: normalizedRequestedModel ? 'session' : 'default',
       };
     }
@@ -486,6 +577,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         sessionId: null,
         model: normalizedRequestedModel,
         effort: null,
+        ultracode: null,
         source: 'session',
       };
     }
@@ -496,6 +588,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       sessionId: null,
       model: providerCatalog.DEFAULT,
       effort: null,
+      ultracode: null,
       source: 'default',
     };
   };
@@ -530,6 +623,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     deleteCustomModel,
     setSessionModel,
     setSessionEffort,
+    setSessionUltracode,
     resolveSessionModel,
     resolveResumeModel,
   };

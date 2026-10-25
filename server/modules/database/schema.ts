@@ -133,11 +133,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     custom_name TEXT,
     project_path TEXT,
     jsonl_path TEXT,
-    -- Model and reasoning effort this session runs with. Written when the user
-    -- changes either selection and on every send, so reopening a session
-    -- restores its exact runtime configuration instead of provider defaults.
+    -- Model, reasoning effort and ultracode switch this session runs with.
+    -- Written when the user changes a selection and on every send, so
+    -- reopening a session restores its exact runtime configuration instead of
+    -- provider defaults. \`ultracode\` is 1 (on), 0 (off) or NULL when no choice
+    -- has been recorded; it combines with any effort level.
     model TEXT,
     effort TEXT,
+    ultracode INTEGER DEFAULT NULL,
     -- The app session this one was branched from, NULL for sessions created
     -- normally. Informational only: a fork is a fully independent provider
     -- session, and deleting the source does not affect it.

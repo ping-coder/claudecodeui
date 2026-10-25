@@ -18,14 +18,18 @@ const createModels = (value: string): ProviderModelsDefinition => ({
 
 const createCurrentActiveModel = (model: string): ProviderCurrentActiveModel => ({ model });
 
-/** In-memory stand-in for the `sessions` table rows the service reads and writes. */
+/**
+ * In-memory stand-in for the `sessions` table rows the service reads and
+ * writes. `ultracode` is stored as the column holds it: 1, 0, or NULL.
+ */
 const createSessionStore = (
   rows: Record<string, string | null> = {},
   efforts: Record<string, string | null> = {},
+  ultracodes: Record<string, number | null> = {},
 ) => {
   const sessions = new Map(Object.entries(rows).map(([sessionId, model]) => [
     sessionId,
-    { model, effort: efforts[sessionId] ?? null },
+    { model, effort: efforts[sessionId] ?? null, ultracode: ultracodes[sessionId] ?? null },
   ]));
   return {
     sessions,
@@ -41,6 +45,12 @@ const createSessionStore = (
       const session = sessions.get(sessionId);
       if (session) {
         session.effort = effort;
+      }
+    },
+    setSessionUltracode: (sessionId: string, ultracode: boolean) => {
+      const session = sessions.get(sessionId);
+      if (session) {
+        session.ultracode = ultracode ? 1 : 0;
       }
     },
   };
@@ -346,6 +356,48 @@ test('custom models without declared effort levels expose no effort', async () =
   assert.equal('effort' in created.model, false);
 });
 
+test('custom models can run ultracode only when their provider supports it and they declare xhigh', async () => {
+  const { service } = createTestService();
+
+  const xhighClaude = await service.createCustomModel('claude', {
+    model: 'Gateway Opus',
+    id: 'gateway-opus',
+    effort: { values: ['low', 'xhigh'] },
+  });
+  assert.equal(xhighClaude.model.supportsUltracode, true);
+  assert.equal(
+    xhighClaude.models.OPTIONS.find((option) => option.value === 'gateway-opus')?.supportsUltracode,
+    true,
+  );
+
+  // Claude Code gates ultracode on xhigh-capable models.
+  const highOnlyClaude = await service.createCustomModel('claude', {
+    model: 'Gateway Haiku',
+    id: 'gateway-haiku',
+    effort: { values: ['low', 'high'] },
+  });
+  assert.equal('supportsUltracode' in highOnlyClaude.model, false);
+
+  const plainClaude = await service.createCustomModel('claude', { model: 'Plain', id: 'gateway-plain' });
+  assert.equal('supportsUltracode' in plainClaude.model, false);
+
+  // Other providers cannot run ultracode, whatever levels a model declares.
+  const xhighCodex = await service.createCustomModel('codex', {
+    model: 'Gateway GPT',
+    id: 'gateway-gpt',
+    effort: { values: ['xhigh'] },
+  });
+  assert.equal('supportsUltracode' in xhighCodex.model, false);
+
+  // Dropping xhigh from the declared levels takes ultracode away with it.
+  const narrowed = await service.updateCustomModel('claude', xhighClaude.model.recordId as number, {
+    model: 'Gateway Opus',
+    id: 'gateway-opus',
+    effort: { values: ['low'] },
+  });
+  assert.equal('supportsUltracode' in narrowed.model, false);
+});
+
 test('custom effort levels must be levels the provider supports', async () => {
   const { service } = createTestService();
 
@@ -388,7 +440,7 @@ test('allowed effort levels come from the provider, not from the built-in models
   // Every merged catalog carries the provider's levels for the model library,
   // weakest first, and an empty list where effort is unsupported.
   const expectedLevels: Record<LLMProvider, string[]> = {
-    claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+    claude: ['low', 'medium', 'high', 'xhigh', 'max'],
     codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     cursor: [],
     opencode: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
@@ -461,6 +513,7 @@ test('setSessionModel records the model on the session row', () => {
     sessionId: 'session-1',
     model: 'opus',
     effort: null,
+    ultracode: null,
     source: 'session',
   });
   assert.equal(sessions.sessions.get('session-1')?.model, 'opus');
@@ -484,6 +537,7 @@ test('setSessionEffort records an explicit effort on the session row', () => {
     provider: 'codex',
     sessionId: 'session-1',
     effort: 'ultra',
+    ultracode: null,
     source: 'session',
   });
   assert.equal(sessions.sessions.get('session-1')?.effort, 'ultra');
@@ -495,6 +549,107 @@ test('setSessionEffort ignores sessions that have no row yet', () => {
 
   assert.equal(service.setSessionEffort('codex', 'missing-session', 'high'), null);
   assert.equal(sessions.sessions.size, 0);
+});
+
+test('setSessionEffort stores a legacy ultracode effort as xhigh with ultracode on', () => {
+  // A frontend cached from before ultracode became a switch still posts it.
+  const sessions = createSessionStore({ 'session-1': 'opus' }, { 'session-1': 'low' });
+  const { service } = createTestService({ sessions });
+
+  const stored = service.setSessionEffort('claude', 'session-1', 'ultracode');
+
+  assert.deepEqual(stored, {
+    provider: 'claude',
+    sessionId: 'session-1',
+    effort: 'xhigh',
+    ultracode: true,
+    source: 'session',
+  });
+  assert.deepEqual(sessions.sessions.get('session-1'), { model: 'opus', effort: 'xhigh', ultracode: 1 });
+});
+
+test('setSessionEffort leaves a recorded ultracode choice alone', () => {
+  const sessions = createSessionStore({ 'session-1': 'opus' }, {}, { 'session-1': 1 });
+  const { service } = createTestService({ sessions });
+
+  const stored = service.setSessionEffort('claude', 'session-1', 'low');
+
+  assert.equal(stored?.ultracode, true);
+  assert.deepEqual(sessions.sessions.get('session-1'), { model: 'opus', effort: 'low', ultracode: 1 });
+});
+
+test('setSessionUltracode records the switch and resolveSessionModel reads it back', async () => {
+  const sessions = createSessionStore({ 'session-1': 'opus' }, { 'session-1': 'low' });
+  const { service } = createTestService({ sessions });
+
+  assert.equal((await service.resolveSessionModel('claude', { sessionId: 'session-1' })).ultracode, null);
+
+  const turnedOn = service.setSessionUltracode('claude', 'session-1', true);
+  assert.deepEqual(turnedOn, {
+    provider: 'claude',
+    sessionId: 'session-1',
+    effort: 'low',
+    ultracode: true,
+    source: 'session',
+  });
+  assert.deepEqual(await service.resolveSessionModel('claude', { sessionId: 'session-1' }), {
+    provider: 'claude',
+    sessionId: 'session-1',
+    model: 'opus',
+    effort: 'low',
+    ultracode: true,
+    source: 'session',
+  });
+
+  // Off is a recorded choice of its own, not the absence of one.
+  assert.equal(service.setSessionUltracode('claude', 'session-1', false)?.ultracode, false);
+  assert.equal(sessions.sessions.get('session-1')?.ultracode, 0);
+  assert.equal((await service.resolveSessionModel('claude', { sessionId: 'session-1' })).ultracode, false);
+});
+
+test('setSessionUltracode ignores sessions that have no row yet', () => {
+  const sessions = createSessionStore();
+  const { service } = createTestService({ sessions });
+
+  assert.equal(service.setSessionUltracode('claude', 'missing-session', true), null);
+  assert.equal(service.setSessionUltracode('claude', '  ', true), null);
+  assert.equal(sessions.sessions.size, 0);
+});
+
+test('a legacy ultracode effort on a session row reads as xhigh with ultracode on', async () => {
+  const { service } = createTestService({
+    sessions: createSessionStore(
+      { 'legacy-unset': 'opus', 'legacy-off': 'opus', 'unrecorded-model': null },
+      { 'legacy-unset': 'ultracode', 'legacy-off': 'ultracode', 'unrecorded-model': 'ultracode' },
+      { 'legacy-off': 0 },
+    ),
+  });
+
+  const unset = await service.resolveSessionModel('claude', { sessionId: 'legacy-unset' });
+  assert.equal(unset.effort, 'xhigh');
+  assert.equal(unset.ultracode, true);
+
+  // An explicitly recorded switch wins over what the legacy token implied.
+  const off = await service.resolveSessionModel('claude', { sessionId: 'legacy-off' });
+  assert.equal(off.effort, 'xhigh');
+  assert.equal(off.ultracode, false);
+
+  const fallback = await service.resolveSessionModel('claude', { sessionId: 'unrecorded-model' });
+  assert.equal(fallback.source, 'default');
+  assert.equal(fallback.effort, 'xhigh');
+  assert.equal(fallback.ultracode, true);
+
+  // Writing the model back reports the split selection too.
+  const stored = service.setSessionModel('claude', 'legacy-unset', 'sonnet');
+  assert.equal(stored?.effort, 'xhigh');
+  assert.equal(stored?.ultracode, true);
+});
+
+test('session-less resolutions report no ultracode choice', async () => {
+  const { service } = createTestService();
+
+  assert.equal((await service.resolveSessionModel('claude', { requestedModel: 'opus' })).ultracode, null);
+  assert.equal((await service.resolveSessionModel('claude')).ultracode, null);
 });
 
 test('resolveSessionModel prefers the recorded session model', async () => {

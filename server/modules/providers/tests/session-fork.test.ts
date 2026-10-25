@@ -101,17 +101,34 @@ test('a fork becomes an independent session that points back at its source', asy
   });
 });
 
-test('a fork inherits the model and effort of the conversation it branched from', async () => {
+test('a fork inherits the model, effort and ultracode of the conversation it branched from', async () => {
   await withForkableClaude(async ({ directory }) => {
     seedSource(directory);
     sessionsDb.setSessionModel(SOURCE_ID, 'claude-opus-5');
-    sessionsDb.setSessionEffort(SOURCE_ID, 'xhigh');
+    sessionsDb.setSessionEffort(SOURCE_ID, 'low');
+    sessionsDb.setSessionUltracode(SOURCE_ID, true);
 
     const result = await sessionsService.forkSessionById(SOURCE_ID);
 
     const forked = sessionsDb.getSessionById(result.sessionId);
     assert.equal(forked?.model, 'claude-opus-5');
-    assert.equal(forked?.effort, 'xhigh');
+    assert.equal(forked?.effort, 'low');
+    assert.equal(forked?.ultracode, 1);
+
+    // An explicit off is copied as off, and no choice stays no choice.
+    sessionsDb.setSessionUltracode(SOURCE_ID, false);
+    const offFork = await sessionsService.forkSessionById(SOURCE_ID);
+    assert.equal(sessionsDb.getSessionById(offFork.sessionId)?.ultracode, 0);
+  });
+});
+
+test('a fork of a session with no recorded ultracode choice records none either', async () => {
+  await withForkableClaude(async ({ directory }) => {
+    seedSource(directory);
+
+    const result = await sessionsService.forkSessionById(SOURCE_ID);
+
+    assert.equal(sessionsDb.getSessionById(result.sessionId)?.ultracode, null);
   });
 });
 

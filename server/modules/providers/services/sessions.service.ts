@@ -370,6 +370,7 @@ export const sessionsService = {
       // differently from the conversation it was branched from.
       model: source.model,
       effort: source.effort,
+      ultracode: source.ultracode,
     });
 
     await broadcastSessionUpserted(forkSessionId);

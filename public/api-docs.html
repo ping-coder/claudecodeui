@@ -544,7 +544,13 @@
                                         <td><code>effort</code></td>
                                         <td>string</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>Reasoning effort for Claude, Codex, and OpenCode models that expose effort metadata. Use <code>default</code> or omit it to let the provider decide.</td>
+                                        <td>Reasoning effort for Claude, Codex, and OpenCode models that expose effort metadata. Claude accepts <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, and <code>max</code>, depending on the model. Use <code>default</code> or omit it to let the provider decide. The legacy Claude value <code>ultracode</code> is still accepted and runs as <code>xhigh</code> with <code>ultracode</code> on.</td>
+                                    </tr>
+                                    <tr>
+                                        <td><code>ultracode</code></td>
+                                        <td>boolean</td>
+                                        <td><span class="badge badge-optional">Optional</span></td>
+                                        <td>Claude only. Turns ultracode, Claude Code's standing dynamic-workflow orchestration, on or off. It is independent of <code>effort</code> and combines with any level (for example <code>low</code> with ultracode on). Honoured only on models that support <code>xhigh</code>; ignored on other models and by the other providers. Omit it to leave the choice to Claude Code's own settings.</td>
                                     </tr>
                                     <tr>
                                         <td><code>cleanup</code></td>

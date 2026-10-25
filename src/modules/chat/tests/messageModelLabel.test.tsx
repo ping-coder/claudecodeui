@@ -14,20 +14,47 @@ import type { ChatMessage, NormalizedMessage } from '@/shared/types';
 // The model ids that actually appear on assistant rows in real Claude Code
 // transcripts, taken from a ~86k-row sample of this machine's `~/.claude`.
 describe('the label a reported model is shortened to', () => {
-  it('names the family for a dated or undated id', () => {
-    expect(formatAnsweringModelLabel('claude-opus-5')).toBe('Opus');
-    expect(formatAnsweringModelLabel('claude-sonnet-5')).toBe('Sonnet');
-    expect(formatAnsweringModelLabel('claude-haiku-4-5-20251001')).toBe('Haiku');
-    expect(formatAnsweringModelLabel('claude-fable-5-1')).toBe('Fable');
+  it('names the family and version of an undated id', () => {
+    expect(formatAnsweringModelLabel('claude-opus-5-5')).toBe('Opus 5.5');
+    expect(formatAnsweringModelLabel('claude-fable-5-1')).toBe('Fable 5.1');
+    expect(formatAnsweringModelLabel('claude-mythos-5-1')).toBe('Mythos 5.1');
+    expect(formatAnsweringModelLabel('claude-opus-5')).toBe('Opus 5');
+    expect(formatAnsweringModelLabel('claude-sonnet-5')).toBe('Sonnet 5');
+  });
+
+  it('drops the release date from a dated id', () => {
+    expect(formatAnsweringModelLabel('claude-sonnet-4-5-20250929')).toBe('Sonnet 4.5');
+    expect(formatAnsweringModelLabel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5');
+    expect(formatAnsweringModelLabel('claude-haiku-4-5@20251001')).toBe('Haiku 4.5');
+    expect(formatAnsweringModelLabel('claude-opus-4-20250514')).toBe('Opus 4');
+    expect(formatAnsweringModelLabel('claude-opus-4-1@20250805')).toBe('Opus 4.1');
+  });
+
+  it('reads the version of an id written in the older version-first order', () => {
+    expect(formatAnsweringModelLabel('claude-3-5-sonnet-20241022')).toBe('Sonnet 3.5');
+    expect(formatAnsweringModelLabel('claude-3-opus-20240229')).toBe('Opus 3');
+    expect(formatAnsweringModelLabel('anthropic.claude-3-5-sonnet-20240620-v1:0')).toBe('Sonnet 3.5');
+  });
+
+  it('ignores a cloud or gateway prefix and suffix around the id', () => {
+    expect(formatAnsweringModelLabel('us.anthropic.claude-opus-5-5-v1:0')).toBe('Opus 5.5');
+    expect(formatAnsweringModelLabel('anthropic/claude-sonnet-5')).toBe('Sonnet 5');
+    expect(formatAnsweringModelLabel('anthropic/claude-opus-4.5')).toBe('Opus 4.5');
+  });
+
+  it('names only the family for a bare alias', () => {
     expect(formatAnsweringModelLabel('opus')).toBe('Opus');
+    expect(formatAnsweringModelLabel('Sonnet')).toBe('Sonnet');
   });
 
   it('keeps a 1M-context id distinct from the base model if one is ever reported', () => {
     // Claude Code writes the base id on assistant rows today, so this guards
     // the mapping rather than describing current transcripts: the same family
     // at a different context window and price must not read as the base.
-    expect(formatAnsweringModelLabel('claude-opus-5[1m]')).toBe('Opus 1M');
-    expect(formatAnsweringModelLabel('claude-opus-5')).toBe('Opus');
+    expect(formatAnsweringModelLabel('claude-opus-5[1m]')).toBe('Opus 5 1M');
+    expect(formatAnsweringModelLabel('claude-sonnet-5-5[1m]')).toBe('Sonnet 5.5 1M');
+    expect(formatAnsweringModelLabel('sonnet[1m]')).toBe('Sonnet 1M');
+    expect(formatAnsweringModelLabel('claude-opus-5')).toBe('Opus 5');
   });
 
   it('shows an unrecognized id verbatim rather than dropping it', () => {
@@ -78,7 +105,7 @@ describe('the model label in the message footer', () => {
 
     const label = container.querySelector('[title="Answered by claude-opus-5"]');
     assert.ok(label, 'the footer must carry the model the provider reported');
-    assert.equal(label?.textContent, 'Opus');
+    assert.equal(label?.textContent, 'Opus 5');
   });
 
   it('shows nothing for a reply the provider reported no model for', () => {

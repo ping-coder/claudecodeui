@@ -166,3 +166,21 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
     );
   });
 });
+
+test('the ultracode switch is recorded per session as 1, 0, or NULL when never chosen', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('session-ultracode', 'claude', '/workspace/demo-project');
+    assert.equal(sessionsDb.getSessionById('session-ultracode')?.ultracode, null);
+
+    sessionsDb.setSessionUltracode('session-ultracode', true);
+    assert.equal(sessionsDb.getSessionById('session-ultracode')?.ultracode, 1);
+
+    // Off is stored, not cleared, so reopening the session keeps it off.
+    sessionsDb.setSessionUltracode('session-ultracode', false);
+    assert.equal(sessionsDb.getSessionById('session-ultracode')?.ultracode, 0);
+
+    // Like the effort, a session without a row is not created by recording.
+    sessionsDb.setSessionUltracode('session-missing', true);
+    assert.equal(sessionsDb.getSessionById('session-missing'), null);
+  });
+});

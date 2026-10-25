@@ -476,6 +476,21 @@ const parseSessionEffortPayload = (payload: unknown): string => {
   return effort;
 };
 
+/** Parses the active-ultracode body, whose `ultracode` must be a real boolean. */
+const parseSessionUltracodePayload = (payload: unknown): boolean => {
+  const ultracode = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>).ultracode
+    : undefined;
+  if (typeof ultracode !== 'boolean') {
+    throw new AppError('ultracode must be true or false.', {
+      code: 'ULTRACODE_REQUIRED',
+      statusCode: 400,
+    });
+  }
+
+  return ultracode;
+};
+
 const parseModelRecordId = (value: unknown): number => {
   const rawRecordId = readPathParam(value, 'recordId').trim();
   if (!/^\d+$/.test(rawRecordId)) {
@@ -712,7 +727,7 @@ router.post(
     // A session row only exists once the gateway has allocated one. Report the
     // selection back either way so the client can hold it until the first send.
     res.json(createApiSuccessResponse(
-      stored ?? { provider, sessionId, model, effort: null, source: 'session' as const },
+      stored ?? { provider, sessionId, model, effort: null, ultracode: null, source: 'session' as const },
     ));
   }),
 );
@@ -728,7 +743,23 @@ router.post(
     // Mirror active-model behavior for a composer that picked an effort just
     // before the session gateway created its row.
     res.json(createApiSuccessResponse(
-      stored ?? { provider, sessionId, effort, source: 'session' as const },
+      stored ?? { provider, sessionId, effort, ultracode: null, source: 'session' as const },
+    ));
+  }),
+);
+
+/** Records the ultracode on/off choice for one app session. */
+router.post(
+  '/:provider/sessions/:sessionId/active-ultracode',
+  asyncHandler(async (req: Request, res: Response) => {
+    const provider = parseProvider(req.params.provider);
+    const sessionId = parseSessionId(req.params.sessionId);
+    const ultracode = parseSessionUltracodePayload(req.body);
+    const stored = providerModelsService.setSessionUltracode(provider, sessionId, ultracode);
+    // Like active-effort: a session without a row yet gets its choice echoed
+    // back and records it with the first send.
+    res.json(createApiSuccessResponse(
+      stored ?? { provider, sessionId, effort: null, ultracode, source: 'session' as const },
     ));
   }),
 );

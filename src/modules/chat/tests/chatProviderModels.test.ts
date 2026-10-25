@@ -32,6 +32,7 @@ vi.mock('@/shared/api', () => ({
       sessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveEffort: () => okJson({ success: true, data: null }),
+      setSessionActiveUltracode: () => okJson({ success: true, data: null }),
       createModel: () => okJson({ success: true, data: null }),
       updateModel: () => okJson({ success: true, data: null }),
       removeModel: () => okJson({ success: true, data: null }),

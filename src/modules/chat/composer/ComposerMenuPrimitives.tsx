@@ -5,10 +5,11 @@ import { cn } from '@/shared/utils';
 import type { ComposerMenuAnchor } from '@/shared/types';
 
 /**
- * Shared shell for the composer popovers (model/effort and permissions) so both
- * menus share one surface, one heading style and one row style.
+ * Shared shell for the composer popovers (model/effort, permissions and
+ * scheduling) so every menu shares one surface, one heading style and one row
+ * style.
  *
- * Used by chat's ComposerModelMenu and ComposerPermissionMenu.
+ * Used by chat's ComposerModelMenu, ComposerPermissionMenu and ScheduleMessagePopover.
  */
 export function ComposerMenuSurface({
   anchor,
@@ -39,19 +40,27 @@ export function ComposerMenuSurface({
   );
 }
 
-/** Used by chat's ComposerModelMenu and ComposerPermissionMenu to label a section of the popover. */
+/** Used by chat's ComposerModelMenu, ComposerPermissionMenu and ScheduleMessagePopover to label a section of the popover. */
 export function ComposerMenuHeading({ children }: { children: ReactNode }) {
   return (
     <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground">{children}</p>
   );
 }
 
-/** Used by chat's ComposerModelMenu to divide its model and effort sections. */
+/** Used by chat's ComposerModelMenu and ScheduleMessagePopover to divide the sections of a popover. */
 export function ComposerMenuSeparator() {
   return <div className="my-1 h-px bg-border" aria-hidden />;
 }
 
-/** Used by chat's ComposerModelMenu and ComposerPermissionMenu to render one selectable row with its checked state. */
+/**
+ * Used by chat's ComposerModelMenu, ComposerPermissionMenu and
+ * ScheduleMessagePopover to render one selectable row with its checked state.
+ *
+ * `menuitemradio` rows pick one value of a group, `menuitemcheckbox` rows flip
+ * an independent on/off option, and plain `menuitem` rows act without a
+ * checked state. A `trailing` element replaces the default check mark, e.g.
+ * with a chevron or a switch.
+ */
 export function ComposerMenuItem({
   label,
   description,
@@ -67,7 +76,7 @@ export function ComposerMenuItem({
   icon?: ReactNode;
   isSelected: boolean;
   onSelect: () => void;
-  role?: 'menuitemradio' | 'menuitem';
+  role?: 'menuitemradio' | 'menuitemcheckbox' | 'menuitem';
   trailing?: ReactNode;
   className?: string;
 }) {
@@ -75,7 +84,7 @@ export function ComposerMenuItem({
     <button
       type="button"
       role={role}
-      aria-checked={role === 'menuitemradio' ? isSelected : undefined}
+      aria-checked={role === 'menuitem' ? undefined : isSelected}
       onClick={onSelect}
       className={cn(
         'flex w-full items-start gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
@@ -91,7 +100,8 @@ export function ComposerMenuItem({
           <span className="mt-0.5 block text-xs leading-4 text-muted-foreground">{description}</span>
         )}
       </span>
-      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+      {/* min-w rather than w so a trailing control wider than the check mark (a switch) is not clipped. */}
+      <span className="mt-0.5 flex h-4 min-w-4 shrink-0 items-center justify-center">
         {trailing ?? (isSelected ? <Check className="h-3.5 w-3.5 text-foreground" /> : null)}
       </span>
     </button>

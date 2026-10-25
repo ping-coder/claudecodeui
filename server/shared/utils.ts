@@ -706,6 +706,55 @@ export function isPlaceholderProviderModel(model: string): boolean {
 }
 
 // ---------------------------
+//----------------- LEGACY ULTRACODE EFFORT UTILITIES ------------
+/**
+ * Effort token older builds used to stand for Claude Code's ultracode, back
+ * when ultracode meant "xhigh effort plus standing workflow orchestration" and
+ * was offered as one more effort level. Ultracode is now an independent on/off
+ * switch that combines with any effort level, so this value is never valid as
+ * an effort any more; it survives only in persisted data: session rows,
+ * custom-model effort lists, queued and scheduled message options, and API
+ * callers written against the old shape.
+ *
+ * Used by the database migrations that rewrite stored rows, and by
+ * `splitLegacyUltracodeEffort` for the values that cannot be migrated in place.
+ */
+export const LEGACY_ULTRACODE_EFFORT = 'ultracode';
+
+/**
+ * Effort level a legacy `ultracode` effort token always ran at. Used with
+ * `LEGACY_ULTRACODE_EFFORT` by the migrations and `splitLegacyUltracodeEffort`.
+ */
+export const LEGACY_ULTRACODE_EFFORT_LEVEL = 'xhigh';
+
+/**
+ * Rewrites a selection that still carries the legacy `ultracode` effort token
+ * into the shape it means today: effort `xhigh` with ultracode on. An explicit
+ * `ultracode` value already on the selection wins, since it can only come from
+ * a client that knows the new shape. Selections without the legacy token are
+ * returned unchanged (same object).
+ *
+ * Call it wherever an effort value read from storage or from a client reaches
+ * code that records or runs it: the chat websocket before recording a send, the
+ * Providers service when reading a session's recorded selection, and the Claude
+ * runtime before building SDK options, so a replayed queued or scheduled
+ * message cannot write the token back or send it to the SDK as an effort.
+ */
+export function splitLegacyUltracodeEffort<
+  TSelection extends { effort?: string | null; ultracode?: boolean | null },
+>(selection: TSelection): TSelection {
+  if (selection.effort !== LEGACY_ULTRACODE_EFFORT) {
+    return selection;
+  }
+
+  return {
+    ...selection,
+    effort: LEGACY_ULTRACODE_EFFORT_LEVEL,
+    ultracode: selection.ultracode ?? true,
+  };
+}
+
+// ---------------------------
 //----------------- WEBSOCKET PAYLOAD PARSING UTILITIES ------------
 /**
  * Parses one websocket message payload into a plain JSON object record.

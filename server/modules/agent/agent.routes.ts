@@ -649,7 +649,8 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *                        which is the first custom model while "Use only my models" is on. Cursor
    *                        without that setting leaves the choice to its CLI.
    *
-   *                        Claude models: 'default', 'sonnet', 'opus', 'haiku', 'sonnet[1m]', 'opus[1m]', 'fable'
+   *                        Claude models: 'default', 'best', 'fable', 'sonnet', 'sonnet[1m]', 'opus', 'opus[1m]',
+   *                                       'haiku', 'opusplan'
    *                        Cursor models: 'gpt-5' (default), 'gpt-5.2', 'gpt-5.2-high', 'sonnet-4.5', 'opus-4.5',
    *                                       'composer-1', 'auto', 'gpt-5.1', 'gpt-5.1-high',
    *                                       'gpt-5.1-codex', 'gpt-5.1-codex-high', 'gpt-5.1-codex-max',
@@ -657,9 +658,20 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *                        Codex models: 'gpt-5.4' (default), 'gpt-5.5', 'gpt-5.4-mini'
    *
    * @param {string} effort - (Optional) Reasoning effort for providers/models that support it.
-   *                          Claude supports: 'low', 'medium', 'high', 'xhigh', 'max' depending on model.
+   *                          Claude supports: 'low', 'medium', 'high', 'xhigh', 'max' depending on model
+   *                          ('xhigh' only on the models that also offer ultracode).
    *                          Codex supports: 'low', 'medium', 'high', 'xhigh'.
    *                          'default' or omission lets the provider decide.
+   *                          The legacy Claude value 'ultracode' is still accepted and runs as
+   *                          'xhigh' with ultracode on (an explicit `ultracode` still wins).
+   *
+   * @param {boolean} ultracode - (Optional, Claude only) Ultracode on/off: Claude Code's standing
+   *                             dynamic-workflow orchestration. Independent of effort, so it combines
+   *                             with any level (e.g. 'low' + ultracode). Honoured only on xhigh-capable
+   *                             models (every Claude alias except 'default', and custom models that
+   *                             offer 'xhigh'); ignored elsewhere and
+   *                             by the other providers. Accepts true/false or the strings "true"/"false".
+   *                             Omitted: no choice is sent and Claude Code's own settings decide.
    *
    * @param {boolean} cleanup - (Optional) Auto-cleanup project directory after completion.
    *                           Default: true
@@ -878,6 +890,11 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     // Parse stream and cleanup as booleans (handle string "true"/"false" from curl)
     const stream = req.body.stream === undefined ? true : (req.body.stream === true || req.body.stream === 'true');
     const cleanup = req.body.cleanup === undefined ? true : (req.body.cleanup === true || req.body.cleanup === 'true');
+    // Ultracode stays unset unless the caller chose, so Claude Code's own
+    // settings decide; the runtime drops it on models that cannot run it.
+    const ultracode = req.body.ultracode === true || req.body.ultracode === 'true'
+      ? true
+      : (req.body.ultracode === false || req.body.ultracode === 'false' ? false : undefined);
 
     // If branchName is provided, automatically enable createBranch
     const createBranch = branchName ? true : (req.body.createBranch === true || req.body.createBranch === 'true');
@@ -1047,6 +1064,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           sessionId: appSessionId,
           model: model || providerModels?.DEFAULT,
           effort,
+          ultracode,
           permissionMode: 'bypassPermissions' // Bypass all permissions for API calls
         }, run.writer);
 

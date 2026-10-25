@@ -1,11 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Workflow } from 'lucide-react';
 
 import type { ProviderModelOption } from '@/shared/types';
 import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
+import { cn } from '@/shared/utils';
 import { useComposerMenuAnchor } from '@/modules/chat/hooks/useComposerMenuAnchor';
+import { formatAnsweringModelLabel } from '@/modules/chat/utils/modelLabel';
 import {
   ComposerMenuHeading,
   ComposerMenuItem,
@@ -25,11 +27,42 @@ type ComposerModelMenuProps = {
   modelOptions: ProviderModelOption[];
   onSelectModel: (model: string) => void;
   modelsLoading: boolean;
+  /**
+   * Whether ultracode (standing workflow orchestration, independent of the
+   * effort level) is on for the next turn; `null` when the active model cannot
+   * run it, which hides the control.
+   */
+  ultracode: boolean | null;
+  onToggleUltracode: (ultracode: boolean) => void;
 };
 
 /**
+ * Compact, purely visual switch for the Ultracode row, in the settings
+ * toggle's colours. The row itself carries the checked state for assistive
+ * tech, so this stays hidden from it.
+ */
+function UltracodeSwitchIndicator({ checked }: { checked: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors duration-200',
+        checked ? 'border-primary bg-primary' : 'border-border bg-muted',
+      )}
+    >
+      <span
+        className={cn(
+          'pointer-events-none inline-block h-3 w-3 rounded-full shadow-sm transition-transform duration-200',
+          checked ? 'translate-x-[13px] bg-white' : 'translate-x-px bg-foreground/60 dark:bg-foreground/80',
+        )}
+      />
+    </span>
+  );
+}
+
+/**
  * Rendered by chat's ChatComposer as the popover for choosing the active
- * provider's model and reasoning effort for the next turn.
+ * provider's model, reasoning effort and ultracode switch for the next turn.
  */
 function ComposerModelMenu({
   effort,
@@ -39,6 +72,8 @@ function ComposerModelMenu({
   modelOptions,
   onSelectModel,
   modelsLoading,
+  ultracode,
+  onToggleUltracode,
 }: ComposerModelMenuProps) {
   const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
@@ -65,18 +100,26 @@ function ComposerModelMenu({
     () => modelOptions.find((option) => option.value === model) ?? null,
     [model, modelOptions],
   );
-  const modelLabel = selectedModelOption?.label || model;
+  // A model missing from the catalog (an external session reporting a raw id
+  // such as `claude-opus-5-5`) is named the way replies name it.
+  const modelLabel = selectedModelOption?.label || formatAnsweringModelLabel(model) || model;
 
   const hasEffortSection = resolvedEffortOptions.length > 0;
   const hasModelSection = modelOptions.length > 0 || modelsLoading;
-  if (!hasEffortSection && !hasModelSection) {
+  const hasUltracodeControl = ultracode !== null;
+  if (!hasEffortSection && !hasModelSection && !hasUltracodeControl) {
     return null;
   }
 
-  const triggerLabel = hasModelSection ? modelLabel : effortLabel;
+  const ultracodeLabel = t('composer.ultracode', { defaultValue: 'Ultracode' });
+  const triggerLabel = hasModelSection ? modelLabel : hasEffortSection ? effortLabel : ultracodeLabel;
   const ariaLabel = t('composer.modelMenu', {
     defaultValue: 'Select model and reasoning effort',
   });
+  // The trigger only shows an icon for ultracode, so its name says it too.
+  const triggerAriaLabel = ultracode
+    ? `${ariaLabel} (${t('composer.ultracodeOn', { defaultValue: 'Ultracode on' })})`
+    : ariaLabel;
 
   return (
     <>
@@ -87,12 +130,23 @@ function ComposerModelMenu({
           updateAnchor();
           setIsOpen((current) => !current);
         }}
-        className="flex h-8 max-w-20 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56"
+        className={cn(
+          'flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56',
+          // The ultracode icon gets its own room on phones instead of eating the label's.
+          ultracode ? 'max-w-24' : 'max-w-20',
+        )}
         aria-haspopup="menu"
         aria-expanded={isOpen}
-        aria-label={ariaLabel}
-        title={ariaLabel}
+        aria-label={triggerAriaLabel}
+        title={triggerAriaLabel}
       >
+        {ultracode && (
+          <Workflow
+            aria-hidden
+            data-testid="composer-ultracode-indicator"
+            className="h-3.5 w-3.5 shrink-0 text-purple-500 dark:text-purple-400"
+          />
+        )}
         <span className="truncate">{triggerLabel}</span>
         {hasModelSection && hasEffortSection && effort !== DEFAULT_EFFORT_VALUE && (
           <span className="hidden shrink-0 capitalize text-muted-foreground sm:inline">· {effortLabel}</span>
@@ -122,9 +176,27 @@ function ComposerModelMenu({
             </>
           )}
 
-          {hasModelSection && (
+          {hasUltracodeControl && (
             <>
               {hasEffortSection && <ComposerMenuSeparator />}
+              {/* Independent of the effort level, so toggling it leaves the
+                  menu open for the user to pick an effort as well. */}
+              <ComposerMenuItem
+                role="menuitemcheckbox"
+                label={ultracodeLabel}
+                description={t('composer.ultracodeDescription', {
+                  defaultValue: 'Workflow orchestration at any reasoning level',
+                })}
+                isSelected={ultracode}
+                onSelect={() => onToggleUltracode(!ultracode)}
+                trailing={<UltracodeSwitchIndicator checked={ultracode} />}
+              />
+            </>
+          )}
+
+          {hasModelSection && (
+            <>
+              {(hasEffortSection || hasUltracodeControl) && <ComposerMenuSeparator />}
               <ComposerMenuItem
                 role="menuitem"
                 label={modelLabel}

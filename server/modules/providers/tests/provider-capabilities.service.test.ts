@@ -35,3 +35,29 @@ test('capability effort levels cover every level a curated model declares', () =
     assert.deepEqual(missingLevels, [], `${provider}: effortLevels misses curated levels`);
   }
 });
+
+test('only Claude can run ultracode', () => {
+  const supportsUltracode = Object.fromEntries(
+    providerCapabilitiesService.listAllProviderCapabilities()
+      .map((capabilities) => [capabilities.provider, capabilities.supportsUltracode]),
+  );
+
+  assert.deepEqual(supportsUltracode, { claude: true, cursor: false, codex: false, opencode: false });
+});
+
+test('ultracode is a switch beside the effort levels, never one of them', () => {
+  for (const [provider, catalog] of Object.entries(CURATED_CATALOGS) as Array<[LLMProvider, ProviderModelsDefinition]>) {
+    const { effortLevels, supportsUltracode } = providerCapabilitiesService.getProviderCapabilities(provider);
+    assert.equal(effortLevels.includes('ultracode'), false, `${provider}: ultracode listed as an effort level`);
+
+    for (const option of catalog.OPTIONS) {
+      const declaredLevels = option.effort?.values.map((level) => level.value) ?? [];
+      assert.equal(declaredLevels.includes('ultracode'), false, `${provider}/${option.value}: ultracode listed as an effort`);
+      if (option.supportsUltracode) {
+        // Claude Code only runs ultracode on xhigh-capable models.
+        assert.equal(supportsUltracode, true, `${provider}/${option.value}: provider cannot run ultracode`);
+        assert.ok(declaredLevels.includes('xhigh'), `${provider}/${option.value}: supportsUltracode without xhigh`);
+      }
+    }
+  }
+});

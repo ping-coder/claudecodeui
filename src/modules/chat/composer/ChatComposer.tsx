@@ -60,6 +60,9 @@ type ChatComposerProps = {
   effort: string;
   availableEffortOptions: NonNullable<ProviderModelOption['effort']>['values'];
   onSelectEffort: (effort: string) => void;
+  /** Ultracode switch for the next turn; `null` when the active model cannot run it. */
+  ultracode: boolean | null;
+  onToggleUltracode: (ultracode: boolean) => void;
   model: string;
   availableModelOptions: ProviderModelOption[];
   onSelectModel: (model: string) => void;
@@ -137,6 +140,8 @@ export default function ChatComposer({
   effort,
   availableEffortOptions,
   onSelectEffort,
+  ultracode,
+  onToggleUltracode,
   model,
   availableModelOptions,
   onSelectModel,
@@ -496,6 +501,8 @@ export default function ChatComposer({
               modelOptions={availableModelOptions}
               onSelectModel={onSelectModel}
               modelsLoading={modelsLoading}
+              ultracode={ultracode}
+              onToggleUltracode={onToggleUltracode}
             />
 
             <ComposerPermissionMenu

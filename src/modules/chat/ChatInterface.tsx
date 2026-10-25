@@ -9,6 +9,7 @@ import PermissionContext from '@/modules/chat/context/PermissionContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
+import { buildModelRunOptions } from '@/shared/utils';
 import type {
   ChatMessage,
   Project,
@@ -108,6 +109,7 @@ function ChatInterface({
     setStoredProviderModel,
     currentProviderEffort,
     currentProviderEffortOptions,
+    currentProviderUltracode,
     currentProviderModel,
     currentProviderModelOptions,
     permissionMode,
@@ -121,6 +123,7 @@ function ChatInterface({
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    selectProviderUltracode,
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
@@ -247,6 +250,7 @@ function ChatInterface({
     cyclePermissionMode,
     currentProviderModel,
     currentProviderEffort,
+    currentProviderUltracode,
     isLoading: isProcessing,
     processingSessions,
     canAbortSession,
@@ -386,12 +390,28 @@ function ChatInterface({
     const scheduled = await scheduleMessage({
       content,
       scheduledFor,
-      options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
+      options: {
+        // The same model/effort/ultracode rule as a live send.
+        ...buildModelRunOptions({
+          model: currentProviderModel,
+          effort: currentProviderEffort,
+          ultracode: currentProviderUltracode,
+        }),
+        permissionMode,
+      },
     });
     if (scheduled) {
       setInput('');
     }
-  }, [currentProviderEffort, currentProviderModel, input, permissionMode, scheduleMessage, setInput]);
+  }, [
+    currentProviderEffort,
+    currentProviderModel,
+    currentProviderUltracode,
+    input,
+    permissionMode,
+    scheduleMessage,
+    setInput,
+  ]);
 
   const permissionContextValue = useMemo(() => ({
     pendingPermissionRequests,
@@ -423,6 +443,14 @@ function ChatInterface({
       console.error('Error changing the active session reasoning effort:', error);
     }
   }, [currentSessionId, provider, selectProviderEffort, selectedSession?.id]);
+
+  const handleToggleComposerUltracode = useCallback(async (ultracode: boolean) => {
+    try {
+      await selectProviderUltracode(provider, ultracode, currentSessionId || selectedSession?.id || null);
+    } catch (error) {
+      console.error('Error changing ultracode for the active session:', error);
+    }
+  }, [currentSessionId, provider, selectProviderUltracode, selectedSession?.id]);
 
   // Mirrors ChatComposer's own visibility check so the message pane can
   // reserve enough bottom space to keep the floating status tab from
@@ -547,6 +575,8 @@ function ChatInterface({
           effort={currentProviderEffort}
           availableEffortOptions={currentProviderEffortOptions}
           onSelectEffort={handleSelectComposerEffort}
+          ultracode={currentProviderUltracode}
+          onToggleUltracode={handleToggleComposerUltracode}
           model={currentProviderModel}
           availableModelOptions={currentProviderModelOptions}
           onSelectModel={handleSelectComposerModel}

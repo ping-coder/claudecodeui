@@ -175,6 +175,113 @@ test('reasoning effort is persisted and returned with the active session model',
   });
 });
 
+test('the ultracode switch is persisted and returned with the active session model', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createAppSession('ultracode-session', 'claude', workspacePath);
+    sessionsDb.setSessionEffort('ultracode-session', 'low');
+    const postUltracode = async (sessionId: string, body: unknown) => {
+      const response = await fetch(
+        `${baseUrl}/api/providers/claude/sessions/${sessionId}/active-ultracode`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      return {
+        status: response.status,
+        payload: await response.json() as {
+          data?: { sessionId: string; effort: string | null; ultracode: boolean | null; source: string };
+          error?: { code: string };
+        },
+      };
+    };
+    const readUltracode = async () => {
+      const response = await fetch(`${baseUrl}/api/providers/claude/sessions/ultracode-session/active-model`);
+      return (await response.json() as { data: { effort: string | null; ultracode: boolean | null } }).data;
+    };
+
+    const initial = await readUltracode();
+    assert.equal(initial.effort, 'low');
+    assert.equal(initial.ultracode, null);
+
+    const turnedOn = await postUltracode('ultracode-session', { ultracode: true });
+    assert.equal(turnedOn.status, 200);
+    assert.deepEqual(turnedOn.payload.data, {
+      provider: 'claude',
+      sessionId: 'ultracode-session',
+      effort: 'low',
+      ultracode: true,
+      source: 'session',
+    });
+    assert.equal(sessionsDb.getSessionById('ultracode-session')?.ultracode, 1);
+    // Independent of the effort level: low effort keeps ultracode on.
+    assert.equal((await readUltracode()).ultracode, true);
+    assert.equal((await readUltracode()).effort, 'low');
+
+    const turnedOff = await postUltracode('ultracode-session', { ultracode: false });
+    assert.equal(turnedOff.status, 200);
+    assert.equal(turnedOff.payload.data?.ultracode, false);
+    assert.equal(sessionsDb.getSessionById('ultracode-session')?.ultracode, 0);
+    assert.equal((await readUltracode()).ultracode, false);
+
+    // A session the gateway has not created yet gets its choice echoed back.
+    const pending = await postUltracode('not-created-yet', { ultracode: true });
+    assert.equal(pending.status, 200);
+    assert.deepEqual(pending.payload.data, {
+      provider: 'claude',
+      sessionId: 'not-created-yet',
+      effort: null,
+      ultracode: true,
+      source: 'session',
+    });
+
+    for (const invalid of [{}, { ultracode: 'true' }, { ultracode: 1 }, { ultracode: null }, []]) {
+      const rejected = await postUltracode('ultracode-session', invalid);
+      assert.equal(rejected.status, 400, JSON.stringify(invalid));
+      assert.equal(rejected.payload.error?.code, 'ULTRACODE_REQUIRED', JSON.stringify(invalid));
+    }
+    assert.equal(sessionsDb.getSessionById('ultracode-session')?.ultracode, 0);
+  });
+});
+
+test('a legacy ultracode effort posted by an old client is stored as xhigh with ultracode on', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createAppSession('legacy-effort-session', 'claude', workspacePath);
+
+    const response = await fetch(
+      `${baseUrl}/api/providers/claude/sessions/legacy-effort-session/active-effort`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort: 'ultracode' }),
+      },
+    );
+    const payload = await response.json() as { data: { effort: string; ultracode: boolean | null } };
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.data.effort, 'xhigh');
+    assert.equal(payload.data.ultracode, true);
+    assert.equal(sessionsDb.getSessionById('legacy-effort-session')?.effort, 'xhigh');
+    assert.equal(sessionsDb.getSessionById('legacy-effort-session')?.ultracode, 1);
+  });
+});
+
+test('the capabilities route reports which providers can run ultracode', async () => {
+  await withProviderServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/providers/capabilities`);
+    const payload = await response.json() as {
+      data: { providers: Array<{ provider: string; supportsUltracode: boolean }> };
+    };
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      Object.fromEntries(payload.data.providers.map((row) => [row.provider, row.supportsUltracode])),
+      { claude: true, cursor: false, codex: false, opencode: false },
+    );
+  });
+});
+
 test('model routes expose immutable defaults and full custom model CRUD', async () => {
   await withProviderServer(async (baseUrl) => {
     const initialResponse = await fetch(`${baseUrl}/api/providers/codex/models`);
@@ -355,7 +462,7 @@ test('custom model routes accept, validate, and return reasoning-effort levels',
     // The model library's toggles come from here, not from the built-in models.
     assert.deepEqual(
       catalogPayload.data.models.EFFORT_LEVELS,
-      ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+      ['low', 'medium', 'high', 'xhigh', 'max'],
     );
 
     // OpenCode's allowed levels do not depend on which upstream providers the

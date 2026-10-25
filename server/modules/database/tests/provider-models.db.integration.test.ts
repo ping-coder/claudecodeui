@@ -59,8 +59,8 @@ test('provider model repository stores custom rows only and maintains session re
       VALUES ('project-1', '/tmp/project-1')
     `).run();
     db.prepare(`
-      INSERT INTO sessions (session_id, provider, project_path, model, effort)
-      VALUES ('session-1', 'codex', '/tmp/project-1', 'gateway/model-v1', 'high')
+      INSERT INTO sessions (session_id, provider, project_path, model, effort, ultracode)
+      VALUES ('session-1', 'codex', '/tmp/project-1', 'gateway/model-v1', 'high', 1)
     `).run();
 
     const updated = providerModelsDb.updateCustomProviderModel('codex', custom.recordId, {
@@ -71,6 +71,7 @@ test('provider model repository stores custom rows only and maintains session re
     assert.equal(sessionsDb.getSessionById('session-1')?.model, 'gateway/model-v2');
     // A rename keeps the same underlying model, so its effort stays applicable.
     assert.equal(sessionsDb.getSessionById('session-1')?.effort, 'high');
+    assert.equal(sessionsDb.getSessionById('session-1')?.ultracode, 1);
 
     const removed = providerModelsDb.deleteCustomProviderModel(
       'codex',
@@ -79,9 +80,10 @@ test('provider model repository stores custom rows only and maintains session re
     );
     assert.equal(removed?.modelId, 'gateway/model-v2');
     assert.equal(sessionsDb.getSessionById('session-1')?.model, 'gpt-default');
-    // The effort belonged to the deleted model and must not survive onto the
-    // fallback, which has its own default.
+    // The effort and ultracode choices belonged to the deleted model and must
+    // not survive onto the fallback, which has its own defaults.
     assert.equal(sessionsDb.getSessionById('session-1')?.effort, null);
+    assert.equal(sessionsDb.getSessionById('session-1')?.ultracode, null);
     assert.equal(providerModelsDb.getCustomProviderModel('codex', custom.recordId), null);
   } finally {
     closeConnection();

@@ -86,6 +86,14 @@ export type ProviderModelOption = {
       description?: string;
     }[];
   };
+  /**
+   * True when this model can run with ultracode: Claude Code's standing
+   * dynamic-workflow orchestration. Ultracode is an on/off switch beside the
+   * effort level, not one of the `effort.values`, and combines with any of
+   * them. Only providers whose capabilities report `supportsUltracode` set it;
+   * absent means unsupported.
+   */
+  supportsUltracode?: boolean;
 };
 
 /**
@@ -191,8 +199,8 @@ export type ProviderCurrentActiveModel = {
 export type ProviderSessionModelSource = 'session' | 'provider' | 'default';
 
 /**
- * The model one session runs with, its persisted reasoning effort when one has
- * been recorded, and where the model answer came from.
+ * The model one session runs with, its persisted reasoning effort and ultracode
+ * choice when they have been recorded, and where the model answer came from.
  *
  * Returned by `providerModelsService.resolveSessionModel` and used by the
  * `/models`, `/cost` and `/status` commands, the active-model route, and the
@@ -204,6 +212,12 @@ export type ProviderSessionModel = {
   model: string;
   /** NULL means this session has not recorded an effort choice yet. */
   effort: string | null;
+  /**
+   * Whether this session last ran with ultracode on. NULL means no choice has
+   * been recorded yet. Independent of `effort`; see
+   * `ProviderModelOption['supportsUltracode']`.
+   */
+  ultracode: boolean | null;
   source: ProviderSessionModelSource;
 };
 

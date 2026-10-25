@@ -421,3 +421,71 @@ test('Agent route reads no model catalog for a continued session of an unregiste
 
   assert.deepEqual(catalogReads, []);
 });
+
+/**
+ * Runs one Agent request with the given extra body fields and returns the
+ * options each provider runtime was started with.
+ */
+async function runWithBody(
+  provider: 'claude' | 'codex' | 'opencode',
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>[]> {
+  const calls: Record<string, unknown>[] = [];
+  const recordOptions = (async (_prompt: string, options: Record<string, unknown>) => {
+    calls.push(options);
+  }) as unknown as AgentDependencies['queryClaude'];
+
+  await withAgentServer(createDependencies({
+    fileSystem: {
+      access: async () => undefined,
+    } as unknown as AgentDependencies['fileSystem'],
+    models: {
+      getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'catalog-default' }),
+    } as unknown as AgentDependencies['models'],
+    queryClaude: recordOptions,
+    queryCodex: recordOptions,
+    queryOpenCode: recordOptions,
+  }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectPath: '/home/test/project',
+        message: 'Run',
+        provider,
+        stream: false,
+        ...body,
+      }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  return calls;
+}
+
+test('Agent route passes the ultracode switch to Claude as a boolean', async () => {
+  const ultracodeFor = async (body: Record<string, unknown>) => (await runWithBody('claude', body)).map((call) => call.ultracode);
+
+  assert.deepEqual(await ultracodeFor({ effort: 'low', ultracode: true }), [true]);
+  assert.deepEqual(await ultracodeFor({ ultracode: false }), [false]);
+  // curl sends form-ish strings, as for stream and cleanup.
+  assert.deepEqual(await ultracodeFor({ ultracode: 'true' }), [true]);
+  assert.deepEqual(await ultracodeFor({ ultracode: 'false' }), [false]);
+  // No choice, or a value that is not one, leaves Claude Code's settings in charge.
+  assert.deepEqual(await ultracodeFor({}), [undefined]);
+  assert.deepEqual(await ultracodeFor({ ultracode: 'yes' }), [undefined]);
+  assert.deepEqual(await ultracodeFor({ ultracode: 1 }), [undefined]);
+
+  // The legacy effort token reaches the runtime untouched; it splits it there.
+  const [legacyCall] = await runWithBody('claude', { effort: 'ultracode' });
+  assert.equal(legacyCall.effort, 'ultracode');
+  assert.equal(legacyCall.ultracode, undefined);
+});
+
+test('Agent route does not pass ultracode to Codex or OpenCode', async () => {
+  for (const provider of ['codex', 'opencode'] as const) {
+    const [call] = await runWithBody(provider, { effort: 'high', ultracode: true });
+    assert.equal(call.effort, 'high');
+    assert.equal('ultracode' in call, false, `${provider} must not receive ultracode`);
+  }
+});

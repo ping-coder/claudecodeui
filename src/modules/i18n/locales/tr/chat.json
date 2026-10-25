@@ -247,6 +247,9 @@
     "answeredBy": "{{model}} tarafından yanıtlandı"
   },
   "composer": {
+    "ultracode": "Ultracode",
+    "ultracodeDescription": "Her akıl yürütme seviyesinde iş akışı orkestrasyonu",
+    "ultracodeOn": "Ultracode açık",
     "permissionHeading": "{{provider}} eylemleri nasıl onaylansın?",
     "permissionCycleHint": "Modu değiştirmek için giriş alanında Tab tuşuna bas",
     "permissionTriggerLabel": "{{mode}}: {{heading}}",

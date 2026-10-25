@@ -19,7 +19,7 @@ import type {
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
 } from '@/shared/types.js';
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { parseIncomingJsonObject, splitLegacyUltracodeEffort } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -243,14 +243,28 @@ async function dispatchRun(
   const clientOptions = (data.options ?? {}) as AnyRecord;
   const command = typeof data.content === 'string' ? data.content : '';
 
+  // Older clients and replayed queued or scheduled messages can still carry the
+  // legacy `ultracode` effort, which now means xhigh with ultracode on. Split it
+  // once here so neither the session row nor the runtime ever sees the token.
+  // `ultracode` is only a choice when it is a real boolean; clients omit it for
+  // models that cannot run ultracode.
+  const requestedEffort = typeof clientOptions.effort === 'string' ? clientOptions.effort.trim() : '';
+  const { effort, ultracode } = splitLegacyUltracodeEffort({
+    effort: requestedEffort || undefined,
+    ultracode: typeof clientOptions.ultracode === 'boolean' ? clientOptions.ultracode : undefined,
+  });
+
   // Record what this turn runs with so reopening the session later restores the
-  // same model and reasoning effort, and so the resume path has a
-  // session-scoped model answer to use.
+  // same model, reasoning effort and ultracode switch, and so the resume path
+  // has a session-scoped model answer to use.
   if (typeof clientOptions.model === 'string' && clientOptions.model.trim()) {
     providerModelsService.setSessionModel(provider, sessionId, clientOptions.model);
   }
-  if (typeof clientOptions.effort === 'string' && clientOptions.effort.trim()) {
-    providerModelsService.setSessionEffort(provider, sessionId, clientOptions.effort);
+  if (effort) {
+    providerModelsService.setSessionEffort(provider, sessionId, effort);
+  }
+  if (typeof ultracode === 'boolean') {
+    providerModelsService.setSessionUltracode(provider, sessionId, ultracode);
   }
 
   const attachmentCandidates = [
@@ -272,6 +286,8 @@ async function dispatchRun(
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
     ...extraRuntimeOptions,
+    effort,
+    ultracode,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,

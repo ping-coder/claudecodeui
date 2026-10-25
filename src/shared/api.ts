@@ -453,6 +453,10 @@ export const api = {
       post(`/api/providers/${provider}/sessions/${encodeURIComponent(sessionId)}/active-effort`, {
         effort,
       }),
+    setSessionActiveUltracode: (provider: string, sessionId: string, ultracode: boolean) =>
+      post(`/api/providers/${provider}/sessions/${encodeURIComponent(sessionId)}/active-ultracode`, {
+        ultracode,
+      }),
 
     mcpServers: (
       provider: string,

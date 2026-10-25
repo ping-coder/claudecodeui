@@ -219,11 +219,12 @@ export const providerModelsDb = {
         return null;
       }
 
-      // The effort is cleared alongside the model because it was chosen for the
-      // deleted model; replaced sessions resume on the fallback model's default.
+      // The effort and ultracode choices are cleared alongside the model because
+      // they were made for the deleted model; replaced sessions resume on the
+      // fallback model's defaults.
       db.prepare(`
         UPDATE sessions
-        SET model = ?, effort = NULL, updated_at = CURRENT_TIMESTAMP
+        SET model = ?, effort = NULL, ultracode = NULL, updated_at = CURRENT_TIMESTAMP
         WHERE provider = ? AND model = ?
       `).run(fallbackModelId, provider, row.model_id);
 

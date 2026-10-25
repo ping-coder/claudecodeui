@@ -247,6 +247,9 @@
     "answeredBy": "Beantwortet von {{model}}"
   },
   "composer": {
+    "ultracode": "Ultracode",
+    "ultracodeDescription": "Workflow-Orchestrierung bei jeder Reasoning-Stufe",
+    "ultracodeOn": "Ultracode an",
     "permissionHeading": "Wie sollen Aktionen von {{provider}} genehmigt werden?",
     "permissionCycleHint": "Tab im Eingabefeld drücken, um den Modus zu wechseln",
     "permissionTriggerLabel": "{{mode}}: {{heading}}",

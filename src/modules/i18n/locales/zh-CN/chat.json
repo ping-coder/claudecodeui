@@ -258,6 +258,9 @@
     "answeredBy": "由 {{model}} 回答"
   },
   "composer": {
+    "ultracode": "Ultracode",
+    "ultracodeDescription": "在任意推理级别下编排工作流",
+    "ultracodeOn": "Ultracode 已开启",
     "permissionHeading": "如何批准 {{provider}} 的操作？",
     "permissionCycleHint": "在输入框中按 Tab 切换模式",
     "permissionTriggerLabel": "{{mode}}：{{heading}}",

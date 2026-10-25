@@ -458,11 +458,11 @@ touched.**
 and a `jsonl_path` — a session that never ran has nothing to copy — delegates to the
 provider's fork adapter, then writes the new row with `sessionsDb.createForkedSession`. That
 insert records `provider_session_id`, `jsonl_path` and `forked_from_session_id` immediately,
-and first deletes any row the watcher already made for the new file. The source's `model` and
-`effort` are copied, because a fork that silently dropped to the catalog default would answer
-differently from the conversation it branched from. Finally it broadcasts `session_upserted`,
-which is why neither caller — `ChatInterface.handleForkFromMessage` and the sidebar's
-`forkSession` — refetches anything before navigating.
+and first deletes any row the watcher already made for the new file. The source's `model`,
+`effort` and `ultracode` are copied, because a fork that silently dropped to the catalog
+default would answer differently from the conversation it branched from. Finally it
+broadcasts `session_upserted`, which is why neither caller — `ChatInterface.handleForkFromMessage`
+and the sidebar's `forkSession` — refetches anything before navigating.
 
 | | `claude-fork.provider.ts` | `codex-fork.provider.ts` |
 | --- | --- | --- |

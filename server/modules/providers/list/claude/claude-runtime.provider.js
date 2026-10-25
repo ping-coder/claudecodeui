@@ -24,10 +24,7 @@ import {
   buildClaudeUserContent,
   normalizeImageDescriptors
 } from '@/shared/image-attachments.js';
-import {
-  CLAUDE_PREDEFINED_MODELS,
-  CLAUDE_ULTRACODE_EFFORT
-} from '@/modules/providers/list/claude/claude-models.provider.js';
+import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
@@ -41,7 +38,11 @@ import {
   getReportedClaudeContextWindow,
   rememberClaudeContextWindow
 } from '@/modules/providers/services/provider-token-usage.service.js';
-import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+import {
+  createCompleteMessage,
+  createNormalizedMessage,
+  splitLegacyUltracodeEffort
+} from '@/shared/utils.js';
 
 const activeSessions = new Map();
 // Outstanding background tasks per live session, keyed like activeSessions. An
@@ -81,42 +82,59 @@ const BG_WAIT_CEILING_MS = 30 * 60 * 1000;
 
 const TOOLS_REQUIRING_INTERACTION = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
-// Ultracode is a session-scoped setting rather than an SDK effort level: it pairs xhigh
-// effort with standing dynamic-workflow orchestration, and the CLI only honours it when
-// Workflows are enabled. The catalog offers it as an effort choice for the picker, so the
-// selection is translated back into the two options the SDK actually understands here.
-const ULTRACODE_SDK_EFFORT = 'xhigh';
-
-function resolveClaudeEffort(model, effort, modelsDefinition = CLAUDE_PREDEFINED_MODELS) {
+/**
+ * Resolves one turn's effort level and ultracode switch against the selected model's
+ * catalog entry. Ultracode (standing dynamic-workflow orchestration) is independent of
+ * effort and combines with any level; Claude Code honours it only on xhigh-capable models,
+ * which the catalog marks with `supportsUltracode`. A legacy `ultracode` effort token from
+ * an old queued/scheduled message or API caller is first split into xhigh + ultracode on.
+ * @param {string} model - Model the turn runs with
+ * @param {{ effort?: unknown, ultracode?: unknown }} requested - Client choices for the turn
+ * @param {Object} [modelsDefinition] - Merged catalog the choices are validated against
+ * @returns {{ effort: string|undefined, ultracode: boolean|undefined }} `effort` is a level
+ *   the model declares, or undefined for the CLI default. `ultracode` is undefined when the
+ *   client made no choice or the model cannot run it, so nothing is sent for it.
+ */
+function resolveClaudeEffortSelection(model, requested, modelsDefinition = CLAUDE_PREDEFINED_MODELS) {
+  const { effort, ultracode } = splitLegacyUltracodeEffort({
+    effort: typeof requested.effort === 'string' ? requested.effort : undefined,
+    ultracode: typeof requested.ultracode === 'boolean' ? requested.ultracode : undefined
+  });
   const selectedModel = modelsDefinition?.OPTIONS?.find((option) => option.value === model) || null;
   const allowedEfforts = selectedModel?.effort?.values
     ?.map((value) => value.value) || [];
-  return typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
-    ? effort
-    : undefined;
+  return {
+    effort: typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
+      ? effort
+      : undefined,
+    ultracode: selectedModel?.supportsUltracode === true && typeof ultracode === 'boolean'
+      ? ultracode
+      : undefined
+  };
 }
 
 /**
- * Writes the resolved effort choice onto the SDK options, expanding `ultracode` into the
- * xhigh effort level plus the session-scoped settings it requires.
+ * Writes a resolved effort/ultracode selection onto the SDK options. Ultracode is a
+ * session-scoped setting rather than an SDK option: turning it on also enables Workflows,
+ * which it requires, and turning it off is sent explicitly so an `ultracode: true` in the
+ * user's own settings files cannot run a turn the composer shows as off.
  * @param {Object} sdkOptions - SDK options being built
- * @param {string|undefined} resolvedEffort - Catalog-validated effort selection
+ * @param {{ effort: string|undefined, ultracode: boolean|undefined }} selection - Output of
+ *   resolveClaudeEffortSelection
  */
-function applyClaudeEffort(sdkOptions, resolvedEffort) {
-  if (!resolvedEffort) {
+function applyClaudeEffortSelection(sdkOptions, { effort, ultracode }) {
+  if (effort) {
+    sdkOptions.effort = effort;
+  }
+
+  if (ultracode === undefined) {
     return;
   }
 
-  if (resolvedEffort !== CLAUDE_ULTRACODE_EFFORT) {
-    sdkOptions.effort = resolvedEffort;
-    return;
-  }
-
-  sdkOptions.effort = ULTRACODE_SDK_EFFORT;
   sdkOptions.settings = {
     ...(sdkOptions.settings || {}),
-    ultracode: true,
-    enableWorkflows: true
+    ultracode,
+    ...(ultracode ? { enableWorkflows: true } : {})
   };
 }
 
@@ -244,7 +262,16 @@ export function buildClaudeSdkEnv(hostEnv = process.env) {
 }
 
 function mapCliOptionsToSDK(options = {}) {
-  const { providerSessionId, cwd, toolsSettings, permissionMode, effort, resumeAnchorId, resumeFromScratch } = options;
+  const {
+    providerSessionId,
+    cwd,
+    toolsSettings,
+    permissionMode,
+    effort,
+    ultracode,
+    resumeAnchorId,
+    resumeFromScratch
+  } = options;
 
   const sdkOptions = {};
 
@@ -299,9 +326,9 @@ function mapCliOptionsToSDK(options = {}) {
 
   sdkOptions.model = options.model || CLAUDE_PREDEFINED_MODELS.DEFAULT;
 
-  applyClaudeEffort(sdkOptions, resolveClaudeEffort(
+  applyClaudeEffortSelection(sdkOptions, resolveClaudeEffortSelection(
     sdkOptions.model,
-    effort,
+    { effort, ultracode },
     options.effortModels || CLAUDE_PREDEFINED_MODELS,
   ));
 

@@ -34,6 +34,13 @@ type ProviderCapabilities = {
    */
   effortLevels: string[];
   /**
+   * Whether the runtime can turn on ultracode (Claude Code's standing
+   * dynamic-workflow orchestration). It is an on/off switch beside the effort
+   * level, never one of `effortLevels`; which models accept it is per model
+   * (`ProviderModelOption['supportsUltracode']`).
+   */
+  supportsUltracode: boolean;
+  /**
    * Whether an already-sent message can be replaced, which requires the
    * provider to re-run a conversation truncated at a chosen point.
    */
@@ -61,7 +68,10 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: true,
     supportsTokenUsage: true,
     supportsEffort: true,
-    effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+    effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    // Sent as the session-scoped `ultracode` setting; the catalog marks the
+    // models that accept it (the xhigh-capable ones, as Claude Code requires).
+    supportsUltracode: true,
     // `resumeSessionAt` re-runs a conversation truncated at a message, and
     // `forkSession` copies a transcript prefix into a new session file.
     supportsMessageEditing: true,
@@ -78,6 +88,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsTokenUsage: false,
     supportsEffort: false,
     effortLevels: [],
+    supportsUltracode: false,
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
@@ -92,6 +103,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    supportsUltracode: false,
     // Not from the Codex SDK, which only starts and resumes threads: both ride
     // the same CLI's `app-server` protocol, whose `thread/fork` copies a
     // thread up to a chosen turn. Editing is that fork plus a new prompt,
@@ -115,6 +127,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // Passed on as OpenCode's `--variant`. `thinking` (MiniMax's on/off
     // variant, paired with `none`) is not a strength, so it sorts last.
     effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
+    supportsUltracode: false,
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
@@ -123,7 +136,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
 /**
  * Application service exposing the provider capability matrix. Used by the
  * Providers routes (the capabilities endpoints) and by the Providers model
- * service, which reads `effortLevels` to validate custom-model effort.
+ * service, which reads `effortLevels` to validate custom-model effort and
+ * `supportsUltracode` to decide which custom models may run ultracode.
  */
 export const providerCapabilitiesService = {
   getProviderCapabilities(provider: LLMProvider): ProviderCapabilities {

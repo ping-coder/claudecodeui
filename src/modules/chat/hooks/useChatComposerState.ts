@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { api, ApiRequestError } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
+import { buildModelRunOptions } from '@/shared/utils';
 import type { BackgroundSendChoice, BackgroundSendPrompt, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
@@ -46,6 +47,11 @@ type UseChatComposerStateArgs = {
    */
   currentProviderModel: string;
   currentProviderEffort: string;
+  /**
+   * Ultracode switch every send carries when the current model can run it.
+   * NULL or absent means it cannot, and sends leave `ultracode` out entirely.
+   */
+  currentProviderUltracode?: boolean | null;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
@@ -205,6 +211,7 @@ export function useChatComposerState({
   resolvePermissionModeForProvider,
   currentProviderModel,
   currentProviderEffort,
+  currentProviderUltracode,
   isLoading,
   processingSessions,
   canAbortSession,
@@ -678,8 +685,11 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
-      model: currentProviderModel,
-      effort: currentProviderEffort,
+      ...buildModelRunOptions({
+        model: currentProviderModel,
+        effort: currentProviderEffort,
+        ultracode: currentProviderUltracode,
+      }),
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
       toolsSettings,
       skipPermissions: toolsSettings?.skipPermissions || false,
@@ -688,6 +698,7 @@ export function useChatComposerState({
   }, [
     currentProviderEffort,
     currentProviderModel,
+    currentProviderUltracode,
     permissionMode,
     provider,
     resolvePermissionModeForProvider,

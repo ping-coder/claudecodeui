@@ -15,6 +15,7 @@ import {
   USER_NOTIFICATION_PREFERENCES_TABLE_SCHEMA_SQL,
   VAPID_KEYS_TABLE_SCHEMA_SQL,
 } from '@/modules/database/schema.js';
+import { LEGACY_ULTRACODE_EFFORT, LEGACY_ULTRACODE_EFFORT_LEVEL } from '@/shared/utils.js';
 
 const SQLITE_UUID_SQL = `
 lower(hex(randomblob(4))) || '-' ||
@@ -458,6 +459,110 @@ const addSessionEffortColumn = (db: Database): void => {
 };
 
 /**
+ * Adds the `ultracode` column that records a session's ultracode switch
+ * (1 = on, 0 = off).
+ *
+ * Existing rows stay NULL ("no choice recorded"), except the ones that ran the
+ * legacy `ultracode` effort, which `migrateLegacyUltracodeEffort` turns on.
+ */
+const addSessionUltracodeColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'ultracode', 'INTEGER DEFAULT NULL');
+};
+
+/**
+ * Replaces the legacy `ultracode` level in a custom model's declared effort
+ * levels with the xhigh level it always ran at, without listing xhigh twice.
+ *
+ * Levels are stored weakest first and ultracode sorted after max, so xhigh
+ * takes ultracode's place unless that would put it after a declared max.
+ */
+const replaceLegacyUltracodeEffortLevel = (levels: unknown[]): unknown[] => {
+  const legacyIndex = levels.indexOf(LEGACY_ULTRACODE_EFFORT);
+  const remaining = levels.filter((level) => level !== LEGACY_ULTRACODE_EFFORT);
+  if (legacyIndex === -1 || remaining.includes(LEGACY_ULTRACODE_EFFORT_LEVEL)) {
+    return remaining;
+  }
+
+  const maxIndex = remaining.indexOf('max');
+  const insertAt = maxIndex === -1 ? legacyIndex : Math.min(legacyIndex, maxIndex);
+  return [...remaining.slice(0, insertAt), LEGACY_ULTRACODE_EFFORT_LEVEL, ...remaining.slice(insertAt)];
+};
+
+/**
+ * Rewrites data stored while ultracode was modelled as a sixth Claude effort
+ * level (xhigh plus standing workflows). Ultracode is now a separate switch, so:
+ *
+ * - a session whose effort is `ultracode` becomes xhigh with ultracode on,
+ *   keeping an ultracode value already recorded on the row;
+ * - a Claude custom model that declared `ultracode` declares xhigh instead.
+ *   Declaring ultracode meant declaring xhigh capability, and that is exactly
+ *   what custom-model ultracode support is now derived from.
+ *
+ * Must run after the `ultracode` session column exists. Rows whose stored
+ * levels are not a JSON array are left alone, as the repository already reads
+ * them as "no levels". Rewritten rows no longer match, so reruns are no-ops.
+ */
+const migrateLegacyUltracodeEffort = (db: Database): void => {
+  const migratedSessions = db.prepare(`
+    UPDATE sessions
+    SET effort = ?, ultracode = COALESCE(ultracode, 1)
+    WHERE effort = ?
+  `).run(LEGACY_ULTRACODE_EFFORT_LEVEL, LEGACY_ULTRACODE_EFFORT);
+  if (migratedSessions.changes > 0) {
+    console.log(`Running migration: Split legacy ultracode effort on ${migratedSessions.changes} session(s)`);
+  }
+
+  // The LIKE only narrows the scan; every candidate is parsed before writing.
+  const legacyModelRows = db.prepare(`
+    SELECT id, effort_values, effort_default
+    FROM provider_models
+    WHERE provider = 'claude'
+      AND (effort_values LIKE ? OR effort_default = ?)
+  `).all(`%"${LEGACY_ULTRACODE_EFFORT}"%`, LEGACY_ULTRACODE_EFFORT) as Array<{
+    id: number;
+    effort_values: string | null;
+    effort_default: string | null;
+  }>;
+
+  const updateModelEffort = db.prepare(`
+    UPDATE provider_models
+    SET effort_values = ?, effort_default = ?
+    WHERE id = ?
+  `);
+  const migrateModelRows = db.transaction(() => {
+    let migratedModels = 0;
+    for (const row of legacyModelRows) {
+      let levels: unknown;
+      try {
+        levels = JSON.parse(row.effort_values ?? '');
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(levels)) {
+        continue;
+      }
+
+      const effortDefault = row.effort_default === LEGACY_ULTRACODE_EFFORT
+        ? LEGACY_ULTRACODE_EFFORT_LEVEL
+        : row.effort_default;
+      updateModelEffort.run(
+        JSON.stringify(replaceLegacyUltracodeEffortLevel(levels)),
+        effortDefault,
+        row.id,
+      );
+      migratedModels += 1;
+    }
+    return migratedModels;
+  });
+
+  const migratedModels = migrateModelRows();
+  if (migratedModels > 0) {
+    console.log(`Running migration: Replaced legacy ultracode effort on ${migratedModels} custom model(s)`);
+  }
+};
+
+/**
  * Adds the reasoning-effort metadata columns to the custom-model library.
  *
  * Existing rows stay NULL on purpose: no effort levels were ever declared for
@@ -532,6 +637,9 @@ export const runMigrations = (db: Database) => {
     addProviderSessionIdMapping(db);
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
+    addSessionUltracodeColumn(db);
+    // After the ultracode column and the provider_models effort columns exist.
+    migrateLegacyUltracodeEffort(db);
     addForkedFromSessionIdColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);

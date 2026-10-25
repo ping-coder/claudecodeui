@@ -54,7 +54,7 @@ const CATALOG: Partial<Record<LLMProvider, ProviderModelsDefinition>> = {
       CUSTOM_CLAUDE_MODEL,
     ],
     DEFAULT: 'default',
-    EFFORT_LEVELS: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+    EFFORT_LEVELS: ['low', 'medium', 'high', 'xhigh', 'max'],
   },
   cursor: {
     OPTIONS: [{ value: 'auto', label: 'Auto', isCustom: false }],
@@ -90,6 +90,7 @@ vi.mock('@/shared/api', () => ({
       sessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveEffort: () => okJson({ success: true, data: null }),
+      setSessionActiveUltracode: () => okJson({ success: true, data: null }),
     },
   },
 }));
@@ -120,10 +121,12 @@ test('the model library declares effort levels for a new custom model', async ()
   render(<ModelLibraryPanel initialProvider="claude" providerModelCatalog={CATALOG} actions={actions} />);
 
   // Every level the catalog allows is offered, in the server's order.
-  const levelButtons = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'].map((level) => (
+  const levelButtons = ['low', 'medium', 'high', 'xhigh', 'max'].map((level) => (
     screen.getByRole('button', { name: level, pressed: false })
   ));
-  assert.equal(levelButtons.length, 6);
+  assert.equal(levelButtons.length, 5);
+  // Ultracode is a switch beside the effort, never a level a model declares.
+  assert.equal(screen.queryByRole('button', { name: 'ultracode' }), null);
 
   fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'Gateway Claude' } });
   fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'gateway-claude' } });

@@ -250,3 +250,25 @@ export const getQuickSettingsTabId = (tab: QuickSettingsTab): string => `quick-s
 
 /** DOM id of the tabpanel a quick settings tab controls; pairs with `getQuickSettingsTabId`. */
 export const getQuickSettingsTabPanelId = (tab: QuickSettingsTab): string => `quick-settings-tabpanel-${tab}`;
+
+// ---------------------------
+
+//----------------- CHAT RUN OPTIONS ------------
+
+/**
+ * The model, reasoning-effort and ultracode part of a chat run's `options`,
+ * shared by a live send (the chat composer state) and a scheduled message
+ * (ChatInterface) so both follow one rule: `ultracode` is included only as a
+ * boolean, i.e. only when the selected model can run it, and a `null` or
+ * `undefined` switch leaves the key out so the runtime makes no choice.
+ * `ultracode` is a required key so every caller has to pass the switch on.
+ */
+export const buildModelRunOptions = (selection: {
+  model: string;
+  effort: string;
+  ultracode: boolean | null | undefined;
+}): { model: string; effort: string; ultracode?: boolean } => ({
+  model: selection.model,
+  effort: selection.effort,
+  ...(typeof selection.ultracode === 'boolean' ? { ultracode: selection.ultracode } : {}),
+});

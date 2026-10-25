@@ -249,6 +249,9 @@
     "answeredBy": "Répondu par {{model}}"
   },
   "composer": {
+    "ultracode": "Ultracode",
+    "ultracodeDescription": "Orchestration de workflows à tout niveau de raisonnement",
+    "ultracodeOn": "Ultracode activé",
     "permissionHeading": "Comment approuver les actions de {{provider}} ?",
     "permissionCycleHint": "Appuyez sur Tab dans la zone de saisie pour changer de mode",
     "permissionTriggerLabel": "{{mode}} : {{heading}}",
