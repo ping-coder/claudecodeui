@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/home/peacehe/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-BASE_DIR="/home/peacehe/apps/cloudcli"
+BASE_DIR="${HOME}/apps/cloudcli"
 REPO_DIR="${BASE_DIR}/repo"
 RELEASES_DIR="${BASE_DIR}/releases"
 SHARED_DIR="${BASE_DIR}/shared"
@@ -202,7 +202,7 @@ cmd_list() {
   [ -L "$CURRENT_LINK" ] && current_target=$(readlink -f "$CURRENT_LINK" || true)
   [ -f "$PREV_FILE" ] && prev_target=$(cat "$PREV_FILE" || true)
 
-  echo "Available Releases on peace-cc (newest first):"
+  echo "Available Releases on $(hostname -s) (newest first):"
   echo "--------------------------------------------------------------------------------"
   for dir in $(ls -1dt "${RELEASES_DIR}"/20* 2>/dev/null || true); do
     local name marker="" msg=""
@@ -236,3 +236,4 @@ case "${1:-status}" in
     exit 1
     ;;
 esac
+

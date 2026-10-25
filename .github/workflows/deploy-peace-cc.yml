@@ -1,4 +1,4 @@
-name: Deploy to peace-cc
+name: Deploy to peace-cc & peacecloudtop
 
 on:
   push:
@@ -10,21 +10,31 @@ on:
         description: "Git branch, tag, or commit SHA to deploy (defaults to current ref)"
         required: false
         type: string
+      target:
+        description: "Target host: all, peace-cc, or peacecloudtop"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - peace-cc
+          - peacecloudtop
 
 concurrency:
-  group: peace-cc-deployment
+  group: cloudcli-deployment
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  deploy-peace-cc:
     name: Build & Atomically Deploy to peace-cc
+    if: ${{ github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'peace-cc' || inputs.target == '' }}
     runs-on: [self-hosted, peace-cc]
     steps:
       - name: Deploy release snapshot & verify health
         env:
           TARGET_REF: ${{ inputs.ref || github.sha }}
         run: |
-          /home/peacehe/apps/cloudcli/bin/cloudcli-ctl deploy "$TARGET_REF"
+          "$HOME/apps/cloudcli/bin/cloudcli-ctl" deploy "$TARGET_REF"
 
       - name: Write Deployment Summary
         if: always()
@@ -33,7 +43,33 @@ jobs:
             echo "## 🚀 peace-cc Deployment Summary"
             echo ""
             echo '```text'
-            /home/peacehe/apps/cloudcli/bin/cloudcli-ctl list
+            "$HOME/apps/cloudcli/bin/cloudcli-ctl" list
+            echo ""
+            echo "Health Check:"
+            curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-peacecloudtop:
+    name: Build & Atomically Deploy to peacecloudtop
+    if: ${{ github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'peacecloudtop' || inputs.target == '' }}
+    runs-on: [self-hosted, peacecloudtop]
+    steps:
+      - name: Deploy release snapshot & verify health
+        env:
+          TARGET_REF: ${{ inputs.ref || github.sha }}
+        run: |
+          "$HOME/apps/cloudcli/bin/cloudcli-ctl" deploy "$TARGET_REF"
+
+      - name: Write Deployment Summary
+        if: always()
+        run: |
+          {
+            echo "## 🚀 peacecloudtop Deployment Summary"
+            echo ""
+            echo '```text'
+            "$HOME/apps/cloudcli/bin/cloudcli-ctl" list
             echo ""
             echo "Health Check:"
             curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"

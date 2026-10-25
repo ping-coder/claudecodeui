@@ -1,4 +1,4 @@
-name: Rollback peace-cc
+name: Rollback peace-cc & peacecloudtop
 
 on:
   workflow_dispatch:
@@ -8,21 +8,31 @@ on:
         required: false
         default: "prev"
         type: string
+      target_host:
+        description: "Target host: all, peace-cc, or peacecloudtop"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - peace-cc
+          - peacecloudtop
 
 concurrency:
-  group: peace-cc-deployment
+  group: cloudcli-deployment
   cancel-in-progress: false
 
 jobs:
-  rollback:
+  rollback-peace-cc:
     name: Instant Atomic Rollback on peace-cc
+    if: ${{ inputs.target_host == 'all' || inputs.target_host == 'peace-cc' || inputs.target_host == '' }}
     runs-on: [self-hosted, peace-cc]
     steps:
       - name: Rollback symlink & restart service
         env:
           TARGET_RELEASE: ${{ inputs.target_release }}
         run: |
-          /home/peacehe/apps/cloudcli/bin/cloudcli-ctl rollback "$TARGET_RELEASE"
+          "$HOME/apps/cloudcli/bin/cloudcli-ctl" rollback "$TARGET_RELEASE"
 
       - name: Write Rollback Summary
         if: always()
@@ -31,7 +41,33 @@ jobs:
             echo "## ⏪ peace-cc Rollback Summary"
             echo ""
             echo '```text'
-            /home/peacehe/apps/cloudcli/bin/cloudcli-ctl list
+            "$HOME/apps/cloudcli/bin/cloudcli-ctl" list
+            echo ""
+            echo "Health Check:"
+            curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback-peacecloudtop:
+    name: Instant Atomic Rollback on peacecloudtop
+    if: ${{ inputs.target_host == 'all' || inputs.target_host == 'peacecloudtop' || inputs.target_host == '' }}
+    runs-on: [self-hosted, peacecloudtop]
+    steps:
+      - name: Rollback symlink & restart service
+        env:
+          TARGET_RELEASE: ${{ inputs.target_release }}
+        run: |
+          "$HOME/apps/cloudcli/bin/cloudcli-ctl" rollback "$TARGET_RELEASE"
+
+      - name: Write Rollback Summary
+        if: always()
+        run: |
+          {
+            echo "## ⏪ peacecloudtop Rollback Summary"
+            echo ""
+            echo '```text'
+            "$HOME/apps/cloudcli/bin/cloudcli-ctl" list
             echo ""
             echo "Health Check:"
             curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"
