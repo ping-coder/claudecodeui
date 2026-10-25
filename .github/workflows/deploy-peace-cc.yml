@@ -1,0 +1,42 @@
+name: Deploy to peace-cc
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git branch, tag, or commit SHA to deploy (defaults to current ref)"
+        required: false
+        type: string
+
+concurrency:
+  group: peace-cc-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & Atomically Deploy to peace-cc
+    runs-on: [self-hosted, peace-cc]
+    steps:
+      - name: Deploy release snapshot & verify health
+        env:
+          TARGET_REF: ${{ inputs.ref || github.sha }}
+        run: |
+          /home/peacehe/apps/cloudcli/bin/cloudcli-ctl deploy "$TARGET_REF"
+
+      - name: Write Deployment Summary
+        if: always()
+        run: |
+          {
+            echo "## 🚀 peace-cc Deployment Summary"
+            echo ""
+            echo '```text'
+            /home/peacehe/apps/cloudcli/bin/cloudcli-ctl list
+            echo ""
+            echo "Health Check:"
+            curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,40 @@
+name: Rollback peace-cc
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_release:
+        description: "Target release folder or short SHA to rollback to (leave empty or 'prev' to rollback to previous version)"
+        required: false
+        default: "prev"
+        type: string
+
+concurrency:
+  group: peace-cc-deployment
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Instant Atomic Rollback on peace-cc
+    runs-on: [self-hosted, peace-cc]
+    steps:
+      - name: Rollback symlink & restart service
+        env:
+          TARGET_RELEASE: ${{ inputs.target_release }}
+        run: |
+          /home/peacehe/apps/cloudcli/bin/cloudcli-ctl rollback "$TARGET_RELEASE"
+
+      - name: Write Rollback Summary
+        if: always()
+        run: |
+          {
+            echo "## ⏪ peace-cc Rollback Summary"
+            echo ""
+            echo '```text'
+            /home/peacehe/apps/cloudcli/bin/cloudcli-ctl list
+            echo ""
+            echo "Health Check:"
+            curl -fsS http://127.0.0.1:3001/health || echo "UNREACHABLE"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
