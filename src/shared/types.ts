@@ -258,6 +258,56 @@ export type SessionActivitySnapshot = {
   tasks?: BackgroundTaskSummary[];
 };
 
+/**
+ * How far a busy session's current work has got, as the activity tab's
+ * progress readout draws it: the agents of a workflow that is still running,
+ * else the checklist of the turn in flight. Counted from the transcript rows
+ * by chat's run-progress utilities and never invented: a session with nothing
+ * to count has no progress at all.
+ */
+export type ActivityProgress = {
+  /** What is counted: a workflow's agents or a checklist's tasks. */
+  unit: 'agents' | 'tasks';
+  /** Units finished: agents that completed or failed, tasks marked completed. */
+  done: number;
+  /** Every unit known so far, including agents still queued and tasks still open. */
+  total: number;
+  /** Units in flight right now (running agents, tasks in progress); they animate the bar's next segment. */
+  running: number;
+  /** The script phase the workflow's current agent runs under, when it names one. */
+  phase?: string;
+  /**
+   * When the timed window opened (epoch ms): the workflow's launch, else the
+   * turn's start. A turn whose opening list cannot be known (its user
+   * message, or the list, began above the loaded rows) opens the window at
+   * its oldest loaded checklist row instead, when that row already shows
+   * items done. The time-left estimate paces the units finished since.
+   */
+  startedAt: number;
+  /**
+   * Of the `done` units, how many were already done when the window opened:
+   * checklist items already done in the list the turn opened with (else in
+   * the row that opened the window), matched by tracker id or by text.
+   * Absent means none, as for a workflow or a list begun in the turn. The
+   * time-left estimate leaves them out.
+   */
+  doneAtStart?: number;
+  /**
+   * A running workflow's per-agent timing, from its live stream. Present only
+   * when at least one finished agent reported how long it ran and every
+   * running agent reported when it started. It lets the time-left estimate
+   * treat agents running side by side as concurrent.
+   */
+  agentTiming?: {
+    /** Mean run time (ms) of the finished agents that reported one. */
+    meanDurationMs: number;
+    /** When each running agent started (epoch ms). */
+    runningStartedAt: number[];
+    /** Slots the script has declared but not started yet. */
+    queued: number;
+  };
+};
+
 // ---------------------------
 
 //----------------- REALTIME TRANSPORT ------------
@@ -687,6 +737,20 @@ export type WorkflowAgentProgress = {
   toolCalls?: number;
   durationMs?: number;
   resultPreview?: string;
+};
+
+/**
+ * One agent of a workflow run as the Workflow card lists it and the progress
+ * readouts count it: what the journal recorded on the last history load and
+ * what the live stream has said since, folded together by chat's
+ * `mergeWorkflowAgents`. `queued` is a slot the script has declared but not
+ * started, which only the live stream knows about; it has no id yet.
+ */
+export type WorkflowAgentRow = Omit<WorkflowAgentProgress, 'state'> & {
+  /** The agent's id, or the queued slot's index: what the list keys on. */
+  key: string;
+  phase?: string;
+  status: BackgroundTaskStatus | 'queued';
 };
 
 /** Discriminator on NormalizedMessage naming which kind of transcript event it carries — plain text, tool use or result, thinking, stream delta or end, error, completion, status, permission request/resolution/cancellation, session creation, interactive prompt, or task notification. */

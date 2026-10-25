@@ -15,7 +15,7 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
-import type { BackgroundSendChoice, BackgroundSendPrompt, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { ActivityProgress, BackgroundSendChoice, BackgroundSendPrompt, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -63,6 +63,8 @@ type ChatComposerProps = {
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
+  /** How far the activity's work has got, for the activity tab's progress readout; null when there is nothing to count. */
+  activityProgress?: ActivityProgress | null;
   isLoading: boolean;
   onAbortSession: () => void;
   permissionMode: PermissionMode;
@@ -149,6 +151,7 @@ export default function ChatComposer({
   handlePermissionDecision,
   handleGrantToolPermission,
   activity,
+  activityProgress = null,
   isLoading,
   onAbortSession,
   permissionMode,
@@ -323,7 +326,12 @@ export default function ChatComposer({
     <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-2 pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6">
       {!hasPendingPermissions && (
         <div className="pointer-events-none absolute bottom-full left-1/2 z-10 w-[calc(100%-1rem)] max-w-[54.25rem] -translate-x-1/2 translate-y-px bg-transparent sm:w-[calc(100%-2rem)]">
-          <ActivityIndicator activity={activity} onAbort={onAbortSession} isInputFocused={isInputFocused} />
+          <ActivityIndicator
+            activity={activity}
+            progress={activityProgress}
+            onAbort={onAbortSession}
+            isInputFocused={isInputFocused}
+          />
         </div>
       )}
 

@@ -302,6 +302,20 @@
       "assistant": "Assistant"
     }
   },
+  "runProgress": {
+    "agents_one": "{{done}}/{{count}} agent",
+    "agents_other": "{{done}}/{{count}} agents",
+    "tasks_one": "{{done}}/{{count}} task",
+    "tasks_other": "{{done}}/{{count}} tasks",
+    "percent": "{{percent}}%",
+    "eta": {
+      "underMinute": "<1m left",
+      "minutes": "~{{minutes}}m left",
+      "hours": "~{{hours}}h left",
+      "hoursMinutes": "~{{hours}}h {{minutes}}m left",
+      "hint": "Estimated from the pace so far"
+    }
+  },
   "projectSelection": {
     "startChatWithProvider": "Select a project to start chatting with {{provider}}"
   },

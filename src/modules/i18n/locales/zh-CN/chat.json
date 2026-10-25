@@ -249,6 +249,18 @@
       "assistant": "Assistant"
     }
   },
+  "runProgress": {
+    "agents_other": "{{done}}/{{count}} 个智能体",
+    "tasks_other": "{{done}}/{{count}} 项任务",
+    "percent": "{{percent}}%",
+    "eta": {
+      "underMinute": "剩余不到 1 分钟",
+      "minutes": "约剩 {{minutes}} 分钟",
+      "hours": "约剩 {{hours}} 小时",
+      "hoursMinutes": "约剩 {{hours}} 小时 {{minutes}} 分钟",
+      "hint": "根据目前的进度估算"
+    }
+  },
   "projectSelection": {
     "startChatWithProvider": "选择一个项目以开始与 {{provider}} 聊天"
   },

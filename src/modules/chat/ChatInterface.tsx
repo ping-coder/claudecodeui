@@ -30,6 +30,7 @@ import {
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
+import { deriveActivityProgress } from '@/modules/chat/utils/runProgress';
 
 type ChatInterfaceProps = {
   isActive: boolean;
@@ -461,6 +462,15 @@ function ChatInterface({
   // overlapping the last message.
   const hasActivityIndicator = Boolean(sessionActivity && pendingPermissionRequests.length === 0);
 
+  // What the activity tab's progress readout counts, read from the same rows
+  // the transcript's cards draw: a running workflow's agents, else the turn's
+  // checklist. Every loaded row, since a workflow launched pages back can
+  // still be the one running.
+  const activityProgress = useMemo(
+    () => deriveActivityProgress(chatMessages, sessionActivity),
+    [chatMessages, sessionActivity],
+  );
+
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
@@ -572,6 +582,7 @@ function ChatInterface({
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
+          activityProgress={activityProgress}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
           permissionMode={permissionMode}

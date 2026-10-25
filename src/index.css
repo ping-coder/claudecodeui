@@ -588,6 +588,15 @@
     clip-path: inset(-8px -8px 0 -8px);
   }
 
+  /* The in-flight segment of a run's progress bar (chat's RunProgressBar),
+     standing in for the CLI's spinner glyph. Its own animation rather than
+     animate-pulse, which marks the status dots. The segment rests half-lit
+     (set where it is drawn), which is all reduced motion shows of it, so it
+     never passes for a finished segment. */
+  .chat-progress-segment-running {
+    animation: chat-progress-breathe 0.9s ease-in-out infinite alternate;
+  }
+
   .chat-message {
     contain: layout style paint;
     content-visibility: auto;
@@ -979,6 +988,15 @@
       opacity: 1;
       filter: blur(0);
       transform: translateY(0) scaleY(1);
+    }
+  }
+
+  @keyframes chat-progress-breathe {
+    from {
+      opacity: 0.25;
+    }
+    to {
+      opacity: 1;
     }
   }
 

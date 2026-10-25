@@ -9,13 +9,13 @@ import type {
   Project,
   SubagentActivity,
   ToolResult,
-  WorkflowAgentInfo,
-  WorkflowAgentProgress,
+  WorkflowAgentRow,
   WorkflowInfo,
 } from '@/shared/types';
 import { api, readApiJson } from '@/shared/api';
 import { cn } from '@/shared/utils';
 import { MarkdownContent } from '@/modules/chat/tools/ContentRenderers/MarkdownContent';
+import { RunProgressBar } from '@/modules/chat/tools/RunProgressBar';
 import { SubagentTimeline } from '@/modules/chat/tools/SubagentTimeline';
 import { ToolErrorDisplay } from '@/modules/chat/tools/ToolErrorDisplay';
 import { useIsExportingTranscript } from '@/modules/chat/context/TranscriptRenderContext';
@@ -24,8 +24,13 @@ import {
   describeWorkflowAgent,
   findCurrentWorkflowAgent,
   formatTaskDuration,
-  resolveBackgroundTaskStatus,
 } from '@/modules/chat/utils/backgroundTasks';
+import {
+  formatProgressCount,
+  mergeWorkflowAgents,
+  resolveWorkflowRunStatus,
+  summarizeWorkflowAgents,
+} from '@/modules/chat/utils/runProgress';
 import { parseWorkflowMeta } from '@/modules/chat/utils/workflowScriptMeta';
 
 type WorkflowPanelProps = {
@@ -46,19 +51,6 @@ type WorkflowAgentActivity = {
   agent: { id: string; label?: string; model?: string; status: BackgroundTaskStatus };
   activity: SubagentActivity[];
   activityCount: number;
-};
-
-/**
- * One agent of the run as the card lists it: what the journal recorded on the
- * last history load and what the live stream has said since, folded together.
- * `queued` is a slot the script has declared but not started, which only the
- * live stream knows about; it has no id yet.
- */
-type WorkflowAgentRow = Omit<WorkflowAgentProgress, 'state'> & {
-  /** The agent's id, or the queued slot's index: what the list keys on. */
-  key: string;
-  phase?: string;
-  status: BackgroundTaskStatus | 'queued';
 };
 
 /** How often an open, running agent's timeline is re-read from its transcript. */
@@ -113,82 +105,6 @@ const AGENT_STATUS_STYLES: Record<WorkflowAgentRow['status'], string> = {
   failed: 'bg-red-500 dark:bg-red-400',
   stopped: 'bg-muted-foreground/40',
 };
-
-/** The live stream's word on an agent, in the card's statuses. */
-const LIVE_AGENT_STATUS: Record<WorkflowAgentProgress['state'], WorkflowAgentRow['status']> = {
-  queued: 'queued',
-  running: 'running',
-  done: 'completed',
-  failed: 'failed',
-};
-
-/**
- * Folds the run's agents from its two sources into one list.
- *
- * The journal (from the last history load) is what survives a reload and the
- * only source once the run is over; the live stream is fresher while the run
- * is going and the only source for an agent's current tool, spend and queued
- * slots. So a journal status that has settled wins — the journal was read
- * after the fact — and an unsettled one defers to the live state, which is
- * newer. Once the workflow itself is over, a slot either source still has
- * running or queued is one the run ended under, not one still going.
- */
-function settleAgentStatus(
-  journalStatus: WorkflowAgentInfo['status'],
-  liveState: WorkflowAgentProgress['state'] | undefined,
-  isWorkflowRunning: boolean,
-): WorkflowAgentRow['status'] {
-  if (journalStatus !== 'running') {
-    return journalStatus;
-  }
-  const status = liveState ? LIVE_AGENT_STATUS[liveState] : journalStatus;
-  return isWorkflowRunning || status === 'completed' || status === 'failed' ? status : 'stopped';
-}
-
-function mergeWorkflowAgents(
-  journalAgents: WorkflowAgentInfo[],
-  liveAgents: WorkflowAgentProgress[] | undefined,
-  isWorkflowRunning: boolean,
-): WorkflowAgentRow[] {
-  const liveById = new Map<string, WorkflowAgentProgress>();
-  for (const agent of liveAgents ?? []) {
-    if (agent.agentId) {
-      liveById.set(agent.agentId, agent);
-    }
-  }
-
-  const rows: WorkflowAgentRow[] = journalAgents.map((agent, index) => {
-    const live = liveById.get(agent.id);
-    const { state, ...liveFields } = live ?? { index, state: undefined };
-    return {
-      ...liveFields,
-      key: agent.id,
-      agentId: agent.id,
-      label: agent.label ?? live?.label,
-      phase: agent.phase ?? live?.phase,
-      status: settleAgentStatus(agent.status, state, isWorkflowRunning),
-    };
-  });
-
-  const journalIds = new Set(journalAgents.map((agent) => agent.id));
-  for (const { state, ...live } of liveAgents ?? []) {
-    if (live.agentId && journalIds.has(live.agentId)) {
-      continue;
-    }
-    const liveStatus = LIVE_AGENT_STATUS[state];
-    if (!isWorkflowRunning && liveStatus === 'queued') {
-      // Never started, and now never will: nothing to list.
-      continue;
-    }
-    rows.push({
-      ...live,
-      key: live.agentId ?? `slot-${live.index}`,
-      status: isWorkflowRunning || liveStatus === 'completed' || liveStatus === 'failed' ? liveStatus : 'stopped',
-    });
-  }
-
-  return rows;
-}
 
 type WorkflowAgentTimelineProps = {
   sessionId: string;
@@ -369,9 +285,11 @@ WorkflowAgentRowView.displayName = 'WorkflowAgentRowView';
 
 /**
  * Rendered by chat's MessageComponent for a `Workflow` tool call: the run's
- * name and status in the header, and — opened on demand — its phases, the
- * agents it spawned with what each is doing, live usage, its result and the
- * script it ran.
+ * name and status in the header, with the CLI's progress row beside them (or
+ * on a line of its own on a narrow card) once agents are listed — a segmented
+ * bar, `done/total agents`, the phase and the elapsed time — and, opened on
+ * demand, its phases, the agents it spawned with what each is doing, live
+ * usage, its result and the script it ran.
  *
  * Shaped like SubagentPanel: the launch is a summary of work, and the
  * detail is only wanted on demand, so the body stays unmounted until opened.
@@ -387,14 +305,7 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
   const script = typeof parsedInput.script === 'string' ? parsedInput.script : '';
   const meta = useMemo(() => parseWorkflowMeta(script), [script]);
 
-  // A workflow only ever runs in the background, so until something reports
-  // on it — the backend from the journal and notification, the live stream
-  // from its task events — it is still going. Unless the tool refused the
-  // call outright (a script that does not parse): that result is an error
-  // and nothing was ever launched.
-  const status = toolResult?.isError
-    ? 'failed'
-    : resolveBackgroundTaskStatus(workflow?.status, taskStatus?.status) ?? 'running';
+  const status = resolveWorkflowRunStatus({ toolResult, workflow, taskStatus });
   const name = workflow?.name || taskStatus?.workflowName || meta.name || '';
   const description = workflow?.description || meta.description || String(parsedInput.description ?? '');
   // A progress summary restating the description ("one agent that waits…")
@@ -407,7 +318,9 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
     () => mergeWorkflowAgents(workflow?.agents ?? [], taskStatus?.agents, status === 'running'),
     [workflow?.agents, taskStatus?.agents, status],
   );
-  const finishedCount = agents.filter((agent) => agent.status === 'completed' || agent.status === 'failed').length;
+  // The header's progress row counts the same list the body shows.
+  const agentProgress = useMemo(() => summarizeWorkflowAgents(agents), [agents]);
+  const finishedCount = agentProgress.done;
   const failedCount = agents.filter((agent) => agent.status === 'failed').length;
   // An agent's transcript is fetched by session and run; the run id is on the
   // journal read or, before history reloads, the launch acknowledgement.
@@ -428,6 +341,13 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
     ? describeWorkflowAgent(currentAgent)
     : taskStatus?.agents ? undefined : taskStatus?.description;
 
+  const agentCountLabel = formatProgressCount({ unit: 'agents', ...agentProgress }, t);
+  // The phase belongs to the agent the run is on, so only a running run has
+  // one, and it is left out when the status badge already says it.
+  const headerPhase = status === 'running' && agentProgress.phase !== liveSummary ? agentProgress.phase : undefined;
+  // The CLI's own wall time for the run, from its latest progress event.
+  const headerElapsed = taskStatus?.usage ? formatTaskDuration(taskStatus.usage.durationMs) : '';
+
   // The folded notification is the result; a live launch still holds the
   // acknowledgement until history reloads, and that is never worth showing.
   const content = typeof toolResult?.content === 'string' ? toolResult.content : '';
@@ -442,42 +362,67 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
         type="button"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((previous) => !previous)}
-        className="flex w-full select-none items-center gap-1.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full select-none flex-wrap items-center gap-x-1.5 gap-y-0.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
-        <ChevronRight className={cn('h-3 w-3 flex-shrink-0 transition-transform duration-150', isOpen && 'rotate-90')} />
-        <Workflow className="h-3.5 w-3.5 flex-shrink-0 text-purple-500 dark:text-purple-400" />
-        <span className="flex-shrink-0 font-medium text-foreground">{t('workflow.title', 'Workflow')}</span>
-        {name && (
-          <>
-            <span className="flex-shrink-0 text-[10px] text-muted-foreground/40">/</span>
-            <span className="flex-shrink-0 font-medium">{name}</span>
-          </>
-        )}
-        {description && <span className="min-w-0 flex-1 truncate">{description}</span>}
-        <span className={cn('ml-auto flex flex-shrink-0 items-center gap-1 text-[11px]', STATUS_STYLES[status])}>
-          {status === 'running' ? (
+        {/* One unit, so the name never wraps away from its title; it
+            truncates only once the title has a line to itself. */}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ChevronRight className={cn('h-3 w-3 flex-shrink-0 transition-transform duration-150', isOpen && 'rotate-90')} />
+          <Workflow className="h-3.5 w-3.5 flex-shrink-0 text-purple-500 dark:text-purple-400" />
+          <span className="flex-shrink-0 font-medium text-foreground">{t('workflow.title', 'Workflow')}</span>
+          {name && (
             <>
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
-              {liveSummary || t('workflow.status.running', 'running')}
-            </>
-          ) : status === 'failed' ? (
-            <>
-              <CircleAlert className="h-3 w-3" />
-              {t('workflow.status.failed', 'failed')}
-            </>
-          ) : status === 'stopped' ? (
-            // Neither a spinner nor a check mark: the run never reported and
-            // the process it ran in is gone, so there is no outcome to draw.
-            <span title={t('workflow.stoppedHint', 'The run ended before this workflow reported back')} className="flex items-center gap-1">
-              <CircleDashed className="h-3 w-3" />
-              {t('workflow.status.stopped', 'no result')}
-            </span>
-          ) : (
-            <>
-              <CircleCheck className="h-3 w-3" />
-              {t('workflow.status.completed', 'done')}
+              <span className="flex-shrink-0 text-[10px] text-muted-foreground/40">/</span>
+              <span className="min-w-0 truncate font-medium" title={name}>{name}</span>
             </>
           )}
+        </span>
+        {description && <span className="min-w-0 flex-1 truncate">{description}</span>}
+        {/* The progress row and the status move together onto a line of their
+            own when the card is too narrow for them beside the name, rather
+            than squeezing it; on that line the phase and the elapsed time
+            truncate before the count and the status do. */}
+        <span className="ml-auto flex min-w-0 max-w-full items-center gap-2 text-[11px]">
+          {agentProgress.total > 0 && (
+            // Like the CLI's workflow row. The bar is decoration here: the
+            // count beside it already says it in the button's name.
+            <span className="flex min-w-0 items-center gap-1.5 overflow-hidden tabular-nums text-muted-foreground">
+              <RunProgressBar
+                decorative
+                done={agentProgress.done}
+                total={agentProgress.total}
+                running={status === 'running' ? agentProgress.running : 0}
+              />
+              <span className="shrink-0">{agentCountLabel}</span>
+              {headerPhase && <span className="min-w-0 max-w-40 truncate">· {headerPhase}</span>}
+              {headerElapsed && <span className="min-w-0 truncate">· {headerElapsed}</span>}
+            </span>
+          )}
+          <span className={cn('flex flex-shrink-0 items-center gap-1', STATUS_STYLES[status])}>
+            {status === 'running' ? (
+              <>
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
+                {liveSummary || t('workflow.status.running', 'running')}
+              </>
+            ) : status === 'failed' ? (
+              <>
+                <CircleAlert className="h-3 w-3" />
+                {t('workflow.status.failed', 'failed')}
+              </>
+            ) : status === 'stopped' ? (
+              // Neither a spinner nor a check mark: the run never reported and
+              // the process it ran in is gone, so there is no outcome to draw.
+              <span title={t('workflow.stoppedHint', 'The run ended before this workflow reported back')} className="flex items-center gap-1">
+                <CircleDashed className="h-3 w-3" />
+                {t('workflow.status.stopped', 'no result')}
+              </span>
+            ) : (
+              <>
+                <CircleCheck className="h-3 w-3" />
+                {t('workflow.status.completed', 'done')}
+              </>
+            )}
+          </span>
         </span>
       </button>
 

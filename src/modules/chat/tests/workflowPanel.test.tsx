@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 import '@/modules/i18n';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
@@ -466,6 +466,115 @@ describe('the agents of a workflow card', () => {
 
     expect(screen.queryByRole('button', { name: /audit:chat/ })).toBeNull();
     expect(screen.getByText('audit:chat')).toBeTruthy();
+  });
+});
+
+describe('the progress row in a workflow card\'s header', () => {
+  /** The card's header, which stays collapsed: the row is a summary of the run. */
+  const header = () => screen.getByRole('button', { expanded: false });
+
+  /** The state of each of the header bar's four segments, left to right. */
+  const headerSegments = () => [...header().querySelectorAll('[data-segment]')]
+    .map((segment) => segment.getAttribute('data-segment'));
+
+  /** A run one agent into three, on its Audit phase, 3m 30s in by the CLI's clock. */
+  const renderRunningPanel = () => renderPanel({
+    toolResult: LAUNCH_ACK,
+    workflow: {
+      ...completedWorkflow,
+      status: 'running',
+      agents: [
+        { id: 'aa1e064cf8bd159d6', label: 'audit:chat', phase: 'Audit', status: 'running' },
+        { id: 'a9cfe29aa8f2afcbf', label: 'audit:sidebar', phase: 'Audit', status: 'running' },
+      ],
+    },
+    taskStatus: { status: 'running', agents: liveAgents, usage: { totalTokens: 12_345, toolUses: 32, durationMs: 210_000 } },
+  });
+
+  it('counts the agents like the CLI\'s workflow row while the run is going: bar, count, phase and elapsed', () => {
+    renderRunningPanel();
+
+    // One of three done (the body's "1 of 3 agents finished"), one running.
+    expect(headerSegments()).toEqual(['done', 'running', 'open', 'open']);
+    expect(within(header()).getByText('1/3 agents')).toBeTruthy();
+    // The phase of the agent the run is on, and the CLI's wall time for the run.
+    expect(within(header()).getByText('· Audit')).toBeTruthy();
+    expect(within(header()).getByText('· 3m 30s')).toBeTruthy();
+  });
+
+  it('shows a finished run\'s final count, with no phase and nothing animating', () => {
+    renderPanel({
+      toolResult: { content: '{"audits":[]}', isError: false },
+      workflow: completedWorkflow,
+      taskStatus: { status: 'completed', agents: liveAgents, usage: { totalTokens: 1, toolUses: 40, durationMs: 300_000 } },
+    });
+
+    // Done and failed are finished; the agent that never reported keeps the
+    // bar from reading complete.
+    expect(within(header()).getByText('2/3 agents')).toBeTruthy();
+    expect(headerSegments()).toEqual(['done', 'done', 'done', 'open']);
+    expect(within(header()).queryByText('· Audit')).toBeNull();
+    expect(within(header()).queryByText('· Synthesize')).toBeNull();
+    expect(within(header()).getByText('· 5m 0s')).toBeTruthy();
+  });
+
+  it('has no progress row before the run has listed an agent', () => {
+    renderPanel({ toolResult: LAUNCH_ACK, taskStatus: { status: 'running', summary: 'Verify 3/6' } });
+
+    expect(header().querySelector('[data-segment]')).toBeNull();
+    expect(screen.getByText('Verify 3/6')).toBeTruthy();
+  });
+
+  it('draws the bar as decoration, so the button is named by its text alone', () => {
+    // Inside the button a progressbar is read into the button's name by its
+    // value, a stray "1" ahead of the "1/3 agents" beside it.
+    renderRunningPanel();
+
+    expect(within(header()).queryByRole('progressbar')).toBeNull();
+    const bar = header().querySelector('[data-segment]')?.parentElement;
+    expect(bar?.getAttribute('aria-hidden')).toBe('true');
+    expect(bar?.hasAttribute('role')).toBe(false);
+    expect(bar?.hasAttribute('aria-valuenow')).toBe(false);
+    expect(screen.getByRole('button', { expanded: false, name: /frontend-architecture-audit.*1\/3 agents · Audit · 3m 30s/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { expanded: false, name: /\b1\s+1\/3 agents/ })).toBeNull();
+  });
+
+  it('moves the progress row and the status onto their own line on a narrow card instead of squeezing the name', () => {
+    // Before, the row was shrink-0 beside the name, so on a narrow card the
+    // name collapsed to an ellipsis and the status was still clipped. The row
+    // decided its phase and elapsed time by the viewport, not the card.
+    renderRunningPanel();
+
+    expect(header().classList.contains('flex-wrap')).toBe(true);
+    const name = within(header()).getByText('frontend-architecture-audit');
+    const title = name.parentElement;
+    // The title is one unit: the name never wraps away from it, and the row is not beside it to squeeze it.
+    expect(title?.contains(within(header()).getByText('Workflow'))).toBe(true);
+    expect(title?.contains(within(header()).getByText('1/3 agents'))).toBe(false);
+    // The row and the status wrap together, and shrink rather than overflow
+    // the card: the phase and the elapsed time truncate first.
+    const status = within(header()).getByText('running');
+    const row = within(header()).getByText('1/3 agents').parentElement;
+    const group = row?.parentElement;
+    expect(group?.contains(status)).toBe(true);
+    expect(group?.classList.contains('min-w-0')).toBe(true);
+    expect(row?.classList.contains('min-w-0')).toBe(true);
+    for (const optional of [within(header()).getByText('· Audit'), within(header()).getByText('· 3m 30s')]) {
+      expect(optional.classList.contains('min-w-0')).toBe(true);
+      expect(optional.classList.contains('truncate')).toBe(true);
+      expect(optional.className).not.toMatch(/(^|\s)(hidden|sm:inline)(\s|$)/);
+    }
+  });
+
+  it('leaves the phase to the status badge when the live summary already names it', () => {
+    renderPanel({
+      toolResult: LAUNCH_ACK,
+      taskStatus: { status: 'running', summary: 'Audit', agents: [{ ...liveAgents[1], phase: 'Audit' }] },
+    });
+
+    expect(within(header()).getByText('0/1 agent')).toBeTruthy();
+    expect(within(header()).getByText('Audit')).toBeTruthy();
+    expect(within(header()).queryByText('· Audit')).toBeNull();
   });
 });
 
