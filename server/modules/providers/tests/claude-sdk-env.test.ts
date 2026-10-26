@@ -16,3 +16,13 @@ test('a host CLAUDE_CODE_ARTIFACT value wins over the default', () => {
 test('host env vars are still forwarded', () => {
   assert.equal(buildClaudeSdkEnv({ ANTHROPIC_BASE_URL: 'http://proxy' }).ANTHROPIC_BASE_URL, 'http://proxy');
 });
+
+// The Claude history reader tells CloudCLI's own launches from another CLI
+// process's by the entrypoint stamped on them, so CloudCLI's runs must write
+// the same one whatever CloudCLI inherited. An inherited `cli` would even be
+// rewritten to `sdk-cli` by the CLI, as an SDK run has no terminal.
+test('SDK sessions always run under CloudCLI\'s own entrypoint', () => {
+  assert.equal(buildClaudeSdkEnv({}).CLAUDE_CODE_ENTRYPOINT, 'sdk-ts');
+  assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_ENTRYPOINT: 'cli' }).CLAUDE_CODE_ENTRYPOINT, 'sdk-ts');
+  assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_ENTRYPOINT: 'local-agent' }).CLAUDE_CODE_ENTRYPOINT, 'sdk-ts');
+});

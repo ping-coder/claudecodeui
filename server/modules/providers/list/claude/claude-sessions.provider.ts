@@ -9,6 +9,7 @@ import type {
   CompactionInfo,
   FetchHistoryOptions,
   FetchHistoryResult,
+  LiveClaudeRun,
   NormalizedMessage,
   SubagentActivity,
   SubagentInfo,
@@ -31,7 +32,11 @@ import {
   truncateSubagentActivity,
 } from '@/shared/utils.js';
 import { sessionsDb } from '@/modules/database/index.js';
-import { getClaudeSDKSessionStartTime } from '@/modules/providers/list/claude/claude-runtime.provider.js';
+import {
+  CLOUDCLI_CLAUDE_ENTRYPOINT,
+  getClaudeSDKSessionStartTime,
+} from '@/modules/providers/list/claude/claude-runtime.provider.js';
+import { listLiveClaudeCliRuns } from '@/modules/providers/services/claude-cli-liveness.service.js';
 import {
   getReportedClaudeContextWindow,
   summarizeClaudeTokenUsage,
@@ -95,6 +100,11 @@ type ClaudeSubagentTranscript = {
   model?: string;
   /** When the agent's first row was written: the moment it was spawned. */
   startedAt?: string;
+  /**
+   * The `entrypoint` stamped on that first row: what kind of process spawned
+   * the agent (see `canLiveRunReport`).
+   */
+  entrypoint?: string;
 };
 
 /**
@@ -129,6 +139,7 @@ async function readClaudeSubagentTranscript(filePath: string): Promise<ClaudeSub
         const timestamp = typeof entry.timestamp === 'string' ? entry.timestamp : undefined;
         if (timestamp && !transcript.startedAt) {
           transcript.startedAt = timestamp;
+          transcript.entrypoint = readRowEntrypoint(entry) ?? undefined;
         }
 
         if (entry.message?.role === 'assistant' && Array.isArray(entry.message?.content)) {
@@ -310,6 +321,36 @@ async function readWorkflowJournal(transcriptDir: string): Promise<WorkflowAgent
 }
 
 /**
+ * Fingerprints every workflow journal under a session's `subagents/workflows/`
+ * directory as a sorted list of `<runId>:<mtimeMs>:<size>`.
+ *
+ * A running workflow appends to its journal while the session transcript
+ * stays quiet, so this is how the history cache sees a run's agents advance.
+ * It costs one readdir and one stat per run, which keeps it cheap enough to
+ * run on every history read. A session with no workflows, or a run directory
+ * with no journal yet, contributes nothing.
+ */
+async function readWorkflowJournalStamps(workflowsDirectory: string): Promise<string[]> {
+  let runIds: string[];
+  try {
+    runIds = await fsp.readdir(workflowsDirectory);
+  } catch {
+    return [];
+  }
+
+  const stamps = await Promise.all(runIds.map(async (runId) => {
+    try {
+      const stat = await fsp.stat(path.join(workflowsDirectory, runId, 'journal.jsonl'));
+      return `${runId}:${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      return null;
+    }
+  }));
+
+  return stamps.filter((stamp): stamp is string => stamp !== null).sort();
+}
+
+/**
  * Which kind of background work a tool-result row launched, read off the
  * structured `toolUseResult` the CLI stores beside it.
  *
@@ -354,6 +395,12 @@ type ClaudeTaskNotification = {
   status: string;
   summary: string;
   result: string;
+  /**
+   * When the latest row that notified for this call was written (epoch ms),
+   * queue-operation records included, or null when none of them carries a
+   * readable timestamp. A settled workflow publishes it as `endedAt`.
+   */
+  notifiedAt: number | null;
 };
 
 function readTaggedValue(content: string, tagName: string): string {
@@ -422,16 +469,22 @@ function collectTaskNotifications(messages: AnyRecord[]): Map<string, ClaudeTask
 
       // A resumed agent notifies more than once; the last word wins, and the
       // rows that carried the earlier words go with it.
-      const sourceUuids = notifications.get(toolUseId)?.sourceUuids ?? [];
+      const earlier = notifications.get(toolUseId);
+      const sourceUuids = earlier?.sourceUuids ?? [];
       if (typeof message.uuid === 'string' && message.uuid) {
         sourceUuids.push(message.uuid);
       }
+      const writtenAt = Date.parse(String(message.timestamp ?? ''));
+      const earlierNotifiedAt = earlier?.notifiedAt ?? null;
       notifications.set(toolUseId, {
         sourceUuids,
         toolUseId,
         status: readTaggedValue(text, 'status') || 'completed',
         summary: readTaggedValue(text, 'summary'),
         result: readTaggedValue(text, 'result'),
+        notifiedAt: Number.isFinite(writtenAt) && (earlierNotifiedAt === null || writtenAt > earlierNotifiedAt)
+          ? writtenAt
+          : earlierNotifiedAt,
       });
     }
   }
@@ -692,15 +745,48 @@ function dropSupersededPromptBranches(rows: AnyRecord[]): AnyRecord[] {
   return rows.filter((row) => typeof row.uuid !== 'string' || !abandoned.has(row.uuid));
 }
 
-/** When the CLI run behind a session started (epoch ms), or null when none is up. */
+/** When CloudCLI's own SDK run behind a session started (epoch ms), or null when none is up. */
 type LiveRunStartTimeProbe = (sessionId: string) => number | null;
+
+/**
+ * The live Claude CLI processes registered for a provider session that may
+ * still be running background work (see `listLiveClaudeCliRuns`). Async
+ * because it reads the CLI's own process registry from disk.
+ */
+type LiveCliRunsProbe = (providerSessionId: string) => Promise<LiveClaudeRun[]>;
+
+/** The `entrypoint` a transcript row was written under, or null when it names none. */
+function readRowEntrypoint(row: AnyRecord): string | null {
+  return typeof row.entrypoint === 'string' && row.entrypoint ? row.entrypoint : null;
+}
+
+/**
+ * Whether one of `liveRuns` may be the process that wrote a transcript row,
+ * written at `writtenAt` under the entrypoint `writtenBy`, and so can still
+ * deliver the report of the background work that row launched.
+ *
+ * Background work runs inside the process that launched it. A process that
+ * started after the row was written cannot be that process: it is a later
+ * run of the session. Every row also carries the entrypoint of the process
+ * that wrote it, so a live process of another kind cannot be it either, for
+ * example a busy Shell-tab REPL (`cli`) next to a CloudCLI run (`sdk-ts`)
+ * that has died. A row or a run that names no entrypoint is not ruled out by
+ * it. An unreadable `writtenAt` matches no run.
+ */
+function canLiveRunReport(liveRuns: LiveClaudeRun[], writtenAt: unknown, writtenBy: string | null): boolean {
+  const writtenAtMs = Date.parse(String(writtenAt ?? ''));
+  return liveRuns.some((run) => (
+    run.startedAt <= writtenAtMs
+    && (writtenBy === null || run.entrypoint === null || run.entrypoint === writtenBy)
+  ));
+}
 
 async function getSessionMessages(
   sessionId: string,
   providerSessionId: string,
   limit: number | null,
   offset: number,
-  getLiveRunStartTime: LiveRunStartTimeProbe,
+  readLiveRuns: () => Promise<LiveClaudeRun[]>,
 ): Promise<ClaudeHistoryMessagesResult> {
   try {
     // The DB row is keyed by the app-facing session id, while the JSONL rows
@@ -788,14 +874,15 @@ async function getSessionMessages(
 
     // A background agent runs inside the CLI process that launched it, so once
     // that process is gone an agent that has not reported back never will. A
-    // later run of the same session is a new process, so a launch row older
-    // than the live run belongs to a process that has already exited. The
-    // runtime keys its process map by the app session id when the chat gateway
-    // starts a run and by the provider-native id when the agent API does, so
-    // both are asked.
-    const liveRunStartedAt = getLiveRunStartTime(sessionId) ?? getLiveRunStartTime(providerSessionId);
-    const launchedByLiveRun = (message: AnyRecord): boolean =>
-      liveRunStartedAt !== null && Date.parse(String(message.timestamp ?? '')) >= liveRunStartedAt;
+    // launch counts as live only while a live run could be the process that
+    // wrote it (see `canLiveRunReport`). Which runs are live is only asked
+    // once a launch turns out to be unreported, because answering it means
+    // reading the Claude CLI's process registry from disk (see `listLiveRuns`).
+    let liveRuns: Promise<LiveClaudeRun[]> | undefined;
+    const launchedByLiveRun = async (message: AnyRecord): Promise<boolean> => {
+      liveRuns ??= readLiveRuns();
+      return canLiveRunReport(await liveRuns, message.timestamp, readRowEntrypoint(message));
+    };
 
     for (const message of messages) {
       const launch = readBackgroundLaunch(message.toolUseResult);
@@ -831,16 +918,19 @@ async function getSessionMessages(
       //
       // A synchronous agent hands its answer back inline on its own tool
       // result, so its status never depends on a notification or the process.
-      const unreportedStatus = isAsyncLaunch
-        ? launchedByLiveRun(message) ? 'running' : 'stopped'
-        : 'completed';
+      const readUnreportedStatus = async (): Promise<'running' | 'stopped' | 'completed'> => {
+        if (!isAsyncLaunch) {
+          return 'completed';
+        }
+        return (await launchedByLiveRun(message)) ? 'running' : 'stopped';
+      };
 
       if (launch === 'agent') {
         const agentId = String(message.toolUseResult.agentId);
         const subagent = subagentsById.get(agentId);
         const status: SubagentInfo['status'] = notification
           ? notification.status === 'completed' ? 'completed' : 'failed'
-          : unreportedStatus;
+          : await readUnreportedStatus();
 
         if (subagent && subagent.activity.length > 0) {
           message.subagentTools = subagent.activity;
@@ -865,7 +955,7 @@ async function getSessionMessages(
         // workflow the user stopped is not one that failed.
         const status: WorkflowInfo['status'] = notification
           ? notification.status === 'completed' || notification.status === 'stopped' ? notification.status : 'failed'
-          : unreportedStatus;
+          : await readUnreportedStatus();
         // The journal marks an agent `started` and later `result`/`failed`.
         // Once the run itself has settled, a `started` with no second record
         // is not still going: the run was stopped under it, or a resume re-ran
@@ -881,6 +971,10 @@ async function getSessionMessages(
           name: String(message.toolUseResult.workflowName ?? ''),
           description: typeof message.toolUseResult.summary === 'string' ? message.toolUseResult.summary : undefined,
           status,
+          // The notification row is folded away below, and a turn driven
+          // outside CloudCLI streams no end event, so this is the only place
+          // the run's end survives.
+          endedAt: notification?.notifiedAt != null ? new Date(notification.notifiedAt).toISOString() : undefined,
           agents,
           agentCounts: {
             total: agents.length,
@@ -1213,18 +1307,55 @@ function readTaskStatusEvent(raw: AnyRecord): ClaudeTaskStatusEvent | null {
 
 type ClaudeSessionsProviderOptions = {
   /**
-   * When the CLI run behind a session started, or null when none is up.
-   * Injected so history tests can pin what a stopped run reads as without
-   * driving a real SDK run.
+   * When CloudCLI's own SDK run behind a session started, or null when none
+   * is up. Injected so history tests can pin what a stopped run reads as
+   * without driving a real SDK run.
    */
   getLiveRunStartTime?: LiveRunStartTimeProbe;
+  /**
+   * The live Claude CLI processes registered for a provider session that may
+   * still be running background work: the runs behind turns CloudCLI does not
+   * drive itself. Injected so history tests never read the real `~/.claude`.
+   */
+  listLiveCliRuns?: LiveCliRunsProbe;
 };
 
 export class ClaudeSessionsProvider implements IProviderSessions {
   private readonly getLiveRunStartTime: LiveRunStartTimeProbe;
+  private readonly listLiveCliRuns: LiveCliRunsProbe;
 
-  constructor({ getLiveRunStartTime = getClaudeSDKSessionStartTime }: ClaudeSessionsProviderOptions = {}) {
+  constructor({
+    getLiveRunStartTime = getClaudeSDKSessionStartTime,
+    listLiveCliRuns = listLiveClaudeCliRuns,
+  }: ClaudeSessionsProviderOptions = {}) {
     this.getLiveRunStartTime = getLiveRunStartTime;
+    this.listLiveCliRuns = listLiveCliRuns;
+  }
+
+  /**
+   * The live runs that may still report on this session's background work,
+   * in no particular order (see `canLiveRunReport` for how one is matched to
+   * a launch).
+   *
+   * CloudCLI's own SDK run is one when it is up. The runtime keys its process
+   * map by the app session id when the chat gateway starts a run and by the
+   * provider-native id when the agent API does, so both are asked. Every
+   * Claude CLI process the CLI's own registry lists for the session, apart
+   * from those at rest, is another (see `listLiveClaudeCliRuns`): a Shell-tab
+   * `claude --resume`, a REPL in a terminal, or a run of another CloudCLI
+   * instance sharing `~/.claude`. That registry records only the
+   * provider-native id. Both sources are always asked: stopping at
+   * CloudCLI's own run read a live REPL's earlier launches as `stopped`, and
+   * stopping at the first live process let any process vouch for another's.
+   */
+  private async listLiveRuns(sessionId: string, providerSessionId: string): Promise<LiveClaudeRun[]> {
+    const sdkRunStartedAt = this.getLiveRunStartTime(sessionId) ?? this.getLiveRunStartTime(providerSessionId);
+    const cliRuns = await this.listLiveCliRuns(providerSessionId);
+    return sdkRunStartedAt === null
+      ? cliRuns
+      // The runtime pins the entrypoint its runs write (`buildClaudeSdkEnv`),
+      // whatever entrypoint CloudCLI itself inherited.
+      : [{ startedAt: sdkRunStartedAt, entrypoint: CLOUDCLI_CLAUDE_ENTRYPOINT }, ...cliRuns];
   }
 
   /**
@@ -1711,7 +1842,8 @@ export class ClaudeSessionsProvider implements IProviderSessions {
    * The journal beside it settles the agent when it has; short of that the
    * agent is running only while the process that spawned it is — the same
    * rule history applies to a launch row, keyed here on the agent's first row
-   * rather than the launch's.
+   * (its time and entrypoint) rather than the launch's, and asked of the same
+   * runs (see `listLiveRuns`).
    */
   async readWorkflowAgentActivity(
     sessionId: string,
@@ -1743,10 +1875,8 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     if (journalAgent && journalAgent.status !== 'running') {
       status = journalAgent.status;
     } else {
-      const liveRunStartedAt = this.getLiveRunStartTime(sessionId) ?? this.getLiveRunStartTime(providerSessionId);
-      status = liveRunStartedAt !== null && Date.parse(transcript.startedAt ?? '') >= liveRunStartedAt
-        ? 'running'
-        : 'stopped';
+      const liveRuns = await this.listLiveRuns(sessionId, providerSessionId);
+      status = canLiveRunReport(liveRuns, transcript.startedAt, transcript.entrypoint ?? null) ? 'running' : 'stopped';
     }
 
     return {
@@ -1764,6 +1894,38 @@ export class ClaudeSessionsProvider implements IProviderSessions {
   }
 
   /**
+   * Fingerprints what this session's history reads besides its transcript,
+   * so the history cache can tell a stale copy from a current one when the
+   * transcript file has not changed.
+   *
+   * Two inputs qualify. A workflow's agents advance in the run's journal,
+   * under `<projectDir>/<providerSessionId>/subagents/workflows/<runId>/`,
+   * while the transcript stays quiet, so every journal's mtime and size go
+   * into the key. And an unreported background launch reads `running` or
+   * `stopped` by which live runs could have written it, so the same list of
+   * runs history matches launches against (`listLiveRuns`) goes in too,
+   * each run's start and entrypoint, sorted so the order the registry lists
+   * them in does not matter. A CLI process starting, exiting, or coming to
+   * rest after a turn changes the key even though no file of the session
+   * changed.
+   */
+  async readHistoryFreshnessKey(
+    sessionId: string,
+    providerSessionId: string,
+    transcriptPath: string,
+  ): Promise<string> {
+    const [liveRuns, journals] = await Promise.all([
+      this.listLiveRuns(sessionId, providerSessionId),
+      readWorkflowJournalStamps(path.join(path.dirname(transcriptPath), providerSessionId, 'subagents', 'workflows')),
+    ]);
+    const runs = liveRuns
+      .map(({ startedAt, entrypoint }) => ({ startedAt, entrypoint }))
+      .sort((left, right) => left.startedAt - right.startedAt
+        || (left.entrypoint ?? '').localeCompare(right.entrypoint ?? ''));
+    return JSON.stringify({ liveRuns: runs, journals });
+  }
+
+  /**
    * Loads Claude JSONL history for a project/session and returns normalized
    * messages, preserving the existing pagination behavior from projects.js.
    */
@@ -1778,7 +1940,13 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     try {
       // Load full history first so `total` reflects frontend-normalized messages,
       // not raw JSONL records.
-      result = await getSessionMessages(sessionId, providerSessionId, null, 0, this.getLiveRunStartTime);
+      result = await getSessionMessages(
+        sessionId,
+        providerSessionId,
+        null,
+        0,
+        () => this.listLiveRuns(sessionId, providerSessionId),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[ClaudeProvider] Failed to load session ${sessionId}:`, message);

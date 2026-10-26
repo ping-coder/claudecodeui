@@ -9,7 +9,7 @@ import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
-import type { BackgroundTaskSummary } from '@/shared/types.js';
+import type { BackgroundTaskSummary, WorkflowInfo } from '@/shared/types.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -153,7 +153,9 @@ test('history pages are sliced from the cached full transcript and see appended 
   const transcriptPath = path.join(transcriptDirectory, `${sessionId}.jsonl`);
 
   try {
-    await withIsolatedDatabase(async () => {
+    // Every Claude history read asks the CLI's process registry whether a run
+    // is live, so it gets an empty one rather than the real ~/.claude.
+    await withClaudeCliRegistry([], async () => await withIsolatedDatabase(async () => {
       const rows = [
         claudeTextRow(sessionId, 'user', 'one', 0),
         claudeTextRow(sessionId, 'assistant', 'reply one', 1),
@@ -190,7 +192,7 @@ test('history pages are sliced from the cached full transcript and see appended 
       const older = await sessionsService.fetchHistory(sessionId, { limit: 2, offset: 2 });
       assert.deepEqual(older.messages.map((message) => message.content), ['reply one', 'two']);
       assert.equal(older.hasMore, true);
-    });
+    }));
   } finally {
     await rm(transcriptDirectory, { recursive: true, force: true });
   }
@@ -367,8 +369,10 @@ test('running sessions ignore registry files a crash left behind', { concurrency
 
     await withClaudeCliRegistry(
       [
-        // The process is gone: signal 0 cannot find this pid.
-        { pid: 4_194_302, sessionId: 'claude-native-stale', status: 'busy', startedAt: 1_000 },
+        // The process is gone: no kernel hands out 2^31 - 1, the largest pid
+        // `process.kill` accepts, so signal 0 cannot find it. A pid under
+        // Linux's default pid_max can belong to a live process.
+        { pid: 2 ** 31 - 1, sessionId: 'claude-native-stale', status: 'busy', startedAt: 1_000 },
         // Alive, but waiting for input rather than producing a response.
         { pid: process.pid, sessionId: 'claude-native-idle', status: 'idle', startedAt: 2_000 },
       ],
@@ -405,6 +409,40 @@ test('a CLI turn does not duplicate a session already running a chat run', { con
   });
 });
 
+test('a CLI turn does not duplicate a session whose background work CloudCLI holds', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('held-cli-session', 'claude', '/tmp/running-project');
+    sessionsDb.assignProviderSessionId('held-cli-session', 'claude-native-held');
+
+    // The process CloudCLI holds open for the work registers itself `busy`
+    // until the work is done, so the registry names the same session.
+    const tasks = [task('workflow', 6_000)];
+    await withClaudeCliRegistry(
+      [{ pid: process.pid, sessionId: 'claude-native-held', status: 'busy', entrypoint: 'sdk-ts', startedAt: 5_500 }],
+      async () => await withProviders(
+        {
+          claude: {
+            run: async () => undefined,
+            abort: () => false,
+            listBackgroundWork: () => [{ sessionId: 'held-cli-session', tasks }],
+          },
+        },
+        async () => {
+          assert.deepEqual(await sessionsService.listRunningSessions(), [{
+            sessionId: 'held-cli-session',
+            provider: 'claude',
+            startedAt: 6_000,
+            lastSeq: 0,
+            background: true,
+            canInterrupt: false,
+            tasks,
+          }]);
+        },
+      ),
+    );
+  });
+});
+
 test('an unreadable registry never fails the running-sessions poll', { concurrency: false }, async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('safe-session', 'claude', '/tmp/running-project');
@@ -426,4 +464,129 @@ test('an unreadable registry never fails the running-sessions poll', { concurren
       },
     );
   });
+});
+
+test('a cached Claude history follows a CLI-driven workflow through its journal and its process', { concurrency: false }, async () => {
+  const projectDirectory = await mkdtemp(path.join(os.tmpdir(), 'sessions-service-cli-workflow-'));
+  const appSessionId = 'cli-workflow-app-session';
+  const providerSessionId = 'claude-native-cli-workflow';
+  const toolUseId = 'toolu_cli_workflow';
+  const transcriptPath = path.join(projectDirectory, `${providerSessionId}.jsonl`);
+  const runDirectory = path.join(projectDirectory, providerSessionId, 'subagents', 'workflows', 'wf_cli-1');
+  const journalPath = path.join(runDirectory, 'journal.jsonl');
+  const journalRow = (type: string, agentId: string, label?: string) => `${JSON.stringify({ type, agentId, label })}\n`;
+
+  try {
+    // A Workflow launch the CLI has not reported back on yet, and its journal.
+    const rows = [
+      {
+        type: 'assistant',
+        uuid: 'wf-a1',
+        parentUuid: null,
+        sessionId: providerSessionId,
+        timestamp: '2026-08-21T10:32:10.000Z',
+        message: { role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'Workflow', input: {} }] },
+      },
+      {
+        type: 'user',
+        uuid: 'wf-u1',
+        parentUuid: 'wf-a1',
+        sessionId: providerSessionId,
+        timestamp: '2026-08-21T10:32:15.000Z',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'Workflow launched in background.' }] },
+        toolUseResult: { status: 'async_launched', runId: 'wf_cli-1', workflowName: 'audit', transcriptDir: runDirectory },
+      },
+    ];
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(
+      journalPath,
+      journalRow('started', 'ag1', 'audit:chat') + journalRow('result', 'ag1') + journalRow('started', 'ag2', 'audit:sidebar'),
+      'utf8',
+    );
+
+    await withIsolatedDatabase(async () => {
+      const now = new Date().toISOString();
+      sessionsDb.createSession(providerSessionId, 'claude', projectDirectory, 'CLI workflow', now, now, transcriptPath);
+      sessionsDb.createAppSession(appSessionId, 'claude', projectDirectory);
+      sessionsDb.assignProviderSessionId(appSessionId, providerSessionId);
+
+      // Counts the full-transcript parses the cache lets through.
+      const claudeSessions = providerRegistry.resolveProvider('claude').sessions;
+      const realFetchHistory = claudeSessions.fetchHistory;
+      let parses = 0;
+      claudeSessions.fetchHistory = (sessionId, options) => {
+        parses += 1;
+        return realFetchHistory.call(claudeSessions, sessionId, options);
+      };
+
+      const readWorkflow = async () => (await sessionsService.fetchHistory(appSessionId)).messages
+        .find((message) => message.kind === 'tool_use' && message.toolId === toolUseId)?.workflow;
+      const agentStatuses = (workflow: WorkflowInfo | undefined) =>
+        workflow?.agents.map((agent) => [agent.label, agent.status]);
+
+      // A Shell-tab `claude --resume` that launched the workflow. The CLI keeps
+      // its registry status `busy` for as long as a workflow it launched is
+      // unfinished, even after its own turn has ended.
+      const registryRecord = (status: string) => ({
+        pid: process.pid,
+        sessionId: providerSessionId,
+        status,
+        entrypoint: 'cli',
+        startedAt: Date.parse('2026-08-21T10:30:00.000Z'),
+      });
+      const registryFile = () => path.join(os.homedir(), '.claude', 'sessions', `${process.pid}.json`);
+
+      try {
+        await withClaudeCliRegistry(
+          [registryRecord('busy')],
+          async () => {
+            const live = await readWorkflow();
+            assert.equal(live?.status, 'running');
+            assert.deepEqual(agentStatuses(live), [['audit:chat', 'completed'], ['audit:sidebar', 'running']]);
+            assert.equal(parses, 1);
+
+            await readWorkflow();
+            assert.equal(parses, 1, 'nothing changed, so the cached transcript is served');
+
+            // One agent settles and the next starts, all in the journal: the
+            // transcript itself stays quiet.
+            await appendFile(journalPath, journalRow('result', 'ag2') + journalRow('started', 'ag3', 'synthesize'), 'utf8');
+            const progressed = await readWorkflow();
+            assert.equal(parses, 2);
+            assert.deepEqual(agentStatuses(progressed), [
+              ['audit:chat', 'completed'],
+              ['audit:sidebar', 'completed'],
+              ['synthesize', 'running'],
+            ]);
+
+            // The CLI comes to rest, which it does only once nothing it
+            // launched is unfinished; again, no file of the session changed.
+            // A process at rest cannot report, so the cached copy that read
+            // the run as live is stale.
+            await writeFile(registryFile(), JSON.stringify(registryRecord('idle')), 'utf8');
+            const resting = await readWorkflow();
+            assert.equal(parses, 3);
+            assert.equal(resting?.status, 'stopped');
+            assert.deepEqual(agentStatuses(resting), [
+              ['audit:chat', 'completed'],
+              ['audit:sidebar', 'completed'],
+              ['synthesize', 'stopped'],
+            ]);
+
+            // The resting CLI then exits and removes its registry file. That
+            // changes nothing the history depends on, so the cache holds.
+            await rm(registryFile());
+            const exited = await readWorkflow();
+            assert.equal(parses, 3, 'a resting process exiting does not invalidate the cached transcript');
+            assert.equal(exited?.status, 'stopped');
+          },
+        );
+      } finally {
+        claudeSessions.fetchHistory = realFetchHistory;
+      }
+    });
+  } finally {
+    await rm(projectDirectory, { recursive: true, force: true });
+  }
 });

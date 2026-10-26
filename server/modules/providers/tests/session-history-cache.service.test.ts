@@ -163,3 +163,82 @@ test('invalidating a session re-parses its unchanged transcript on the next read
     assert.equal(second?.messages[0]?.content, 'load-2');
   });
 });
+
+test('a cached load is reused only while its freshness key is unchanged', async () => {
+  await withTranscriptFile(async (transcriptPath) => {
+    const cache = createSessionHistoryCache();
+    let loads = 0;
+    const loadFull = async () => {
+      loads += 1;
+      return historyResult(`load-${loads}`);
+    };
+    // Stands in for what a history depends on outside its transcript file: a
+    // workflow journal's stat, or whether the run behind the session is up.
+    let freshnessKey = 'journal-1';
+    const readFreshnessKey = async () => freshnessKey;
+
+    const first = await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    const reused = await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    assert.equal(loads, 1);
+    assert.equal(reused, first);
+
+    // The transcript file is untouched, but the history is not current.
+    freshnessKey = 'journal-2';
+    const refreshed = await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    assert.equal(loads, 2);
+    assert.equal(refreshed?.messages[0]?.content, 'load-2');
+
+    const reusedAgain = await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    assert.equal(loads, 2);
+    assert.equal(reusedAgain, refreshed);
+  });
+});
+
+test('the freshness key is read before the load, so a change made during it shows on the next read', async () => {
+  await withTranscriptFile(async (transcriptPath) => {
+    const cache = createSessionHistoryCache();
+    let freshnessKey = 'journal-1';
+    let loads = 0;
+    const loadFull = async () => {
+      loads += 1;
+      // The workflow writes its journal while the transcript is being parsed:
+      // what was read reflects at best the key from before the load.
+      freshnessKey = `journal-${loads + 1}`;
+      return historyResult(`load-${loads}`);
+    };
+    const readFreshnessKey = async () => freshnessKey;
+
+    await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    const next = await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+
+    assert.equal(loads, 2);
+    assert.equal(next?.messages[0]?.content, 'load-2');
+  });
+});
+
+test('a freshness key that cannot be read bypasses the cache and drops the entry', async () => {
+  await withTranscriptFile(async (transcriptPath) => {
+    const cache = createSessionHistoryCache();
+    let loads = 0;
+    const loadFull = async () => {
+      loads += 1;
+      return historyResult(`load-${loads}`);
+    };
+    const readFreshnessKey = async () => 'journal-1';
+
+    await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    const failed = await cache.getFullHistory({
+      sessionId: 's1',
+      transcriptPath,
+      readFreshnessKey: async () => {
+        throw new Error('registry unreadable');
+      },
+      loadFull,
+    });
+    assert.equal(failed, null, 'the caller falls back to a direct read');
+
+    // The entry cached before the failure is not trusted afterwards either.
+    await cache.getFullHistory({ sessionId: 's1', transcriptPath, readFreshnessKey, loadFull });
+    assert.equal(loads, 2);
+  });
+});

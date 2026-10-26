@@ -426,8 +426,12 @@ test('Claude history keeps a background agent running until its outcome is repor
       sessionsDb.createSession(SESSION_ID, 'claude', tempRoot, 'Subagent session', now, now, parentPath);
 
       // The run that launched the agent is still up, so it can still report.
+      // No Claude CLI process is registered for the session.
       const liveRunStartedAt = Date.parse('2026-08-21T09:59:00.000Z');
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => liveRunStartedAt }).fetchHistory(SESSION_ID, {
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => liveRunStartedAt,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(SESSION_ID, {
         providerSessionId: SESSION_ID,
       });
       const agentRow = history.messages.find(
@@ -462,8 +466,12 @@ test('Claude history reports a background agent stopped once its session process
       // A background agent runs inside the session's CLI process. With that
       // process gone — the run was stopped, or crashed — an agent that never
       // reported never will, and "still running" would pin a spinner on the
-      // card forever.
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => null }).fetchHistory(SESSION_ID, {
+      // card forever. Neither CloudCLI's runtime nor the Claude CLI's process
+      // registry knows of a live run here.
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => null,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(SESSION_ID, {
         providerSessionId: SESSION_ID,
       });
       const agentRow = history.messages.find(
@@ -495,7 +503,10 @@ test('Claude history reports a background agent stopped when a later run of the 
       // `running` made an orphaned card flicker back to a spinner on every
       // later turn.
       const laterRunStartedAt = Date.parse('2026-08-21T11:00:00.000Z');
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => laterRunStartedAt }).fetchHistory(SESSION_ID, {
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => laterRunStartedAt,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(SESSION_ID, {
         providerSessionId: SESSION_ID,
       });
       const agentRow = history.messages.find(
@@ -529,6 +540,7 @@ test('Claude history asks after the session process by both the app and the prov
       for (const liveId of [appSessionId, SESSION_ID]) {
         const history = await new ClaudeSessionsProvider({
           getLiveRunStartTime: (sessionId) => (sessionId === liveId ? Date.parse('2026-08-21T09:59:00.000Z') : null),
+          listLiveCliRuns: async () => [],
         }).fetchHistory(appSessionId, { providerSessionId: SESSION_ID });
         const agentRow = history.messages.find(
           (message) => message.kind === 'tool_use' && message.toolId === AGENT_TOOL_USE_ID,
@@ -604,7 +616,10 @@ test('Claude history reports a forked background agent stopped: no transcript, n
       const now = new Date().toISOString();
       sessionsDb.createSession(SESSION_ID, 'claude', tempRoot, 'Subagent session', now, now, parentPath);
 
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => null }).fetchHistory(SESSION_ID, {
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => null,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(SESSION_ID, {
         providerSessionId: SESSION_ID,
       });
       const agentRow = history.messages.find(
@@ -835,6 +850,10 @@ for (const notification of ['user', 'remove', 'enqueue'] as const) {
         assert.equal(workflowRow?.workflow?.runId, WORKFLOW_RUN_ID);
         assert.equal(workflowRow?.workflow?.description, 'Evidence-based audit of the frontend');
         assert.match(workflowRow?.workflow?.scriptPath ?? '', /frontend-architecture-audit-wf_16fbf852-274\.js$/);
+        // The run ended when the row carrying its report was written, in
+        // either shape. That row is folded away, and a turn the Claude CLI
+        // drove streamed no end event, so this is all that places the end.
+        assert.equal(workflowRow?.workflow?.endedAt, '2026-08-21T11:27:00.000Z');
 
         const strayNotification = history.messages.find(
           (message) => typeof message.content === 'string' && message.content.includes('<task-notification>'),
@@ -858,8 +877,12 @@ test('Claude history reads a workflow\'s agents and their progress from its jour
       sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', tempRoot, 'Workflow session', now, now, parentPath);
 
       // The run that launched the workflow is still up, so it is still going.
+      // No Claude CLI process is registered for the session.
       const liveRunStartedAt = Date.parse('2026-08-21T10:30:00.000Z');
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => liveRunStartedAt }).fetchHistory(WORKFLOW_SESSION_ID, {
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => liveRunStartedAt,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(WORKFLOW_SESSION_ID, {
         providerSessionId: WORKFLOW_SESSION_ID,
       });
       const workflowRow = history.messages.find(
@@ -867,6 +890,7 @@ test('Claude history reads a workflow\'s agents and their progress from its jour
       );
 
       assert.equal(workflowRow?.workflow?.status, 'running');
+      assert.equal(workflowRow?.workflow?.endedAt, undefined, 'a run that has not reported has not ended');
       assert.equal(workflowRow?.toolResult?.content, '', 'the launch acknowledgement must never show as a result');
       // An agent with a `started` record and no `result` or `failed` is the
       // one still working; the journal is the only place that says so.
@@ -929,7 +953,10 @@ test('Claude history reports a workflow stopped, with no agents, when its run an
       const now = new Date().toISOString();
       sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', tempRoot, 'Workflow session', now, now, parentPath);
 
-      const history = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => null }).fetchHistory(WORKFLOW_SESSION_ID, {
+      const history = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => null,
+        listLiveCliRuns: async () => [],
+      }).fetchHistory(WORKFLOW_SESSION_ID, {
         providerSessionId: WORKFLOW_SESSION_ID,
       });
       const workflowRow = history.messages.find(
@@ -937,8 +964,69 @@ test('Claude history reports a workflow stopped, with no agents, when its run an
       );
 
       assert.equal(workflowRow?.workflow?.status, 'stopped');
+      assert.equal(workflowRow?.workflow?.endedAt, undefined, 'nothing records when a run that never reported ended');
       assert.deepEqual(workflowRow?.workflow?.agents, []);
       assert.deepEqual(workflowRow?.workflow?.agentCounts, { total: 0, completed: 0, failed: 0, running: 0, stopped: 0 });
+    });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Claude history ends a workflow that reported more than once at its latest report', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-workflow-ended-at-'));
+
+  try {
+    const parentPath = await writeClaudeWorkflowSession(tempRoot, { notification: 'none', journal: true });
+    const appendRows = async (rows: Record<string, unknown>[]) => writeFile(
+      parentPath,
+      `${(await readFile(parentPath, 'utf8')).trim()}\n${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+      'utf8',
+    );
+    const readWorkflow = async () => (await new ClaudeSessionsProvider({
+      getLiveRunStartTime: () => null,
+      listLiveCliRuns: async () => [],
+    }).fetchHistory(WORKFLOW_SESSION_ID, { providerSessionId: WORKFLOW_SESSION_ID })).messages.find(
+      (message) => message.kind === 'tool_use' && message.toolId === WORKFLOW_TOOL_USE_ID,
+    )?.workflow;
+
+    await withIsolatedDatabase(async () => {
+      const now = new Date().toISOString();
+      sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', tempRoot, 'Workflow session', now, now, parentPath);
+
+      // A report whose row carries no readable time settles the run without
+      // placing its end.
+      await appendRows([{
+        type: 'queue-operation',
+        operation: 'enqueue',
+        sessionId: WORKFLOW_SESSION_ID,
+        content: workflowNotificationText('stopped'),
+      }]);
+      const untimed = await readWorkflow();
+      assert.equal(untimed?.status, 'stopped');
+      assert.equal(untimed?.endedAt, undefined);
+
+      // A resumed session first reports the run as stopped, then the run
+      // finishes and reports again. Its end is the last report, not the first.
+      await appendRows([
+        {
+          type: 'queue-operation',
+          operation: 'enqueue',
+          timestamp: '2026-08-21T10:50:00.000Z',
+          sessionId: WORKFLOW_SESSION_ID,
+          content: workflowNotificationText('stopped'),
+        },
+        {
+          type: 'user',
+          uuid: 'workflow-notification-2',
+          sessionId: WORKFLOW_SESSION_ID,
+          timestamp: '2026-08-21T11:27:00.000Z',
+          message: { role: 'user', content: [{ type: 'text', text: workflowNotificationText('completed') }] },
+        },
+      ]);
+      const reportedTwice = await readWorkflow();
+      assert.equal(reportedTwice?.status, 'completed');
+      assert.equal(reportedTwice?.endedAt, '2026-08-21T11:27:00.000Z');
     });
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
@@ -1056,8 +1144,10 @@ test('a long workflow agent timeline keeps its newest steps within the transport
       const now = new Date().toISOString();
       sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', tempRoot, 'Workflow session', now, now, parentPath);
 
-      const live = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => Date.parse('2026-08-21T10:30:00.000Z') })
-        .readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
+      const live = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => Date.parse('2026-08-21T10:30:00.000Z'),
+        listLiveCliRuns: async () => [],
+      }).readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
       assert.equal(live?.activityCount, 205);
       assert.equal(live?.activity.length, 200);
       assert.equal(live?.activity[0]?.content, 'step 6');
@@ -1088,9 +1178,12 @@ test('a workflow agent the journal has not settled is running only while the run
       sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', tempRoot, 'Workflow session', now, now, parentPath);
 
       // The run that spawned the agent is still up: it started before the
-      // agent's first row was written.
-      const live = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => Date.parse('2026-08-21T10:30:00.000Z') })
-        .readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
+      // agent's first row was written. No Claude CLI process is registered
+      // for the session.
+      const live = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => Date.parse('2026-08-21T10:30:00.000Z'),
+        listLiveCliRuns: async () => [],
+      }).readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
       assert.deepEqual(live?.agent, { id: agentId, label: 'synthesize', model: 'claude-opus-4-1', status: 'running' });
       assert.equal(live?.activityCount, 2);
       assert.deepEqual(live?.activity.map((entry) => entry.kind), ['thinking', 'tool']);
@@ -1098,8 +1191,10 @@ test('a workflow agent the journal has not settled is running only while the run
       assert.equal(live?.activity[1]?.toolName, 'Read');
 
       // A later run of the session is a new process; the agent's own is gone.
-      const orphaned = await new ClaudeSessionsProvider({ getLiveRunStartTime: () => Date.parse('2026-08-21T11:00:00.000Z') })
-        .readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
+      const orphaned = await new ClaudeSessionsProvider({
+        getLiveRunStartTime: () => Date.parse('2026-08-21T11:00:00.000Z'),
+        listLiveCliRuns: async () => [],
+      }).readWorkflowAgentActivity(WORKFLOW_SESSION_ID, WORKFLOW_RUN_ID, agentId);
       assert.equal(orphaned?.agent.status, 'stopped');
 
       // No transcript for this agent: nothing to show, which the route turns

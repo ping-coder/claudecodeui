@@ -18,12 +18,17 @@ import type { FetchHistoryResult } from '@/shared/types.js';
  * rewrites history (a new turn, an edit, a rewind, a fork) touches the file
  * and invalidates naturally.
  *
- * One thing the file cannot tell: whether the CLI process behind the session
- * is still running. Claude's history reader answers a background agent's
- * status from that, so a session's entry is also dropped explicitly when its
- * process starts or ends (`invalidate`) — otherwise a page read while the
- * process was up would keep reporting `running` after it had gone, until the
- * next row happened to land in the file.
+ * Some of what a history reader returns is not in that file. Claude's reader
+ * answers an unreported background launch's status from whether the process
+ * behind the session is still running, and reads a workflow's agents from
+ * the run's journal, which is written next to the transcript rather than
+ * into it. A caller whose history depends on such inputs passes
+ * `readFreshnessKey`, a fingerprint of them read before the load like the
+ * stat, and an entry is reused only while both match. Otherwise a page read
+ * while the process was up would keep reporting `running` after it had gone,
+ * and a workflow's agents would stay where they were, until the next row
+ * happened to land in the file. CloudCLI's own runs also drop the session's
+ * entry explicitly when their process starts or ends (`invalidate`).
  *
  * Only history readers that read `jsonl_path` itself may use this cache —
  * callers pass `transcriptPath: null` for providers whose messages live
@@ -36,6 +41,8 @@ type CacheEntry = {
   mtimeMs: number;
   /** File size in bytes; doubles as the entry's cost against the byte budget. */
   size: number;
+  /** What `readFreshnessKey` returned before the load, or null when the caller passed none. */
+  freshnessKey: string | null;
   full: FetchHistoryResult;
 };
 
@@ -43,6 +50,12 @@ type GetFullHistoryArgs = {
   sessionId: string;
   /** Path of the file the provider's history reader actually parses, or null to bypass. */
   transcriptPath: string | null | undefined;
+  /**
+   * Fingerprints what the history depends on besides the transcript file
+   * (see `IProviderSessions.readHistoryFreshnessKey`). Omitted, the file's
+   * stat alone decides whether a cached entry is current.
+   */
+  readFreshnessKey?: () => Promise<string | null>;
   /** Loads the complete transcript (`limit: null, offset: 0`) from the provider. */
   loadFull: () => Promise<FetchHistoryResult>;
 };
@@ -80,10 +93,16 @@ export function createSessionHistoryCache(
   return {
     /**
      * Returns the session's full transcript through the cache, or null when
-     * the session is not cacheable (no transcript path, or the file cannot be
-     * stat'ed) — the caller then falls back to a plain provider read.
+     * the session is not cacheable (no transcript path, the file cannot be
+     * stat'ed, or its freshness key cannot be read) — the caller then falls
+     * back to a plain provider read.
      */
-    async getFullHistory({ sessionId, transcriptPath, loadFull }: GetFullHistoryArgs): Promise<FetchHistoryResult | null> {
+    async getFullHistory({
+      sessionId,
+      transcriptPath,
+      readFreshnessKey,
+      loadFull,
+    }: GetFullHistoryArgs): Promise<FetchHistoryResult | null> {
       if (!transcriptPath) {
         return null;
       }
@@ -100,12 +119,24 @@ export function createSessionHistoryCache(
         return null;
       }
 
+      let freshnessKey: string | null = null;
+      if (readFreshnessKey) {
+        try {
+          freshnessKey = await readFreshnessKey();
+        } catch {
+          // Without the key there is no telling whether an entry is current.
+          entries.delete(sessionId);
+          return null;
+        }
+      }
+
       const cached = entries.get(sessionId);
       if (
         cached
         && cached.transcriptPath === transcriptPath
         && cached.mtimeMs === stat.mtimeMs
         && cached.size === stat.size
+        && cached.freshnessKey === freshnessKey
       ) {
         // Re-insert to mark as most recently used.
         entries.delete(sessionId);
@@ -114,8 +145,8 @@ export function createSessionHistoryCache(
       }
 
       // Concurrent requests for the same session share one parse. The file may
-      // gain rows while the load runs; the pre-load stat is what the entry is
-      // keyed by, so the next request would see a changed stat and re-read.
+      // gain rows while the load runs; the pre-load stat and key are what the
+      // entry is keyed by, so the next request would see a change and re-read.
       const pending = pendingLoads.get(sessionId);
       if (pending) {
         return pending;
@@ -127,6 +158,7 @@ export function createSessionHistoryCache(
           transcriptPath,
           mtimeMs: stat.mtimeMs,
           size: stat.size,
+          freshnessKey,
           full,
         });
         evictOverBudget();

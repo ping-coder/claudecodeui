@@ -470,6 +470,30 @@ export type BackgroundTaskSummary = {
 };
 
 /**
+ * One live Claude process that may still deliver the report of background
+ * work it launched in a session: CloudCLI's own SDK run, or a Claude CLI
+ * process the CLI's registry (`~/.claude/sessions`) lists for the session,
+ * such as a Shell-tab `claude --resume`, a REPL in a terminal, or another
+ * CloudCLI instance's run.
+ *
+ * Background work runs inside the process that launched it, so a launch can
+ * only still report through a process that is up and that wrote it.
+ * `startedAt` (epoch ms) rules out a process that started after the launch
+ * row was written. `entrypoint` is the `CLAUDE_CODE_ENTRYPOINT` the process
+ * runs under: `sdk-ts` for an Agent SDK run (CloudCLI pins it for its own
+ * runs, and keeps an inherited one away from its Shell tab, whose REPL then
+ * writes `cli`), and whatever another process was started with, e.g. `cli`
+ * for an interactive REPL or `sdk-cli` for a non-interactive CLI started
+ * from one. The CLI also stamps it on every transcript row it writes, so a
+ * process of another kind is ruled out too. It is null when the process's
+ * record does not say, and then rules nothing out.
+ */
+export type LiveClaudeRun = {
+  startedAt: number;
+  entrypoint: string | null;
+};
+
+/**
  * Where one agent of a running workflow stands, as the SDK reports it on the
  * run's `task_progress` events.
  *
@@ -545,6 +569,16 @@ export type WorkflowInfo = {
   name: string;
   description?: string;
   status: 'running' | 'completed' | 'failed' | 'stopped';
+  /**
+   * When the run's outcome was written to the session transcript, as an ISO
+   * 8601 timestamp on the server's clock: the latest row that carried its
+   * `<task-notification>`, whether a user-role turn or a queue-operation
+   * record. A run's end is not streamed when the turn is driven outside
+   * CloudCLI (a Shell-tab `claude --resume`), so this is the only way to
+   * place it. Absent while the run has not reported, including a `stopped`
+   * run whose process ended first, since nothing records when that run ended.
+   */
+  endedAt?: string;
   agents: WorkflowAgentInfo[];
   agentCounts: { total: number; completed: number; failed: number; running: number; stopped: number };
   scriptPath?: string;

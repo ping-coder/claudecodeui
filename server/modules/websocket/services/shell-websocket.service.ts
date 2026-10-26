@@ -703,6 +703,12 @@ export function handleShellConnection(
         const termCols = readNumber(data.cols, 80);
         const termRows = readNumber(data.rows, 24);
         const prioritizedPath = prioritizeUserNpmGlobalBin(process.env);
+        // A CloudCLI started from inside a Claude Code process inherits its
+        // entrypoint, and an interactive `claude` keeps an inherited one, so
+        // the Shell tab's REPL would label itself as that kind of process.
+        // Without it the REPL writes `cli`, which is how the Claude history
+        // reader tells its launches from CloudCLI's own runs.
+        const { CLAUDE_CODE_ENTRYPOINT: _inheritedEntrypoint, ...hostEnv } = process.env;
 
         shellProcess = (dependencies.spawnPty ?? pty.spawn)(shell, shellArgs, {
           name: 'xterm-256color',
@@ -710,7 +716,7 @@ export function handleShellConnection(
           rows: termRows,
           cwd: resolvedProjectPath,
           env: {
-            ...process.env,
+            ...hostEnv,
             [prioritizedPath.key]: prioritizedPath.value,
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',

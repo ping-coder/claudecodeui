@@ -251,6 +251,25 @@ export interface IProviderSessions {
     runId: string,
     agentId: string,
   ): Promise<WorkflowAgentActivity | null>;
+
+  /**
+   * Fingerprints what a session's history depends on besides its transcript
+   * file, for the history cache: a cached history is reused only while both
+   * the file's stat and this key are unchanged. Called on every history read
+   * that goes through the cache, so it must stay cheap.
+   *
+   * `transcriptPath` is the session's `jsonl_path`, the file the cache stats.
+   * Implemented only by providers whose history reader consults something
+   * that can change while that file does not. Claude's reads its workflows'
+   * journals, and reads an unreported background launch as running or
+   * stopped by whether the process behind the session is alive. Without it,
+   * the file alone decides when a cached history is stale.
+   */
+  readHistoryFreshnessKey?(
+    sessionId: string,
+    providerSessionId: string,
+    transcriptPath: string,
+  ): Promise<string | null>;
 }
 
 // ---------------------------

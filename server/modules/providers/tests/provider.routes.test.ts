@@ -57,6 +57,27 @@ async function withProviderServer(
   }
 }
 
+/**
+ * Runs `run` with a throwaway HOME, so a route that reads the Claude CLI's
+ * process registry under `~/.claude/sessions` finds an empty one instead of
+ * the developer's real one.
+ */
+async function withIsolatedHome(run: () => Promise<void>): Promise<void> {
+  const previousHome = process.env.HOME;
+  const isolatedHome = await mkdtemp(path.join(os.tmpdir(), 'provider-routes-home-'));
+  process.env.HOME = isolatedHome;
+  try {
+    await run();
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    await rm(isolatedHome, { recursive: true, force: true });
+  }
+}
+
 test('session creation route names a CloudCLI session from the initial message', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     const response = await fetch(`${baseUrl}/api/providers/sessions`, {
@@ -599,7 +620,7 @@ test('the running-sessions route reports a session held open for background work
   } as unknown as IProvider];
 
   try {
-    await withProviderServer(async (baseUrl) => {
+    await withIsolatedHome(() => withProviderServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/providers/sessions/running`);
       const payload = await response.json() as { data: { sessions: unknown[] } };
 
@@ -613,7 +634,7 @@ test('the running-sessions route reports a session held open for background work
         canInterrupt: false,
         tasks,
       }]);
-    });
+    }));
   } finally {
     providerRegistry.listProviders = realListProviders;
   }
@@ -658,7 +679,7 @@ async function writeWorkflowRun(projectDirectory: string): Promise<string> {
 }
 
 test('the workflow agent route reads an agent\'s timeline and status from its run directory', async () => {
-  await withProviderServer(async (baseUrl, workspacePath) => {
+  await withIsolatedHome(() => withProviderServer(async (baseUrl, workspacePath) => {
     const sessionPath = await writeWorkflowRun(workspacePath);
     const now = new Date().toISOString();
     sessionsDb.createSession(WORKFLOW_SESSION_ID, 'claude', workspacePath, 'Workflow session', now, now, sessionPath);
@@ -707,5 +728,5 @@ test('the workflow agent route reads an agent\'s timeline and status from its ru
     const missing = await missingResponse.json() as { error: { code: string } };
     assert.equal(missingResponse.status, 404);
     assert.equal(missing.error.code, 'WORKFLOW_AGENT_NOT_FOUND');
-  });
+  }));
 });

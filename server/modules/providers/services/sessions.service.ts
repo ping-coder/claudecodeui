@@ -171,7 +171,7 @@ export const sessionsService = {
           running.tasks = tasks;
           continue;
         }
-        entries.push({
+        const backgroundEntry: RunningSessionEntry = {
           sessionId,
           provider: provider.id,
           startedAt: Math.min(...tasks.map((task) => task.startedAt)),
@@ -181,14 +181,20 @@ export const sessionsService = {
           background: true,
           canInterrupt: false,
           tasks,
-        });
+        };
+        entries.push(backgroundEntry);
+        // The CLI process holding this work registers itself `busy` until the
+        // work is done, so the loop below would list the session a second time
+        // as a turn of a CLI CloudCLI does not own.
+        runningById.set(sessionId, backgroundEntry);
       }
     }
 
     // The chat-run registry only knows about turns CloudCLI drives itself, so
     // without this a session working under the Claude CLI — including one
     // CloudCLI spawned for its own Shell view — looks idle. A session already
-    // listed above keeps its richer entry.
+    // listed above, for a chat run or the background work CloudCLI holds for
+    // it, keeps its richer entry.
     for (const live of await listBusyClaudeCliSessions()) {
       const session = sessionsDb.getSessionByProviderSessionId(live.providerSessionId);
       if (!session || runningById.has(session.session_id)) {
@@ -521,9 +527,17 @@ export const sessionsService = {
     const transcriptPath = provider === 'claude' || provider === 'codex'
       ? session.jsonl_path
       : null;
+    // Claude's history also depends on what that file cannot show: its
+    // workflows' journals, and whether the CLI process behind the session is
+    // still alive. Its provider fingerprints both so a cached copy goes stale
+    // when either changes; Codex's history is the file alone.
+    const readHistoryFreshnessKey = providerSessions.readHistoryFreshnessKey?.bind(providerSessions);
     const fullHistory = await sessionHistoryCache.getFullHistory({
       sessionId,
       transcriptPath,
+      readFreshnessKey: readHistoryFreshnessKey && transcriptPath
+        ? () => readHistoryFreshnessKey(sessionId, providerSessionId, transcriptPath)
+        : undefined,
       loadFull: () => providerSessions.fetchHistory(sessionId, {
         limit: null,
         offset: 0,

@@ -814,6 +814,34 @@ test('other shells and initial commands only get the COLORFGBG hint', () => {
   });
 });
 
+test('the Shell tab never hands its processes an inherited Claude Code entrypoint', () => {
+  // A CloudCLI started from inside a Claude Code process inherits its
+  // entrypoint, and an interactive claude keeps an inherited one: the Shell
+  // tab's REPL would then pass for that kind of process, e.g. for one of
+  // CloudCLI's own SDK runs, in the history reader's liveness check.
+  const previous = process.env.CLAUDE_CODE_ENTRYPOINT;
+  process.env.CLAUDE_CODE_ENTRYPOINT = 'sdk-ts';
+  try {
+    withClaudeConfig(({ projectPath }) => {
+      const { calls, dependencies } = spawnRecorder('claude-session-1');
+      launch(dependencies, { provider: 'claude', hasSession: true, colorScheme: 'dark' }, projectPath);
+      launch(dependencies, { provider: 'plain-shell', isPlainShell: true, initialCommand: 'claude' }, projectPath);
+
+      assert.equal(calls.length, 2);
+      for (const call of calls) {
+        assert.equal('CLAUDE_CODE_ENTRYPOINT' in call.env, false);
+        assert.equal(call.env.TERM, 'xterm-256color', 'the rest of the environment is still passed on');
+      }
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    } else {
+      process.env.CLAUDE_CODE_ENTRYPOINT = previous;
+    }
+  }
+});
+
 const AGY_CONVERSATION_ID = '0f6b2c1e-8d3a-4f5b-9c7e-2a1d3b4c5e6f';
 const AGY_NOT_INSTALLED_MESSAGE =
   'Antigravity CLI (agy) is not installed on this machine. Install it, or set AGY_CLI_PATH to its full path and restart CloudCLI.';

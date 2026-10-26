@@ -243,12 +243,25 @@ function matchesToolPermission(entry, toolName, input) {
 }
 
 /**
+ * The `entrypoint` every run CloudCLI starts through the Agent SDK writes on
+ * its transcript rows and its process registry record. The SDK's own default,
+ * pinned so a CloudCLI started from inside a Claude Code process (whose
+ * children inherit that process's entrypoint, which the CLI may then rewrite)
+ * still writes it. Used by the Claude history reader to tell CloudCLI's own
+ * launches from those of another CLI process on the same session.
+ */
+export const CLOUDCLI_CLAUDE_ENTRYPOINT = 'sdk-ts';
+
+/**
  * Environment for the spawned CLI. Forwards all host env vars (e.g. ANTHROPIC_BASE_URL);
  * since SDK 0.2.113, options.env replaces process.env instead of overlaying it.
  *
  * Claude Code turns the Artifact tools off for SDK-driven sessions unless
  * CLAUDE_CODE_ARTIFACT is set, so a session continued from this UI would lose them.
  * Default it on; a host value (e.g. CLAUDE_CODE_ARTIFACT=0) still wins.
+ *
+ * The entrypoint is always CloudCLI's own (`CLOUDCLI_CLAUDE_ENTRYPOINT`): an
+ * inherited one would label CloudCLI's runs as some other kind of process.
  *
  * @param {Record<string, string | undefined>} [hostEnv]
  * @returns {Record<string, string | undefined>}
@@ -257,6 +270,7 @@ export function buildClaudeSdkEnv(hostEnv = process.env) {
   return {
     CLAUDE_CODE_ARTIFACT: '1',
     ...hostEnv,
+    CLAUDE_CODE_ENTRYPOINT: CLOUDCLI_CLAUDE_ENTRYPOINT,
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(BG_WAIT_CEILING_MS),
   };
 }
