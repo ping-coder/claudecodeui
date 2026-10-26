@@ -7,6 +7,7 @@ import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { collectRunningBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
+import { isCliDrivenActivity } from '@/modules/chat/utils/runProgress';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -57,7 +58,9 @@ type UseChatRealtimeHandlersArgs = {
  * protocol: every frame is keyed by the stable app session id, so there is
  * no session-id handoff, no provider branching, and no navigation here.
  * Sidebar events (`session_upserted`, `loading_progress`) are handled by
- * `useProjectsState`, not in this hook.
+ * `useProjectsState`, not in this hook — except that the viewed transcript
+ * reloads here on `session_upserted` while a Claude CLI process CloudCLI does
+ * not drive runs its turn, since the sidebar's reload skips a busy session.
  */
 export function useChatRealtimeHandlers({
   isActive,
@@ -192,8 +195,23 @@ export function useChatRealtimeHandlers({
           return;
         }
 
-        // Sidebar/global events — owned by useProjectsState.
-        case 'session_upserted':
+        // Sidebar/global events — owned by useProjectsState, whose reload of
+        // the viewed transcript skips a busy session: a run CloudCLI drives
+        // streams its rows here live. A turn the Claude CLI drives outside
+        // CloudCLI streams nothing, so its transcript on disk is the only
+        // source; reload it as the CLI writes it (the refresh coordinator
+        // folds a burst of writes into one trailing reload).
+        case 'session_upserted': {
+          const upsertedSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+          if (
+            upsertedSessionId
+            && upsertedSessionId === activeViewSessionId
+            && isCliDrivenActivity(getSessionActivity?.(upsertedSessionId))
+          ) {
+            void requestLatestMessages(upsertedSessionId);
+          }
+          return;
+        }
         case 'loading_progress':
           return;
 
