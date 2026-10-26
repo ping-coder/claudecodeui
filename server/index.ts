@@ -29,7 +29,7 @@ import {
 import { taskmasterRoutes } from './modules/taskmaster/index.js';
 import { commandsRoutes } from './modules/commands/index.js';
 import { settingsRoutes } from './modules/settings/index.js';
-import { createSystemModule } from './modules/system/index.js';
+import { createSystemModule, resolveDeploymentEnvironment } from './modules/system/index.js';
 import { createAgentModule } from './modules/agent/index.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
@@ -74,6 +74,10 @@ const RUNNING_VERSION = (() => {
         return null;
     }
 })();
+// Non-production deployment name from CLOUDCLI_DEPLOY_ENV (e.g. "staging"), or null
+// in production. Reported by /health so the web UI can mark the tab title and the
+// sidebar; resolved once because a running process's environment does not change.
+const DEPLOYMENT_ENVIRONMENT = resolveDeploymentEnvironment(process.env.CLOUDCLI_DEPLOY_ENV);
 const systemRoutes = createSystemModule({
     appRoot: APP_ROOT,
     installMode,
@@ -133,13 +137,15 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Public health check endpoint (no authentication required)
+// Public health check endpoint (no authentication required). `environment` is
+// always present: the non-production deployment name, or null in production.
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         installMode,
-        version: RUNNING_VERSION
+        version: RUNNING_VERSION,
+        environment: DEPLOYMENT_ENVIRONMENT
     });
 });
 
