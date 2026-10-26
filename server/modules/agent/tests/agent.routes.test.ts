@@ -11,6 +11,14 @@ import type { LLMProvider } from '@/shared/types.js';
 
 import { createAgentRouter } from '../agent.routes.js';
 
+// The routes log clone progress to stdout while requests run. node:test's
+// parent reads this file's results from the same stdout, and under the full
+// parallel suite that async output can interleave with a result frame and
+// corrupt it ("Unable to deserialize cloned data"), dropping the whole file's
+// results. Nothing here asserts on stdout, so keep it quiet.
+test.mock.method(console, 'log', () => undefined);
+test.mock.method(console, 'info', () => undefined);
+
 type AgentDependencies = Parameters<typeof createAgentRouter>[0];
 type AgentRunFunction = ReturnType<AgentDependencies['getRunner']>;
 
