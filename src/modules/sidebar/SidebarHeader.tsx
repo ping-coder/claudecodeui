@@ -49,7 +49,10 @@ function LogoBlock({ t }: { t: TFunction }) {
       >
         {t('app.title')}
       </h1>
-      <DeploymentEnvironmentBadge className="max-w-24" />
+      {/* Grows from nothing into the room the whole wordmark leaves, up to its own text width,
+          so a narrow sidebar ellipsizes the badge (down to an amber dot) before it cuts the
+          wordmark, and a long name can never run under the header buttons. */}
+      <DeploymentEnvironmentBadge className="max-w-max grow basis-0" />
     </div>
   );
 }
@@ -191,7 +194,7 @@ export default function SidebarHeader({
         className="p-3 pb-2 md:hidden"
         style={isPWA && isMobile ? { paddingTop: '16px' } : {}}
       >
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           {IS_PLATFORM ? (
             <a
               href="https://cloudcli.ai/dashboard"

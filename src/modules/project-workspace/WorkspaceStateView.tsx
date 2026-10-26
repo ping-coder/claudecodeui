@@ -1,6 +1,7 @@
 import { Folder } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';
 
 type WorkspaceStateViewProps = {
@@ -18,8 +19,12 @@ export default function WorkspaceStateView({ mode, isMobile, onMenuClick }: Work
   return (
     <div className="flex h-full flex-col">
       {isMobile && (
-        <div className="pwa-header-safe flex-shrink-0 border-b border-border/50 bg-background/80 p-2 backdrop-blur-sm sm:p-3">
+        <div className="pwa-header-safe flex flex-shrink-0 items-center gap-2 border-b border-border/50 bg-background/80 p-2 backdrop-blur-sm sm:p-3">
           <MobileMenuButton onMenuClick={onMenuClick} compact />
+          {/* These screens replace WorkspaceHeader, so, as it does, this header marks a
+              non-production deployment itself: on phones the sidebar (which carries the
+              badge) is a closed drawer. */}
+          <DeploymentEnvironmentBadge className="max-w-20" />
         </div>
       )}
 

@@ -39,6 +39,9 @@ export default defineConfig(({ mode }) => {
       port: parseInt(env.VITE_PORT) || 5173,
       proxy: {
         '/api': `http://${proxyHost}:${serverPort}`,
+        // The public health check, read by the deployment environment marker and the
+        // restart check. Unproxied, Vite's SPA fallback answers it with index.html.
+        '/health': `http://${proxyHost}:${serverPort}`,
         '/ws': {
           target: `ws://${proxyHost}:${serverPort}`,
           ws: true

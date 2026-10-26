@@ -61,6 +61,20 @@ test('in Chinese the staging badge reads "预发布"', async () => {
   assert.equal(badge.getAttribute('title'), '部署环境：预发布');
 });
 
+test('a className replaces the badge\'s own shrink and width classes', async () => {
+  stubHealth('staging');
+  const DeploymentEnvironmentBadge = await loadBadge();
+
+  render(<DeploymentEnvironmentBadge className="max-w-16 shrink" />);
+
+  // tailwind-merge 3 knows only Tailwind's v4 class names, so a base class it does not
+  // recognise (flex-shrink-0) would stay beside the consumer's and leave the outcome to
+  // the order of the rules in the stylesheet.
+  const classes = (await screen.findByText('Stage')).className.split(/\s+/);
+  assert.deepEqual(classes.filter((name) => /^(flex-)?shrink/.test(name)), ['shrink']);
+  assert.deepEqual(classes.filter((name) => name.startsWith('max-w-')), ['max-w-16']);
+});
+
 test('an environment without a translated label is shown as configured', async () => {
   stubHealth('qa-east-1');
   const DeploymentEnvironmentBadge = await loadBadge();

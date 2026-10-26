@@ -44,8 +44,9 @@ export default function SidebarCollapsed({
         <PanelLeftOpen className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-foreground" />
       </button>
 
-      {/* Deployment environment marker; renders nothing in production */}
-      <DeploymentEnvironmentBadge className="max-w-11 px-1 text-[9px]" />
+      {/* Deployment environment marker; renders nothing in production. leading-none is
+          restated because cn lets the smaller font size drop the badge's own one. */}
+      <DeploymentEnvironmentBadge className="max-w-11 px-1 text-[9px] leading-none" />
 
       <div className="nav-divider my-1 w-6" />
 

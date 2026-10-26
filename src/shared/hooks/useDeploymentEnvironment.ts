@@ -95,6 +95,23 @@ const DEPLOYMENT_ENVIRONMENT_FAVICON_FILES: Partial<Record<string, string>> = {
 };
 
 /**
+ * The URL of an amber icon file beside the given production icon URL, or null when that URL is
+ * not http(s): a data:, blob: or about: URL cannot be the base of a relative one, nor can an
+ * href that does not parse. The swap runs above every error boundary, so it must skip such an
+ * icon (inlined by the deployer, or rewritten by a browser extension) rather than throw.
+ */
+const resolveDeploymentEnvironmentFaviconHref = (stageFile: string, productionIconUrl: string): string | null => {
+  try {
+    const productionIcon = new URL(productionIconUrl);
+    return productionIcon.protocol === 'http:' || productionIcon.protocol === 'https:'
+      ? new URL(stageFile, productionIcon).href
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * Swaps the browser tab icon for the amber one while the deployment is not production, since
  * the label in the tab title cannot be coloured, and puts the production icon back on unmount.
  * Used once by App at the root, beside `useDeploymentEnvironmentTitle`; production never
@@ -118,7 +135,12 @@ export function useDeploymentEnvironmentFavicon(): void {
 
         // Resolved against the production icon rather than the site root, so the swap
         // also holds when the app is served from a sub-path.
-        iconLink.setAttribute('href', new URL(stageFile, iconLink.href).href);
+        const stageHref = resolveDeploymentEnvironmentFaviconHref(stageFile, iconLink.href);
+        if (!stageHref) {
+          return [];
+        }
+
+        iconLink.setAttribute('href', stageHref);
         return [{ iconLink, productionHref }];
       });
 

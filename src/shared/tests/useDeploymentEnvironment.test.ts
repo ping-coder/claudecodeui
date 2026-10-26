@@ -206,6 +206,29 @@ test('the favicon hook takes the amber icon from beside the production one under
   await waitFor(() => assert.equal(new URL(svgIcon.href).pathname, '/cloudcli/favicon-stage.svg'));
 });
 
+// The swap runs above every error boundary, so an icon the amber file cannot be resolved
+// beside (inlined by the deployer, or rewritten by an extension) must be skipped: throwing
+// there would blank the whole tab.
+test.each([
+  ['an inlined data: icon', 'data:image/png;base64,iVBORw0KGgo='],
+  ['a blob: icon', 'blob:http://localhost:3000/4f6c5a8e-7b0e-4d3c-9a1f-2c8d6e5b4a3f'],
+  ['an about: icon', 'about:blank'],
+  ['an icon whose URL does not parse', 'http://[::1'],
+])('the favicon hook leaves %s alone and still swaps the others', async (_icon, href) => {
+  stubHealth(replyWith({ environment: 'staging' }));
+  const unusableIcon = addIconLink('icon', 'image/png', href);
+  const svgIcon = addIconLink('icon', 'image/svg+xml', '/favicon.svg');
+  const { useDeploymentEnvironmentFavicon } = await loadHooks();
+
+  const { unmount } = renderHook(() => useDeploymentEnvironmentFavicon());
+  await waitFor(() => assert.equal(new URL(svgIcon.href).pathname, '/favicon-stage.svg'));
+  assert.equal(unusableIcon.getAttribute('href'), href);
+
+  unmount();
+  assert.equal(svgIcon.getAttribute('href'), '/favicon.svg');
+  assert.equal(unusableIcon.getAttribute('href'), href);
+});
+
 test('in production the favicon hook leaves the tab icons alone', async () => {
   stubHealth(replyWith({ status: 'ok', environment: null }));
   const svgIcon = addIconLink('icon', 'image/svg+xml', '/favicon.svg');
