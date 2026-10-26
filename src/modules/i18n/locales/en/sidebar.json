@@ -38,7 +38,10 @@
     "selectAllLoaded": "Select all loaded",
     "clearSelection": "Clear",
     "deleteSelected_one": "Delete {{count}} session",
-    "deleteSelected_other": "Delete {{count}} sessions"
+    "deleteSelected_other": "Delete {{count}} sessions",
+    "openOnLeft": "Open on the left",
+    "openOnRight": "Open on the right",
+    "openOnRightSplit": "Open on the right (split view)"
   },
   "tooltips": {
     "viewEnvironments": "View Environments",
@@ -57,7 +60,11 @@
     "clearSearch": "Clear search",
     "openCommandPalette": "Open command palette",
     "attentionRequiredIndicator": "Session needs attention",
-    "backgroundWorkIndicator": "Background work running"
+    "backgroundWorkIndicator": "Background work running",
+    "altClickOtherSide": "You can also Alt+click",
+    "openedLeft": "Open in the left pane",
+    "openedRight": "Open in the right pane",
+    "openedBoth": "Open in both panes"
   },
   "navigation": {
     "chat": "Chat",
@@ -176,5 +183,10 @@
     "archiveSessions_other": "Archive {{count}} sessions",
     "archiveSessionsNotice_one": "Archive keeps the session out of the active list while preserving its history.",
     "archiveSessionsNotice_other": "Archive keeps the sessions out of the active list while preserving their history."
+  },
+  "paneTarget": {
+    "label": "Open in",
+    "left": "Left",
+    "right": "Right"
   }
 }

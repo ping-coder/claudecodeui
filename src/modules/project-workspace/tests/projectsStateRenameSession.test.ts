@@ -62,7 +62,7 @@ const renderWithSelectedSession = async () => {
     assert.equal(result.current.projects.length, 1);
   });
   act(() => {
-    result.current.handleSessionSelect({ ...session, __projectId: 'project-1' });
+    result.current.actions.openSession({ ...session, __projectId: 'project-1' });
   });
   assert.equal(result.current.selectedSession?.summary, 'Original title');
 
@@ -71,6 +71,7 @@ const renderWithSelectedSession = async () => {
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   projectsResponse.mockReset();
   renameSessionResponse.mockReset();
 });
@@ -142,7 +143,7 @@ test('a rename leaves the one-shot search jump target behind', async () => {
     assert.equal(result.current.projects.length, 1);
   });
   act(() => {
-    result.current.handleSessionSelect({
+    result.current.actions.openSession({
       ...session,
       __projectId: 'project-1',
       __searchTargetSnippet: 'matched text',

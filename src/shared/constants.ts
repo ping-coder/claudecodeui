@@ -242,3 +242,25 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
 export const PROVIDER_TERMINAL_SIGN_IN_COMMANDS: Partial<Record<LLMProvider, string>> = {
   agy: 'agy',
 };
+
+// ---------------------------
+
+//----------------- WORKSPACE PANES ------------
+
+/** Narrowest a pane may get; two panes need 2x this + PANE_SPLITTER_WIDTH_PX, else only the focused pane shows. */
+export const PANE_MIN_WIDTH_PX = 360;
+
+/** Hit width of the divider between the two panes. */
+export const PANE_SPLITTER_WIDTH_PX = 6;
+
+/** Left share after Split and after a double-click on the divider. */
+export const WORKSPACE_SPLIT_RATIO_DEFAULT = 0.5;
+
+/** Lower bound of the left share; pixel minimums apply on top. */
+export const WORKSPACE_SPLIT_RATIO_MIN = 0.2;
+
+/** Upper bound of the left share; pixel minimums apply on top. */
+export const WORKSPACE_SPLIT_RATIO_MAX = 0.8;
+
+/** Pane layout key in sessionStorage (this browser tab, authoritative) and localStorage (seed for new pages); removed on logout. */
+export const WORKSPACE_LAYOUT_STORAGE_KEY = 'workspace-layout';

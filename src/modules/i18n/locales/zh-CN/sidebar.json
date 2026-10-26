@@ -38,7 +38,10 @@
     "selectAllLoaded": "全选已加载",
     "clearSelection": "清除选择",
     "deleteSelected_one": "删除 {{count}} 个会话",
-    "deleteSelected_other": "删除 {{count}} 个会话"
+    "deleteSelected_other": "删除 {{count}} 个会话",
+    "openOnLeft": "在左侧打开",
+    "openOnRight": "在右侧打开",
+    "openOnRightSplit": "在右侧打开（拆分视图）"
   },
   "tooltips": {
     "viewEnvironments": "查看环境",
@@ -56,7 +59,11 @@
     "cancel": "取消",
     "clearSearch": "清除搜索",
     "openCommandPalette": "打开命令面板",
-    "attentionRequiredIndicator": "会话需要处理"
+    "attentionRequiredIndicator": "会话需要处理",
+    "altClickOtherSide": "也可以 Alt+单击",
+    "openedLeft": "已在左侧打开",
+    "openedRight": "已在右侧打开",
+    "openedBoth": "两侧都已打开"
   },
   "navigation": {
     "chat": "聊天",
@@ -167,5 +174,10 @@
     "archiveSessions_other": "归档 {{count}} 个会话",
     "archiveSessionsNotice_one": "归档会将所选会话移出活动列表，但保留其历史记录。",
     "archiveSessionsNotice_other": "归档会将所选会话移出活动列表，但保留其历史记录。"
+  },
+  "paneTarget": {
+    "label": "打开到",
+    "left": "左",
+    "right": "右"
   }
 }

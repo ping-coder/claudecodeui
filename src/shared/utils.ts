@@ -2,7 +2,15 @@ import { clsx, type ClassValue } from 'clsx';
 import type { TFunction } from 'i18next';
 import { twMerge } from 'tailwind-merge';
 
-import type { LLMProvider, Project, ProjectSession, QuickSettingsTab, SlashCommand } from '@/shared/types';
+import type {
+  LLMProvider,
+  Project,
+  ProjectSession,
+  QuickSettingsTab,
+  SessionDragPayload,
+  SlashCommand,
+  WorkspacePaneSide,
+} from '@/shared/types';
 
 //----------------- DEPLOYMENT MODE ------------
 
@@ -253,7 +261,7 @@ const applyDocumentTitle = (): void => {
  * Sets the browser tab title of the current page. Outside production the deployment
  * environment label stays in front of it ("Stage · My session"); in production the title
  * is written exactly as given. Write page titles through here rather than assigning
- * `document.title`, which would drop the label. Used by the sidebar module's project list.
+ * `document.title`, which would drop the label. Called by project-workspace's ProjectEffects.
  */
 export const setDocumentPageTitle = (title: string): void => {
   documentPageTitle = title;
@@ -363,3 +371,152 @@ export const buildModelRunOptions = (selection: {
  * model as the chat.
  */
 export const getProviderModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;
+
+// ---------------------------
+
+//----------------- KEYBOARD SHORTCUTS ------------
+
+/**
+ * True on macOS/iOS/iPadOS, where the primary modifier is the Command key. Evaluated at
+ * call time rather than at import, so it always reflects the current navigator. Used by
+ * `formatShortcut` and by keyboard handlers that pick `metaKey` or `ctrlKey` as Mod.
+ */
+export const isApplePlatform = (): boolean => {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+
+  // userAgentData is Chromium-only; Safari, on every iPhone and iPad, reports navigator.platform.
+  const { userAgentData } = navigator as Navigator & { userAgentData?: { platform?: string } };
+  const platform = userAgentData?.platform || navigator.platform || '';
+  return /mac|iphone|ipad|ipod/i.test(platform);
+};
+
+/** Glyphs Apple platforms draw for the reserved shortcut tokens. A Map, so a key label such as "constructor" cannot match an Object prototype member. Private to `formatShortcut`. */
+const APPLE_SHORTCUT_GLYPHS = new Map<string, string>([
+  ['mod', '⌘'],
+  ['shift', '⇧'],
+  ['alt', '⌥'],
+  ['enter', '↵'],
+]);
+
+/** Words other platforms spell the reserved shortcut tokens with. Private to `formatShortcut`. */
+const SHORTCUT_WORDS = new Map<string, string>([
+  ['mod', 'Ctrl'],
+  ['shift', 'Shift'],
+  ['alt', 'Alt'],
+  ['enter', 'Enter'],
+]);
+
+/**
+ * Renders a shortcut for tooltips, menus and hints: ['mod','shift','enter'] -> '⌘⇧↵' on Apple,
+ * 'Ctrl+Shift+Enter' elsewhere. Tokens: 'mod' | 'shift' | 'alt' | 'enter' (matched case-insensitively)
+ * or any key label, which is shown as given except that a single letter is upper-cased.
+ */
+export const formatShortcut = (keys: readonly string[]): string => {
+  const isApple = isApplePlatform();
+  const reservedLabels = isApple ? APPLE_SHORTCUT_GLYPHS : SHORTCUT_WORDS;
+  const labels = keys.map((key) => reservedLabels.get(key.toLowerCase()) ?? (key.length === 1 ? key.toUpperCase() : key));
+  return labels.join(isApple ? '' : '+');
+};
+
+// ---------------------------
+
+//----------------- WORKSPACE PANES ------------
+
+/** MIME type a dragged sidebar row or pane tab carries its SessionDragPayload under. Private to the session drag helpers. */
+const SESSION_DRAG_MIME = 'application/x-cloudcli-session';
+
+/** Resolves a link against the page, because text/uri-list only accepts absolute URLs. Private to `writeSessionDragPayload`. */
+const toAbsoluteUrl = (href: string): string => {
+  try {
+    return new URL(href, window.location.href).toString();
+  } catch {
+    return href;
+  }
+};
+
+/**
+ * Writes a session/tab drag payload under the app MIME; pass href for links so text/uri-list keeps
+ * working outside the app (another browser tab, the address bar). Call it from a dragstart handler.
+ */
+export const writeSessionDragPayload = (dataTransfer: DataTransfer, payload: SessionDragPayload, href?: string): void => {
+  // Only the documented fields travel, so a caller handing over a richer object leaks nothing.
+  const serialized: SessionDragPayload = {
+    sessionId: payload.sessionId,
+    projectId: payload.projectId,
+    provider: payload.provider,
+    title: payload.title,
+    ...(payload.fromTab ? { fromTab: { side: payload.fromTab.side, tabKey: payload.fromTab.tabKey } } : {}),
+  };
+  dataTransfer.setData(SESSION_DRAG_MIME, JSON.stringify(serialized));
+
+  if (href) {
+    const url = toAbsoluteUrl(href);
+    dataTransfer.setData('text/uri-list', url);
+    dataTransfer.setData('text/plain', url);
+  }
+};
+
+/** Reads the payload `writeSessionDragPayload` wrote, on drop; null when absent or malformed. */
+export const readSessionDragPayload = (dataTransfer: DataTransfer): SessionDragPayload | null => {
+  let raw = '';
+  try {
+    raw = dataTransfer.getData(SESSION_DRAG_MIME);
+  } catch {
+    return null;
+  }
+  if (!raw) {
+    return null;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const isNullableId = (id: unknown): id is string | null => id === null || (typeof id === 'string' && id.length > 0);
+  if (!isNullableId(candidate.sessionId) || !isNullableId(candidate.projectId)) {
+    return null;
+  }
+  if (typeof candidate.provider !== 'string' || !candidate.provider) {
+    return null;
+  }
+
+  const payload: SessionDragPayload = {
+    sessionId: candidate.sessionId,
+    projectId: candidate.projectId,
+    provider: candidate.provider as LLMProvider,
+    title: typeof candidate.title === 'string' ? candidate.title : '',
+  };
+
+  if (candidate.fromTab !== undefined) {
+    const fromTab = candidate.fromTab as Record<string, unknown> | null;
+    if (
+      !fromTab
+      || typeof fromTab !== 'object'
+      || (fromTab.side !== 'left' && fromTab.side !== 'right')
+      || typeof fromTab.tabKey !== 'string'
+      || !fromTab.tabKey
+    ) {
+      return null;
+    }
+    payload.fromTab = { side: fromTab.side, tabKey: fromTab.tabKey };
+  }
+
+  return payload;
+};
+
+/** Whether a drag carries a session payload; usable during dragenter/dragover, where types are readable but data is not. */
+export const hasSessionDragPayload = (dataTransfer: DataTransfer | null): boolean =>
+  Boolean(dataTransfer && Array.from(dataTransfer.types ?? []).includes(SESSION_DRAG_MIME));
+
+/** `pane-${side}-${id}` inside a pane, unchanged outside, so two panes never share DOM ids (tool-result anchors, for one). */
+export const getPaneScopedDomId = (side: WorkspacePaneSide | null, id: string): string =>
+  (side ? `pane-${side}-${id}` : id);

@@ -64,6 +64,7 @@ const renderProjectsState = async (wrapper?: (props: { children: ReactNode }) =>
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   projectsResponse.mockReset();
   projectsResponse.mockResolvedValue({
     ok: true,

@@ -95,6 +95,7 @@ const renderProjectsState = async (navigate: ReturnType<typeof vi.fn>, urlSessio
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   projectsResponse.mockReset();
   listeners.clear();
 });
@@ -115,7 +116,7 @@ test('an upsert carrying the provider id replaces the aliased row and rewrites t
   });
 
   act(() => {
-    result.current.handleSessionSelect({ id: PROVIDER_SESSION_ID } as ProjectSession);
+    result.current.actions.openSession({ id: PROVIDER_SESSION_ID } as ProjectSession);
   });
   navigate.mockClear();
 
@@ -129,7 +130,8 @@ test('an upsert carrying the provider id replaces the aliased row and rewrites t
     'the provider-id row must be replaced, not duplicated',
   );
   assert.equal(result.current.selectedSession?.id, APP_SESSION_ID);
-  assert.deepEqual(navigate.mock.calls, [[`/session/${APP_SESSION_ID}`]]);
+  // Replace, not push: the alias was never a page of its own, so Back must not return to it.
+  assert.deepEqual(navigate.mock.calls, [[`/session/${APP_SESSION_ID}`, { replace: true }]]);
 });
 
 test('an upsert without a provider id leaves the aliased row in place', async () => {
@@ -144,7 +146,7 @@ test('an upsert without a provider id leaves the aliased row in place', async ()
   });
 
   act(() => {
-    result.current.handleSessionSelect({ id: PROVIDER_SESSION_ID } as ProjectSession);
+    result.current.actions.openSession({ id: PROVIDER_SESSION_ID } as ProjectSession);
   });
   navigate.mockClear();
 
@@ -176,7 +178,7 @@ test('an upsert for a session that is already canonical does not renavigate', as
   });
 
   act(() => {
-    result.current.handleSessionSelect({ id: APP_SESSION_ID } as ProjectSession);
+    result.current.actions.openSession({ id: APP_SESSION_ID } as ProjectSession);
   });
   navigate.mockClear();
 

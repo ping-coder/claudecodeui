@@ -73,7 +73,7 @@ export type ProviderModelActions = {
 
 //----------------- PROJECTS AND SESSIONS ------------
 
-/** Identifies the workspace pane the user is looking at; plugin panes are namespaced by plugin id. */
+/** A workspace view: what a pane tab shows (Chat, Files, Shell, Git, Tasks, Browser or a plugin view). Plugin views are namespaced by plugin id. */
 export type AppTab = 'chat' | 'files' | 'shell' | 'git' | 'tasks' | 'browser' | `plugin:${string}`;
 
 /** A message queued to be sent to a session at a future time. */
@@ -1489,6 +1489,155 @@ export type ProjectWorkspaceShellProps = RealtimeProps & {
   navigate: NavigateFunction;
 };
 
+/** One side of the split workspace; 'right' exists only while the workspace is split. */
+export type WorkspacePaneSide = 'left' | 'right';
+
+/**
+ * Where an open request lands.
+ * 'focused': the focused pane, but a session already open on either side is revealed there, never duplicated.
+ * 'other': the pane that is not focused; creates the right pane when unsplit.
+ * 'left' | 'right': absolute; may deliberately show one session on both sides.
+ */
+export type SessionOpenTarget = 'focused' | 'other' | WorkspacePaneSide;
+
+/** Options for opening a session or a new chat in the split workspace. */
+export type SessionOpenOptions = {
+  /** Default 'focused'. */
+  target?: SessionOpenTarget;
+  /** Open as the target pane's single preview tab (replaced by the next preview open). Default false = kept tab. Ignored for new chats. */
+  preview?: boolean;
+  /** View a newly created tab starts on (default 'chat'); a revealed tab switches only when this is given. */
+  view?: AppTab;
+  /** Owning project when it is not in the loaded project list (archived sessions, some search hits). */
+  ownerProject?: Project | null;
+  /** How the URL follows when the focused session changes. Default 'push'. */
+  history?: 'push' | 'replace';
+};
+
+/** A session, or the project's one unsent new chat, open as a tab in a pane. `session`/`isMissing` are runtime-only, never persisted. */
+export type WorkspaceSessionTab = {
+  /** Stable for the tab's life (React key, drag payload); kept when a draft becomes a session. */
+  key: string;
+  /** null = unsent new chat (draft). At most one draft per project across the whole layout. */
+  sessionId: string | null;
+  /** Owning project; '' only for a missing-session tab opened from a URL with no resolvable project. */
+  projectId: string;
+  provider: LLMProvider;
+  /** Last known title, shown until the live projects row is available. */
+  title: string;
+  /** The workspace view this tab shows. */
+  view: AppTab;
+  isPreview: boolean;
+  /** Object handed to ChatInterface; identity changes only on open, establish, rename, refresh or alias rewrite. */
+  session: ProjectSession | null;
+  /** The session could not be resolved (deleted elsewhere); the pane shows a notice instead of the chat. */
+  isMissing?: boolean;
+};
+
+/** One pane: its tabs, the active one, recency order and the runtime counters fed to its single ChatInterface. */
+export type WorkspacePaneState = {
+  tabs: WorkspaceSessionTab[];
+  activeTabKey: string | null;
+  /** Tab keys, most recently active first; picks the tab shown after a close. */
+  mru: string[];
+  /** Runtime: bumps whenever the pane switches onto a draft tab -> ChatInterface.newSessionTrigger. */
+  draftActivation: number;
+  /** Runtime: bumps when the session on screen changed outside a run -> ChatInterface.externalMessageUpdate. */
+  externalRevision: number;
+};
+
+/** The split layout; the single source of truth for what each pane shows. */
+export type WorkspaceLayout = {
+  left: WorkspacePaneState;
+  /** null while unsplit; an empty pane right after Split. */
+  right: WorkspacePaneState | null;
+  /** Where plain opens land; URL, document title, palette, quick settings and TaskMaster follow it. */
+  focusedSide: WorkspacePaneSide;
+  /** Left pane share of the main width, clamped to WORKSPACE_SPLIT_RATIO_MIN..MAX. */
+  splitRatio: number;
+};
+
+/** Changes a pane tab's view. userInitiated pins a preview tab (view-tab click, opening a file); programmatic fallbacks keep it a preview. */
+export type WorkspaceViewSetter = (view: AppTab, options?: { userInitiated?: boolean }) => void;
+
+/** Every way the UI changes the layout. URL sync and persistence follow these writes; nothing else mutates the layout. */
+export type WorkspaceLayoutActions = {
+  /** Opens a session object (sidebar rows, search hits, forks, drops); resolves the project first when neither session.__projectId nor options.ownerProject names one. */
+  openSession: (session: ProjectSession, options?: SessionOpenOptions) => void;
+  /** Opens a session known only by id (URL, palette, notifications): loaded pages first, then api.sessionDetails. */
+  openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
+  /** Opens or reveals the project's single unsent new chat; an explicit side moves an existing draft there. */
+  openNewSession: (project: Project, options?: SessionOpenOptions) => void;
+  /** First send created a session: upserts it into `projects` and converts that project's draft tab in place (URL replace). Layout no-op when the draft was closed meanwhile. */
+  establishDraft: (sessionId: string, context: SessionEstablishedContext) => void;
+  /** Activates a tab and focuses its pane (URL replace). */
+  activateTab: (side: WorkspacePaneSide, tabKey: string) => void;
+  /** MRU fallback; an emptied right pane closes; an emptied left pane is replaced by the right one. */
+  closeTab: (side: WorkspacePaneSide, tabKey: string) => void;
+  /** Closes every tab of the pane except this one. */
+  closeOtherTabs: (side: WorkspacePaneSide, tabKey: string) => void;
+  /** Closes the tabs after this one in the pane's tab order. */
+  closeTabsToRight: (side: WorkspacePaneSide, tabKey: string) => void;
+  /** Closes every tab of the pane; the pane then closes like after its last tab. */
+  closeAllTabs: (side: WorkspacePaneSide) => void;
+  /** Turns a preview tab into a kept one; no-op for kept tabs. */
+  pinTab: (side: WorkspacePaneSide, tabKey: string) => void;
+  /** Reorder within a pane, or move across panes (kept + focused). copy duplicates a session tab onto the Chat view; drafts always move. index counts the destination's tabs without the moved one; default the end. */
+  moveTab: (from: WorkspacePaneSide, tabKey: string, to: WorkspacePaneSide, options?: { index?: number; copy?: boolean }) => void;
+  /** Switches a tab's view; pin also turns a preview tab into a kept one. */
+  setTabView: (side: WorkspacePaneSide, tabKey: string, view: AppTab, options?: { pin?: boolean }) => void;
+  /** No-op when already focused or the pane does not exist. */
+  focusPane: (side: WorkspacePaneSide) => void;
+  /** Unsplit: adds an empty right pane and focuses it. Split: focuses the other pane. */
+  split: () => void;
+  /** Split <-> merge; merging appends the right pane's tabs to the left (deduped), nothing is closed. */
+  toggleSplit: () => void;
+  /** Closes one side, merging its tabs into the other. */
+  closePane: (side: WorkspacePaneSide) => void;
+  /** Commits the left pane's share of the main width (clamped); call it once when a divider drag ends. */
+  setSplitRatio: (ratio: number) => void;
+};
+
+/** Which panes show a session, resolved per sidebar row into one scalar so the row memo holds. */
+export type SessionPanePlacement = 'left' | 'right' | 'both' | null;
+
+/** Payload of a dragged sidebar row or pane tab, carried under a custom MIME by writeSessionDragPayload. */
+export type SessionDragPayload = {
+  /** null for a dragged draft tab. */
+  sessionId: string | null;
+  /** null when a Conversations row does not know its project; the drop resolves it. */
+  projectId: string | null;
+  provider: LLMProvider;
+  title: string;
+  /** Set when a pane tab is dragged: dropping moves (Alt copies) instead of opening. */
+  fromTab?: { side: WorkspacePaneSide; tabKey: string };
+};
+
+/** One open tab as the command palette's Open tabs group lists it. */
+export type WorkspaceOpenTabSummary = {
+  side: WorkspacePaneSide;
+  tabKey: string;
+  title: string;
+  provider: LLMProvider;
+  projectName: string;
+  isActive: boolean;
+};
+
+/** Workspace commands the command palette offers; assembled by project-workspace's ProjectCommandPalette. */
+export type CommandPaletteWorkspaceCommands = {
+  canSplit: boolean;
+  isSplit: boolean;
+  isImmersive: boolean;
+  openTabs: WorkspaceOpenTabSummary[];
+  onToggleSplit: () => void;
+  onFocusPane: (side: WorkspacePaneSide) => void;
+  onMoveActiveTabToOtherSide: () => void;
+  onCloseOtherTabs: () => void;
+  onCloseFocusedPane: () => void;
+  onActivateTab: (side: WorkspacePaneSide, tabKey: string) => void;
+  onToggleFullscreen: () => void;
+};
+
 // ---------------------------
 
 //----------------- PROVIDER AUTHENTICATION ------------
@@ -1659,7 +1808,27 @@ export type MobileTerminalSelectionManager = {
 
 //----------------- SIDEBAR ------------
 
-/** The complete project-list state and callback bundle the sidebar assembles once and threads down through its project list, project rows and session rows. */
+/** Split targeting the sidebar draws: row buttons, left/right menu items, placement markers and the Open-in switch. */
+export type SidebarPaneTargeting = {
+  /** Desktop and either already split or wide enough to split: rows offer the side buttons and menu items. */
+  canTargetSides: boolean;
+  /** A right pane exists: both buttons, placement markers and the Open-in switch show. */
+  isSplit: boolean;
+  focusedSide: WorkspacePaneSide;
+  onFocusSide: (side: WorkspacePaneSide) => void;
+  /** sessionId -> placement; identity changes only when tab membership changes. */
+  placements: ReadonlyMap<string, SessionPanePlacement>;
+};
+
+/** A conversation the sidebar opens from a Conversations row or a search hit. */
+export type SidebarConversationOpenRequest = {
+  projectId: string | null;
+  sessionId: string;
+  provider: string;
+  messageTimestamp?: string | null;
+  messageSnippet?: string | null;
+};
+
 /**
  * What a session row needs to draw its state and act on the session, named once
  * so the two lists that render a row — Projects and Conversations — cannot fall
@@ -1684,8 +1853,11 @@ export type SessionRowActions = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches a session into an independent one. Rows hide it for providers that cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Split targeting; list components resolve it into per-row scalars and never hand the object to memoized rows. */
+  paneTargeting?: SidebarPaneTargeting | null;
 };
 
+/** The complete project-list state and callback bundle the sidebar assembles once and threads down through its project list, project rows and session rows. */
 export type SidebarProjectListProps = SessionRowActions & {
   projects: Project[];
   filteredProjects: Project[];
@@ -1710,8 +1882,8 @@ export type SidebarProjectListProps = SessionRowActions & {
   onCancelEditingProject: () => void;
   onSaveProjectName: (projectId: string, nextName: string) => void;
   onDeleteProject: (project: Project) => void;
-  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
-  onNewSession: (project: Project) => void;
+  onSessionSelect: (session: SessionWithProvider, projectId: string, options?: SessionOpenOptions) => void;
+  onNewSession: (project: Project, options?: SessionOpenOptions) => void;
   /** The project whose session list is in bulk-selection mode and the rows ticked in it, or null while no list is selecting. */
   sessionSelection: SidebarSessionSelection | null;
   /** Enters bulk-selection mode for one project, or replaces its ticked rows (used by "Select all" and "Clear"). */

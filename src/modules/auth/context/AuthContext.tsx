@@ -6,6 +6,7 @@ import { IS_PLATFORM } from '@/shared/utils';
 import { api, readApiErrorMessage } from '@/shared/api';
 import { AUTH_SESSION_EXPIRED_EVENT, AUTH_TOKEN_REFRESHED_EVENT, getAuthTokenRefreshDelay, isValidRefreshedToken, storeAuthToken } from '@/shared/authToken';
 import { hydrateChatDrafts, resetChatDrafts } from '@/shared/chatDrafts';
+import { WORKSPACE_LAYOUT_STORAGE_KEY } from '@/shared/constants';
 import { hydrateUserPreferences, resetUserPreferences } from '@/shared/userSettings';
 /** The signed-in account held by AuthContext - a required `username` plus an optional id and any additional fields the auth API returns - and should be read through `useAuth()` rather than re-derived from raw auth responses. */
 type AuthUser = {
@@ -80,6 +81,17 @@ const clearStoredToken = () => {
   localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
 };
 
+/** The split workspace's pane layout names the signed-in user's sessions; both copies go on sign-out. */
+const clearStoredWorkspaceLayout = () => {
+  for (const store of ['sessionStorage', 'localStorage'] as const) {
+    try {
+      window[store].removeItem(WORKSPACE_LAYOUT_STORAGE_KEY);
+    } catch {
+      // Storage unavailable: there is nothing stored to clear.
+    }
+  }
+};
+
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
   if (!context) {
@@ -104,9 +116,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setToken(null);
     clearStoredToken();
     // Otherwise the next person to sign in on this device would start out
-    // looking at the previous user's theme, language, permissions and drafts.
+    // looking at the previous user's theme, language, permissions, drafts and
+    // open conversations.
     resetUserPreferences();
     resetChatDrafts();
+    clearStoredWorkspaceLayout();
   }, []);
 
   // Preferences live in auth.db, so they can only be fetched once there is a

@@ -3,23 +3,34 @@ import { useEffect } from 'react';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { writeSelectedProvider } from '@/shared/selectedProvider';
 import { useProjectEffectsState } from '@/modules/project-workspace/context/ProjectsStateContext';
-import type { LLMProvider, ProjectWorkspaceShellProps } from '@/shared/types';
+import type { LLMProvider } from '@/shared/types';
+import { getPageTitle, setDocumentPageTitle } from '@/shared/utils';
 
-/** Headless controller rendered by ProjectWorkspaceShell to register palette operations and handle service-worker navigation messages. */
-export default function ProjectEffects({
-  navigate,
-}: Pick<ProjectWorkspaceShellProps, 'navigate'>) {
+/**
+ * Headless controller rendered by ProjectWorkspaceShell for page-wide effects: palette operations,
+ * service-worker notification clicks and the browser tab title, all following the focused pane.
+ */
+export default function ProjectEffects() {
   const {
     openSettings,
     refreshProjectsSilently,
-    setActiveTab,
     setSidebarOpen,
+    openSessionById,
+    focusedProject,
+    focusedSession,
   } = useProjectEffectsState();
 
   usePaletteOpsRegister({
     openSettings,
     refreshProjects: refreshProjectsSilently,
   });
+
+  // Rendered here rather than in the sidebar, so the title keeps following the focused pane while the
+  // sidebar is collapsed, switched to another mode or hidden by immersive mode.
+  const pageTitle = getPageTitle(focusedProject, focusedSession);
+  useEffect(() => {
+    setDocumentPageTitle(pageTitle);
+  }, [pageTitle]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
@@ -36,16 +47,14 @@ export default function ProjectEffects({
         writeSelectedProvider(message.provider as LLMProvider);
       }
 
-      setActiveTab('chat');
       setSidebarOpen(false);
       void refreshProjectsSilently();
 
+      // The notified session opens kept in the focused pane, on its Chat view; a notification
+      // without a session leaves the panes as they are.
       if (typeof message.sessionId === 'string' && message.sessionId) {
-        navigate(`/session/${message.sessionId}`);
-        return;
+        openSessionById(message.sessionId, { preview: false, view: 'chat' });
       }
-
-      navigate('/');
     };
 
     navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
@@ -53,7 +62,7 @@ export default function ProjectEffects({
     return () => {
       navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
     };
-  }, [navigate, refreshProjectsSilently, setActiveTab, setSidebarOpen]);
+  }, [openSessionById, refreshProjectsSilently, setSidebarOpen]);
 
   return null;
 }

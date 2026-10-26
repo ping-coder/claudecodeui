@@ -75,6 +75,7 @@ const renderProjectsState = async () => {
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   projectsResponse.mockReset();
   listeners.clear();
 });

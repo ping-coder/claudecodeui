@@ -1,46 +1,74 @@
 import { createContext, useContext, useMemo } from 'react';
-import type { ReactNode } from 'react';
+import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { useProjectsState } from '@/modules/project-workspace/hooks/useProjectsState';
-import type { IsSessionProcessing,ServerEvent } from '@/shared/types';
+import type {
+  AppTab,
+  IsSessionProcessing,
+  Project,
+  ProjectSession,
+  ServerEvent,
+  SessionOpenOptions,
+  SidebarPaneTargeting,
+  WorkspaceLayout,
+  WorkspaceLayoutActions,
+  WorkspacePaneSide,
+} from '@/shared/types';
 
 type ProjectsState = ReturnType<typeof useProjectsState>;
 
-type ProjectSidebarState = Pick<
-  ProjectsState,
-  'sidebarOpen' | 'setSidebarOpen' | 'sidebarSharedProps'
->;
+/** What the main region needs to render the panes: the layout, each pane's project and the layout actions. */
+type ProjectPanesState = {
+  layout: WorkspaceLayout;
+  /** Stable object per pane (projects row merged via mergeProjectSelectionMetadata, or an unlisted/archived project); null for an empty pane. */
+  paneProjects: Readonly<Record<WorkspacePaneSide, Project | null>>;
+  projects: Project[];
+  isLoadingProjects: boolean;
+  attentionSessionIds: ReadonlySet<string>;
+  /** Default project for new chats: focused pane, other pane, last browsed, first. */
+  fallbackProject: Project | null;
+  actions: WorkspaceLayoutActions;
+  openSettings: (tab?: string) => void;
+  setSidebarOpen: Dispatch<SetStateAction<boolean>>;
+  renameSession: (sessionId: string, summary: string) => Promise<boolean>;
+  refreshProjectsSilently: () => Promise<void>;
+};
 
-type ProjectMainState = Pick<
-  ProjectsState,
-  | 'selectedProject'
-  | 'selectedSession'
-  | 'activeTab'
-  | 'setActiveTab'
-  | 'setSidebarOpen'
-  | 'isLoadingProjects'
-  | 'openSettings'
-  | 'externalMessageUpdate'
-  | 'newSessionTrigger'
-  | 'registerOptimisticSession'
-  | 'handleProjectSelect'
-  | 'refreshProjectsSilently'
-  | 'renameSession'
->;
+/** What ProjectSidebarRegion needs to render the sidebar module for the focused pane. */
+type ProjectSidebarState = {
+  sidebarOpen: boolean;
+  setSidebarOpen: Dispatch<SetStateAction<boolean>>;
+  /** Same shape as before the split. selectedProject/selectedSession = focused pane; onSessionSelect(session, options?) = openSession; onNewSession(project, options?) = openNewSession; onProjectSelect only records the browsed project. */
+  sidebarSharedProps: ProjectsState['sidebarSharedProps'];
+  /** ProjectSidebarRegion adds canTargetSides = !isMobile && (chrome.canSplit || isSplit). */
+  paneTargetingBase: Omit<SidebarPaneTargeting, 'canTargetSides'>;
+  /** Changes whenever the focused pane's active tab changes (closes the immersive sidebar peek). */
+  focusedTabKey: string | null;
+};
 
-type ProjectCommandState = Pick<
-  ProjectsState,
-  'selectedProject' | 'handleNewSession' | 'openSettings' | 'setActiveTab'
->;
+/** What the command palette and quick settings act on: the focused pane. */
+type ProjectCommandState = {
+  /** Focused pane's project, else fallbackProject. */
+  selectedProject: Project | null;
+  /** New chat in the focused pane. */
+  handleNewSession: (project: Project) => void;
+  openSettings: (tab?: string) => void;
+  /** Focused tab's view, user-initiated (pins). */
+  setActiveTab: (view: AppTab) => void;
+  openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
+  layout: WorkspaceLayout;
+  actions: WorkspaceLayoutActions;
+};
 
-type ProjectEffectsState = Pick<
-  ProjectsState,
-  'openSettings' | 'refreshProjectsSilently' | 'setActiveTab' | 'setSidebarOpen'
->;
-
-type ProjectActiveSessionState = {
-  activeSessionId: string | null;
+/** What the headless page effects need: palette registrations, notification clicks and the document title. */
+type ProjectEffectsState = {
+  openSettings: (tab?: string) => void;
+  refreshProjectsSilently: () => Promise<void>;
+  setSidebarOpen: Dispatch<SetStateAction<boolean>>;
+  openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
+  focusedProject: Project | null;
+  focusedSession: ProjectSession | null;
 };
 
 type ProjectsStateProviderProps = {
@@ -52,13 +80,12 @@ type ProjectsStateProviderProps = {
   isSessionProcessing: IsSessionProcessing;
 };
 
+const ProjectPanesContext = createContext<ProjectPanesState | null>(null);
 const ProjectSidebarContext = createContext<ProjectSidebarState | null>(null);
-const ProjectMainContext = createContext<ProjectMainState | null>(null);
 const ProjectCommandContext = createContext<ProjectCommandState | null>(null);
 const ProjectEffectsContext = createContext<ProjectEffectsState | null>(null);
-const ProjectActiveSessionContext = createContext<ProjectActiveSessionState | null>(null);
 
-/** Rendered by ProjectWorkspaceRoute to own the workspace's project and session state and expose it through this module's context hooks. */
+/** Rendered by ProjectWorkspaceRoute to own the workspace's project, session and pane state and expose it through this module's context hooks. */
 export function ProjectsStateProvider({
   children,
   sessionId,
@@ -75,88 +102,95 @@ export function ProjectsStateProvider({
     isSessionProcessing,
   });
 
+  const panesState = useMemo<ProjectPanesState>(
+    () => ({
+      layout: state.layout,
+      paneProjects: state.paneProjects,
+      projects: state.projects,
+      isLoadingProjects: state.isLoadingProjects,
+      attentionSessionIds: state.attentionSessionIds,
+      fallbackProject: state.fallbackProject,
+      actions: state.actions,
+      openSettings: state.openSettings,
+      setSidebarOpen: state.setSidebarOpen,
+      renameSession: state.renameSession,
+      refreshProjectsSilently: state.refreshProjectsSilently,
+    }),
+    [
+      state.actions,
+      state.attentionSessionIds,
+      state.fallbackProject,
+      state.isLoadingProjects,
+      state.layout,
+      state.openSettings,
+      state.paneProjects,
+      state.projects,
+      state.refreshProjectsSilently,
+      state.renameSession,
+      state.setSidebarOpen,
+    ],
+  );
+
   const sidebarState = useMemo<ProjectSidebarState>(
     () => ({
       sidebarOpen: state.sidebarOpen,
       setSidebarOpen: state.setSidebarOpen,
       sidebarSharedProps: state.sidebarSharedProps,
+      paneTargetingBase: state.paneTargetingBase,
+      focusedTabKey: state.focusedTabKey,
     }),
-    [state.sidebarOpen, state.setSidebarOpen, state.sidebarSharedProps],
+    [state.focusedTabKey, state.paneTargetingBase, state.setSidebarOpen, state.sidebarOpen, state.sidebarSharedProps],
   );
 
-  const mainState = useMemo<ProjectMainState>(
-    () => ({
-      selectedProject: state.selectedProject,
-      selectedSession: state.selectedSession,
-      activeTab: state.activeTab,
-      setActiveTab: state.setActiveTab,
-      setSidebarOpen: state.setSidebarOpen,
-      isLoadingProjects: state.isLoadingProjects,
-      openSettings: state.openSettings,
-      externalMessageUpdate: state.externalMessageUpdate,
-      newSessionTrigger: state.newSessionTrigger,
-      registerOptimisticSession: state.registerOptimisticSession,
-      handleProjectSelect: state.handleProjectSelect,
-      refreshProjectsSilently: state.refreshProjectsSilently,
-      renameSession: state.renameSession,
-    }),
-    [
-      state.activeTab,
-      state.externalMessageUpdate,
-      state.handleProjectSelect,
-      state.isLoadingProjects,
-      state.newSessionTrigger,
-      state.openSettings,
-      state.refreshProjectsSilently,
-      state.registerOptimisticSession,
-      state.renameSession,
-      state.selectedProject,
-      state.selectedSession,
-      state.setActiveTab,
-      state.setSidebarOpen,
-    ],
-  );
-
+  const commandSelectedProject = state.selectedProject ?? state.fallbackProject;
   const commandState = useMemo<ProjectCommandState>(
     () => ({
-      selectedProject: state.selectedProject,
+      selectedProject: commandSelectedProject,
       handleNewSession: state.handleNewSession,
       openSettings: state.openSettings,
       setActiveTab: state.setActiveTab,
+      openSessionById: state.openSessionById,
+      layout: state.layout,
+      actions: state.actions,
     }),
-    [state.handleNewSession, state.openSettings, state.selectedProject, state.setActiveTab],
+    [
+      commandSelectedProject,
+      state.actions,
+      state.handleNewSession,
+      state.layout,
+      state.openSessionById,
+      state.openSettings,
+      state.setActiveTab,
+    ],
   );
 
   const effectsState = useMemo<ProjectEffectsState>(
     () => ({
       openSettings: state.openSettings,
       refreshProjectsSilently: state.refreshProjectsSilently,
-      setActiveTab: state.setActiveTab,
       setSidebarOpen: state.setSidebarOpen,
+      openSessionById: state.openSessionById,
+      focusedProject: state.focusedProject,
+      focusedSession: state.focusedSession,
     }),
     [
+      state.focusedProject,
+      state.focusedSession,
+      state.openSessionById,
       state.openSettings,
       state.refreshProjectsSilently,
-      state.setActiveTab,
       state.setSidebarOpen,
     ],
-  );
-
-  const activeSessionState = useMemo<ProjectActiveSessionState>(
-    () => ({ activeSessionId: state.selectedSession?.id ?? sessionId ?? null }),
-    [sessionId, state.selectedSession?.id],
   );
 
   return (
     <ProjectEffectsContext.Provider value={effectsState}>
       <ProjectCommandContext.Provider value={commandState}>
-        <ProjectMainContext.Provider value={mainState}>
+        <ProjectPanesContext.Provider value={panesState}>
           <ProjectSidebarContext.Provider value={sidebarState}>
-            <ProjectActiveSessionContext.Provider value={activeSessionState}>
-              {children}
-            </ProjectActiveSessionContext.Provider>
+            {children}
           </ProjectSidebarContext.Provider>
-        </ProjectMainContext.Provider>
+        </ProjectPanesContext.Provider>
       </ProjectCommandContext.Provider>
     </ProjectEffectsContext.Provider>
   );
@@ -169,25 +203,22 @@ function useRequiredProjectContext<T>(value: T | null, hookName: string): T {
   return value;
 }
 
+/** Read by ProjectMainRegion (and the panes it renders) to draw both panes and change the layout. */
+export function useProjectPanesState(): ProjectPanesState {
+  return useRequiredProjectContext(useContext(ProjectPanesContext), 'useProjectPanesState');
+}
+
+/** Read by ProjectSidebarRegion to render the sidebar module for the focused pane. */
 export function useProjectSidebarState(): ProjectSidebarState {
   return useRequiredProjectContext(useContext(ProjectSidebarContext), 'useProjectSidebarState');
 }
 
-export function useProjectMainState(): ProjectMainState {
-  return useRequiredProjectContext(useContext(ProjectMainContext), 'useProjectMainState');
-}
-
+/** Read by ProjectCommandPalette and ProjectQuickSettingsRegion, which act on the focused pane. */
 export function useProjectCommandState(): ProjectCommandState {
   return useRequiredProjectContext(useContext(ProjectCommandContext), 'useProjectCommandState');
 }
 
+/** Read by ProjectEffects for palette registrations, notification clicks and the document title. */
 export function useProjectEffectsState(): ProjectEffectsState {
   return useRequiredProjectContext(useContext(ProjectEffectsContext), 'useProjectEffectsState');
-}
-
-export function useProjectActiveSessionState(): ProjectActiveSessionState {
-  return useRequiredProjectContext(
-    useContext(ProjectActiveSessionContext),
-    'useProjectActiveSessionState',
-  );
 }
