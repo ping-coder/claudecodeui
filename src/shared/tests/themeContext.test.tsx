@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import React from 'react';
-import { afterEach, beforeEach, test } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import { ThemeProvider, useTheme } from '@/shared/context/ThemeContext';
 import {
@@ -64,7 +64,34 @@ beforeEach(() => {
 afterEach(() => {
   window.matchMedia = originalMatchMedia;
   colorSchemeListeners = [];
+  vi.unstubAllGlobals();
+  document.head.querySelectorAll('meta[name="theme-color"]').forEach((meta) => meta.remove());
 });
+
+/** Adds the theme colour meta index.html declares; jsdom starts with an empty head. */
+const addThemeColorMeta = (): HTMLMetaElement => {
+  const meta = document.createElement('meta');
+  meta.name = 'theme-color';
+  meta.content = '#ffffff';
+  document.head.append(meta);
+  return meta;
+};
+
+/**
+ * Loads a provider whose deployment environment, read from /health, is `environment`. The
+ * answer is cached in module state for the page load, so the provider (and the preference
+ * store it uses) is loaded afresh.
+ */
+const loadThemeProviderOn = async (environment: string | null) => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => (url === '/health'
+    ? { ok: true, json: async () => ({ status: 'ok', environment }) }
+    : { ok: false, json: async () => ({}) })));
+  vi.resetModules();
+  const themeContext = await import('@/shared/context/ThemeContext');
+  const freshWrapper = ({ children }: { children: React.ReactNode }) =>
+    React.createElement(themeContext.ThemeProvider, null, children);
+  return { useFreshTheme: themeContext.useTheme, freshWrapper };
+};
 
 test('mounting stores no theme for a user who has never chosen one', () => {
   renderHook(() => useTheme(), { wrapper });
@@ -196,4 +223,35 @@ test('a stored value written by a newer client falls back to following the syste
 
   assert.equal(result.current.themeMode, 'system');
   assert.equal(result.current.isDarkMode, true);
+});
+
+test('the browser chrome follows the page background in production', async () => {
+  const themeColorMeta = addThemeColorMeta();
+  const { useFreshTheme, freshWrapper } = await loadThemeProviderOn(null);
+
+  const { result } = renderHook(() => useFreshTheme(), { wrapper: freshWrapper });
+  // Let the /health answer arrive, so it is known not to change the colour.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(themeColorMeta.getAttribute('content'), '#f6f4ef');
+
+  act(() => {
+    result.current.toggleDarkMode();
+  });
+  assert.equal(themeColorMeta.getAttribute('content'), '#141414');
+});
+
+test('a non-production deployment keeps the browser chrome amber in either theme', async () => {
+  const themeColorMeta = addThemeColorMeta();
+  const { useFreshTheme, freshWrapper } = await loadThemeProviderOn('staging');
+
+  const { result } = renderHook(() => useFreshTheme(), { wrapper: freshWrapper });
+  await waitFor(() => assert.equal(themeColorMeta.getAttribute('content'), '#fbbf24'));
+
+  act(() => {
+    result.current.toggleDarkMode();
+  });
+  assert.equal(result.current.isDarkMode, true);
+  assert.equal(themeColorMeta.getAttribute('content'), '#fbbf24');
 });

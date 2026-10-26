@@ -281,6 +281,12 @@
     "refreshIn_one": "This will refresh the window in {{count}} second. If the update doesn't apply, RESTART the environment.",
     "refreshIn_other": "This will refresh the window in {{count}} seconds. If the update doesn't apply, RESTART the environment."
   },
+  "deploymentEnvironment": {
+    "staging": "Stage",
+    "development": "Dev",
+    "test": "Test",
+    "badgeTooltip": "Deployment environment: {{environment}}"
+  },
   "commandPalette": {
     "title": "Command palette",
     "pages": {

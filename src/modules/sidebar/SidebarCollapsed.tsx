@@ -1,6 +1,8 @@
 import { Settings, Sparkles, PanelLeftOpen, Bug, AlertTriangle } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
+import { DeploymentEnvironmentBadge } from '@/shared/ui';
+
 const DISCORD_INVITE_URL = 'https://discord.gg/buxwujPNRE';
 const GITHUB_ISSUES_URL = 'https://github.com/siteboon/claudecodeui/issues/new';
 
@@ -41,6 +43,9 @@ export default function SidebarCollapsed({
       >
         <PanelLeftOpen className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-foreground" />
       </button>
+
+      {/* Deployment environment marker; renders nothing in production */}
+      <DeploymentEnvironmentBadge className="max-w-11 px-1 text-[9px]" />
 
       <div className="nav-divider my-1 w-6" />
 

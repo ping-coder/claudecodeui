@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 
+import { api } from '@/shared/api';
 import { APP_VERSION } from '@/shared/constants';
 import type { InstallMode, ReleaseInfo } from '@/shared/types';
 
@@ -34,7 +35,7 @@ export const useVersionCheck = (owner: string, repo: string) => {
   useEffect(() => {
     const fetchHealth = async () => {
       try {
-        const response = await fetch('/health');
+        const response = await api.system.health();
         const data = await response.json();
         if (data.installMode === 'npm' || data.installMode === 'git') {
           setInstallMode(data.installMode);

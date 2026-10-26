@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { AppTab, Project, ProjectSession } from '@/shared/types';
 import { cn } from '@/shared/utils';
+import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';
 import WorkspaceConnectionStatus from '@/modules/project-workspace/WorkspaceConnectionStatus';
 import WorkspaceTabs from '@/modules/project-workspace/WorkspaceTabs';
@@ -100,6 +101,9 @@ export default function WorkspaceHeader({
       <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 items-center gap-2 sm:max-w-[min(34%,24rem)] sm:flex-[1_1_18rem]">
           {isMobile && <MobileMenuButton onMenuClick={onMenuClick} />}
+          {/* On phones the sidebar (which carries the badge) is a closed drawer, so the
+              header marks a non-production deployment itself. */}
+          {isMobile && <DeploymentEnvironmentBadge className="max-w-20" />}
           <WorkspaceTitle
             activeTab={activeTab}
             selectedProject={selectedProject}

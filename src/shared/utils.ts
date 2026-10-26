@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from 'clsx';
+import type { TFunction } from 'i18next';
 import { twMerge } from 'tailwind-merge';
 
 import type { LLMProvider, Project, ProjectSession, QuickSettingsTab, SlashCommand } from '@/shared/types';
@@ -226,6 +227,84 @@ export const getPageTitle = (
 
   const displayName = selectedProject?.displayName?.trim();
   return displayName ? `${displayName} - ${DEFAULT_PAGE_TITLE}` : DEFAULT_PAGE_TITLE;
+};
+
+/**
+ * The page part of the tab title, as last given to `setDocumentPageTitle`. It starts as the
+ * static `<title>` of index.html, which the login and setup screens keep. Private to the title helpers.
+ */
+let documentPageTitle = DEFAULT_PAGE_TITLE;
+
+/** Label of the non-production deployment that leads the tab title; null in production. Private to the title helpers. */
+let documentTitleEnvironmentLabel: string | null = null;
+
+/** Writes the tab title from the two parts above. Private to the title setters. */
+const applyDocumentTitle = (): void => {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  document.title = documentTitleEnvironmentLabel
+    ? `${documentTitleEnvironmentLabel} · ${documentPageTitle}`
+    : documentPageTitle;
+};
+
+/**
+ * Sets the browser tab title of the current page. Outside production the deployment
+ * environment label stays in front of it ("Stage · My session"); in production the title
+ * is written exactly as given. Write page titles through here rather than assigning
+ * `document.title`, which would drop the label. Used by the sidebar module's project list.
+ */
+export const setDocumentPageTitle = (title: string): void => {
+  documentPageTitle = title;
+  applyDocumentTitle();
+};
+
+/**
+ * Sets the label that leads the browser tab title, or removes it with null; production
+ * passes null, so its titles stay exactly as the page sets them. The title is rewritten
+ * only when the label changes. Used by the `useDeploymentEnvironmentTitle` shared hook.
+ */
+export const setDocumentTitleEnvironmentLabel = (label: string | null): void => {
+  if (label === documentTitleEnvironmentLabel) {
+    return;
+  }
+
+  documentTitleEnvironmentLabel = label;
+  applyDocumentTitle();
+};
+
+// ---------------------------
+
+//----------------- DEPLOYMENT ENVIRONMENT ------------
+
+/**
+ * Deployment environment ids (lower-cased) that have a translated label, mapped to the
+ * `common` namespace key holding it. A Map, so an id such as "constructor" cannot match an
+ * Object prototype member. Private to `getDeploymentEnvironmentLabel`.
+ */
+const DEPLOYMENT_ENVIRONMENT_LABEL_KEYS = new Map<string, string>([
+  ['staging', 'deploymentEnvironment.staging'],
+  ['stage', 'deploymentEnvironment.staging'],
+  ['preprod', 'deploymentEnvironment.staging'],
+  ['pre-production', 'deploymentEnvironment.staging'],
+  ['development', 'deploymentEnvironment.development'],
+  ['dev', 'deploymentEnvironment.development'],
+  ['test', 'deploymentEnvironment.test'],
+  ['testing', 'deploymentEnvironment.test'],
+]);
+
+/**
+ * Turns the deployment environment id reported by `/health` into the short label shown in
+ * the tab title and the environment badge: the translated name of a well-known id, matched
+ * regardless of case (staging, stage, preprod and pre-production give "Stage" / "预发布"),
+ * otherwise the id exactly as the operator wrote it. The key is read from the `common`
+ * namespace whichever namespace `t` defaults to. Used by the DeploymentEnvironmentBadge
+ * shared UI component and the `useDeploymentEnvironmentTitle` shared hook.
+ */
+export const getDeploymentEnvironmentLabel = (environment: string, t: TFunction): string => {
+  const labelKey = DEPLOYMENT_ENVIRONMENT_LABEL_KEYS.get(environment.trim().toLowerCase());
+  return labelKey ? t(labelKey, { ns: 'common' }) : environment;
 };
 
 // ---------------------------

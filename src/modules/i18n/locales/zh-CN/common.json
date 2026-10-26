@@ -269,5 +269,11 @@
       "closeSidebar": "关闭侧边栏",
       "resizeSidebar": "调整侧边栏宽度"
     }
+  },
+  "deploymentEnvironment": {
+    "staging": "预发布",
+    "development": "开发",
+    "test": "测试",
+    "badgeTooltip": "部署环境：{{environment}}"
   }
 }

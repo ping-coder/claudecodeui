@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 
 import type { SidebarProjectListProps } from '@/shared/types';
-import { getPageTitle } from '@/shared/utils';
+import { getPageTitle, setDocumentPageTitle } from '@/shared/utils';
 import SidebarProjectItem from '@/modules/sidebar/SidebarProjectItem';
 import SidebarProjectsState from '@/modules/sidebar/SidebarProjectsState';
 
@@ -63,7 +63,7 @@ export default function SidebarProjectList({
   );
 
   useEffect(() => {
-    document.title = pageTitle;
+    setDocumentPageTitle(pageTitle);
   }, [pageTitle]);
 
   const showProjects = !isLoading && projects.length > 0 && filteredProjects.length > 0;

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import { IS_PLATFORM } from '@/shared/utils';
 
 type AuthScreenLayoutProps = {
@@ -32,7 +33,9 @@ export default function AuthScreenLayout({
       </div>
 
       <div className="relative mx-auto flex min-h-full w-full max-w-md items-center justify-center p-4 py-8">
-        <div className="w-full rounded-2xl border border-border/70 bg-card/90 p-8 shadow-[0_24px_60px_-20px_hsl(var(--foreground)/0.18)] ring-1 ring-foreground/5 backdrop-blur-xl sm:p-10">
+        <div className="relative w-full rounded-2xl border border-border/70 bg-card/90 p-8 shadow-[0_24px_60px_-20px_hsl(var(--foreground)/0.18)] ring-1 ring-foreground/5 backdrop-blur-xl sm:p-10">
+          {/* Pinned to the corner so it never shifts the card; renders nothing in production. */}
+          <DeploymentEnvironmentBadge className="absolute right-4 top-4 max-w-32" />
           <div className="text-center">
             <div className="mb-5 flex justify-center">
               {logo ?? (

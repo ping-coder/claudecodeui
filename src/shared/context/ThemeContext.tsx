@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { useDeploymentEnvironment } from '@/shared/hooks/useDeploymentEnvironment';
 import type { ThemeMode } from '@/shared/types';
 import {
   readUserPreference,
@@ -37,6 +38,9 @@ const prefersDarkAppearance = (): boolean =>
 const resolveIsDarkMode = (mode: ThemeMode): boolean =>
   mode === 'system' ? prefersDarkAppearance() : mode === 'dark';
 
+/** The browser chrome colour of a non-production deployment: the environment badge's amber-400. */
+const DEPLOYMENT_ENVIRONMENT_THEME_COLOR = '#fbbf24';
+
 export const useTheme = () => {
   const context = useContext(ThemeContext);
   if (!context) {
@@ -55,6 +59,9 @@ export const ThemeProvider = ({ children }: { children: ReactNode }) => {
   // The resolved colour. It is not derivable from `themeMode` alone, because
   // under `system` it changes when the OS does, with no state change here.
   const [isDarkMode, setIsDarkMode] = useState(() => resolveIsDarkMode(readStoredThemeMode()));
+  // Read from /health. A non-production deployment overrides the browser chrome
+  // colour below, so the provider has to re-apply it when the answer arrives.
+  const deploymentEnvironment = useDeploymentEnvironment();
 
   // The theme now lives in auth.db, so a change made on another device (or in
   // another tab) arrives through the preference store rather than a re-render.
@@ -72,31 +79,39 @@ export const ThemeProvider = ({ children }: { children: ReactNode }) => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark');
 
-      // Update iOS status bar style and theme color for dark mode
+      // Update iOS status bar style for dark mode
       const statusBarMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
       if (statusBarMeta) {
         statusBarMeta.setAttribute('content', 'black-translucent');
       }
-
-      const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-      if (themeColorMeta) {
-        themeColorMeta.setAttribute('content', '#141414'); // Dark background color (hsl(0 0% 8%))
-      }
     } else {
       document.documentElement.classList.remove('dark');
 
-      // Update iOS status bar style and theme color for light mode
+      // Update iOS status bar style for light mode
       const statusBarMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
       if (statusBarMeta) {
         statusBarMeta.setAttribute('content', 'default');
       }
-
-      const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-      if (themeColorMeta) {
-        themeColorMeta.setAttribute('content', '#f6f4ef'); // Light background color (warm cream)
-      }
     }
   }, [isDarkMode]);
+
+  // The browser chrome (the mobile address bar, a PWA's title bar) follows the page
+  // background, except on a non-production deployment, which keeps the environment
+  // badge's amber in either theme. This is the only writer of the theme colour.
+  useEffect(() => {
+    const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+    if (!themeColorMeta) {
+      return;
+    }
+
+    if (deploymentEnvironment) {
+      themeColorMeta.setAttribute('content', DEPLOYMENT_ENVIRONMENT_THEME_COLOR);
+    } else if (isDarkMode) {
+      themeColorMeta.setAttribute('content', '#141414'); // Dark background color (hsl(0 0% 8%))
+    } else {
+      themeColorMeta.setAttribute('content', '#f6f4ef'); // Light background color (warm cream)
+    }
+  }, [isDarkMode, deploymentEnvironment]);
 
   // Listen for system theme changes
   useEffect(() => {

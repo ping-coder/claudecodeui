@@ -619,6 +619,9 @@ export const api = {
   },
 
   system: {
+    // Public, outside /api and sent without a token so the login screen can
+    // read it too: running version, install mode and deployment environment.
+    health: () => fetch('/health'),
     update: () => post('/api/system/update'),
   },
 };

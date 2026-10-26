@@ -3,6 +3,7 @@ import { I18nextProvider } from 'react-i18next';
 
 import { ThemeProvider } from '@/shared/context/ThemeContext';
 import { UiPreferencesProvider } from '@/shared/context/UiPreferencesContext';
+import { useDeploymentEnvironmentFavicon, useDeploymentEnvironmentTitle } from '@/shared/hooks/useDeploymentEnvironment';
 import { AuthProvider, ProtectedRoute } from '@/modules/auth';
 import { TaskMasterProvider,TasksSettingsProvider } from '@/modules/task-master';
 import { WebSocketProvider } from '@/shared/context/WebSocketContext';
@@ -105,12 +106,24 @@ function detectRouterBasename() {
   return detectedBasename;
 }
 
+/**
+ * Renders nothing. Mounted above the auth gate so the deployment environment label leads
+ * the tab title, and the amber icon marks the tab, on every screen, the login and setup
+ * screens included.
+ */
+function DeploymentEnvironmentTabMarkers() {
+  useDeploymentEnvironmentTitle();
+  useDeploymentEnvironmentFavicon();
+  return null;
+}
+
 /** Rendered by main.tsx; mounts the shared providers, the auth gate and the project workspace routes. */
 export default function App() {
   const routerBasename = detectRouterBasename();
 
   return (
     <I18nextProvider i18n={i18n}>
+      <DeploymentEnvironmentTabMarkers />
       <ThemeProvider>
         <UiPreferencesProvider>
         <AuthProvider>

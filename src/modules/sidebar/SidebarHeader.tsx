@@ -1,7 +1,7 @@
 import { FolderPlus, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
-import { Button, Input } from '@/shared/ui';
+import { Button, DeploymentEnvironmentBadge, Input } from '@/shared/ui';
 import { CLOUDCLI_WORDMARK_FONT_FAMILY } from '@/shared/constants';
 import { IS_PLATFORM } from '@/shared/utils';
 import type { SidebarSearchMode } from '@/shared/types';
@@ -31,7 +31,10 @@ type SidebarHeaderProps = {
   t: TFunction;
 };
 
-/** Module-level, not a nested render function, so the wordmark is not remounted on every SidebarHeader render. */
+/**
+ * Module-level, not a nested render function, so the wordmark is not remounted on every SidebarHeader render.
+ * Shared by the desktop and mobile headers, so both carry the deployment environment badge.
+ */
 function LogoBlock({ t }: { t: TFunction }) {
   return (
     <div className="flex min-w-0 items-center gap-2.5">
@@ -46,6 +49,7 @@ function LogoBlock({ t }: { t: TFunction }) {
       >
         {t('app.title')}
       </h1>
+      <DeploymentEnvironmentBadge className="max-w-24" />
     </div>
   );
 }
