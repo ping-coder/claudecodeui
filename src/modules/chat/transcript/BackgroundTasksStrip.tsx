@@ -27,6 +27,17 @@ type BackgroundTasksStripProps = {
   tasks?: BackgroundTaskSummary[];
   /** The session the tasks belong to, which `chat.stop-task` names; null before one exists. */
   sessionId: string | null;
+  /**
+   * Whether CloudCLI's own runtime drives the session's run: a turn sent from
+   * here, or the background work such a turn left running. Only that runtime
+   * can stop a task (`chat.stop-task` reaches the SDK session that launched
+   * it, and anything else is refused as NO_SUCH_TASK), so a row's chip offers
+   * its ✕ only then. False for a turn a Claude CLI outside CloudCLI drives (a
+   * Shell tab's `claude --resume`, another CloudCLI instance), whose launches
+   * a history load can read as running, and for a session with no activity,
+   * where nothing here runs.
+   */
+  canStopTasks: boolean;
   /** The chat websocket's send, for stopping a task. */
   sendMessage: (message: unknown) => void;
   /**
@@ -98,10 +109,12 @@ function describeTask(message: ChatMessage, t: TFunction) {
 /**
  * Rendered by chat's ChatMessagesPane above the transcript: one chip per
  * background task — workflow, agent or command — that is still running, each
- * scrolling to its card when clicked and stoppable from its ✕. Renders
- * nothing while nothing runs, which is most of the time.
+ * scrolling to its card when clicked. A task CloudCLI's runtime tracks is
+ * stoppable from its ✕; one a Claude CLI outside CloudCLI runs is listed
+ * without one, as only that CLI can stop it. Renders nothing while nothing
+ * runs, which is most of the time.
  */
-export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, sendMessage, onReveal, onLoadAll }: BackgroundTasksStripProps) => {
+export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopTasks, sendMessage, onReveal, onLoadAll }: BackgroundTasksStripProps) => {
   const { t } = useTranslation();
   const running = listRunningBackgroundLaunches(messages);
   // A loaded row that has a word on its task — settled or not — is the word;
@@ -140,7 +153,7 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, sendMess
               {name && <span className="min-w-0 truncate">{name}</span>}
               {progress && <span className="min-w-0 truncate text-muted-foreground/70">· {progress}</span>}
             </button>
-            {sessionId && taskId && (
+            {canStopTasks && sessionId && taskId && (
               <button
                 type="button"
                 onClick={() => sendMessage({ type: 'chat.stop-task', sessionId, taskId })}
@@ -189,6 +202,8 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, sendMess
                 {label}
               </button>
             )}
+            {/* The map holds the tasks CloudCLI's runtime reports it tracks,
+                so these keep their ✕ whatever `canStopTasks` says. */}
             {sessionId && (
               <button
                 type="button"

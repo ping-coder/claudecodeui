@@ -326,8 +326,10 @@ export type ActivityDetailsAgent = {
 
 /**
  * One workflow as the activity tab's details panel draws it: a run still
- * going, whichever turn launched it, or one the current turn saw end. Read
- * from its `Workflow` transcript row the way the row's card reads it.
+ * going (one the current turn launched, until something reports it over, or
+ * one an earlier turn launched that a report says is running), or a run whose
+ * row places its end inside the current turn. Read from its `Workflow`
+ * transcript row the way the row's card reads it.
  */
 export type ActivityDetailsWorkflow = {
   /** The id of the call that launched it. */
@@ -382,13 +384,17 @@ export type ActivityDetails = {
      */
     isCliDriven: boolean;
   };
-  /** Running workflows first, then the ones the current turn saw end, newest first in each. Capped. */
+  /** Running workflows first, then the ones that ended inside the current turn, newest first in each. Capped. */
   workflows: ActivityDetailsWorkflow[];
   /** How many workflows the cap left out of `workflows`. */
   hiddenWorkflowCount: number;
   /** The checklist of the turn in flight; null when it has none or the turn is over. */
   checklist: { items: ActivityDetailsChecklistItem[]; done: number; total: number } | null;
-  /** The session's own background tasks not already drawn as a workflow, newest first. */
+  /**
+   * The session's own background tasks, newest first, less every run a loaded
+   * `Workflow` row speaks for: one drawn in `workflows` (capped or not), or one
+   * its row says is over, which no lagging task list can show as running.
+   */
   tasks: ActivityDetailsTask[];
 };
 
@@ -778,6 +784,14 @@ export type WorkflowInfo = {
   agents: WorkflowAgentInfo[];
   agentCounts: { total: number; completed: number; failed: number; running: number; stopped: number };
   scriptPath?: string;
+  /**
+   * When the run ended: the ISO timestamp, on the server's clock, of the
+   * latest transcript row its task notification came from. Absent until a
+   * notification reports the run over, so a run settled as `stopped` because
+   * its process died first has none. The activity tab's details panel places
+   * an earlier turn's run that is over against the current turn by it.
+   */
+  endedAt?: string;
 };
 
 /**

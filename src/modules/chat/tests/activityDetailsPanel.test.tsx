@@ -4,10 +4,14 @@ import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { i18n } from '@/modules/i18n';
+import ActivityDetailsPanel from '@/modules/chat/composer/ActivityDetailsPanel';
 import ActivityIndicator from '@/modules/chat/composer/ActivityIndicator';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
+import { WorkflowPanel } from '@/modules/chat/tools/WorkflowPanel';
 import { deriveActivityDetails, deriveActivityProgress } from '@/modules/chat/utils/runProgress';
 import type {
+  ActivityDetails,
+  ActivityDetailsWorkflow,
   BackgroundTaskSummary,
   ChatMessage,
   SessionActivity,
@@ -152,6 +156,79 @@ const openPanel = () => {
   return panel();
 };
 
+/** The tab's row is as tall as the tab (`h-8`). */
+const TAB_ROW_PX = 32;
+
+/** The resize observers set up while a chat column is modelled, with what each watches. */
+const resizeObservers = new Set<{ callback: ResizeObserverCallback; targets: Set<Element> }>();
+
+/**
+ * jsdom lays nothing out, so a model stands in for the browser's chat column:
+ * the transcript pane is as tall as each case leaves it (all that the header,
+ * the composer and an on-screen keyboard leave of the column), and the tab's
+ * row is TAB_ROW_PX. A resize reaches the page the ways a browser's does: the
+ * transcript's resize observers, the window's `resize` and the visual
+ * viewport's (iOS Safari's keyboard). Undone by `vi.unstubAllGlobals()`
+ * and the config's `restoreMocks`.
+ */
+function modelChatColumn(transcriptHeightPx: number) {
+  let transcriptHeight = transcriptHeightPx;
+  const transcript = document.createElement('div');
+  vi.spyOn(transcript, 'getBoundingClientRect').mockImplementation(() => DOMRect.fromRect({ width: 390, height: transcriptHeight }));
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return [...this.children].some((child) => child.classList.contains('chat-activity-tab')) ? TAB_ROW_PX : 0;
+  });
+  vi.stubGlobal('ResizeObserver', class {
+    private readonly observer: { callback: ResizeObserverCallback; targets: Set<Element> };
+
+    constructor(callback: ResizeObserverCallback) {
+      this.observer = { callback, targets: new Set() };
+      resizeObservers.add(this.observer);
+    }
+
+    observe(target: Element) {
+      this.observer.targets.add(target);
+    }
+
+    unobserve(target: Element) {
+      this.observer.targets.delete(target);
+    }
+
+    disconnect() {
+      resizeObservers.delete(this.observer);
+    }
+  });
+  const visualViewport = new EventTarget();
+  vi.stubGlobal('visualViewport', visualViewport);
+
+  return {
+    transcriptRef: { current: transcript },
+    /** The transcript takes a new height that nothing reports yet. */
+    setTranscriptHeight: (heightPx: number) => {
+      transcriptHeight = heightPx;
+    },
+    /** The transcript takes a new height its resize observers hear of: the composer grew with a draft, say. */
+    resizeTranscript: (heightPx: number) => act(() => {
+      transcriptHeight = heightPx;
+      for (const { callback, targets } of resizeObservers) {
+        if (targets.has(transcript)) {
+          callback([], {} as ResizeObserver);
+        }
+      }
+    }),
+    /** The window resizes, and the transcript with it. */
+    resizeWindow: (heightPx: number) => act(() => {
+      transcriptHeight = heightPx;
+      window.dispatchEvent(new Event('resize'));
+    }),
+    /** The visual viewport resizes (an on-screen keyboard comes or goes), and the transcript with it. */
+    resizeVisualViewport: (heightPx: number) => act(() => {
+      transcriptHeight = heightPx;
+      visualViewport.dispatchEvent(new Event('resize'));
+    }),
+  };
+}
+
 describe('the activity tab as the details toggle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -280,6 +357,125 @@ describe('the activity tab as the details toggle', () => {
     expect(screen.queryByRole('region', PANEL)).toBeNull();
     expect(container.querySelector('div.chat-activity-tab')?.classList.contains('cursor-pointer')).toBe(false);
   });
+
+  it('draws its chevron in full muted contrast at rest, and in the foreground colour when focused or open', () => {
+    render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} />);
+    const classes = () => toggle().className.split(/\s+/);
+
+    // At rest it is the only sign the tab opens. At 60% opacity on the card
+    // it read 2.3:1 in the light theme, short of the 3:1 WCAG 1.4.11 asks.
+    expect(classes()).toContain('text-muted-foreground');
+    expect(classes().filter((name) => name.startsWith('text-muted-foreground/'))).toEqual([]);
+    // Hover alone brightened it, which neither a keyboard nor a touch gives.
+    expect(classes()).toContain('focus-visible:text-foreground');
+    expect(classes()).toContain('group-hover:text-foreground');
+
+    openPanel();
+    expect(classes()).toContain('text-foreground');
+    expect(classes()).not.toContain('text-muted-foreground');
+  });
+
+  it('in a pane too narrow even for its label, truncates the label rather than clipping the elapsed time or the toggle', () => {
+    // The readout gives way first and the label used to be shrink-0, so the
+    // tab overflowed at its end, clipping the toggle (its last child) first.
+    const { container } = render(<IndicatorHarness messages={[userTurn]} activity={runningTurn()} onAbort={() => {}} />);
+    const tab = container.querySelector<HTMLElement>('div.chat-activity-tab')!;
+    const label = screen.getByText('Thinking…').parentElement!;
+
+    expect(label.parentElement).toBe(tab);
+    expect(label.classList.contains('min-w-0')).toBe(true);
+    expect(label.classList.contains('truncate')).toBe(true);
+    expect(label.classList.contains('shrink-0')).toBe(false);
+    // Marked, so the fit check counts what it truncates and the readout
+    // still gives way before it does.
+    expect(label.hasAttribute('data-fit-clip')).toBe(true);
+    expect(within(tab).getByText('6m 0s').classList.contains('shrink-0')).toBe(true);
+    expect(toggle().classList.contains('shrink-0')).toBe(true);
+  });
+
+  it('scrolls the tab back once focus leaves the toggle the browser scrolled into view', () => {
+    const { container } = render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} />);
+    const tab = container.querySelector<HTMLElement>('div.chat-activity-tab')!;
+
+    toggle().focus();
+    // What a browser does to bring a focused toggle the tab clips into view;
+    // jsdom does no layout, so the test does it.
+    tab.scrollLeft = 61;
+
+    // Tab on to Stop: the label is back in view rather than left cut off.
+    screen.getByRole('button', { name: 'Stop' }).focus();
+    expect(tab.scrollLeft).toBe(0);
+  });
+});
+
+describe('the details panel in a short chat column', () => {
+  // The panel grows upward from the tab, inside a chat column that clips
+  // whatever passes its top. 390x664 phone: 454px of transcript, 118px once
+  // a 336px keyboard is up.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resizeObservers.clear();
+  });
+
+  it('fits the room above the composer, so its first rows stay in reach as an on-screen keyboard comes and goes', () => {
+    const column = modelChatColumn(454);
+    render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} transcriptRef={column.transcriptRef} />);
+    const opened = openPanel();
+
+    // Room to spare: its own 16rem ceiling decides.
+    expect(opened.style.maxHeight).toBe('min(16rem, 408px)');
+
+    // iOS Safari: the keyboard shrinks the visual viewport, and the
+    // workspace with it, while dvh stays as it was.
+    column.resizeVisualViewport(118);
+    // 118px of transcript: 32 for the tab's row, 6 for the panel's gap above
+    // it and 8 to spare below the header leave the panel 72px, all of it in
+    // view and scrolling within.
+    expect(panel().style.maxHeight).toBe('min(16rem, 72px)');
+
+    column.resizeVisualViewport(454);
+    expect(panel().style.maxHeight).toBe('min(16rem, 408px)');
+  });
+
+  it('shrinks as a long draft grows the composer under it, and follows the window', () => {
+    const column = modelChatColumn(300);
+    render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} transcriptRef={column.transcriptRef} />);
+    openPanel();
+    expect(panel().style.maxHeight).toBe('min(16rem, 254px)');
+
+    // A twelve-line draft: the composer grows and the transcript gives way.
+    column.resizeTranscript(180);
+    expect(panel().style.maxHeight).toBe('min(16rem, 134px)');
+
+    column.resizeWindow(140);
+    expect(panel().style.maxHeight).toBe('min(16rem, 94px)');
+  });
+
+  it('measures the room afresh each time it opens', () => {
+    const column = modelChatColumn(454);
+    render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} transcriptRef={column.transcriptRef} />);
+    openPanel();
+    fireEvent.click(toggle());
+
+    // The keyboard came up while the panel was closed and nothing watched.
+    column.setTranscriptHeight(118);
+    expect(openPanel().style.maxHeight).toBe('min(16rem, 72px)');
+  });
+
+  it('caps nothing by the viewport, and only by its own ceiling with no transcript to fit', () => {
+    render(<IndicatorHarness messages={busyTranscript} activity={runningTurn()} onAbort={() => {}} />);
+    const opened = openPanel();
+
+    expect(opened.style.maxHeight).toBe('');
+    expect(opened.classList.contains('max-h-64')).toBe(true);
+    expect(opened.className).not.toMatch(/vh/);
+  });
 });
 
 describe('what the details panel lists', () => {
@@ -374,6 +570,58 @@ describe('what the details panel lists', () => {
     render(<IndicatorHarness messages={[userTurn]} activity={runningTurn({ statusText: null })} onAbort={() => {}} />);
 
     expect(openPanel().textContent).toContain('Turn in progress· 6m 0s');
+  });
+});
+
+describe('a workflow\'s run time in the panel', () => {
+  // The CLI reports a run's wall time to the millisecond: 95.6 s is 1m 36s to
+  // the nearest second, and 1m 35s rounded down.
+  const reportedUsage = { totalTokens: 1_000, toolUses: 12, durationMs: 95_600 };
+
+  const finishedAgents: WorkflowAgentProgress[] = [
+    { index: 0, label: 'plan', agentId: 'p1', state: 'done', startedAt: LAUNCH, durationMs: 40_000 },
+    { index: 1, label: 'report', agentId: 'r1', state: 'done', startedAt: LAUNCH + 40_000, durationMs: 55_000 },
+  ];
+
+  /** The panel listing one workflow, as deriveActivityDetails reads it. */
+  const listing = (workflow: Pick<ActivityDetailsWorkflow, 'status' | 'elapsedMs'>): ActivityDetails => ({
+    run: { statusText: 'Thinking', elapsedMs: 360_000, isBackground: false, isCliDriven: false },
+    workflows: [{
+      key: 'toolu_workflow_1',
+      name: 'frontend-architecture-audit',
+      description: 'Evidence-based audit of the frontend',
+      progress: { unit: 'agents', done: 2, total: 2, running: 0, startedAt: LAUNCH },
+      remainingMs: null,
+      agents: [],
+      hiddenAgentCount: 0,
+      ...workflow,
+    }],
+    hiddenWorkflowCount: 0,
+    checklist: null,
+    tasks: [],
+  });
+
+  const workflowSection = () => screen.getByText('frontend-architecture-audit').closest('section')!;
+
+  it('reads a finished run\'s reported time as the run\'s Workflow card does', () => {
+    const card = render(
+      <WorkflowPanel
+        toolInput={JSON.stringify({ script: SCRIPT })}
+        taskStatus={{ status: 'completed', taskId: 'wxkj4kcvd', agents: finishedAgents, usage: reportedUsage }}
+        createDiff={() => []}
+      />,
+    );
+    expect(card.container.textContent).toContain('· 1m 36s');
+    card.unmount();
+
+    render(<ActivityDetailsPanel id="details" details={listing({ status: 'completed', elapsedMs: reportedUsage.durationMs })} />);
+    expect(workflowSection().textContent).toContain('2/2 agents· 100%· 1m 36s');
+  });
+
+  it('still counts a running run\'s time in whole seconds, as the tab\'s clock ticks', () => {
+    render(<ActivityDetailsPanel id="details" details={listing({ status: 'running', elapsedMs: 95_600 })} />);
+
+    expect(workflowSection().textContent).toContain('2/2 agents· 100%· 1m 35s');
   });
 });
 
@@ -485,6 +733,7 @@ describe('the details panel in the composer', () => {
   afterEach(() => {
     resetUserPreferences();
     vi.unstubAllGlobals();
+    resizeObservers.clear();
     localStorage.clear();
   });
 
@@ -506,5 +755,54 @@ describe('the details panel in the composer', () => {
     rerender(<ChatComposer {...props} />);
     expect(toggle().getAttribute('aria-expanded')).toBe('true');
     expect(within(panel()).getByText('frontend-architecture-audit')).toBeTruthy();
+  });
+
+  /** The composer as ChatInterface draws it for one viewed session. */
+  const sessionComposerProps = (sessionId: string, activity: SessionActivity, messages: ChatMessage[]) => composerProps({
+    activitySessionId: sessionId,
+    activity,
+    isLoading: !activity.background,
+    activityProgress: deriveActivityProgress(messages, activity),
+    readActivityDetails: (nowMs) => deriveActivityDetails(messages, activity, nowMs),
+  });
+
+  it('starts collapsed in a session the user switches to, though both are busy', () => {
+    const turnInA = runningTurn({ startedAt: Date.now() - 360_000 });
+    const runInB: SessionActivity = { statusText: 'Running in the Claude CLI', canInterrupt: false, startedAt: Date.now() - 20_000 };
+    const { rerender } = render(<ChatComposer {...sessionComposerProps('session-a', turnInA, busyTranscript)} />);
+    openPanel();
+
+    // Picking B in the sidebar hands the tab B's activity in the same render:
+    // the tab passes no idle moment that would collapse the panel.
+    rerender(<ChatComposer {...sessionComposerProps('session-b', runInB, [userTurn])} />);
+    expect(screen.getByText('Running in the Claude CLI…')).toBeTruthy();
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('region', PANEL)).toBeNull();
+
+    // Nor does going back reopen it over A's transcript.
+    rerender(<ChatComposer {...sessionComposerProps('session-a', turnInA, busyTranscript)} />);
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('region', PANEL)).toBeNull();
+  });
+
+  it('keeps the panel open within one session when background work gives way to a new turn', () => {
+    const work = backgroundWork([{ ...workflowTask, startedAt: Date.now() - 360_000 }]);
+    const { rerender } = render(<ChatComposer {...sessionComposerProps('session-a', work, busyTranscript)} />);
+    openPanel();
+
+    // The user sends over the background work: the entry becomes a turn with
+    // a fresh clock, and the workflow the panel lists runs on under it. The
+    // session never went idle, so the user's choice holds.
+    rerender(<ChatComposer {...sessionComposerProps('session-a', runningTurn({ startedAt: Date.now() }), busyTranscript)} />);
+    expect(toggle().getAttribute('aria-expanded')).toBe('true');
+    expect(within(panel()).getByText('frontend-architecture-audit')).toBeTruthy();
+  });
+
+  it('fits the details panel in the transcript above the composer', () => {
+    const column = modelChatColumn(118);
+    const activity = runningTurn({ startedAt: Date.now() - 360_000 });
+    render(<ChatComposer {...sessionComposerProps('session-a', activity, busyTranscript)} transcriptRef={column.transcriptRef} />);
+
+    expect(openPanel().style.maxHeight).toBe('min(16rem, 72px)');
   });
 });

@@ -235,3 +235,103 @@ export function resolveLatestPagePagination(
       : previousHasMore && oldestFetchedPageHasMore,
   };
 }
+
+/**
+ * How far back, in rows, a latest-page refresh reaches for a background launch
+ * it follows (`resolveLatestRefreshLimit`). Every reload re-sends the whole
+ * window, each row with its tool result folded in, and while the poll follows
+ * a workflow the Claude CLI runs outside CloudCLI a reload of such a window
+ * comes every 15 s, so the reach is bounded. 150 rows, about seven pages, spans the
+ * several tool-using turns (tens of rows each) a session typically takes while
+ * one of its runs works. A launch further back keeps the copy the last read
+ * that reached it left, until the session is opened again.
+ */
+const MAX_LATEST_REFRESH_ROWS = 150;
+
+/**
+ * Whether a row cached from the server launched background work, a workflow
+ * or an agent, that the history read it came from saw still running. A server
+ * row carries no other status (the live stream's word on a task sits on
+ * realtime rows, which a refresh keeps), so this is the transcript strip's
+ * rule (`readBackgroundTaskStatus`) on such a row. It is also what a later
+ * read can still change: the run's agents, its outcome, the result folded in.
+ */
+function isRunningBackgroundLaunch(message: NormalizedMessage): boolean {
+  return message.kind === 'tool_use'
+    && Boolean(message.toolId)
+    && (message.workflow?.status ?? message.subagent?.status) === 'running';
+}
+
+/**
+ * The latest-page refresh the rows cached from the server call for: how many
+ * of the newest rows it requests, and the oldest cached row a read of that
+ * window is sure to reach when at most one row is written while it is in
+ * flight; a launch that is the oldest cached row, which gets no row of slack
+ * (see below), is reached by a read no row outran.
+ *
+ * A page, unless a launch whose background work the cache last saw running
+ * sits further back. Rows written after it push it out of the newest page, and
+ * the merge keeps every cached row older than the page as it was, so its run
+ * would stay frozen as it stood when it left the page: its agents, and still
+ * `running` after it ends. The window then reaches back to the oldest such
+ * launch, plus one row so that a row written while the request is in flight
+ * does not push it out again (when more arrive between two reads, the next
+ * read, sized from the grown cache, reaches it), and the merge replaces the
+ * cached copy with the server's. Once that copy reads as over, the window
+ * shrinks back to a page. A launch more than `MAX_LATEST_REFRESH_ROWS` back is
+ * not reached for.
+ *
+ * The row of slack never reaches above the oldest cached row. The merge can
+ * only place a window whose first row is cached, so a window starting one row
+ * older than everything cached is dropped whole on every quiet read, and the
+ * launch with it. A launch that is the oldest cached row therefore gets no
+ * slack: a quiet read reaches it, and a read that rows outran still merges,
+ * growing the cache, so the next one, sized from it, does.
+ */
+function planLatestRefresh(serverMessages: NormalizedMessage[]): { limit: number; firstReachedIndex: number } {
+  // The launch at `index` is reached by the `length - index` rows from it to
+  // the end, plus the row of slack.
+  const firstReachableIndex = Math.max(0, serverMessages.length + 1 - MAX_LATEST_REFRESH_ROWS);
+  for (let index = firstReachableIndex; index < serverMessages.length; index += 1) {
+    if (isRunningBackgroundLaunch(serverMessages[index])) {
+      const limit = Math.max(
+        SESSION_MESSAGES_PAGE_SIZE,
+        Math.min(serverMessages.length, serverMessages.length - index + 1),
+      );
+      return { limit, firstReachedIndex: Math.min(index, Math.max(0, serverMessages.length + 1 - limit)) };
+    }
+  }
+  return {
+    limit: SESSION_MESSAGES_PAGE_SIZE,
+    // A page's row of slack counts as above the rows it reaches, as a row
+    // written meanwhile pushes it out.
+    firstReachedIndex: Math.max(0, serverMessages.length + 1 - SESSION_MESSAGES_PAGE_SIZE),
+  };
+}
+
+/**
+ * How many of the newest rows a latest-page refresh requests, given the rows
+ * cached from the server (see `planLatestRefresh`).
+ */
+export function resolveLatestRefreshLimit(serverMessages: NormalizedMessage[]): number {
+  return planLatestRefresh(serverMessages).limit;
+}
+
+/**
+ * The tool calls among the rows cached from the server that the next
+ * latest-page refresh leaves as they are: those above the rows the window
+ * `resolveLatestRefreshLimit` sizes is sure to reach (see
+ * `planLatestRefresh`). Re-reading the latest page cannot follow a launch
+ * among them.
+ */
+export function listToolIdsBeyondLatestRefresh(serverMessages: NormalizedMessage[]): Set<string> {
+  const { firstReachedIndex } = planLatestRefresh(serverMessages);
+  const toolIds = new Set<string>();
+  for (let index = 0; index < firstReachedIndex; index += 1) {
+    const message = serverMessages[index];
+    if (message.kind === 'tool_use' && message.toolId) {
+      toolIds.add(message.toolId);
+    }
+  }
+  return toolIds;
+}

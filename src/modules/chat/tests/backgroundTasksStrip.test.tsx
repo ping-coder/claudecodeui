@@ -21,6 +21,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -62,6 +63,7 @@ describe('the background tasks strip', () => {
         onReveal={() => {}}
         onLoadAll={() => {}}
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         messages={[
           toolRow({
@@ -90,6 +92,7 @@ describe('the background tasks strip', () => {
     const { container } = render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -113,6 +116,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -149,7 +153,7 @@ describe('the background tasks strip', () => {
       taskStatus: { status: 'running', workflowName: 'frontend-architecture-audit' },
     });
 
-    render(<BackgroundTasksStrip sessionId="session-1" sendMessage={() => {}} onReveal={onReveal} onLoadAll={() => {}} messages={[row]} />);
+    render(<BackgroundTasksStrip sessionId="session-1" canStopTasks sendMessage={() => {}} onReveal={onReveal} onLoadAll={() => {}} messages={[row]} />);
 
     fireEvent.click(screen.getByRole('button'));
     expect(onReveal).toHaveBeenCalledWith(row);
@@ -162,6 +166,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -191,6 +196,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -223,6 +229,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -245,6 +252,7 @@ describe('the background tasks strip', () => {
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={sendMessage}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -308,6 +316,7 @@ describe('the background tasks strip, for a task whose launch row is not loaded'
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={sendMessage}
         onReveal={() => {}}
         onLoadAll={onLoadAll}
@@ -331,6 +340,7 @@ describe('the background tasks strip, for a task whose launch row is not loaded'
     const { container } = render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -356,6 +366,7 @@ describe('the background tasks strip, for tasks only the activity map has a word
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={sendMessage}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -379,6 +390,7 @@ describe('the background tasks strip, for tasks only the activity map has a word
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={onLoadAll}
@@ -403,6 +415,7 @@ describe('the background tasks strip, for tasks only the activity map has a word
     render(
       <BackgroundTasksStrip
         sessionId="session-1"
+        canStopTasks
         sendMessage={() => {}}
         onReveal={() => {}}
         onLoadAll={() => {}}
@@ -415,6 +428,82 @@ describe('the background tasks strip, for tasks only the activity map has a word
     );
 
     expect(screen.getByRole('button').textContent).toBe('Workflowaudit· 0/1 agent · only');
+  });
+});
+
+describe('the background tasks strip, for tasks only a Claude CLI outside CloudCLI can stop', () => {
+  // The async launches of a Claude CLI CloudCLI does not drive (a Shell tab's
+  // `claude --resume`, another CloudCLI instance), as a history load returns
+  // them while that CLI lives: read running, their acknowledgements naming
+  // tasks that only that CLI tracks. A stop for one is refused as
+  // NO_SUCH_TASK, which lands in the transcript as an error row.
+  const cliRows = [
+    toolRow({
+      toolName: 'Workflow',
+      toolId: 'toolu_workflow_cli',
+      workflow: {
+        runId: 'wf_cli',
+        name: 'frontend-audit',
+        status: 'running',
+        agents: [{ id: 'a1', status: 'running' }],
+        agentCounts: { total: 1, completed: 0, failed: 0, running: 1, stopped: 0 },
+      },
+      toolResult: {
+        content: 'Workflow launched in background. Task ID: wcli1',
+        isError: false,
+        toolUseResult: { status: 'async_launched', taskId: 'wcli1', runId: 'wf_cli' },
+      },
+    }),
+    toolRow({
+      toolName: 'Agent',
+      toolId: 'toolu_agent_cli',
+      isSubagentContainer: true,
+      subagent: { id: 'acli2', description: 'Survey the repo', status: 'running' },
+      toolResult: { content: '', isError: false, toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'acli2' } },
+    }),
+  ];
+
+  it('lists them without a ✕, which the server could only refuse', () => {
+    const sendMessage = vi.fn();
+    const onReveal = vi.fn();
+    render(
+      <BackgroundTasksStrip
+        sessionId="app-session"
+        canStopTasks={false}
+        sendMessage={sendMessage}
+        onReveal={onReveal}
+        onLoadAll={() => {}}
+        messages={cliRows}
+      />,
+    );
+
+    // Still listed, and still a way to the card.
+    const chips = screen.getAllByRole('button');
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Workflowfrontend-audit· 0/1', 'AgentSurvey the repo']);
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
+    chips.forEach((chip) => fireEvent.click(chip));
+    expect(onReveal).toHaveBeenCalledTimes(2);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('offers it on the same rows while CloudCLI\'s runtime drives the session', () => {
+    const sendMessage = vi.fn();
+    render(
+      <BackgroundTasksStrip
+        sessionId="app-session"
+        canStopTasks
+        sendMessage={sendMessage}
+        onReveal={() => {}}
+        onLoadAll={() => {}}
+        messages={cliRows}
+      />,
+    );
+
+    screen.getAllByRole('button', { name: 'Stop' }).forEach((stop) => fireEvent.click(stop));
+    expect(sendMessage.mock.calls.map(([frame]) => frame)).toEqual([
+      { type: 'chat.stop-task', sessionId: 'app-session', taskId: 'wcli1' },
+      { type: 'chat.stop-task', sessionId: 'app-session', taskId: 'acli2' },
+    ]);
   });
 });
 

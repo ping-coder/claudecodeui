@@ -11,7 +11,7 @@ import type {
 import { cn } from '@/shared/utils';
 import { Queue, QueueItem, QueueItemContent, QueueItemIndicator } from '@/modules/chat/tools/Queue';
 import { RunProgressBar } from '@/modules/chat/tools/RunProgressBar';
-import { describeBackgroundTask } from '@/modules/chat/utils/backgroundTasks';
+import { describeBackgroundTask, formatTaskDuration } from '@/modules/chat/utils/backgroundTasks';
 import {
   computeProgressPercent,
   formatElapsed,
@@ -24,6 +24,11 @@ type ActivityDetailsPanelProps = {
   id: string;
   /** What to list, read at the tab's clock. */
   details: ActivityDetails;
+  /**
+   * The tallest it may be, in px, to fit the room above the composer. Null
+   * leaves only its own 16rem ceiling. Either way it scrolls within.
+   */
+  maxHeightPx?: number | null;
 };
 
 /** A run's status in the Workflow card's colours. */
@@ -97,11 +102,17 @@ function WorkflowDetails({ workflow }: { workflow: ActivityDetailsWorkflow }) {
   const { progress, status } = workflow;
   const isRunning = status === 'running';
   const countLabel = progress ? formatProgressCount(progress, t) : '';
+  // A running run's time ticks on the tab's clock. A finished run's is the
+  // one the CLI reported, printed as its Workflow card prints it (to the
+  // nearest second), so the panel and the card never read a second apart.
+  const elapsedLabel = workflow.elapsedMs === null
+    ? ''
+    : isRunning ? formatElapsed(workflow.elapsedMs, t) : formatTaskDuration(workflow.elapsedMs);
   const readout: Array<[part: string, text: string]> = [
     ['count', progress ? countLabel : isRunning ? t('activityDetails.noAgentsYet', 'No agents listed yet') : ''],
     ['percent', progress ? t('runProgress.percent', { percent: computeProgressPercent(progress), defaultValue: '{{percent}}%' }) : ''],
     ['phase', progress?.phase ?? ''],
-    ['elapsed', workflow.elapsedMs === null ? '' : formatElapsed(workflow.elapsedMs, t)],
+    ['elapsed', elapsedLabel],
     ['estimate', workflow.remainingMs === null ? '' : formatRemainingEstimate(workflow.remainingMs, t)],
   ];
   const shownReadout = readout.filter(([, text]) => text.length > 0);
@@ -217,8 +228,13 @@ function BackgroundTaskDetails({ tasks }: { tasks: ActivityDetailsTask[] }) {
  * line naming the run, its elapsed time and, for a run the Claude CLI drives
  * outside this view, why its details arrive only as its transcript is
  * written. With none of that to list, it says so plainly.
+ *
+ * It grows upward from the tab, so it is capped by the room above the
+ * composer as well as its own ceiling: past the top of the chat column it
+ * would be clipped where no scrolling of its own could bring its first rows
+ * back.
  */
-export default function ActivityDetailsPanel({ id, details }: ActivityDetailsPanelProps) {
+export default function ActivityDetailsPanel({ id, details, maxHeightPx = null }: ActivityDetailsPanelProps) {
   const { t } = useTranslation('chat');
   const { run, workflows, hiddenWorkflowCount, checklist, tasks } = details;
   const runLabel = run.isBackground
@@ -233,7 +249,9 @@ export default function ActivityDetailsPanel({ id, details }: ActivityDetailsPan
       aria-label={t('activityDetails.title', 'Progress details')}
       // Focusable so a keyboard can scroll it when it runs long.
       tabIndex={0}
-      className="chat-activity-details-enter pointer-events-auto mb-1.5 max-h-[min(16rem,40dvh)] space-y-3 overflow-y-auto overscroll-contain rounded-lg border border-border/50 bg-card px-3 py-2.5 text-xs text-muted-foreground shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      // ActivityIndicator counts its gap above the tab (mb-1.5) in the room it leaves it.
+      className="chat-activity-details-enter pointer-events-auto mb-1.5 max-h-64 space-y-3 overflow-y-auto overscroll-contain rounded-lg border border-border/50 bg-card px-3 py-2.5 text-xs text-muted-foreground shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      style={maxHeightPx === null ? undefined : { maxHeight: `min(16rem, ${maxHeightPx}px)` }}
     >
       <div>
         <div className="flex min-w-0 items-baseline gap-1.5">

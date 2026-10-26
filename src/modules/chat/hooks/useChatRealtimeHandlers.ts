@@ -7,7 +7,12 @@ import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { collectRunningBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
-import { isCliDrivenActivity } from '@/modules/chat/utils/runProgress';
+import { hasRunningWorkflow, isCliDrivenActivity } from '@/modules/chat/utils/runProgress';
+import {
+  SESSION_MESSAGES_PAGE_SIZE,
+  listToolIdsBeyondLatestRefresh,
+  resolveLatestRefreshLimit,
+} from '@/modules/chat/utils/sessionMessagePagination';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -16,6 +21,24 @@ const isActionablePermissionRequest = (request: { toolName?: unknown } | null | 
 const hasActionablePermissionRequests = (requests: Array<{ toolName?: unknown }> | null | undefined): boolean => {
   return Array.isArray(requests) && requests.some((request) => isActionablePermissionRequest(request));
 };
+
+/**
+ * The tick of the timer that re-reads the viewed transcript while a Claude
+ * CLI process CloudCLI does not drive runs a workflow in it: the
+ * running-sessions poll's cadence, which is also how often the tab learns
+ * whether that run goes on. A run within the newest page is re-read at every
+ * tick, one further back less often (`WIDE_WINDOW_REFRESH_EVERY_TICKS`).
+ */
+const CLI_WORKFLOW_REFRESH_INTERVAL_MS = 5_000;
+
+/**
+ * While the run followed sits further back than the newest page, every
+ * re-read re-sends the whole window up to its launch, each row with its tool
+ * result folded in, which can come to megabytes. It is then re-read only on
+ * every this-many-th tick, every 15 s, which still keeps up with a run whose
+ * agents take minutes.
+ */
+const WIDE_WINDOW_REFRESH_EVERY_TICKS = 3;
 
 type UseChatRealtimeHandlersArgs = {
   isActive: boolean;
@@ -61,6 +84,9 @@ type UseChatRealtimeHandlersArgs = {
  * `useProjectsState`, not in this hook — except that the viewed transcript
  * reloads here on `session_upserted` while a Claude CLI process CloudCLI does
  * not drive runs its turn, since the sidebar's reload skips a busy session.
+ * While such a turn's transcript shows a workflow still running, and a re-read
+ * of its latest rows reaches the launch, it is also re-read on a timer, as the
+ * run's progress is written where no event reports it.
  */
 export function useChatRealtimeHandlers({
   isActive,
@@ -83,12 +109,13 @@ export function useChatRealtimeHandlers({
   requestLatestMessages,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
+  const viewedSessionId = selectedSession?.id || currentSessionId || null;
   // Session switches can send `chat.subscribe` before this effect has a chance
   // to rebind the websocket listener. Read the visible session id from a ref
   // so a fast `chat_subscribed` ack is matched against the current view, not
   // the previous render's closed-over selection.
-  const activeViewSessionIdRef = useRef<string | null>(selectedSession?.id || currentSessionId || null);
-  activeViewSessionIdRef.current = selectedSession?.id || currentSessionId || null;
+  const activeViewSessionIdRef = useRef<string | null>(viewedSessionId);
+  activeViewSessionIdRef.current = viewedSessionId;
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
 
@@ -100,6 +127,48 @@ export function useChatRealtimeHandlers({
   useEffect(() => {
     pendingPermissionRequestsRef.current = pendingPermissionRequests;
   }, [pendingPermissionRequests]);
+
+  // A workflow the Claude CLI runs outside CloudCLI moves on in its own
+  // journal while the transcript stays quiet, and the sessions watcher does
+  // not report on the journal: the `session_upserted` reload below never
+  // comes, so the view would keep the run's agents as they stood at the last
+  // transcript write. While the viewed session's turn is such a run and its
+  // transcript shows a workflow still running (by the details panel's rule),
+  // the transcript is re-read at every tick, or at every third tick (15 s)
+  // while the re-read has to reach back past the newest page, as it then
+  // re-sends the whole window; the history reader folds the journal in on
+  // each read, and the refresh coordinator folds overlapping reloads into
+  // one. The re-read reaches back to a launch still running, but only so far
+  // (`resolveLatestRefreshLimit`): a run whose launch sits further back would
+  // come back unchanged at every read, so it is not followed, and its card
+  // keeps what the last read that reached it said. Both conditions are read
+  // at each tick, so the reloads stop at the first tick after either ends; a
+  // session switch or unmount clears the timer.
+  useEffect(() => {
+    if (!viewedSessionId || !getSessionActivity) {
+      return undefined;
+    }
+    let tick = 0;
+    const timer = window.setInterval(() => {
+      tick += 1;
+      if (!isCliDrivenActivity(getSessionActivity(viewedSessionId))) {
+        return;
+      }
+      const serverMessages = sessionStore.getSessionSlot(viewedSessionId)?.serverMessages ?? [];
+      const beyondReach = listToolIdsBeyondLatestRefresh(serverMessages);
+      if (!hasRunningWorkflow(normalizedToChatMessages(sessionStore.getMessages(viewedSessionId)), beyondReach)) {
+        return;
+      }
+      if (
+        resolveLatestRefreshLimit(serverMessages) > SESSION_MESSAGES_PAGE_SIZE
+        && tick % WIDE_WINDOW_REFRESH_EVERY_TICKS !== 0
+      ) {
+        return;
+      }
+      void requestLatestMessages(viewedSessionId);
+    }, CLI_WORKFLOW_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [viewedSessionId, getSessionActivity, requestLatestMessages, sessionStore]);
 
   useEffect(() => {
     // What a session that has finished responding is left with: the tasks it

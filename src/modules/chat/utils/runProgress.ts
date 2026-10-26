@@ -16,6 +16,7 @@ import type {
 import {
   describeWorkflowAgent,
   ownBackgroundTasks,
+  readBackgroundTaskStatus,
   resolveBackgroundTaskStatus,
 } from '@/modules/chat/utils/backgroundTasks';
 import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
@@ -26,6 +27,11 @@ import { parseWorkflowMeta } from '@/modules/chat/utils/workflowScriptMeta';
  * rows the cards draw: a workflow's agents, or a turn's checklist. The Workflow
  * card, the activity tab above the composer and the tab's details panel all
  * count from here, so none of them disagrees with another about the same run.
+ * The panel lists only the runs it can place in the session's current work,
+ * so it leaves out two kinds its cards still draw: a launch from an earlier
+ * turn that nothing has reported on (its card draws it as running), and an
+ * earlier turn's run that is over, unless its row places the end inside the
+ * current turn (see `deriveActivityDetails`).
  */
 
 //----------------- WORKFLOW AGENTS ------------
@@ -707,6 +713,48 @@ export function isCliDrivenActivity(activity: SessionActivity | null | undefined
   return Boolean(activity && !activity.background && !activity.canInterrupt);
 }
 
+/**
+ * Whether the details panel lists a `Workflow` row's run among those still
+ * going. Its status must resolve to running, as its card draws it, and a
+ * launch nothing has reported on yet resolves so by default. That default
+ * holds in the turn that made the call, which launched the run moments ago.
+ * A launch from an earlier turn has had its chance to report, so it needs a
+ * report that it runs, the rule the transcript's background-task strip
+ * applies. A history load reports on every launch the CLI acknowledged, so
+ * one nothing ever reported on is in practice a call its process never
+ * answered (it died, or was stopped, before the run launched), and drawing it
+ * as running would leave it ticking for the rest of the session. A run of a
+ * CLI process that is still up is reported running by the history reader,
+ * whichever turn launched it, so it stays listed.
+ */
+function isListedAsRunning(message: ChatMessage, index: number, turnOpenIndex: number): boolean {
+  return resolveWorkflowRunStatus(message) === 'running'
+    && (index > turnOpenIndex || readBackgroundTaskStatus(message) === 'running');
+}
+
+/** No launch left out. */
+const NO_TOOL_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * Whether the transcript shows a workflow still running, by the rule the
+ * details panel lists one as running, leaving out the launches whose call ids
+ * are in `beyondReach`. Chat's realtime handlers keep re-reading a turn the
+ * Claude CLI drives outside CloudCLI while it does: the run's agents advance
+ * in its journal, where the sessions watcher reports no change, so nothing
+ * else would re-read the transcript until the CLI writes to it. They leave
+ * out the launches above the rows a latest-page refresh reaches
+ * (`listToolIdsBeyondLatestRefresh`), as re-reading for one of those would
+ * fetch the same stale copy at every tick.
+ */
+export function hasRunningWorkflow(messages: ChatMessage[], beyondReach: ReadonlySet<string> = NO_TOOL_IDS): boolean {
+  const { turnOpenIndex } = locateTurn(messages);
+  return messages.some((message, index) => (
+    isWorkflowLaunch(message)
+    && !(message.toolId && beyondReach.has(message.toolId))
+    && isListedAsRunning(message, index, turnOpenIndex)
+  ));
+}
+
 /** How many agents the details panel lists for one workflow; the rest fold into "+N more". */
 const MAX_LISTED_AGENTS = 8;
 
@@ -821,17 +869,85 @@ function readTurnChecklistItems(messages: ChatMessage[], lastChecklistIndex: num
 }
 
 /**
+ * How far before the time of the user message that opened the turn a run's
+ * end may fall and still count as inside the turn. Three things put an end
+ * that belongs to the turn a little before that time:
+ * - a run the send itself stopped ("Send anyway") is stopped before the new
+ *   turn's process writes its user row;
+ * - the live run time, counted from the launch row, falls short by however
+ *   long the run took to start after the call;
+ * - until a reload swaps the composer's optimistic echo of the message for
+ *   the CLI's own user row, the opening time is on the browser's clock, not
+ *   the server's. This lets the browser's clock run up to 10 s ahead, as the
+ *   echo's reconciliation does (`LOCAL_USER_DEDUPE_CLOCK_SKEW_MS`); a browser
+ *   further ahead, or one behind, moves the boundary by the difference until
+ *   that reload, so a run the send stopped can drop out, or one that ended
+ *   shortly before the send be listed.
+ * The cost is that a run that ended within those 10 s before the turn is
+ * listed as done in it, which it nearly is.
+ */
+const TURN_OPENING_TOLERANCE_MS = 10_000;
+
+/**
+ * When a `Workflow` row's run ended, by each source that says: the live
+ * stream's last word, whose run time counted from the launch (the run's
+ * start) gives the end, and a history load, which reads it off the latest
+ * transcript row the run's task notification came from (`workflow.endedAt`).
+ */
+function readRunEnds(message: ChatMessage): number[] {
+  const ends: number[] = [];
+  const launchedAt = new Date(message.timestamp).getTime();
+  const ranForMs = message.taskStatus?.usage?.durationMs;
+  if (isFiniteNumber(ranForMs) && Number.isFinite(launchedAt)) {
+    ends.push(launchedAt + ranForMs);
+  }
+  const reportedEnd = Date.parse(message.workflow?.endedAt ?? '');
+  if (Number.isFinite(reportedEnd)) {
+    ends.push(reportedEnd);
+  }
+  return ends;
+}
+
+/**
+ * Whether a `Workflow` row's run, now over, ended inside the turn the user
+ * message at `turnOpenIndex` opened (-1 when that message is above the loaded
+ * rows, so every loaded row is the turn's).
+ *
+ * A run launched in the turn did. One launched before it did when either
+ * source places its end at or after the message's time, less
+ * `TURN_OPENING_TOLERANCE_MS` (`readRunEnds`). In a turn a Claude CLI drives
+ * outside CloudCLI no live event arrives, so the history load's end time is
+ * the only one. A run neither places, such as one a history load settled as
+ * stopped because its process died before reporting, is left out with the
+ * ones that ended before the turn.
+ */
+function endedInsideTurn(messages: ChatMessage[], index: number, turnOpenIndex: number): boolean {
+  if (index > turnOpenIndex) {
+    return true;
+  }
+  const turnOpenedAt = new Date(messages[turnOpenIndex].timestamp).getTime();
+  return Number.isFinite(turnOpenedAt)
+    && readRunEnds(messages[index]).some((endedAt) => endedAt >= turnOpenedAt - TURN_OPENING_TOLERANCE_MS);
+}
+
+/**
  * The background tasks the panel lists: the session's own, as the tab names
- * them, newest first, less the workflows the panel already draws from their
- * transcript rows. A workflow whose row is not loaded is still listed here.
+ * them, newest first, less every run a loaded `Workflow` row speaks for. That
+ * is a run the panel draws from its row, listed or folded into "+N more", and
+ * a run whose row says it is over, drawn or not. The row's word outranks the
+ * task list, which can lag behind it: a turn keeps the tasks of the
+ * background work it was sent over until the running-sessions poll replaces
+ * them. A workflow whose row is not loaded is still listed here, and so is
+ * one an earlier turn launched that nothing has reported on, which only the
+ * task list says is running (the transcript's strip lists it the same way).
  */
 function listActivityTasks(
   activity: SessionActivity,
-  drawnWorkflowIds: ReadonlySet<string>,
+  spokenForIds: ReadonlySet<string>,
   nowMs: number,
 ): ActivityDetailsTask[] {
   return ownBackgroundTasks(activity.tasks ?? [])
-    .filter((task) => !drawnWorkflowIds.has(task.toolUseId))
+    .filter((task) => !spokenForIds.has(task.toolUseId))
     .sort((a, b) => b.startedAt - a.startedAt)
     .map((task) => ({ ...task, elapsedMs: Math.max(0, nowMs - task.startedAt) }));
 }
@@ -840,11 +956,16 @@ function listActivityTasks(
  * What the activity tab's details panel lists for the viewed session at
  * `nowMs` (the tab's clock, epoch ms), from the rows the tab's readout counts:
  *
- * - every workflow still running, whichever turn launched it, then the ones
- *   the current turn saw end, newest first in each, each with its agents;
+ * - every workflow still running, then the ones that ended inside the current
+ *   turn, newest first in each, each with its agents. A run the current turn
+ *   launched is running until something reports it over; one an earlier turn
+ *   launched is running only on a report that it is (`isListedAsRunning`),
+ *   and is listed once over only when its row places its end inside the turn
+ *   (`endedInsideTurn`);
  * - the checklist of the turn in flight, item by item; none once the turn is
  *   over, since nothing advances it until the next one;
- * - the session's background tasks, less the workflows already drawn;
+ * - the session's background tasks, less the runs a loaded `Workflow` row
+ *   speaks for (`listActivityTasks`);
  * - the run itself, and whether a Claude CLI process CloudCLI does not drive
  *   is behind it — then no live events reach the view, and what is listed
  *   comes from the transcript, reloaded as the CLI writes it.
@@ -863,16 +984,24 @@ export function deriveActivityDetails(
 
   const running: ActivityDetailsWorkflow[] = [];
   const ended: ActivityDetailsWorkflow[] = [];
+  const spokenForIds = new Set<string>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!isWorkflowLaunch(message)) {
       continue;
     }
     const status = resolveWorkflowRunStatus(message);
-    if (status === 'running') {
+    if (isListedAsRunning(message, index, turnOpenIndex)) {
       running.push(readWorkflowDetails(message, status, index, nowMs, activity.startedAt));
-    } else if (index > turnOpenIndex) {
+    } else if (status === 'running') {
+      // An earlier turn's launch nothing has reported on: no run the panel
+      // can vouch for, so its row says nothing about the task list either.
+      continue;
+    } else if (endedInsideTurn(messages, index, turnOpenIndex)) {
       ended.push(readWorkflowDetails(message, status, index, nowMs, activity.startedAt));
+    }
+    if (message.toolId) {
+      spokenForIds.add(message.toolId);
     }
   }
   const workflows = [...running, ...ended];
@@ -887,6 +1016,6 @@ export function deriveActivityDetails(
     workflows: workflows.slice(0, MAX_LISTED_WORKFLOWS),
     hiddenWorkflowCount: Math.max(0, workflows.length - MAX_LISTED_WORKFLOWS),
     checklist: activity.background ? null : readTurnChecklistItems(messages, lastChecklistIndex),
-    tasks: listActivityTasks(activity, new Set(workflows.map((workflow) => workflow.key)), nowMs),
+    tasks: listActivityTasks(activity, spokenForIds, nowMs),
   };
 }

@@ -61,6 +61,12 @@ type ChatMessagesPaneProps = {
   revealMessage: (message: ChatMessage) => void;
   /** The session's running background tasks from the activity map, for the strip to list ones whose rows are not loaded. */
   backgroundTasks?: BackgroundTaskSummary[];
+  /**
+   * Whether CloudCLI's own runtime drives the viewed session's run, so the
+   * background-tasks strip can offer to stop the tasks the transcript's rows
+   * name (see the strip's `canStopTasks`).
+   */
+  canStopBackgroundTasks: boolean;
   /** The chat websocket's send, which the background-tasks strip stops a task over. */
   sendMessage: (message: unknown) => void;
   loadAllMessages: () => void;
@@ -129,6 +135,7 @@ function ChatMessagesPane({
   loadEarlierMessages,
   revealMessage,
   backgroundTasks,
+  canStopBackgroundTasks,
   sendMessage,
   loadAllMessages,
   allMessagesLoaded,
@@ -202,6 +209,7 @@ function ChatMessagesPane({
               messages={chatMessages}
               tasks={backgroundTasks}
               sessionId={selectedSession?.id || currentSessionId}
+              canStopTasks={canStopBackgroundTasks}
               sendMessage={sendMessage}
               onReveal={revealMessage}
               onLoadAll={loadAllMessages}

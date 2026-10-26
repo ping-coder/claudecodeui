@@ -30,7 +30,7 @@ import {
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
-import { deriveActivityDetails, deriveActivityProgress } from '@/modules/chat/utils/runProgress';
+import { deriveActivityDetails, deriveActivityProgress, isCliDrivenActivity } from '@/modules/chat/utils/runProgress';
 
 type ChatInterfaceProps = {
   isActive: boolean;
@@ -462,6 +462,20 @@ function ChatInterface({
   // overlapping the last message.
   const hasActivityIndicator = Boolean(sessionActivity && pendingPermissionRequests.length === 0);
 
+  // The session whose activity the tab shows, picked by the rule
+  // useChatSessionState reads `sessionActivity` by (the selection first, as
+  // `currentSessionId` catches up with it only after a render), so the tab
+  // starts afresh in the same render as the activity it shows changes hands.
+  const activitySessionId = selectedSession?.id || currentSessionId || null;
+
+  // Only CloudCLI's own runtime can stop a background task, so the
+  // transcript's strip offers to stop the tasks its rows name only while that
+  // runtime drives the viewed session: a turn sent from here, or the
+  // background work one left running. A turn a Claude CLI outside CloudCLI
+  // drives has launches a history load can read as running, which nothing
+  // here can stop, and with no activity nothing here runs at all.
+  const canStopBackgroundTasks = sessionActivity !== null && !isCliDrivenActivity(sessionActivity);
+
   // What the activity tab's progress readout counts, read from the same rows
   // the transcript's cards draw: a running workflow's agents, else the turn's
   // checklist. Every loaded row, since a workflow launched pages back can
@@ -547,6 +561,7 @@ function ChatInterface({
               loadEarlierMessages={loadEarlierMessages}
               revealMessage={revealMessage}
               backgroundTasks={sessionActivity?.tasks}
+              canStopBackgroundTasks={canStopBackgroundTasks}
               sendMessage={sendMessage}
               loadAllMessages={loadAllMessages}
               allMessagesLoaded={allMessagesLoaded}
@@ -590,8 +605,10 @@ function ChatInterface({
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
+          activitySessionId={activitySessionId}
           activityProgress={activityProgress}
           readActivityDetails={readActivityDetails}
+          transcriptRef={scrollContainerRef}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
           permissionMode={permissionMode}

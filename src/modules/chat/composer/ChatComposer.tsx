@@ -63,10 +63,18 @@ type ChatComposerProps = {
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
+  /**
+   * The session `activity` belongs to: the viewed one. The activity tab
+   * starts afresh in each, so a details panel opened in one session never
+   * opens over another's transcript.
+   */
+  activitySessionId?: string | null;
   /** How far the activity's work has got, for the activity tab's progress readout; null when there is nothing to count. */
   activityProgress?: ActivityProgress | null;
   /** Reads what the activity tab's details panel lists, at the tab's clock (epoch ms); called only while the panel is open. */
   readActivityDetails?: (nowMs: number) => ActivityDetails | null;
+  /** The transcript pane above the composer, whose height is the room the activity tab's details panel can open into. */
+  transcriptRef?: RefObject<HTMLElement>;
   isLoading: boolean;
   onAbortSession: () => void;
   permissionMode: PermissionMode;
@@ -153,8 +161,10 @@ export default function ChatComposer({
   handlePermissionDecision,
   handleGrantToolPermission,
   activity,
+  activitySessionId = null,
   activityProgress = null,
   readActivityDetails,
+  transcriptRef,
   isLoading,
   onAbortSession,
   permissionMode,
@@ -332,9 +342,14 @@ export default function ChatComposer({
           request is answered. */}
       <div className="pointer-events-none absolute bottom-full left-1/2 z-10 w-[calc(100%-1rem)] max-w-[54.25rem] -translate-x-1/2 translate-y-px bg-transparent sm:w-[calc(100%-2rem)]">
         <ActivityIndicator
+          // A fresh tab for each session, its details panel collapsed: the
+          // switch from one busy session to another passes no idle moment
+          // that would collapse it.
+          key={activitySessionId ?? undefined}
           activity={activity}
           progress={activityProgress}
           readDetails={readActivityDetails}
+          transcriptRef={transcriptRef}
           isHidden={hasPendingPermissions}
           onAbort={onAbortSession}
           isInputFocused={isInputFocused}
