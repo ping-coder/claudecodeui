@@ -241,6 +241,13 @@
       "startingNow": "Starting now"
     },
     "stop": "停止",
+    "backgroundWork": "后台工作",
+    "backgroundTask": {
+      "workflow": "工作流 {{name}}",
+      "agent": "智能体 {{description}}",
+      "command": "命令 {{description}}",
+      "count": "{{count}} 个任务"
+    },
     "controls": {
       "stopGeneration": "Stop Generation",
       "pressEscToStop": "Press Esc anytime to stop"
@@ -259,6 +266,30 @@
       "hours": "约剩 {{hours}} 小时",
       "hoursMinutes": "约剩 {{hours}} 小时 {{minutes}} 分钟",
       "hint": "根据目前的进度估算"
+    }
+  },
+  "activityDetails": {
+    "title": "进度详情",
+    "turnInProgress": "本轮对话进行中",
+    "cliDriven": "此运行由本视图之外的 Claude CLI 驱动，以下详情会随它写入对话记录而更新。",
+    "empty": "暂无详细进度——此运行没有工作流、任务清单或后台任务。",
+    "workflow": "工作流",
+    "noAgentsYet": "尚未列出智能体",
+    "checklist": "任务清单",
+    "backgroundTasks": "后台任务",
+    "moreAgents": "还有 {{count}} 个",
+    "moreWorkflows_other": "还有 {{count}} 个工作流",
+    "status": {
+      "queued": "排队中",
+      "running": "运行中",
+      "completed": "已完成",
+      "failed": "失败",
+      "stopped": "无结果"
+    },
+    "checklistStatus": {
+      "completed": "已完成",
+      "in_progress": "进行中",
+      "pending": "待办"
     }
   },
   "projectSelection": {

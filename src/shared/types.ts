@@ -263,7 +263,7 @@ export type SessionActivitySnapshot = {
  * progress readout draws it: the agents of a workflow that is still running,
  * else the checklist of the turn in flight. Counted from the transcript rows
  * by chat's run-progress utilities and never invented: a session with nothing
- * to count has no progress at all.
+ * to count has no progress at all. The details panel draws one per workflow.
  */
 export type ActivityProgress = {
   /** What is counted: a workflow's agents or a checklist's tasks. */
@@ -306,6 +306,90 @@ export type ActivityProgress = {
     /** Slots the script has declared but not started yet. */
     queued: number;
   };
+};
+
+/**
+ * One agent of a workflow as the activity tab's details panel lists it: what
+ * to call it, where it stands, the script phase it runs under and, when the
+ * live stream timed it, how long it has been running or ran.
+ */
+export type ActivityDetailsAgent = {
+  /** The agent's id, or a queued slot's index: what the list keys on. */
+  key: string;
+  /** The script's label for it, else the head of its prompt, else its id or place in the run. */
+  label: string;
+  status: WorkflowAgentRow['status'];
+  phase?: string;
+  /** Running: how long it has run at the panel's clock. Finished: how long it ran. Absent when the stream never timed it. */
+  elapsedMs?: number;
+};
+
+/**
+ * One workflow as the activity tab's details panel draws it: a run still
+ * going, whichever turn launched it, or one the current turn saw end. Read
+ * from its `Workflow` transcript row the way the row's card reads it.
+ */
+export type ActivityDetailsWorkflow = {
+  /** The id of the call that launched it. */
+  key: string;
+  /** The run's name; empty while nothing has named it. */
+  name: string;
+  /** What the run does, from the journal, the script's header or the call. */
+  description: string;
+  status: BackgroundTaskStatus;
+  /** Its agents counted for the bar, the count, the percent and the phase; null until the run has listed an agent. */
+  progress: ActivityProgress | null;
+  /** Running: how long since the launch at the panel's clock. Finished: the run time the CLI reported. Null when unknown. */
+  elapsedMs: number | null;
+  /** The time left while the run goes on and its pace allows an estimate; null otherwise. */
+  remainingMs: number | null;
+  /** The agents listed: running ones, then finished ones (newest first in each), then queued slots in start order. Capped. */
+  agents: ActivityDetailsAgent[];
+  /** How many of the run's agents the cap left out of `agents`. */
+  hiddenAgentCount: number;
+};
+
+/** One item of the turn's checklist as the activity tab's details panel lists it, in the checklist view's vocabulary. */
+export type ActivityDetailsChecklistItem = {
+  /** The tracker's id, else the item's place in the list. */
+  key: string;
+  text: string;
+  status: 'completed' | 'in_progress' | 'pending';
+};
+
+/** One background task of the busy session as the activity tab's details panel lists it, with how long it has run at the panel's clock. */
+export type ActivityDetailsTask = BackgroundTaskSummary & { elapsedMs: number };
+
+/**
+ * Everything the activity tab's details panel lists for the viewed session,
+ * read by chat's `deriveActivityDetails` from the transcript rows and the
+ * activity entry the tab's own readout counts from. Never invented: a run
+ * with no workflow, checklist or background task lists none.
+ */
+export type ActivityDetails = {
+  run: {
+    /** The provider's status line, as the tab shows it; null when there is none. */
+    statusText: string | null;
+    /** How long the activity has lasted at the panel's clock. */
+    elapsedMs: number;
+    /** The turn is over and only background tasks keep the session busy. */
+    isBackground: boolean;
+    /**
+     * The turn runs in a Claude CLI process CloudCLI does not drive (a Shell
+     * tab's `claude --resume`, a run owned by another CloudCLI instance). No
+     * live events reach this view, so its details come from the transcript as
+     * the CLI writes it.
+     */
+    isCliDriven: boolean;
+  };
+  /** Running workflows first, then the ones the current turn saw end, newest first in each. Capped. */
+  workflows: ActivityDetailsWorkflow[];
+  /** How many workflows the cap left out of `workflows`. */
+  hiddenWorkflowCount: number;
+  /** The checklist of the turn in flight; null when it has none or the turn is over. */
+  checklist: { items: ActivityDetailsChecklistItem[]; done: number; total: number } | null;
+  /** The session's own background tasks not already drawn as a workflow, newest first. */
+  tasks: ActivityDetailsTask[];
 };
 
 // ---------------------------

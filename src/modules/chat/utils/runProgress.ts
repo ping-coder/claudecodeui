@@ -1,6 +1,10 @@
 import type { TFunction } from 'i18next';
 
 import type {
+  ActivityDetails,
+  ActivityDetailsAgent,
+  ActivityDetailsTask,
+  ActivityDetailsWorkflow,
   ActivityProgress,
   BackgroundTaskStatus,
   ChatMessage,
@@ -9,14 +13,19 @@ import type {
   WorkflowAgentProgress,
   WorkflowAgentRow,
 } from '@/shared/types';
-import { resolveBackgroundTaskStatus } from '@/modules/chat/utils/backgroundTasks';
+import {
+  describeWorkflowAgent,
+  ownBackgroundTasks,
+  resolveBackgroundTaskStatus,
+} from '@/modules/chat/utils/backgroundTasks';
 import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
+import { parseWorkflowMeta } from '@/modules/chat/utils/workflowScriptMeta';
 
 /*
  * How far a session's running work has got, read from the same transcript
  * rows the cards draw: a workflow's agents, or a turn's checklist. The Workflow
- * card and the activity tab above the composer both count from here, so the
- * card's header and the tab never disagree about the same run.
+ * card, the activity tab above the composer and the tab's details panel all
+ * count from here, so none of them disagrees with another about the same run.
  */
 
 //----------------- WORKFLOW AGENTS ------------
@@ -172,6 +181,38 @@ function readWorkflowAgentTiming(rows: WorkflowAgentRow[]): ActivityProgress['ag
     : undefined;
 }
 
+function isWorkflowLaunch(message: ChatMessage): boolean {
+  return Boolean(message.isToolUse) && message.toolName === 'Workflow';
+}
+
+/**
+ * A `Workflow` row's run as its card lists it: the agents merged from the
+ * journal and the live stream, when the run started, and the agents counted
+ * from then — null until the run has listed one, as there is nothing to count.
+ * Only a running run is timed per agent: a finished one has nothing left.
+ */
+function countWorkflowRun(
+  message: ChatMessage,
+  isRunning: boolean,
+  fallbackStartedAt: number,
+): { rows: WorkflowAgentRow[]; startedAt: number; progress: ActivityProgress | null } {
+  const rows = mergeWorkflowAgents(message.workflow?.agents ?? [], message.taskStatus?.agents, isRunning);
+  // The launch row is the run's start: the SDK's start event follows the
+  // call within the same second.
+  const launchedAt = new Date(message.timestamp).getTime();
+  const startedAt = Number.isFinite(launchedAt) ? launchedAt : fallbackStartedAt;
+  const counts = summarizeWorkflowAgents(rows);
+  if (counts.total === 0) {
+    return { rows, startedAt, progress: null };
+  }
+  const agentTiming = isRunning ? readWorkflowAgentTiming(rows) : undefined;
+  return {
+    rows,
+    startedAt,
+    progress: { unit: 'agents', ...counts, startedAt, ...(agentTiming ? { agentTiming } : {}) },
+  };
+}
+
 /**
  * The newest workflow still running that has listed its agents, counted.
  * A run that has not listed one yet has nothing to count, so an older run
@@ -180,24 +221,13 @@ function readWorkflowAgentTiming(rows: WorkflowAgentRow[]): ActivityProgress['ag
 function readRunningWorkflowProgress(messages: ChatMessage[], fallbackStartedAt: number): ActivityProgress | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (!message.isToolUse || message.toolName !== 'Workflow' || resolveWorkflowRunStatus(message) !== 'running') {
+    if (!isWorkflowLaunch(message) || resolveWorkflowRunStatus(message) !== 'running') {
       continue;
     }
-    const rows = mergeWorkflowAgents(message.workflow?.agents ?? [], message.taskStatus?.agents, true);
-    const counts = summarizeWorkflowAgents(rows);
-    if (counts.total === 0) {
-      continue;
+    const { progress } = countWorkflowRun(message, true, fallbackStartedAt);
+    if (progress) {
+      return progress;
     }
-    // The launch row is the run's start: the SDK's start event follows the
-    // call within the same second.
-    const launchedAt = new Date(message.timestamp).getTime();
-    const agentTiming = readWorkflowAgentTiming(rows);
-    return {
-      unit: 'agents',
-      ...counts,
-      startedAt: Number.isFinite(launchedAt) ? launchedAt : fallbackStartedAt,
-      ...(agentTiming ? { agentTiming } : {}),
-    };
   }
   return null;
 }
@@ -220,11 +250,12 @@ const TASK_TRACKER_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'Tas
 type ChecklistStatus = 'completed' | 'in_progress' | 'pending';
 
 /**
- * One item of a rebuilt checklist: its status, and what names the same item
- * in another rebuild of the list. That is the tracker's id, else the item's
- * text, since a TodoWrite or Codex item has no id. Empty when neither is known.
+ * One item of a rebuilt checklist: its status, its text as the checklist view
+ * draws it, and what names the same item in another rebuild of the list. That
+ * is the tracker's id, else the item's text, since a TodoWrite or Codex item
+ * has no id. Empty when neither is known.
  */
-type ChecklistItem = { status: ChecklistStatus; identity: string };
+type ChecklistItem = { status: ChecklistStatus; text: string; identity: string };
 
 /** Anything but done or in progress is still open, as the checklist view draws it. */
 function readChecklistStatus(value: unknown): ChecklistStatus {
@@ -232,8 +263,13 @@ function readChecklistStatus(value: unknown): ChecklistStatus {
 }
 
 /** A task of Claude's tracker, which its id names in every rebuild. */
-function readTrackerItem(id: string, status: unknown): ChecklistItem {
-  return { status: readChecklistStatus(status), identity: `id:${id}` };
+function readTrackerItem(id: string, status: unknown, text: string): ChecklistItem {
+  return { status: readChecklistStatus(status), text, identity: `id:${id}` };
+}
+
+/** A tracker task's subject, its text in the checklist; empty when absent. */
+function readTaskSubject(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -305,6 +341,7 @@ function rebuildChecklist(messages: ChatMessage[], lastIndex: number): Map<strin
       const text = String(todo.content).trim();
       items.set(id || `#${position}`, {
         status: readChecklistStatus(todo.status),
+        text,
         identity: id ? `id:${id}` : text && `text:${text}`,
       });
     });
@@ -320,8 +357,10 @@ function rebuildChecklist(messages: ChatMessage[], lastIndex: number): Map<strin
     const reportedTask = readRecord(result?.task);
     const listedTasks = result?.tasks;
 
-    // A listing restates the whole tracker: adopt it wholesale.
+    // A listing restates the whole tracker: adopt it wholesale, keeping the
+    // text of a task it lists without a subject.
     if (Array.isArray(listedTasks)) {
+      const knownTexts = new Map([...items].map(([id, item]) => [id, item.text]));
       items.clear();
       trackerIds.clear();
       seeded = true;
@@ -329,7 +368,7 @@ function rebuildChecklist(messages: ChatMessage[], lastIndex: number): Map<strin
         const task = readRecord(entry);
         const id = readTaskId(task?.id);
         if (id) {
-          items.set(id, readTrackerItem(id, task?.status));
+          items.set(id, readTrackerItem(id, task?.status, readTaskSubject(task?.subject) || knownTexts.get(id) || id));
           trackerIds.add(id);
         }
       }
@@ -341,7 +380,8 @@ function rebuildChecklist(messages: ChatMessage[], lastIndex: number): Map<strin
       // call's own id stands in. Nothing can name the task before then.
       const id = readTaskId(reportedTask?.id) || message.toolId || '';
       if (id) {
-        items.set(id, readTrackerItem(id, reportedTask?.status ?? input.status));
+        const text = readTaskSubject(reportedTask?.subject) || readTaskSubject(input.subject) || id;
+        items.set(id, readTrackerItem(id, reportedTask?.status ?? input.status, text));
         trackerIds.add(id);
       }
       continue;
@@ -368,9 +408,14 @@ function rebuildChecklist(messages: ChatMessage[], lastIndex: number): Map<strin
       return null;
     }
     trackerIds.add(id);
+    const existing = items.get(id);
     const status = reportedTask?.status ?? input.status;
+    const text = readTaskSubject(reportedTask?.subject) || readTaskSubject(input.subject) || existing?.text || id;
     if (status !== undefined) {
-      items.set(id, readTrackerItem(id, status));
+      items.set(id, readTrackerItem(id, status, text));
+    } else if (existing) {
+      // A rename leaves the status as it was.
+      items.set(id, { ...existing, text });
     }
   }
 
@@ -460,26 +505,32 @@ function readChecklistWindow(
 }
 
 /**
+ * Where the newest turn sits in the rows: the user message that opened it
+ * (-1 when that message is above the loaded rows, so every loaded row is the
+ * turn's) and the turn's newest checklist row (-1 when it has none).
+ */
+function locateTurn(messages: ChatMessage[]): { turnOpenIndex: number; lastChecklistIndex: number } {
+  let lastChecklistIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.type === 'user') {
+      return { turnOpenIndex: index, lastChecklistIndex };
+    }
+    if (lastChecklistIndex === -1 && isChecklistRow(message)) {
+      lastChecklistIndex = index;
+    }
+  }
+  return { turnOpenIndex: -1, lastChecklistIndex };
+}
+
+/**
  * The checklist of the turn in flight, counted. The newest user message
  * opened that turn; a checklist above it belongs to a turn that is over and
  * says nothing about this one, so it is never borrowed — though the items it
  * had done, when the turn carries its list on, are left out of the turn's pace.
  */
 function readTurnChecklistProgress(messages: ChatMessage[], turnStartedAt: number): ActivityProgress | null {
-  // The turn's newest checklist row, and the user message that opened the
-  // turn: -1 when that message is above the loaded rows.
-  let lastChecklistIndex = -1;
-  let turnOpenIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.type === 'user') {
-      turnOpenIndex = index;
-      break;
-    }
-    if (lastChecklistIndex === -1 && isChecklistRow(message)) {
-      lastChecklistIndex = index;
-    }
-  }
+  const { turnOpenIndex, lastChecklistIndex } = locateTurn(messages);
   if (lastChecklistIndex === -1) {
     return null;
   }
@@ -625,4 +676,217 @@ export function formatRemainingEstimate(remainingMs: number, t: TFunction): stri
   return minutes === 0
     ? t('chat:runProgress.eta.hours', { hours, defaultValue: '~{{hours}}h left' })
     : t('chat:runProgress.eta.hoursMinutes', { hours, minutes, defaultValue: '~{{hours}}h {{minutes}}m left' });
+}
+
+/**
+ * An elapsed time as the activity tab prints it — `45s`, `3m 12s` — in the
+ * user's language. Whole seconds rounded down, so a time counted from the
+ * tab's clock ticks with it.
+ */
+export function formatElapsed(elapsedMs: number, t: TFunction): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes < 1
+    ? t('chat:claudeStatus.elapsed.seconds', { count: seconds, defaultValue: '{{count}}s' })
+    : t('chat:claudeStatus.elapsed.minutesSeconds', { minutes, seconds, defaultValue: '{{minutes}}m {{seconds}}s' });
+}
+
+// ---------------------------
+
+//----------------- ACTIVITY DETAILS ------------
+
+/**
+ * Whether a busy session's turn runs in a Claude CLI process CloudCLI does not
+ * drive (a Shell tab's `claude --resume`, a run owned by another CloudCLI
+ * instance). The server lists such a turn as one that cannot be stopped here,
+ * and background work is the only other entry like that. No live events reach
+ * the view for it: its transcript on disk is the only source.
+ */
+export function isCliDrivenActivity(activity: SessionActivity | null | undefined): boolean {
+  return Boolean(activity && !activity.background && !activity.canInterrupt);
+}
+
+/** How many agents the details panel lists for one workflow; the rest fold into "+N more". */
+const MAX_LISTED_AGENTS = 8;
+
+/** How many workflows the details panel lists; the rest fold into "+N more". */
+const MAX_LISTED_WORKFLOWS = 3;
+
+/** The order the details panel lists a workflow's agents in: those at work, then those done, then those waiting. */
+const AGENT_LIST_GROUP: Record<WorkflowAgentRow['status'], number> = {
+  running: 0,
+  completed: 1,
+  failed: 1,
+  stopped: 1,
+  queued: 2,
+};
+
+function isFiniteNumber(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/** How long an agent has run at `nowMs`, or ran once it finished, when the live stream timed it. */
+function readAgentElapsedMs(row: WorkflowAgentRow, nowMs: number): number | undefined {
+  if (row.status === 'running') {
+    return isFiniteNumber(row.startedAt) ? Math.max(0, nowMs - row.startedAt) : undefined;
+  }
+  if (row.status === 'queued') {
+    return undefined;
+  }
+  return isFiniteNumber(row.durationMs) && row.durationMs >= 0 ? row.durationMs : undefined;
+}
+
+/**
+ * A workflow's agents as the details panel lists them: the running ones, then
+ * the finished ones, the newest of each first (the merged list is in spawn
+ * order), then the queued slots in the order they will start — so a capped
+ * list still shows what the run is doing now.
+ */
+function listWorkflowAgents(rows: WorkflowAgentRow[], nowMs: number): ActivityDetailsAgent[] {
+  return rows
+    .map((row, position) => ({ row, position }))
+    .sort((a, b) => (
+      AGENT_LIST_GROUP[a.row.status] - AGENT_LIST_GROUP[b.row.status]
+      || (a.row.status === 'queued' ? a.position - b.position : b.position - a.position)
+    ))
+    .map(({ row }) => {
+      const elapsedMs = readAgentElapsedMs(row, nowMs);
+      return {
+        key: row.key,
+        label: describeWorkflowAgent(row),
+        status: row.status,
+        ...(row.phase ? { phase: row.phase } : {}),
+        ...(elapsedMs === undefined ? {} : { elapsedMs }),
+      };
+    });
+}
+
+/** A workflow's name and what it does, read in the order its card reads them: the journal, the live stream, the script's header, the call. */
+function readWorkflowIdentity(message: ChatMessage): Pick<ActivityDetailsWorkflow, 'name' | 'description'> {
+  const input = readRecord(parseToolPayload(message.toolInput)) ?? {};
+  const meta = typeof input.script === 'string' ? parseWorkflowMeta(input.script) : null;
+  return {
+    name: message.workflow?.name || message.taskStatus?.workflowName || meta?.name || '',
+    description: message.workflow?.description
+      || meta?.description
+      || (typeof input.description === 'string' ? input.description : ''),
+  };
+}
+
+/** One `Workflow` row's run as the details panel draws it, at `nowMs`. */
+function readWorkflowDetails(
+  message: ChatMessage,
+  status: BackgroundTaskStatus,
+  index: number,
+  nowMs: number,
+  fallbackStartedAt: number,
+): ActivityDetailsWorkflow {
+  const isRunning = status === 'running';
+  const { rows, startedAt, progress } = countWorkflowRun(message, isRunning, fallbackStartedAt);
+  const agents = listWorkflowAgents(rows, nowMs);
+  // A finished run's own wall time, from the CLI's last word on it.
+  const reportedDurationMs = message.taskStatus?.usage?.durationMs;
+  return {
+    key: message.toolId ?? `workflow-row-${index}`,
+    ...readWorkflowIdentity(message),
+    status,
+    progress,
+    elapsedMs: isRunning
+      ? Math.max(0, nowMs - startedAt)
+      : isFiniteNumber(reportedDurationMs) ? reportedDurationMs : null,
+    remainingMs: isRunning && progress ? estimateRemainingMs(progress, nowMs) : null,
+    agents: agents.slice(0, MAX_LISTED_AGENTS),
+    hiddenAgentCount: Math.max(0, agents.length - MAX_LISTED_AGENTS),
+  };
+}
+
+/**
+ * The checklist of the turn in flight, item by item as the checklist view
+ * draws it. Null when the turn has none, or when the list cannot be known in
+ * full (it began above the loaded rows): a partial list would draw a false
+ * count, as the readout's rebuild says.
+ */
+function readTurnChecklistItems(messages: ChatMessage[], lastChecklistIndex: number): ActivityDetails['checklist'] {
+  const items = lastChecklistIndex === -1 ? null : rebuildChecklist(messages, lastChecklistIndex);
+  if (!items || items.size === 0) {
+    return null;
+  }
+  const listed = [...items].map(([key, { status, text }]) => ({ key, text, status }));
+  return {
+    items: listed,
+    done: listed.filter((item) => item.status === 'completed').length,
+    total: listed.length,
+  };
+}
+
+/**
+ * The background tasks the panel lists: the session's own, as the tab names
+ * them, newest first, less the workflows the panel already draws from their
+ * transcript rows. A workflow whose row is not loaded is still listed here.
+ */
+function listActivityTasks(
+  activity: SessionActivity,
+  drawnWorkflowIds: ReadonlySet<string>,
+  nowMs: number,
+): ActivityDetailsTask[] {
+  return ownBackgroundTasks(activity.tasks ?? [])
+    .filter((task) => !drawnWorkflowIds.has(task.toolUseId))
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((task) => ({ ...task, elapsedMs: Math.max(0, nowMs - task.startedAt) }));
+}
+
+/**
+ * What the activity tab's details panel lists for the viewed session at
+ * `nowMs` (the tab's clock, epoch ms), from the rows the tab's readout counts:
+ *
+ * - every workflow still running, whichever turn launched it, then the ones
+ *   the current turn saw end, newest first in each, each with its agents;
+ * - the checklist of the turn in flight, item by item; none once the turn is
+ *   over, since nothing advances it until the next one;
+ * - the session's background tasks, less the workflows already drawn;
+ * - the run itself, and whether a Claude CLI process CloudCLI does not drive
+ *   is behind it — then no live events reach the view, and what is listed
+ *   comes from the transcript, reloaded as the CLI writes it.
+ *
+ * Null when the session is not busy.
+ */
+export function deriveActivityDetails(
+  messages: ChatMessage[],
+  activity: SessionActivity | null,
+  nowMs: number,
+): ActivityDetails | null {
+  if (!activity) {
+    return null;
+  }
+  const { turnOpenIndex, lastChecklistIndex } = locateTurn(messages);
+
+  const running: ActivityDetailsWorkflow[] = [];
+  const ended: ActivityDetailsWorkflow[] = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isWorkflowLaunch(message)) {
+      continue;
+    }
+    const status = resolveWorkflowRunStatus(message);
+    if (status === 'running') {
+      running.push(readWorkflowDetails(message, status, index, nowMs, activity.startedAt));
+    } else if (index > turnOpenIndex) {
+      ended.push(readWorkflowDetails(message, status, index, nowMs, activity.startedAt));
+    }
+  }
+  const workflows = [...running, ...ended];
+
+  return {
+    run: {
+      statusText: activity.statusText,
+      elapsedMs: Math.max(0, nowMs - activity.startedAt),
+      isBackground: Boolean(activity.background),
+      isCliDriven: isCliDrivenActivity(activity),
+    },
+    workflows: workflows.slice(0, MAX_LISTED_WORKFLOWS),
+    hiddenWorkflowCount: Math.max(0, workflows.length - MAX_LISTED_WORKFLOWS),
+    checklist: activity.background ? null : readTurnChecklistItems(messages, lastChecklistIndex),
+    tasks: listActivityTasks(activity, new Set(workflows.map((workflow) => workflow.key)), nowMs),
+  };
 }

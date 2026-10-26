@@ -19,7 +19,7 @@ function useQueueItem() {
 
 /* ─── Queue ──────────────────────────────────────────────────────── */
 
-/** Renders a tool's todo list as a progress queue; used by TodoList. */
+/** Renders a checklist as a progress queue; used by TodoList (a todo tool's card) and ActivityDetailsPanel (the activity tab's details). */
 export const Queue = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
     <div
@@ -39,7 +39,7 @@ export type QueueItemProps = {
   status?: QueueItemStatus;
 } & React.HTMLAttributes<HTMLDivElement>;
 
-/** One row of Queue, used by TodoList. */
+/** One row of Queue, used by TodoList and ActivityDetailsPanel. */
 export const QueueItem = React.forwardRef<HTMLDivElement, QueueItemProps>(
   ({ status = 'pending', className, children, ...props }, ref) => {
     const value = React.useMemo(() => ({ status }), [status]);
@@ -64,7 +64,7 @@ QueueItem.displayName = 'QueueItem';
 
 /* ─── QueueItemIndicator ─────────────────────────────────────────── */
 
-/** Status dot of a QueueItem, used by TodoList. */
+/** Status dot of a QueueItem, used by TodoList and ActivityDetailsPanel. */
 export const QueueItemIndicator = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => {
     const { status } = useQueueItem();
@@ -98,7 +98,7 @@ QueueItemIndicator.displayName = 'QueueItemIndicator';
 
 /* ─── QueueItemContent ───────────────────────────────────────────── */
 
-/** Label of a QueueItem, used by TodoList. */
+/** Label of a QueueItem, used by TodoList and ActivityDetailsPanel. */
 export const QueueItemContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, children, ...props }, ref) => {
     const { status } = useQueueItem();

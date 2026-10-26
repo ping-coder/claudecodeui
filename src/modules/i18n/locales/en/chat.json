@@ -316,6 +316,31 @@
       "hint": "Estimated from the pace so far"
     }
   },
+  "activityDetails": {
+    "title": "Progress details",
+    "turnInProgress": "Turn in progress",
+    "cliDriven": "This run is driven by the Claude CLI outside this view, so these details update as its transcript is written.",
+    "empty": "No detailed progress yet — this run has no workflow, task list or background task.",
+    "workflow": "Workflow",
+    "noAgentsYet": "No agents listed yet",
+    "checklist": "Task list",
+    "backgroundTasks": "Background tasks",
+    "moreAgents": "+{{count}} more",
+    "moreWorkflows_one": "+{{count}} more workflow",
+    "moreWorkflows_other": "+{{count}} more workflows",
+    "status": {
+      "queued": "queued",
+      "running": "running",
+      "completed": "done",
+      "failed": "failed",
+      "stopped": "no result"
+    },
+    "checklistStatus": {
+      "completed": "done",
+      "in_progress": "in progress",
+      "pending": "to do"
+    }
+  },
   "projectSelection": {
     "startChatWithProvider": "Select a project to start chatting with {{provider}}"
   },

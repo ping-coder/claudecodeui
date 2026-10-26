@@ -39,8 +39,9 @@ const SEGMENT_STYLES: Record<SegmentState, string> = {
 };
 
 /**
- * Used by chat's ActivityIndicator (the run status tab above the composer)
- * and WorkflowPanel (a Workflow card's header) to draw how far a run has got
+ * Used by chat's ActivityIndicator (the run status tab above the composer),
+ * ActivityDetailsPanel (each workflow in the tab's details) and WorkflowPanel
+ * (a Workflow card's header) to draw how far a run has got
  * the way the CLI's workflow row does: round(done / total × 4) segments
  * filled in the success colour, the next one animated while units are in
  * flight, the rest dimmed.

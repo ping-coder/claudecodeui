@@ -30,7 +30,7 @@ import {
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
-import { deriveActivityProgress } from '@/modules/chat/utils/runProgress';
+import { deriveActivityDetails, deriveActivityProgress } from '@/modules/chat/utils/runProgress';
 
 type ChatInterfaceProps = {
   isActive: boolean;
@@ -471,6 +471,14 @@ function ChatInterface({
     [chatMessages, sessionActivity],
   );
 
+  // What the tab's details panel lists, from the same rows: each workflow with
+  // its agents, the turn's checklist and the background tasks. A reader rather
+  // than a value, so it runs only while the panel is open, at the tab's clock.
+  const readActivityDetails = useCallback(
+    (nowMs: number) => deriveActivityDetails(chatMessages, sessionActivity, nowMs),
+    [chatMessages, sessionActivity],
+  );
+
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
@@ -583,6 +591,7 @@ function ChatInterface({
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
           activityProgress={activityProgress}
+          readActivityDetails={readActivityDetails}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
           permissionMode={permissionMode}

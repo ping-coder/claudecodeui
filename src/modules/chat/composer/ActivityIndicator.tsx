@@ -1,18 +1,21 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+import { ChevronUp } from 'lucide-react';
 
 import { Shimmer } from '@/shared/ui';
-import type { ActivityProgress, BackgroundTaskSummary, SessionActivity } from '@/shared/types';
+import type { ActivityDetails, ActivityProgress, BackgroundTaskSummary, SessionActivity } from '@/shared/types';
 import { cn } from '@/shared/utils';
 import { describeBackgroundTask, ownBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
 import {
   computeProgressPercent,
   estimateRemainingMs,
+  formatElapsed,
   formatProgressCount,
   formatRemainingEstimate,
 } from '@/modules/chat/utils/runProgress';
 import { RunProgressBar } from '@/modules/chat/tools/RunProgressBar';
+import ActivityDetailsPanel from '@/modules/chat/composer/ActivityDetailsPanel';
 
 type ActivityIndicatorProps = {
   activity: SessionActivity | null;
@@ -22,6 +25,18 @@ type ActivityIndicatorProps = {
    * absent draws no progress readout.
    */
   progress?: ActivityProgress | null;
+  /**
+   * Reads what the details panel lists, at the tab's clock (epoch ms). Only
+   * given one does the tab open the panel; it is called only while the panel
+   * is open.
+   */
+  readDetails?: (nowMs: number) => ActivityDetails | null;
+  /**
+   * Hides the tab, and the panel with it, while something else holds the
+   * space above the composer (a pending permission request), without
+   * forgetting whether the panel was open.
+   */
+  isHidden?: boolean;
   onAbort?: () => void;
   isInputFocused?: boolean;
 };
@@ -169,15 +184,37 @@ function nextHiddenParts(
  * its parts give way whole, least useful first, so the label, the elapsed
  * time and Stop always keep theirs.
  *
+ * Given a details reader, the tab is also the toggle of a panel above it
+ * that lists the work in full: each workflow with its agents, the turn's
+ * checklist, the background tasks. A click anywhere on the tab opens or
+ * closes it; Esc keeps its meaning of stopping the turn.
+ *
  * Rendered by chat's ChatComposer above the input so the user can see and
  * interrupt the in-flight turn without leaving the composer.
  */
-export default function ActivityIndicator({ activity, progress = null, onAbort, isInputFocused = false }: ActivityIndicatorProps) {
+export default function ActivityIndicator({
+  activity,
+  progress = null,
+  readDetails,
+  isHidden = false,
+  onAbort,
+  isInputFocused = false,
+}: ActivityIndicatorProps) {
   const { t } = useTranslation('chat');
   const [renderedActivity, setRenderedActivity] = useState<SessionActivity | null>(activity);
   const [isExiting, setIsExiting] = useState(false);
   const startedAt = renderedActivity?.startedAt ?? null;
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // Whether the user opened the details panel. It stays as they left it for
+  // as long as the activity lasts — through a turn ending into background
+  // work or a permission request hiding the tab — and the next activity
+  // starts collapsed.
+  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  if (!activity && isDetailsOpen) {
+    // Reset while rendering, so the panel never paints once the activity is over.
+    setIsDetailsOpen(false);
+  }
+  const detailsPanelId = useId();
   // The readout parts the fit check took out because the tab had no room for
   // them. Only a laid-out DOM can say what fits, so every part starts shown
   // and the layout pass hides what does not fit before the browser paints.
@@ -215,13 +252,18 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
     return () => clearInterval(timer);
   }, [startedAt]);
 
-  // A count of nothing draws no bar.
-  const shownProgress = renderedActivity && progress && progress.total > 0 ? progress : null;
-  // The time left at the tab's own clock — the activity's start plus the
-  // elapsed time it shows — so the estimate and the elapsed time tick together.
-  const remainingMs = shownProgress && startedAt !== null
-    ? estimateRemainingMs(shownProgress, startedAt + elapsedSeconds * 1000)
-    : null;
+  // A count of nothing draws no bar, and a hidden tab draws none (which also
+  // lets the resize observer go, to come back with the tab).
+  const shownProgress = renderedActivity && !isHidden && progress && progress.total > 0 ? progress : null;
+  // The tab's own clock — the activity's start plus the elapsed time it shows
+  // — so the time left, the details and the elapsed time all tick together.
+  const tabNowMs = startedAt === null ? null : startedAt + elapsedSeconds * 1000;
+  const remainingMs = shownProgress && tabNowMs !== null ? estimateRemainingMs(shownProgress, tabNowMs) : null;
+  // Read only while the panel is open and shown; null keeps it closed.
+  const details = useMemo(
+    () => (isDetailsOpen && activity && !isHidden && readDetails && tabNowMs !== null ? readDetails(tabNowMs) : null),
+    [isDetailsOpen, activity, isHidden, readDetails, tabNowMs],
+  );
   const presentParts = shownProgress
     ? READOUT_PARTS.filter((part) => (
       part === 'estimate' ? remainingMs !== null : part === 'phase' ? Boolean(shownProgress.phase) : true
@@ -260,7 +302,7 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
     return () => observer.disconnect();
   }, [hasReadout]);
 
-  if (!renderedActivity) return null;
+  if (!renderedActivity || isHidden) return null;
 
   const isBackground = Boolean(renderedActivity.background);
   const actionWords = ACTION_KEYS.map((key, i) => t(key, { defaultValue: DEFAULT_ACTION_WORDS[i] }));
@@ -269,12 +311,9 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
     : (renderedActivity.statusText || actionWords[Math.floor(elapsedSeconds / 4) % actionWords.length])
       .replace(/\.+$/, '');
   const detail = isBackground ? describeBackgroundTasks(renderedActivity.tasks ?? [], t) : '';
-
-  const minutes = Math.floor(elapsedSeconds / 60);
-  const seconds = elapsedSeconds % 60;
-  const elapsedLabel = minutes < 1
-    ? t('claudeStatus.elapsed.seconds', { count: seconds, defaultValue: '{{count}}s' })
-    : t('claudeStatus.elapsed.minutesSeconds', { minutes, seconds, defaultValue: '{{minutes}}m {{seconds}}s' });
+  const elapsedLabel = formatElapsed(elapsedSeconds * 1000, t);
+  const canOpenDetails = Boolean(readDetails);
+  const toggleDetails = () => setIsDetailsOpen((isOpen) => !isOpen);
 
   const isPartShown = (part: ReadoutPart) => presentParts.includes(part) && !hiddenParts.has(part);
   const progressCountLabel = shownProgress ? formatProgressCount(shownProgress, t) : '';
@@ -296,14 +335,25 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
   ].join(' ');
 
   return (
+    // Column-reversed so the panel, after the tab in reading and focus order
+    // like any disclosure's content, still opens above it.
     <div
-      className={`pointer-events-none bg-transparent ${
+      className={`pointer-events-none flex flex-col-reverse bg-transparent ${
         isExiting ? 'chat-activity-exit' : 'chat-activity-enter'
       }`}
     >
       <div className="flex items-end justify-between gap-2">
-        {/* Clips rather than running under Stop; the fit check keeps it from having to. */}
-        <div ref={tabRef} className={`${tabSurfaceClassName} min-w-0 max-w-full gap-2 overflow-hidden`}>
+        {/* Clips rather than running under Stop; the fit check keeps it from having to.
+            A click anywhere on it toggles the details panel. */}
+        <div
+          ref={tabRef}
+          onClick={canOpenDetails ? toggleDetails : undefined}
+          className={cn(
+            tabSurfaceClassName,
+            'min-w-0 max-w-full gap-2 overflow-hidden',
+            canOpenDetails && 'group pointer-events-auto cursor-pointer',
+          )}
+        >
           <span
             className={`h-1.5 w-1.5 shrink-0 animate-pulse rounded-full ${
               isBackground ? 'bg-purple-500 dark:bg-purple-400' : 'bg-primary'
@@ -355,6 +405,24 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
             </span>
           )}
           <span className="shrink-0 tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
+          {canOpenDetails && (
+            // The tab's toggle for the keyboard and assistive technology, its
+            // name steady while the label beside it rotates and ticks. It has
+            // no handler of its own: its click (a tap, Enter or Space) bubbles
+            // to the tab's.
+            <button
+              type="button"
+              aria-expanded={details !== null}
+              aria-controls={detailsPanelId}
+              aria-label={t('activityDetails.title', 'Progress details')}
+              className="-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring group-hover:text-foreground"
+            >
+              <ChevronUp
+                className={cn('h-3.5 w-3.5 transition-transform duration-200', details !== null && 'rotate-180')}
+                aria-hidden
+              />
+            </button>
+          )}
         </div>
 
         {renderedActivity.canInterrupt && onAbort && (
@@ -374,6 +442,8 @@ export default function ActivityIndicator({ activity, progress = null, onAbort, 
           </button>
         )}
       </div>
+
+      {details && <ActivityDetailsPanel id={detailsPanelId} details={details} />}
     </div>
   );
 }
