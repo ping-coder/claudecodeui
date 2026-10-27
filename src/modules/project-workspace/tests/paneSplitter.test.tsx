@@ -181,3 +181,28 @@ test('unmounting mid-drag gives text selection back', () => {
   assert.equal(document.body.style.userSelect, '');
   assert.equal(onCommit.mock.calls.length, 0);
 });
+
+test('a saved share under a pane\'s pixel minimum drags, steps and reports from where the divider is drawn', () => {
+  // A 1212px column: 1206px after the divider, so 360px is a 0.2985 share. The saved 0.241 came from a
+  // wider column (immersive, the sidebar collapsed); CSS draws the left pane at 360px anyway.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure(this: HTMLElement) {
+    const width = this.dataset.testid === 'group' ? 1212 : 0;
+    return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 600, width, height: 600, toJSON: () => ({}) } as DOMRect;
+  });
+  const drawnShare = 360 / 1206;
+  const onCommit = vi.fn();
+  render(<SplitterHarness ratio={0.241} onCommit={onCommit} />);
+  const separator = screen.getByRole('separator');
+
+  assert.equal(separator.getAttribute('aria-valuenow'), String(Math.round(drawnShare * 100)), 'it reports where it is drawn');
+
+  firePointer(separator, 'pointerDown', 360);
+  firePointer(separator, 'pointerMove', 380);
+  flushFrames();
+  assertClose(readShare(), drawnShare + 20 / 1206, 'the first 20px already move it');
+  firePointer(separator, 'pointerUp', 380);
+  assertClose(onCommit.mock.calls[0][0] as number, drawnShare + 20 / 1206);
+
+  fireEvent.keyDown(separator, { key: 'ArrowRight' });
+  assertClose(onCommit.mock.calls[1][0] as number, drawnShare + 0.04, 'a step starts from the drawn share too');
+});

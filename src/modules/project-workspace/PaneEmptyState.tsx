@@ -3,15 +3,20 @@ import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import {
+  WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
+  WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
+  WORKSPACE_FULLSCREEN_SHORTCUT,
+  WORKSPACE_SPLIT_SHORTCUT,
+} from '@/shared/constants';
 import type {
-  LLMProvider,
   Project,
   ProjectSession,
   WorkspaceLayoutActions,
   WorkspacePaneSide,
 } from '@/shared/types';
 import { ActionMenu, LLMProviderLogo } from '@/shared/ui';
-import { formatShortcut } from '@/shared/utils';
+import { formatShortcut, readSessionProvider } from '@/shared/utils';
 import WorkspaceStateView from '@/modules/project-workspace/WorkspaceStateView';
 
 /** How many recent conversations an empty pane offers. */
@@ -41,8 +46,6 @@ const getSessionTime = (session: ProjectSession): number => {
   const time = raw ? new Date(String(raw)).getTime() : 0;
   return Number.isFinite(time) ? time : 0;
 };
-
-const getSessionProvider = (session: ProjectSession): LLMProvider => session.__provider ?? session.provider ?? 'claude';
 
 /**
  * Rendered by WorkspacePane for a pane without tabs: recent conversations to open on this side, a
@@ -87,10 +90,10 @@ export default function PaneEmptyState({
     onSelect: () => actions.openNewSession(project, { target: side }),
   }));
   const shortcutsHint = t('workspace.shortcutsHint', {
-    split: formatShortcut(['mod', '\\']),
-    left: formatShortcut(['mod', '1']),
-    right: formatShortcut(['mod', '2']),
-    fullscreen: formatShortcut(['mod', 'shift', 'enter']),
+    split: formatShortcut(WORKSPACE_SPLIT_SHORTCUT),
+    left: formatShortcut(WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT),
+    right: formatShortcut(WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT),
+    fullscreen: formatShortcut(WORKSPACE_FULLSCREEN_SHORTCUT),
     defaultValue: '{{split}} split or merge · {{left}} / {{right}} switch panes · {{fullscreen}} full screen',
   });
 
@@ -149,7 +152,7 @@ export default function PaneEmptyState({
               </h3>
               <ul className="space-y-0.5">
                 {recentConversations.map(({ session, project }) => {
-                  const provider = getSessionProvider(session);
+                  const provider = readSessionProvider(session);
                   const title = session.summary || session.name || session.title || t('mainContent.newSession', { defaultValue: 'New Session' });
                   return (
                     <li key={`${project.projectId}:${session.id}`}>

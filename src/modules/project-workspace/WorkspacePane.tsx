@@ -1,9 +1,10 @@
 import { Layers, Maximize2, MessageSquareOff, Minimize2 } from 'lucide-react';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, Dispatch, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useBrowserUseEnabled } from '@/modules/browser-use';
+import { usePaletteOps, usePaletteOpsRegister } from '@/modules/command-palette';
 import { useTasksSettings } from '@/modules/task-master';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { useElementWidth } from '@/modules/project-workspace/hooks/useElementWidth';
@@ -17,11 +18,13 @@ import WorkspaceMain from '@/modules/project-workspace/WorkspaceMain';
 import WorkspaceStateView from '@/modules/project-workspace/WorkspaceStateView';
 import WorkspaceTabs from '@/modules/project-workspace/WorkspaceTabs';
 import type {
+  AppTab,
   PaneTabActivity,
   PaneTabDisplay,
   Project,
   ProjectSession,
   SessionDragPayload,
+  SessionEstablishedContext,
   SessionNavigationOptions,
   WorkspaceLayoutActions,
   WorkspacePaneSide,
@@ -31,12 +34,27 @@ import type {
 import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import { cn, getPaneScopedDomId } from '@/shared/utils';
 
-/** Narrower than this a pane drops its title block and labels only the active view. */
+/** Narrower than this a pane beside another drops its title block and labels only the active view. */
 const COMPACT_PANE_WIDTH_PX = 640;
 /** A focus that follows a Tab key press within this window is keyboard navigation into the pane. */
 const TAB_FOCUS_WINDOW_MS = 120;
 /** An empty set, so panes without another pane pass the same object every render. */
 const NO_SESSION_IDS: ReadonlySet<string> = new Set();
+/** What a pane registers with the command palette while it shows content: its WorkspaceMain and chat register instead. */
+const NO_PALETTE_OPS = {};
+
+/** Whether a measured pane width calls for the compact header (0 is not measured yet). */
+const isCompactPaneWidth = (width: number): boolean => width > 0 && width < COMPACT_PANE_WIDTH_PX;
+
+/** Whether an event comes from a workspace-wide control (split, full screen, show sidebar), which acts on the workspace, not on this pane. */
+const isWorkspaceControlEvent = (event: SyntheticEvent): boolean => (
+  event.target instanceof Element && event.target.closest('[data-workspace-control]') !== null
+);
+
+type PaletteOperations = ReturnType<typeof usePaletteOps>;
+
+/** What a pane's WorkspaceMain shows: the active tab's project, session and view. */
+type PaneContent = { project: Project; session: ProjectSession | null; view: AppTab };
 
 type WorkspacePaneProps = {
   side: WorkspacePaneSide;
@@ -82,6 +100,8 @@ type WorkspacePaneProps = {
   setSidebarOpen: Dispatch<SetStateAction<boolean>>;
   renameSession: (sessionId: string, summary: string) => Promise<boolean>;
   refreshProjectsSilently: () => Promise<void>;
+  /** Hears this pane's editor turn dirty or clean (by pane id), so layout changes that would unmount the pane ask first. */
+  onEditorUnsavedChange: (paneId: string, hasUnsavedChanges: boolean) => void;
   /** Width and visibility, decided by the pane group. */
   className?: string;
   style?: CSSProperties;
@@ -134,10 +154,11 @@ function MissingSessionNotice({ header, onClose }: MissingSessionNoticeProps) {
 }
 
 /**
- * Rendered by ProjectMainRegion once per side (keyed by side). One pane of the split workspace:
- * its tab bar on desktop, then the active tab in WorkspaceMain, an empty pane, or a missing-session
- * notice. A pointer press anywhere inside focuses the pane, as does keyboard focus arriving by Tab
- * (programmatic focus does not); typing inside keeps a preview tab open.
+ * Rendered by ProjectMainRegion once per pane (keyed by pane id). One pane of the split workspace: its
+ * tab bar on desktop, then the active tab in WorkspaceMain, or an empty pane / missing-session notice
+ * over the WorkspaceMain it last showed, kept mounted and hidden. A pointer press anywhere inside focuses
+ * the pane (workspace-wide controls excepted), as does keyboard focus arriving by Tab (programmatic focus
+ * does not); typing inside or opening a file from the chat keeps a preview tab open.
  */
 function WorkspacePane({
   side,
@@ -169,6 +190,7 @@ function WorkspacePane({
   setSidebarOpen,
   renameSession,
   refreshProjectsSilently,
+  onEditorUnsavedChange,
   className,
   style,
 }: WorkspacePaneProps) {
@@ -176,11 +198,14 @@ function WorkspacePane({
   const { canSplit, isImmersive, toggleImmersive } = useWorkspaceChrome();
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const browserUseEnabled = useBrowserUseEnabled();
+  const paletteOps = usePaletteOps();
 
   const rootRef = useRef<HTMLDivElement>(null);
-  const paneWidth = useElementWidth(rootRef);
-  // The pane's own width decides, not the viewport: a half-width pane on a wide screen is compact too.
-  const isCompact = !isMobile && paneWidth > 0 && paneWidth < COMPACT_PANE_WIDTH_PX;
+  // Only the crossing of the threshold re-renders the pane, not every pixel of a divider drag.
+  const isNarrow = useElementWidth(rootRef, isCompactPaneWidth);
+  // The pane's own width decides, not the viewport, and only beside another pane: a single pane keeps
+  // its title (project name, double-click rename) at any width.
+  const isCompact = !isMobile && isSideBySide && isNarrow;
 
   const activeTab = getActiveTab(pane);
   const isMissing = Boolean(activeTab?.isMissing);
@@ -188,11 +213,41 @@ function WorkspacePane({
   const showConnectionStatus = !(isSideBySide && side === 'right');
   const panelId = getPaneScopedDomId(side, 'tabpanel');
 
+  const liveContent: PaneContent | null = activeTab && !isMissing && project
+    ? { project, session: activeTab.session, view: activeTab.view }
+    : null;
+  const hasContent = liveContent !== null;
+  // The content WorkspaceMain last showed. While the pane shows nothing (no tab, a conversation that
+  // is gone) WorkspaceMain keeps it, hidden, instead of unmounting: its chat keeps hearing the runs it
+  // follows (completion sound, [Done] title, permission prompts) and its editor keeps any unsaved
+  // buffer for when the pane shows something again.
+  const [shownContent, setShownContent] = useState<PaneContent | null>(liveContent);
+  if (
+    liveContent
+    && (shownContent?.project !== liveContent.project
+      || shownContent.session !== liveContent.session
+      || shownContent.view !== liveContent.view)
+  ) {
+    // Adjusting state while rendering: React re-renders right away, before anything is committed.
+    setShownContent(liveContent);
+  }
+  const mainContent = liveContent ?? shownContent;
+
+  // The draft tab on screen. A send binds the session it creates to it (see handleSessionEstablished).
+  const activeDraftKey = activeTab && activeTab.sessionId === null ? activeTab.key : null;
+  // The project palette and quick-settings actions use when this pane shows nothing: the one the palette lists.
+  const commandProject = project ?? fallbackProject;
+
   // Latest tab facts for the callbacks handed to WorkspaceMain, which stay stable across tab
   // switches so the memoized chat does not re-render for a new callback identity.
-  const latestTabRef = useRef({ tabKey: activeTab?.key ?? null, projectId: project?.projectId, provider: activeTab?.provider });
+  const latestTabRef = useRef({
+    tabKey: activeTab?.key ?? null,
+    isPreview: Boolean(activeTab?.isPreview),
+    hasContent,
+    commandProject,
+  });
   useLayoutEffect(() => {
-    latestTabRef.current = { tabKey: activeTab?.key ?? null, projectId: project?.projectId, provider: activeTab?.provider };
+    latestTabRef.current = { tabKey: activeTab?.key ?? null, isPreview: Boolean(activeTab?.isPreview), hasContent, commandProject };
   });
 
   // When the last Tab key went down: focus arriving right after it is the user moving into this pane.
@@ -207,16 +262,17 @@ function WorkspacePane({
     return () => window.removeEventListener('keydown', recordTabKey, true);
   }, []);
 
-  const handlePointerDownCapture = () => {
+  const handlePointerDownCapture = (event: SyntheticEvent) => {
     // The first click already acts on this pane: it is focused before the target handles the press.
-    if (!isFocused) {
+    // Workspace-wide controls (split, full screen, show sidebar) only sit here for their position.
+    if (!isFocused && !isWorkspaceControlEvent(event)) {
       actions.focusPane(side);
     }
   };
 
-  const handleFocusCapture = () => {
+  const handleFocusCapture = (event: SyntheticEvent) => {
     // Autofocus, a dialog handing focus back and AskUserQuestion focus programmatically: only Tab moves the pane focus.
-    if (!isFocused && performance.now() - lastTabKeyAtRef.current <= TAB_FOCUS_WINDOW_MS) {
+    if (!isFocused && !isWorkspaceControlEvent(event) && performance.now() - lastTabKeyAtRef.current <= TAB_FOCUS_WINDOW_MS) {
       actions.focusPane(side);
     }
   };
@@ -229,18 +285,45 @@ function WorkspacePane({
   };
 
   const setActiveTab = useCallback<WorkspaceViewSetter>((view, options) => {
-    const { tabKey } = latestTabRef.current;
-    if (tabKey) {
+    const { tabKey, hasContent: isShowingContent } = latestTabRef.current;
+    // A hidden WorkspaceMain (an empty pane, a missing conversation) never changes a tab's view.
+    if (tabKey && isShowingContent) {
       actions.setTabView(side, tabKey, view, { pin: Boolean(options?.userInitiated) });
     }
   }, [actions, side]);
 
-  // A fork or a just-created session opens kept, in this pane, under this pane's project.
+  // Opening a file from the chat is the user working here, like switching views: a preview tab stays.
+  const keepActiveTab = useCallback(() => {
+    const { tabKey, isPreview, hasContent: isShowingContent } = latestTabRef.current;
+    if (tabKey && isPreview && isShowingContent) {
+      actions.pinTab(side, tabKey);
+    }
+  }, [actions, side]);
+
+  // The session this pane's chat just established: the navigation the chat asks for next is already done.
+  const justEstablishedRef = useRef<string | null>(null);
+
+  // Bound to the draft on screen at render time. A first send keeps the callback of the render it
+  // started in, so however slow it is, it converts the draft that sent it (wherever the user moved it
+  // meanwhile), or nothing once that draft was closed, never a newer draft of the same project.
+  const handleSessionEstablished = useCallback((sessionId: string, context: SessionEstablishedContext) => {
+    justEstablishedRef.current = sessionId;
+    actions.establishDraft(sessionId, context, activeDraftKey ? { draftTabKey: activeDraftKey } : undefined);
+  }, [actions, activeDraftKey]);
+
   const handleNavigateToSession = useCallback((targetSessionId: string, options?: SessionNavigationOptions) => {
-    const { projectId, provider } = latestTabRef.current;
+    // establishDraft converted the draft in place; opening it again would pull the focus back here, push
+    // the URL, and rebuild a pane closed in the meantime.
+    if (justEstablishedRef.current === targetSessionId) {
+      justEstablishedRef.current = null;
+      return;
+    }
+    // A fork: kept, in this pane, under the project its own row names (resolved, never read off
+    // whatever tab is on screen when the fork comes back), and without taking the focus from wherever
+    // the user went meanwhile.
     actions.openSession(
-      { id: targetSessionId, __projectId: projectId, __provider: provider },
-      { target: side, preview: false, history: options?.replace ? 'replace' : 'push' },
+      { id: targetSessionId },
+      { target: side, preview: false, history: options?.replace ? 'replace' : 'push', inBackground: true },
     );
   }, [actions, side]);
 
@@ -252,6 +335,10 @@ function WorkspacePane({
   const handleProjectsRefresh = useCallback(() => {
     void refreshProjectsSilently();
   }, [refreshProjectsSilently]);
+
+  const reportEditorUnsaved = useCallback((hasUnsavedChanges: boolean) => {
+    onEditorUnsavedChange(pane.id, hasUnsavedChanges);
+  }, [onEditorUnsavedChange, pane.id]);
 
   const openSidebar = useCallback(() => {
     setSidebarOpen(true);
@@ -270,6 +357,39 @@ function WorkspacePane({
       actions.closeTab(side, activeTab.key);
     }
   };
+
+  // ---------------------------------------------------------------- palette actions in a pane without content
+
+  // A palette or quick-settings action picked while this focused pane shows nothing: it runs once the new
+  // chat it opened is on screen, through the operations that pane's WorkspaceMain and chat register.
+  const pendingContentOpRef = useRef<((ops: PaletteOperations) => void) | null>(null);
+  const runInNewChat = useCallback((view: AppTab, operation: (ops: PaletteOperations) => void) => {
+    const targetProject = latestTabRef.current.commandProject;
+    if (!targetProject) {
+      return;
+    }
+    pendingContentOpRef.current = operation;
+    actions.openNewSession(targetProject, { target: side, view });
+  }, [actions, side]);
+  const contentlessPaneOps = useMemo(() => ({
+    openFile: (filePath: string) => runInNewChat('files', (ops) => ops.openFile(filePath)),
+    openFileInEditor: (filePath: string, line?: number | null) => runInNewChat('chat', (ops) => ops.openFileInEditor(filePath, line)),
+    openDirectory: (directoryPath: string) => runInNewChat('files', (ops) => ops.openDirectory(directoryPath)),
+    insertComposerText: (text: string) => runInNewChat('chat', (ops) => ops.insertComposerText(text)),
+  }), [runInNewChat]);
+  usePaletteOpsRegister(isFocused && !hasContent && !isLoadingProjects ? contentlessPaneOps : NO_PALETTE_OPS);
+  useEffect(() => {
+    const operation = pendingContentOpRef.current;
+    if (!hasContent || !operation) {
+      return undefined;
+    }
+    pendingContentOpRef.current = null;
+    // A frame later the pane's chat and editor have registered their operations and settled on the new chat.
+    const frame = window.requestAnimationFrame(() => operation(paletteOps));
+    return () => window.cancelAnimationFrame(frame);
+  }, [hasContent, paletteOps]);
+
+  // ---------------------------------------------------------------- chrome
 
   const showTabsButton = tabCount > 1 || isSplit;
   const mobileHeaderActions = useMemo(() => {
@@ -327,7 +447,6 @@ function WorkspacePane({
       : NO_SESSION_IDS
   ), [otherPane]);
 
-  const hasContent = Boolean(activeTab && !isMissing && project);
   const immersiveContent = isImmersive && hasTabBar && (hasContent || showConnectionStatus) ? (
     <>
       {hasContent && activeTab && (
@@ -343,59 +462,32 @@ function WorkspacePane({
     </>
   ) : null;
 
-  let content: ReactNode;
-  if (pane.tabs.length === 0) {
-    content = isLoadingProjects ? (
-      <WorkspaceStateView mode="loading" isMobile={Boolean(mobileHeader)} onMenuClick={openSidebar} />
-    ) : (
-      <PaneEmptyState
-        side={side}
-        projects={projects}
-        defaultProject={project ?? fallbackProject}
-        isSplit={isSplit}
-        isMobile={isMobile}
-        otherPaneSession={otherPaneSession}
-        otherPaneSessionIds={otherPaneSessionIds}
-        actions={actions}
-        mobileHeader={mobileHeader}
-        onMenuClick={openSidebar}
-      />
-    );
-  } else if (isMissing) {
-    content = <MissingSessionNotice header={mobileHeader} onClose={closeActiveTab} />;
-  } else {
-    content = (
-      <WorkspaceMain
-        side={side}
-        isFocusedPane={isFocused}
-        isPaneVisible={isVisible}
-        isSplitPane={isSideBySide}
-        compact={isCompact}
-        hideHeader={isImmersive}
-        headerActions={mobileHeaderActions}
-        showConnectionStatus={showConnectionStatus}
-        shellBlockedBy={shellBlockedBy}
-        onClaimShell={claimShell}
-        onFocusPane={focusThisPane}
-        selectedProject={project}
-        selectedSession={activeTab?.session ?? null}
-        activeTab={activeTab?.view ?? 'chat'}
-        setActiveTab={setActiveTab}
-        ws={ws}
-        sendMessage={sendMessage}
-        isMobile={isMobile}
-        onMenuClick={openSidebar}
-        isLoading={isLoadingProjects}
-        onNavigateToSession={handleNavigateToSession}
-        onSessionEstablished={actions.establishDraft}
-        onShowSettings={openSettings}
-        externalMessageUpdate={pane.externalRevision}
-        newSessionTrigger={pane.draftActivation}
-        onProjectSelect={handleProjectSelect}
-        onProjectsRefresh={handleProjectsRefresh}
-        onRenameSession={renameSession}
-      />
-    );
+  // What the pane shows in place of its content.
+  let placeholder: ReactNode = null;
+  if (!hasContent) {
+    if (pane.tabs.length === 0 && !isLoadingProjects) {
+      placeholder = (
+        <PaneEmptyState
+          side={side}
+          projects={projects}
+          defaultProject={project ?? fallbackProject}
+          isSplit={isSplit}
+          isMobile={isMobile}
+          otherPaneSession={otherPaneSession}
+          otherPaneSessionIds={otherPaneSessionIds}
+          actions={actions}
+          mobileHeader={mobileHeader}
+          onMenuClick={openSidebar}
+        />
+      );
+    } else if (isMissing) {
+      placeholder = <MissingSessionNotice header={mobileHeader} onClose={closeActiveTab} />;
+    } else {
+      // Projects still loading, or a tab whose project is not known (yet).
+      placeholder = (
+        <WorkspaceStateView mode={isLoadingProjects ? 'loading' : 'empty'} isMobile={Boolean(mobileHeader)} onMenuClick={openSidebar} />
+      );
+    }
   }
 
   const isCollapsed = isSplit && !isSideBySide;
@@ -413,6 +505,9 @@ function WorkspacePane({
     ? { role: 'tabpanel', 'aria-labelledby': `${panelId}-${activeTab.key}` }
     : {};
 
+  // No tabIndex on the root: it would take the focus of every click on plain text in the pane, and the
+  // keyboard scrolling of the scroll area under it. Programmatic focus lends it one for the moment
+  // (focusWorkspacePaneElement).
   return (
     <div
       ref={rootRef}
@@ -421,7 +516,6 @@ function WorkspacePane({
       aria-label={isSplit
         ? (side === 'left' ? t('workspace.leftPane', { defaultValue: 'Left pane' }) : t('workspace.rightPane', { defaultValue: 'Right pane' }))
         : undefined}
-      tabIndex={-1}
       className={cn('flex min-h-0 min-w-0 flex-col overflow-hidden outline-none', className)}
       style={style}
       onPointerDownCapture={handlePointerDownCapture}
@@ -447,7 +541,43 @@ function WorkspacePane({
         />
       )}
       <div id={panelId} {...tabPanelProps} className="relative flex min-h-0 flex-1 flex-col">
-        {content}
+        {mainContent && (
+          <div data-pane-content={hasContent ? 'shown' : 'kept'} className={hasContent ? 'contents' : 'hidden'}>
+            <WorkspaceMain
+              side={side}
+              isFocusedPane={isFocused && hasContent}
+              isPaneVisible={isVisible && hasContent}
+              isSplitPane={isSideBySide}
+              compact={isCompact}
+              hideHeader={isImmersive}
+              headerActions={mobileHeaderActions}
+              showConnectionStatus={showConnectionStatus}
+              shellBlockedBy={shellBlockedBy}
+              onClaimShell={claimShell}
+              onFocusPane={focusThisPane}
+              selectedProject={mainContent.project}
+              selectedSession={mainContent.session}
+              activeTab={mainContent.view}
+              setActiveTab={setActiveTab}
+              ws={ws}
+              sendMessage={sendMessage}
+              isMobile={isMobile}
+              onMenuClick={openSidebar}
+              isLoading={isLoadingProjects}
+              onNavigateToSession={handleNavigateToSession}
+              onSessionEstablished={handleSessionEstablished}
+              onShowSettings={openSettings}
+              externalMessageUpdate={pane.externalRevision}
+              newSessionTrigger={pane.draftActivation}
+              onProjectSelect={handleProjectSelect}
+              onProjectsRefresh={handleProjectsRefresh}
+              onRenameSession={renameSession}
+              onEditorUnsavedChange={reportEditorUnsaved}
+              onKeepTab={keepActiveTab}
+            />
+          </div>
+        )}
+        {placeholder}
         {isDropTargetActive && (
           <PaneDropOverlay targets={dropTargets} isSplit={isSplit} onDropSession={onDropSession} />
         )}

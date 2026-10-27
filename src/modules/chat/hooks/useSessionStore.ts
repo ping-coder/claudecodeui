@@ -853,6 +853,22 @@ export function useSessionStore() {
   }, [notify]);
 
   /**
+   * Drops the session's streaming row, for a stream whose end will never
+   * come: its run is over and the socket was away for the end. The history
+   * holds the reply; this row would only keep its unfinished beginning on
+   * screen, as the history refresh drops a live row only for the exact text.
+   */
+  const discardStreaming = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const streamId = `__streaming_${sessionId}`;
+    if (!slot.realtimeMessages.some((message) => message.id === streamId)) return;
+    slot.realtimeMessages = slot.realtimeMessages.filter((message) => message.id !== streamId);
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [notify]);
+
+  /**
    * Get merged messages for a session (for rendering).
    */
   const getMessages = useCallback((sessionId: string): NormalizedMessage[] => {
@@ -876,11 +892,12 @@ export function useSessionStore() {
     isStale,
     updateStreaming,
     finalizeStreaming,
+    discardStreaming,
     getMessages,
     getSessionSlot,
   }), [
     fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
-    setActiveSession, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, isStale, updateStreaming, finalizeStreaming, discardStreaming,
     getMessages, getSessionSlot,
   ]);
 }

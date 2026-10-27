@@ -54,6 +54,7 @@ const openAction = (id: string, newTabKey: string) => ({
   target: 'focused' as const,
   preview: false,
   newTabKey,
+  newPaneId: `pane-for-${newTabKey}`,
 });
 
 beforeEach(() => {
@@ -255,4 +256,35 @@ test('setLayout keeps the ref mirror in step, so a second write in the same tick
   assert.equal(result.current.layoutRef.current, result.current.layout);
   const keyA = result.current.createTabKey();
   assert.notEqual(keyA, result.current.createTabKey());
+});
+
+test('what the page does on its own reaches only its own copy; the seed waits for a change the user made', () => {
+  vi.useFakeTimers();
+  const seed = storedLayout(storedPane([storedTab({ key: 'seed', sessionId: 'seeded' })]));
+  localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, seed);
+  // A deep link opened in a new browser tab: the page starts empty and opens the URL's session itself.
+  const { result } = renderLayout('not-in-seed');
+
+  act(() => {
+    result.current.setLayout(reduce(result.current.layoutRef.current, openAction('linked', 'tab-linked')), { byUser: false });
+  });
+  act(() => {
+    vi.advanceTimersByTime(300);
+  });
+  assert.deepEqual(sessionIdsOf(parseStoredLayout(sessionStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY))), ['linked']);
+  assert.equal(localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY), seed, 'the layout new pages start from is untouched');
+
+  act(() => {
+    result.current.setLayout(reduce(result.current.layoutRef.current, { type: 'noteExternalUpdate', sessionId: 'linked' }), { byUser: false });
+    window.dispatchEvent(new Event('pagehide'));
+  });
+  assert.equal(localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY), seed, 'not on pagehide either');
+
+  act(() => {
+    result.current.setLayout(reduce(result.current.layoutRef.current, openAction('mine', 'tab-mine')));
+  });
+  act(() => {
+    vi.advanceTimersByTime(300);
+  });
+  assert.deepEqual(sessionIdsOf(parseStoredLayout(localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY))), ['linked', 'mine']);
 });

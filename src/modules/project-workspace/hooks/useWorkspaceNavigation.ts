@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { NavigateFunction } from 'react-router-dom';
 
+import { WORKSPACE_KEY_ENTRY_SEPARATOR, WORKSPACE_KEY_FIELD_SEPARATOR } from '@/shared/constants';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 import type {
   AppTab,
-  LLMProvider,
   Project,
   ProjectSession,
   SessionEstablishedContext,
@@ -16,10 +17,12 @@ import type {
   WorkspacePaneSide,
   WorkspaceSessionTab,
 } from '@/shared/types';
+import { getOtherPaneSide, readSessionProvider } from '@/shared/utils';
 import type { useWorkspaceLayout } from '@/modules/project-workspace/hooks/useWorkspaceLayout';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { findLoadedSession, resolveSessionTarget } from '@/modules/project-workspace/utils/resolveSessionTarget';
 import {
+  collectMountedPaneIds,
   collectSessionPlacements,
   collectVisibleSessionIds,
   findSessionTab,
@@ -48,6 +51,25 @@ type UseWorkspaceNavigationArgs = {
 /** A session ready to open: the object for the chat and the project that owns it. */
 type KnownSession = { session: ProjectSession; projectId: string };
 
+/** What a backend lookup of a session nothing local knows came to. */
+type LookupResult = KnownSession | 'missing' | 'unavailable';
+
+/**
+ * Who changed the layout. 'user': an action the user took (a click, a key, a send). 'sync': what the page
+ * did on its own (following the URL, restoring rows, resolving tabs, websocket updates); it never
+ * unlocks the localStorage seed and never re-points a URL that moved off the screen.
+ */
+type ChangeOrigin = 'user' | 'sync';
+
+type CommitOptions = {
+  origin?: ChangeOrigin;
+  /**
+   * An explicit open or activation of the focused session: the URL follows even when the layout did not
+   * change, so a URL left on / (Back, Forward) gets the session back.
+   */
+  refillUrl?: boolean;
+};
+
 /** The workspace state the rest of the app reads: the focused pane's tab, project and session. */
 type FocusedPane = {
   side: WorkspacePaneSide;
@@ -56,17 +78,8 @@ type FocusedPane = {
   session: ProjectSession | null;
 };
 
-/** Separators of the membership keys below; session ids never contain these control characters. */
-const KEY_ENTRY_SEPARATOR = '\u0000';
-const KEY_FIELD_SEPARATOR = '\u0001';
-
 const getFocusedSessionId = (layout: WorkspaceLayout): string | null =>
   getActiveTab(getPane(layout, layout.focusedSide))?.sessionId ?? null;
-
-const readSessionProvider = (session: ProjectSession): LLMProvider => {
-  const provider = session.__provider ?? session.provider;
-  return typeof provider === 'string' && provider.trim() ? provider : 'claude';
-};
 
 /** The title a tab shows until the live projects row is available; the same fields, in the same order, as the sidebar row. */
 const readSessionTitle = (session: ProjectSession): string => {
@@ -104,8 +117,9 @@ function useStablePaneProject(projectId: string | null, row: Project | null): Pr
 
 /**
  * The split workspace's write path and URL sync. Every layout change goes through `commit`, which
- * runs the reducer on the latest layout and, when the focused pane's active session changed, moves
- * the URL once. Also implements WorkspaceLayoutActions and derives what the rest of the app reads.
+ * runs the reducer on the latest layout, asks before a change unmounts a pane whose editor holds
+ * unsaved edits and, when the focused pane's active session changed, moves the URL once. Also
+ * implements WorkspaceLayoutActions and derives what the rest of the app reads.
  */
 export function useWorkspaceNavigation({
   workspace,
@@ -118,13 +132,18 @@ export function useWorkspaceNavigation({
   registerEstablishedSession,
   clearSessionAttention,
 }: UseWorkspaceNavigationArgs) {
-  const { layout, layoutRef, setLayout, createTabKey, takeLegacyView } = workspace;
+  const { layout, layoutRef, setLayout, createTabKey, createPaneId, takeLegacyView } = workspace;
+  // The editor's own "discard unsaved changes" question, asked before a layout change unmounts its pane.
+  const { t: tCodeEditor } = useTranslation('codeEditor');
 
   // Projects a tab needs that the sidebar list does not hold: an archived session's project, or one a
   // deep link resolved. Pane projects fall back to it, keyed by projectId.
   const [unlistedProjects, setUnlistedProjects] = useState<Readonly<Record<string, Project>>>({});
   // The project whose title the user last clicked in the sidebar: new chats default to it when no pane has a project.
   const [lastBrowsedProjectId, setLastBrowsedProjectId] = useState<string | null>(null);
+  // Whether the main column fits both panes side by side, reported by ProjectWorkspaceShell, which
+  // measures it. A split that does not fit shows the focused pane only, so only its session is on screen.
+  const [canShowBothPanes, setCanShowBothPanes] = useState(true);
 
   // Latest values for the stable callbacks below and for lookups that resolve later. `navigate` in
   // particular changes identity on every URL change, which must not rebuild the actions.
@@ -149,6 +168,8 @@ export function useWorkspaceNavigation({
   const navigationEpochRef = useRef(0);
   // Sessions whose tab data is known complete or already looked up; each id is resolved at most once.
   const resolvedSessionIdsRef = useRef(new Set<string>());
+  // Ids of the panes whose editor holds unsaved changes, as each pane's WorkspaceMain reports them.
+  const unsavedEditorPaneIdsRef = useRef(new Set<string>());
 
   const navigateToSession = useCallback((targetSessionId: string | null, history: 'push' | 'replace') => {
     urlSessionIdRef.current = targetSessionId;
@@ -161,20 +182,46 @@ export function useWorkspaceNavigation({
     }
   }, []);
 
-  /** The only writer of the layout. Returns the layout it produced. */
-  const commit = useCallback((action: WorkspaceLayoutAction, history: 'push' | 'replace' = 'replace'): WorkspaceLayout => {
+  /**
+   * A change that unmounts a pane (a merge, closing a side, its last tab closed or moved away, a phone
+   * switching panes) would silently drop that pane's unsaved editor buffer: the editor's own question
+   * decides. True when nothing is lost or the user lets it go.
+   */
+  const confirmUnmountingPanes = useCallback((previous: WorkspaceLayout, next: WorkspaceLayout): boolean => {
+    const unsaved = unsavedEditorPaneIdsRef.current;
+    if (unsaved.size === 0) {
+      return true;
+    }
+    const isPhone = isMobileRef.current;
+    const stillMounted = new Set(collectMountedPaneIds(next, { isMobile: isPhone }));
+    const losesEdits = collectMountedPaneIds(previous, { isMobile: isPhone })
+      .some((paneId) => !stillMounted.has(paneId) && unsaved.has(paneId));
+    return !losesEdits || window.confirm(tCodeEditor('unsavedChanges.confirmClose'));
+  }, [tCodeEditor]);
+
+  /** The only writer of the layout. Returns the layout it produced (the previous one when nothing changed or the user kept their edits). */
+  const commit = useCallback((
+    action: WorkspaceLayoutAction,
+    history: 'push' | 'replace' = 'replace',
+    { origin = 'user', refillUrl = false }: CommitOptions = {},
+  ): WorkspaceLayout => {
     const previous = layoutRef.current;
     const next = workspaceLayoutReducer(previous, action);
-    if (next === previous) {
+    if (next !== previous) {
+      if (!confirmUnmountingPanes(previous, next)) {
+        return previous;
+      }
+      setLayout(next, { byUser: origin === 'user' });
+    } else if (!refillUrl) {
       return previous;
     }
-    setLayout(next);
     const nextSessionId = getFocusedSessionId(next);
-    if (getFocusedSessionId(previous) !== nextSessionId && urlSessionIdRef.current !== nextSessionId) {
+    const focusedSessionChanged = getFocusedSessionId(previous) !== nextSessionId;
+    if ((focusedSessionChanged || refillUrl) && urlSessionIdRef.current !== nextSessionId) {
       navigateToSession(nextSessionId, history);
     }
     return next;
-  }, [layoutRef, navigateToSession, setLayout]);
+  }, [confirmUnmountingPanes, layoutRef, navigateToSession, setLayout]);
 
   const beginNavigation = useCallback((): number => {
     navigationEpochRef.current += 1;
@@ -199,20 +246,38 @@ export function useWorkspaceNavigation({
     view ?? (isLayoutEmpty(layoutRef.current) ? takeLegacyView() : undefined)
   ), [layoutRef, takeLegacyView]);
 
-  const openKnownSession = useCallback(({ session, projectId }: KnownSession, options: SessionOpenOptions) => {
+  const openKnownSession = useCallback((
+    { session, projectId }: KnownSession,
+    options: SessionOpenOptions,
+    origin: ChangeOrigin = 'user',
+  ) => {
+    // The owning project is known, so the tab already holds what the chat needs: the visible-tab
+    // lookup leaves it alone (a failed lookup there used to flag a perfectly good session missing).
+    resolvedSessionIdsRef.current.add(session.id);
     commit({
       type: 'open',
       payload: { session, projectId, provider: readSessionProvider(session), title: readSessionTitle(session) },
       target: options.target ?? 'focused',
       preview: Boolean(options.preview),
       view: pickView(options.view),
+      focus: !options.inBackground,
       newTabKey: createTabKey(),
-    }, options.history ?? 'push');
-  }, [commit, createTabKey, pickView]);
+      newPaneId: createPaneId(),
+    }, options.history ?? 'push', { origin, refillUrl: origin === 'user' && !options.inBackground });
+  }, [commit, createPaneId, createTabKey, pickView]);
 
-  /** A tab for a session that could not be resolved: it stays, and the pane says the conversation is gone. */
-  const openMissingSession = useCallback((missingSessionId: string, options: SessionOpenOptions) => {
-    resolvedSessionIdsRef.current.add(missingSessionId);
+  /**
+   * A tab for a session that could not be resolved: it stays, and the pane says the conversation is gone.
+   * `retryable` (the lookup failed rather than finding nothing) lets the visible-tab lookup ask again.
+   */
+  const openMissingSession = useCallback((
+    missingSessionId: string,
+    options: SessionOpenOptions,
+    { origin, retryable }: { origin: ChangeOrigin; retryable: boolean },
+  ) => {
+    if (!retryable) {
+      resolvedSessionIdsRef.current.add(missingSessionId);
+    }
     const provider = readSelectedProvider();
     commit({
       type: 'open',
@@ -220,16 +285,21 @@ export function useWorkspaceNavigation({
       target: options.target ?? 'focused',
       preview: Boolean(options.preview),
       view: pickView(options.view),
+      focus: !options.inBackground,
       newTabKey: createTabKey(),
-    }, options.history ?? 'push');
-    commit({ type: 'markMissing', sessionId: missingSessionId });
-  }, [commit, createTabKey, pickView]);
+      newPaneId: createPaneId(),
+    }, options.history ?? 'push', { origin });
+    commit({ type: 'markMissing', sessionId: missingSessionId }, 'replace', { origin: 'sync' });
+  }, [commit, createPaneId, createTabKey, pickView]);
 
-  /** Sessions the layout or the loaded pages already know, merged with what the caller passed (a search target, say). */
+  /**
+   * Sessions the layout or the loaded pages already know, merged with what the caller passed (a search
+   * target, say). A tab flagged missing proves nothing about the session, so it is looked past.
+   */
   const findKnownSession = useCallback((requested: ProjectSession): KnownSession | null => {
     const own = definedFields(requested);
     const hit = findSessionTab(layoutRef.current, requested.id);
-    if (hit) {
+    if (hit && !hit.tab.isMissing) {
       return {
         session: { ...hit.tab.session, ...own, id: requested.id, __projectId: hit.tab.projectId, __provider: hit.tab.provider },
         projectId: hit.tab.projectId,
@@ -247,7 +317,7 @@ export function useWorkspaceNavigation({
   }, [layoutRef]);
 
   /** Asks the backend about a session nothing local knows; follows one alias hop. */
-  const lookUpSession = useCallback(async (requested: ProjectSession): Promise<KnownSession | null> => {
+  const lookUpSession = useCallback(async (requested: ProjectSession): Promise<LookupResult> => {
     const own = definedFields(requested);
     let resolution = await resolveSessionTarget(requested.id, () => projectsRef.current);
     if (resolution.kind === 'alias') {
@@ -261,8 +331,11 @@ export function useWorkspaceNavigation({
         own.id = resolution.session.id;
       }
     }
+    if (resolution.kind === 'unavailable') {
+      return 'unavailable';
+    }
     if (resolution.kind !== 'found') {
-      return null;
+      return 'missing';
     }
     if (!resolution.isListed) {
       rememberUnlistedProject(resolution.project);
@@ -274,41 +347,58 @@ export function useWorkspaceNavigation({
     };
   }, [findKnownSession, rememberUnlistedProject]);
 
-  /** Opens a session whose project the caller could not name: locally known ones at once, others after a lookup. */
-  const openUnresolvedSession = useCallback((requested: ProjectSession, options: SessionOpenOptions, epoch: number) => {
+  /**
+   * Opens a session whose project the caller could not name: locally known ones at once, others after a
+   * lookup. A lookup overtaken by a newer navigation is dropped, unless `epoch` is null (a background open).
+   */
+  const openUnresolvedSession = useCallback((
+    requested: ProjectSession,
+    options: SessionOpenOptions,
+    epoch: number | null,
+    origin: ChangeOrigin,
+  ) => {
     const known = findKnownSession(requested);
     if (known) {
-      openKnownSession(known, options);
+      openKnownSession(known, options, origin);
       return;
     }
     void lookUpSession(requested).then((resolved) => {
-      if (epoch !== navigationEpochRef.current) {
+      if (epoch !== null && epoch !== navigationEpochRef.current) {
         return;
       }
-      if (resolved) {
-        openKnownSession(resolved, options);
+      if (typeof resolved === 'object') {
+        openKnownSession(resolved, options, origin);
       } else {
-        openMissingSession(requested.id, options);
+        openMissingSession(requested.id, options, { origin, retryable: resolved === 'unavailable' });
       }
     });
   }, [findKnownSession, lookUpSession, openKnownSession, openMissingSession]);
 
   const openSession = useCallback((session: ProjectSession, options: SessionOpenOptions = {}) => {
-    const epoch = beginNavigation();
-    closeMobileSidebar();
+    // A background open (a fork finishing) must not cancel what the user started meanwhile, nor close the phone's drawer.
+    const epoch = options.inBackground ? null : beginNavigation();
+    if (!options.inBackground) {
+      closeMobileSidebar();
+    }
     rememberUnlistedProject(options.ownerProject);
     const projectId = session.__projectId || options.ownerProject?.projectId;
     if (projectId) {
-      openKnownSession({ session: { ...session, __projectId: projectId }, projectId }, options);
+      // The loaded row fills in what a partial object (a dropped row, a drag payload) leaves out, its
+      // title first of all; the caller's own fields win.
+      const loaded = findLoadedSession(session.id, projectsRef.current);
+      const complete = loaded ? { ...loaded.session, ...definedFields(session) } : session;
+      openKnownSession({ session: { ...complete, __projectId: projectId }, projectId }, options);
       return;
     }
-    openUnresolvedSession(session, options, epoch);
+    openUnresolvedSession(session, options, epoch, 'user');
   }, [beginNavigation, closeMobileSidebar, openKnownSession, openUnresolvedSession, rememberUnlistedProject]);
 
   const openSessionById = useCallback((targetSessionId: string, options: SessionOpenOptions = {}) => {
-    const epoch = beginNavigation();
-    closeMobileSidebar();
-    openUnresolvedSession({ id: targetSessionId }, options, epoch);
+    const epoch = options.inBackground ? null : beginNavigation();
+    if (!options.inBackground) {
+      closeMobileSidebar();
+    }
+    openUnresolvedSession({ id: targetSessionId }, options, epoch, 'user');
   }, [beginNavigation, closeMobileSidebar, openUnresolvedSession]);
 
   const openNewSession = useCallback((project: Project, options: SessionOpenOptions = {}) => {
@@ -322,16 +412,22 @@ export function useWorkspaceNavigation({
       target: options.target ?? 'focused',
       view: pickView(options.view),
       newTabKey: createTabKey(),
+      newPaneId: createPaneId(),
     }, options.history ?? 'push');
-  }, [beginNavigation, closeMobileSidebar, commit, createTabKey, pickView, rememberUnlistedProject]);
+  }, [beginNavigation, closeMobileSidebar, commit, createPaneId, createTabKey, pickView, rememberUnlistedProject]);
 
-  const establishDraft = useCallback((establishedSessionId: string, context: SessionEstablishedContext) => {
+  const establishDraft = useCallback((
+    establishedSessionId: string,
+    context: SessionEstablishedContext,
+    options: { draftTabKey?: string } = {},
+  ) => {
     const session = registerEstablishedSession(establishedSessionId, context);
     resolvedSessionIdsRef.current.add(establishedSessionId);
     // The URL is replaced, so Back does not land on an empty new-chat page.
     commit({
       type: 'establishDraft',
       projectId: context.project.projectId,
+      draftTabKey: options.draftTabKey,
       payload: {
         session,
         projectId: context.project.projectId,
@@ -348,7 +444,7 @@ export function useWorkspaceNavigation({
     establishDraft,
     activateTab: (side, tabKey) => {
       beginNavigation();
-      commit({ type: 'activate', side, tabKey });
+      commit({ type: 'activate', side, tabKey }, 'replace', { refillUrl: true });
     },
     closeTab: (side, tabKey) => {
       beginNavigation();
@@ -371,7 +467,16 @@ export function useWorkspaceNavigation({
     },
     moveTab: (from, tabKey, to, options = {}) => {
       beginNavigation();
-      commit({ type: 'move', from, tabKey, to, index: options.index, copy: options.copy, newTabKey: createTabKey() });
+      commit({
+        type: 'move',
+        from,
+        tabKey,
+        to,
+        index: options.index,
+        copy: options.copy,
+        newTabKey: createTabKey(),
+        newPaneId: createPaneId(),
+      });
     },
     setTabView: (side, tabKey, view, options = {}) => {
       commit({ type: 'setView', side, tabKey, view, pin: Boolean(options.pin) });
@@ -382,11 +487,11 @@ export function useWorkspaceNavigation({
     },
     split: () => {
       beginNavigation();
-      commit({ type: 'split' });
+      commit({ type: 'split', newPaneId: createPaneId() });
     },
     toggleSplit: () => {
       beginNavigation();
-      commit(layoutRef.current.right ? { type: 'closePane', side: 'right' } : { type: 'split' });
+      commit(layoutRef.current.right ? { type: 'merge' } : { type: 'split', newPaneId: createPaneId() });
     },
     closePane: (side) => {
       beginNavigation();
@@ -395,7 +500,26 @@ export function useWorkspaceNavigation({
     setSplitRatio: (ratio) => {
       commit({ type: 'setRatio', ratio });
     },
-  }), [beginNavigation, commit, createTabKey, establishDraft, layoutRef, openNewSession, openSession, openSessionById]);
+  }), [
+    beginNavigation,
+    commit,
+    createPaneId,
+    createTabKey,
+    establishDraft,
+    layoutRef,
+    openNewSession,
+    openSession,
+    openSessionById,
+  ]);
+
+  /** Reported by each pane's WorkspaceMain whenever its editor's buffer turns dirty or clean (and clean on unmount). */
+  const setPaneEditorUnsaved = useCallback((paneId: string, hasUnsavedChanges: boolean) => {
+    if (hasUnsavedChanges) {
+      unsavedEditorPaneIdsRef.current.add(paneId);
+    } else {
+      unsavedEditorPaneIdsRef.current.delete(paneId);
+    }
+  }, []);
 
   // ---------------------------------------------------------------- derived values
 
@@ -422,34 +546,36 @@ export function useWorkspaceNavigation({
 
   // Rebuilt only when tab membership changes, so sidebar rows keep their props across tab switches.
   const placementKey = useMemo(() => [...collectSessionPlacements(layout)]
-    .map(([placedSessionId, placement]) => `${placedSessionId}${KEY_FIELD_SEPARATOR}${placement}`)
+    .map(([placedSessionId, placement]) => `${placedSessionId}${WORKSPACE_KEY_FIELD_SEPARATOR}${placement}`)
     .sort()
-    .join(KEY_ENTRY_SEPARATOR), [layout]);
+    .join(WORKSPACE_KEY_ENTRY_SEPARATOR), [layout]);
   const sessionPlacements = useMemo<ReadonlyMap<string, SessionPanePlacement>>(() => new Map(
     placementKey
-      ? placementKey.split(KEY_ENTRY_SEPARATOR).map((entry) => {
-        const [placedSessionId, placement] = entry.split(KEY_FIELD_SEPARATOR);
+      ? placementKey.split(WORKSPACE_KEY_ENTRY_SEPARATOR).map((entry) => {
+        const [placedSessionId, placement] = entry.split(WORKSPACE_KEY_FIELD_SEPARATOR);
         return [placedSessionId, placement as SessionPanePlacement];
       })
       : [],
   ), [placementKey]);
 
-  // Phones show only the focused pane, so only its session counts as seen there.
+  // Phones and a split too narrow for two panes show only the focused pane, so only its session counts as seen there.
+  const showsFocusedPaneOnly = isMobile || !canShowBothPanes;
   const visibleKey = useMemo(
-    () => [...collectVisibleSessionIds(layout, { focusedOnly: isMobile })].sort().join(KEY_ENTRY_SEPARATOR),
-    [isMobile, layout],
+    () => [...collectVisibleSessionIds(layout, { focusedOnly: showsFocusedPaneOnly })].sort().join(WORKSPACE_KEY_ENTRY_SEPARATOR),
+    [layout, showsFocusedPaneOnly],
   );
   const visibleSessionIds = useMemo<ReadonlySet<string>>(
-    () => new Set(visibleKey ? visibleKey.split(KEY_ENTRY_SEPARATOR) : []),
+    () => new Set(visibleKey ? visibleKey.split(WORKSPACE_KEY_ENTRY_SEPARATOR) : []),
     [visibleKey],
   );
 
-  const otherPaneProject = paneProjects[layout.focusedSide === 'left' ? 'right' : 'left'];
-  const fallbackProject = focusedProject
-    ?? otherPaneProject
-    ?? findProjectRow(lastBrowsedProjectId)
-    ?? projects[0]
-    ?? null;
+  const otherPaneProject = paneProjects[getOtherPaneSide(layout.focusedSide)];
+  // The last browsed project, else the first one: a stable object like the pane projects, so what reads
+  // the fallback (the quick settings' commands, say) does not reload on every session update.
+  const browsedProjectId = lastBrowsedProjectId && findProjectRow(lastBrowsedProjectId) ? lastBrowsedProjectId : null;
+  const browsedOrFirstProjectId = browsedProjectId ?? projects[0]?.projectId ?? null;
+  const browsedOrFirstProject = useStablePaneProject(browsedOrFirstProjectId, findProjectRow(browsedOrFirstProjectId));
+  const fallbackProject = focusedProject ?? otherPaneProject ?? browsedOrFirstProject;
 
   const recordBrowsedProject = useCallback((project: Project) => {
     rememberUnlistedProject(project);
@@ -499,10 +625,10 @@ export function useWorkspaceNavigation({
     handledUrlSessionIdRef.current = urlSessionId;
     const epoch = beginNavigation();
     if (hit) {
-      commit({ type: 'activate', side: hit.side, tabKey: hit.tab.key });
+      commit({ type: 'activate', side: hit.side, tabKey: hit.tab.key }, 'replace', { origin: 'sync' });
       return;
     }
-    openUnresolvedSession({ id: urlSessionId }, { target: 'focused', preview: true, history: 'replace' }, epoch);
+    openUnresolvedSession({ id: urlSessionId }, { target: 'focused', preview: true, history: 'replace' }, epoch, 'sync');
   }, [beginNavigation, commit, isLoadingProjects, layoutRef, openUnresolvedSession, sessionId]);
 
   // After the first load: drafts of projects that are gone go, and restored tabs get their full rows.
@@ -515,7 +641,7 @@ export function useWorkspaceNavigation({
     commit({
       type: 'pruneDrafts',
       liveProjectIds: new Set([...projects.map((project) => project.projectId), ...Object.keys(unlistedProjects)]),
-    });
+    }, 'replace', { origin: 'sync' });
     const current = layoutRef.current;
     const restoredSessionIds = new Set(
       [...current.left.tabs, ...(current.right?.tabs ?? [])]
@@ -526,7 +652,11 @@ export function useWorkspaceNavigation({
       const loaded = findLoadedSession(restoredSessionId, projects);
       if (loaded) {
         resolvedSessionIdsRef.current.add(restoredSessionId);
-        commit({ type: 'patchSession', sessionId: restoredSessionId, patch: loaded.session, dropSearchTarget: true });
+        commit(
+          { type: 'patchSession', sessionId: restoredSessionId, patch: loaded.session, dropSearchTarget: true },
+          'replace',
+          { origin: 'sync' },
+        );
       }
     }
   }, [commit, isLoadingProjects, layoutRef, projects, unlistedProjects]);
@@ -556,11 +686,13 @@ export function useWorkspaceNavigation({
       target: 'focused',
       view: pickView(),
       newTabKey: createTabKey(),
-    });
-  }, [commit, createTabKey, isLoadingProjects, layoutRef, pickView, projects, sessionId]);
+      newPaneId: createPaneId(),
+    }, 'replace', { origin: 'sync' });
+  }, [commit, createPaneId, createTabKey, isLoadingProjects, layoutRef, pickView, projects, sessionId]);
 
   // A visible tab whose session is not in the loaded pages (a restored or archived one) is looked up
-  // once; background tabs wait until they are shown. Unresolvable sessions are flagged, not dropped.
+  // once; background tabs wait until they are shown. Only a definite "no such session" flags the tab
+  // missing; a lookup that could not reach the server leaves it as it is, to be asked again later.
   useEffect(() => {
     if (isLoadingProjects) {
       return;
@@ -578,17 +710,45 @@ export function useWorkspaceNavigation({
           if (!resolution.isListed) {
             rememberUnlistedProject(resolution.project);
           }
-          commit({ type: 'patchSession', sessionId: visibleSessionId, patch: resolution.session, dropSearchTarget: true });
+          commit(
+            { type: 'patchSession', sessionId: visibleSessionId, patch: resolution.session, dropSearchTarget: true },
+            'replace',
+            { origin: 'sync' },
+          );
         } else if (resolution.kind === 'alias') {
-          commit({ type: 'replaceSessionId', fromId: visibleSessionId, toId: resolution.canonicalId });
+          commit({ type: 'replaceSessionId', fromId: visibleSessionId, toId: resolution.canonicalId }, 'replace', { origin: 'sync' });
+        } else if (resolution.kind === 'missing') {
+          commit({ type: 'markMissing', sessionId: visibleSessionId }, 'replace', { origin: 'sync' });
         } else {
-          commit({ type: 'markMissing', sessionId: visibleSessionId });
+          resolvedSessionIdsRef.current.delete(visibleSessionId);
         }
       });
     }
   }, [commit, isLoadingProjects, rememberUnlistedProject, visibleSessionIds]);
 
-  // A session on screen in either pane is being looked at, so it no longer needs attention.
+  // A tab flagged missing whose session turns up in the loaded pages (a lookup that failed while the
+  // server was away, a page loaded later) shows its conversation again, without asking the server.
+  useEffect(() => {
+    if (isLoadingProjects) {
+      return;
+    }
+    const current = layoutRef.current;
+    for (const tab of [...current.left.tabs, ...(current.right?.tabs ?? [])]) {
+      if (!tab.isMissing || !tab.sessionId) {
+        continue;
+      }
+      const loaded = findLoadedSession(tab.sessionId, projects);
+      if (loaded) {
+        commit(
+          { type: 'patchSession', sessionId: tab.sessionId, patch: loaded.session, dropSearchTarget: true },
+          'replace',
+          { origin: 'sync' },
+        );
+      }
+    }
+  }, [commit, isLoadingProjects, layoutRef, projects]);
+
+  // A session on screen is being looked at, so it no longer needs attention.
   useEffect(() => {
     for (const visibleSessionId of visibleSessionIds) {
       clearSessionAttention(visibleSessionId);
@@ -605,5 +765,7 @@ export function useWorkspaceNavigation({
     visibleSessionIds,
     fallbackProject,
     recordBrowsedProject,
+    setCanShowBothPanes,
+    setPaneEditorUnsaved,
   };
 }

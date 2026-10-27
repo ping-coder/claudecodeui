@@ -7,7 +7,6 @@ import { cn } from '@/shared/utils';
 import type {
   LLMProvider,
   Project,
-  ProjectSession,
   SessionOpenOptions,
   SessionPanePlacement,
   SessionWithProvider,
@@ -20,7 +19,8 @@ type SidebarProjectSessionsProps = {
   project: Project;
   isExpanded: boolean;
   sessions: SessionWithProvider[];
-  selectedSession: ProjectSession | null;
+  /** The focused pane's session when it is one of this project's, else null. */
+  selectedSessionId: string | null;
   initialSessionsLoaded: boolean;
   hasMoreSessions: boolean;
   isLoadingMoreSessions: boolean;
@@ -78,7 +78,7 @@ export default function SidebarProjectSessions({
   project,
   isExpanded,
   sessions,
-  selectedSession,
+  selectedSessionId,
   initialSessionsLoaded,
   hasMoreSessions,
   isLoadingMoreSessions,
@@ -243,7 +243,7 @@ export default function SidebarProjectSessions({
               key={session.id}
               project={project}
               session={session}
-              selectedSession={selectedSession}
+              isSelected={session.id === selectedSessionId}
               isProcessing={isSessionRunning(session)}
               hasBackgroundWork={backgroundSessionIds.has(session.id)}
               needsAttention={attentionSessionIds.has(session.id)}
@@ -260,8 +260,9 @@ export default function SidebarProjectSessions({
               isSelecting={isSelecting}
               isChecked={checkedSessionIds.has(session.id)}
               onToggleSessionSelected={onToggleSessionSelected}
-              // Scalars, like isEditing: a tab opening for another session or a focus
-              // switch hands this row the same values, so its memo holds.
+              // Scalars, like isEditing and isSelected: a tab opening for another session, or a
+              // focus switch that neither highlights nor unhighlights it, hands this row the same
+              // values, so its memo holds.
               panePlacement={panePlacements?.get(session.id) ?? null}
               canTargetSides={canTargetSides}
               isWorkspaceSplit={isWorkspaceSplit}

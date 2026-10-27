@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
 import { useProjectPanesState } from '@/modules/project-workspace/context/ProjectsStateContext';
@@ -28,7 +28,7 @@ function ProjectWorkspaceShell({
   sendMessage,
   navigate,
 }: ProjectWorkspaceShellProps) {
-  const { layout, actions, setSidebarOpen } = useProjectPanesState();
+  const { layout, actions, setSidebarOpen, setCanShowBothPanes } = useProjectPanesState();
   const { isImmersive, isBrowserFullscreen, toggleImmersive, exitImmersive } = useImmersiveMode();
   // Whether the sidebar is out as an overlay drawer in desktop immersive mode, where its docked
   // column is hidden. Held here because a pane's "Show sidebar" button opens it and the sidebar
@@ -39,6 +39,11 @@ function ProjectWorkspaceShell({
   const mainColumnRef = useRef<HTMLDivElement>(null);
   const mainColumnWidth = useElementWidth(mainColumnRef);
   const canSplit = !isMobile && mainColumnWidth >= SPLIT_MAIN_COLUMN_MIN_WIDTH_PX;
+  // The panes' state decides what counts as on screen: a split that does not fit shows one pane.
+  // Reported before paint, like the measurement itself.
+  useLayoutEffect(() => {
+    setCanShowBothPanes(canSplit);
+  }, [canSplit, setCanShowBothPanes]);
 
   // Every entry into immersive mode starts with the drawer closed; leaving it hides the drawer
   // through `isPeekShown` below, whichever way immersive mode ends (the browser can end it too).

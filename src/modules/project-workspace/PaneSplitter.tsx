@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -77,6 +77,26 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
 
   const measureGroupWidth = useCallback(() => getGroup()?.getBoundingClientRect().width ?? 0, [getGroup]);
 
+  // The group's width, kept current: a saved share can undercut a pane's pixel minimum on a narrower
+  // column, where CSS draws the divider further in. What the divider reports and steps from is where
+  // it is drawn, not the saved share.
+  const [groupWidth, setGroupWidth] = useState(0);
+  useLayoutEffect(() => {
+    const group = getGroup();
+    if (!group) {
+      return undefined;
+    }
+    const measure = () => setGroupWidth(Math.round(group.getBoundingClientRect().width));
+    measure();
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(group);
+    return () => observer.disconnect();
+  }, [getGroup]);
+  const drawnRatio = groupWidth > 0 ? clampRatio(ratio, groupWidth) : ratio;
+
   const commit = useCallback((nextRatio: number) => {
     const clamped = clampRatio(nextRatio, measureGroupWidth());
     writeLeftWidth(clamped);
@@ -90,8 +110,11 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
     event.preventDefault();
     // Pointer capture keeps the drag alive when the cursor leaves the thin divider.
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    dragOriginRef.current = { pointerX: event.clientX, ratio, groupWidth: measureGroupWidth() };
-    pendingRatioRef.current = ratio;
+    const width = measureGroupWidth();
+    // The drag starts where the divider is drawn, so it follows the pointer from the first pixel.
+    const originRatio = clampRatio(ratio, width);
+    dragOriginRef.current = { pointerX: event.clientX, ratio: originRatio, groupWidth: width };
+    pendingRatioRef.current = originRatio;
     document.body.style.userSelect = 'none';
   }, [measureGroupWidth, ratio]);
 
@@ -137,15 +160,15 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      commit(ratio - KEYBOARD_RATIO_STEP);
+      commit(drawnRatio - KEYBOARD_RATIO_STEP);
     } else if (event.key === 'ArrowRight') {
       event.preventDefault();
-      commit(ratio + KEYBOARD_RATIO_STEP);
+      commit(drawnRatio + KEYBOARD_RATIO_STEP);
     } else if (event.key === 'Home') {
       event.preventDefault();
       commit(WORKSPACE_SPLIT_RATIO_DEFAULT);
     }
-  }, [commit, ratio]);
+  }, [commit, drawnRatio]);
 
   const handleDoubleClick = useCallback(() => {
     commit(WORKSPACE_SPLIT_RATIO_DEFAULT);
@@ -167,7 +190,7 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
       role="separator"
       aria-orientation="vertical"
       aria-label={t('workspace.resizePanes', { defaultValue: 'Resize panes' })}
-      aria-valuenow={Math.round(ratio * 100)}
+      aria-valuenow={Math.round(drawnRatio * 100)}
       aria-valuemin={Math.round(WORKSPACE_SPLIT_RATIO_MIN * 100)}
       aria-valuemax={Math.round(WORKSPACE_SPLIT_RATIO_MAX * 100)}
       tabIndex={0}

@@ -242,7 +242,7 @@ const sessionsProps = (
   project: PROJECT_A,
   isExpanded: true,
   sessions: getAllSessions(PROJECT_A),
-  selectedSession: null,
+  selectedSessionId: null as string | null,
   initialSessionsLoaded: true,
   hasMoreSessions: false,
   isLoadingMoreSessions: false,
@@ -336,26 +336,71 @@ const targeting = (
 });
 const isAExpanded = (projectId: string) => projectId === PROJECT_A.projectId;
 
-test('switching the focused pane changes no row props', () => {
+test('switching the focused pane changes no row props when both panes show the same session', () => {
   // The rows offer absolute sides and mark absolute placements, so nothing they
   // are handed depends on which pane is focused.
-  const placements = placementsOf([['a1', 'left'], ['b1', 'right']]);
-  const { rerender } = render(React.createElement(SidebarProjectList, {
-    ...listProps(null, null, targeting(placements, 'left')),
+  const placements = placementsOf([['a1', 'both']]);
+  const focusedOn = (focusedSide: 'left' | 'right') => React.createElement(SidebarProjectList, {
+    ...listProps(null, null, targeting(placements, focusedSide)),
+    selectedProject: PROJECT_A,
+    selectedSession: getAllSessions(PROJECT_A)[0],
     isProjectExpanded: isAExpanded,
-  }));
+  });
+  const { rerender } = render(focusedOn('left'));
   const [firstA, firstB] = recordedProjectRowProps;
 
-  rerender(React.createElement(SidebarProjectList, {
-    ...listProps(null, null, targeting(placements, 'right')),
-    isProjectExpanded: isAExpanded,
-  }));
+  rerender(focusedOn('right'));
   const [, , secondA, secondB] = recordedProjectRowProps;
 
   assert.deepEqual(changedProps(firstA, secondA), []);
   assert.deepEqual(changedProps(firstB, secondB), []);
   assert.equal(firstA.panePlacements, placements, 'the expanded project with an open session gets the placements');
   assert.equal(firstB.panePlacements, null, 'a collapsed project draws no session rows to place');
+});
+
+test('a focus switch between two panes changes props only on the project rows it moves the highlight between', () => {
+  // Left shows a1 (project a), right shows b1 (project b), and c sits in between
+  // untouched: the highlight is resolved per row, so c is handed the same props.
+  const placements = placementsOf([['a1', 'left'], ['b1', 'right']]);
+  const [a1] = getAllSessions(PROJECT_A);
+  const [b1] = getAllSessions(PROJECT_B);
+  const focusedOn = (focusedSide: 'left' | 'right') => React.createElement(SidebarProjectList, {
+    ...listProps(null, null, targeting(placements, focusedSide)),
+    projects: [PROJECT_A, PROJECT_B, PROJECT_C],
+    filteredProjects: [PROJECT_A, PROJECT_B, PROJECT_C],
+    selectedProject: focusedSide === 'left' ? PROJECT_A : PROJECT_B,
+    selectedSession: focusedSide === 'left' ? a1 : b1,
+    isProjectExpanded: () => true,
+  });
+  const { rerender } = render(focusedOn('right'));
+  const [firstA, firstB, firstC] = recordedProjectRowProps;
+
+  rerender(focusedOn('left'));
+  const [, , , secondA, secondB, secondC] = recordedProjectRowProps;
+
+  assert.deepEqual(changedProps(firstC, secondC), [], 'project c is neither the old nor the new focus');
+  assert.deepEqual(changedProps(firstA, secondA), ['isSelected', 'selectedSessionId']);
+  assert.deepEqual(changedProps(firstB, secondB), ['isSelected', 'selectedSessionId']);
+  assert.deepEqual(
+    [secondA.isSelected, secondA.selectedSessionId, secondB.isSelected, secondB.selectedSessionId],
+    [true, 'a1', false, null],
+  );
+});
+
+test('within a project, a focus switch changes props only on the session rows it highlights or unhighlights', () => {
+  const focusedOn = (selectedSessionId: string | null) => React.createElement(SidebarProjectSessions, {
+    ...sessionsProps(null, ''),
+    selectedSessionId,
+  });
+  const { rerender } = render(focusedOn(null));
+  const [firstA1, firstA2] = recordedSessionRowProps;
+
+  rerender(focusedOn('a1'));
+  const [, , secondA1, secondA2] = recordedSessionRowProps;
+
+  assert.deepEqual(changedProps(firstA1, secondA1), ['isSelected']);
+  assert.deepEqual(changedProps(firstA2, secondA2), [], 'a2 was not highlighted and still is not');
+  assert.deepEqual([firstA1.isSelected, secondA1.isSelected, secondA2.isSelected], [false, true, false]);
 });
 
 test('a placement change reaches only the project rows that draw an open session', () => {

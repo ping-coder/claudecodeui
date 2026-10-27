@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { createEvent, fireEvent, render, within } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, within } from '@testing-library/react';
 import type { NavigateFunction } from 'react-router-dom';
 import { beforeEach, test, vi } from 'vitest';
 
@@ -61,6 +61,8 @@ const makeTab = (key: string, overrides: Partial<WorkspaceSessionTab> = {}): Wor
 });
 
 const makePane = (tabs: WorkspaceSessionTab[]): WorkspacePaneState => ({
+  // Ids follow the first tab, so the two panes of a layout differ and a pane keeps its id across renders.
+  id: `pane-${tabs[0]?.key ?? 'empty'}`,
   tabs,
   activeTabKey: tabs[0]?.key ?? null,
   mru: tabs[0] ? [tabs[0].key] : [],
@@ -200,8 +202,9 @@ test('unsplit, a conversation dropped on the right half splits and opens there a
   const drop = fireDrag(zone('left', 'right'), 'drop', transfer);
 
   assert.equal(drop.defaultPrevented, true, 'nothing underneath gets the drop');
+  // The row's title travels along, so a conversation the loaded pages lack still has one in its tab and header.
   assert.deepEqual(vi.mocked(actions.openSession).mock.calls, [[
-    { id: 'session-row', __projectId: 'alpha', __provider: 'claude' },
+    { id: 'session-row', __projectId: 'alpha', __provider: 'claude', summary: 'From the sidebar' },
     { target: 'right', preview: false },
   ]]);
   assert.equal(isOverlayShown(), false, 'the zones go away after the drop');
@@ -211,7 +214,7 @@ test('unsplit, a conversation dropped on the right half splits and opens there a
   assert.deepEqual(vi.mocked(actions.openSession).mock.calls[1][1], { target: 'left', preview: false });
 });
 
-test('the zones go when the drag leaves the panes or ends, and stay while it moves between them', () => {
+test('the zones go when the drag leaves the panes or ends, and stay while it moves between them', async () => {
   setLayout({ left: makePane([makeTab('a1')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
   renderRegion();
   const transfer = rowTransfer(ROW_PAYLOAD);
@@ -225,7 +228,30 @@ test('the zones go when the drag leaves the panes or ends, and stay while it mov
 
   fireDrag(group(), 'dragEnter', transfer);
   fireEvent.dragEnd(document.body);
+  // Cleared on the next task, once the drag's events have all been handed out.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   assert.equal(isOverlayShown(), false, 'a cancelled drag clears them');
+});
+
+test('a drop clears the zones only after the next task, so a zone still gets the drop a browser hands it', async () => {
+  setLayout({ left: makePane([makeTab('a1')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  renderRegion();
+  fireDrag(group(), 'dragEnter', rowTransfer(ROW_PAYLOAD));
+
+  // A browser runs the window's capture listener first, then microtasks (where React commits),
+  // then hands the drop to the zone. Dispatched outside act, as a browser does it.
+  window.dispatchEvent(new Event('drop'));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  assert.equal(isOverlayShown(), true, 'the zones outlast the microtasks between listeners');
+
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(isOverlayShown(), false, 'and go on the next task');
 });
 
 test('a tab dropped on the other pane moves there, with Alt it is copied, and on its own pane nothing happens', () => {
@@ -308,7 +334,7 @@ test('on a tab bar a dragged tab lands at the caret, and a sidebar conversation 
 
   fireDrag(bar('right'), 'drop', rowTransfer(ROW_PAYLOAD), { clientX: 10 });
   assert.deepEqual(vi.mocked(actions.openSession).mock.calls, [[
-    { id: 'session-row', __projectId: 'alpha', __provider: 'claude' },
+    { id: 'session-row', __projectId: 'alpha', __provider: 'claude', summary: 'From the sidebar' },
     { target: 'right', preview: false },
   ]]);
 });
@@ -344,4 +370,19 @@ test('side by side each pane offers its own side; collapsed the visible pane off
   renderRegion(false);
   fireDrag(group(), 'dragEnter', transfer);
   assert.deepEqual(zonesIn('left'), ['left:Open here'], 'no room to split, no right zone');
+});
+
+test('a conversation dragged from the sidebar over a tab bar gets no insertion caret; only a dragged tab lands at a position', () => {
+  setLayout({ left: makePane([makeTab('a1'), makeTab('a2')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  renderRegion();
+
+  const row = rowTransfer(ROW_PAYLOAD);
+  const over = fireDrag(bar('left'), 'dragOver', row, { clientX: 500 });
+  assert.equal(over.defaultPrevented, true, 'the bar still takes the drop');
+  assert.equal(document.querySelector('[data-drop-caret]') === null, true, 'no caret promising a position the open will not honour');
+
+  const tabDrag = makeDataTransfer();
+  fireDrag(within(bar('left')).getByRole('tab', { name: /Chat a1/ }), 'dragStart', tabDrag);
+  fireDrag(bar('left'), 'dragOver', tabDrag, { clientX: 500 });
+  assert.equal(document.querySelector('[data-drop-caret]') !== null, true);
 });

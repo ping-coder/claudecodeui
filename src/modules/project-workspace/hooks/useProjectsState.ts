@@ -571,6 +571,8 @@ export function useProjectsState({
     visibleSessionIds,
     fallbackProject,
     recordBrowsedProject,
+    setCanShowBothPanes,
+    setPaneEditorUnsaved,
   } = useWorkspaceNavigation({
     workspace,
     sessionId,
@@ -699,7 +701,7 @@ export function useProjectsState({
       // active here (e.g. edited from another client or the CLI): the panes
       // showing it reload their messages.
       if (visibleSessionIdsRef.current.has(upsert.sessionId) && !isSessionProcessingRef.current(upsert.sessionId)) {
-        commit({ type: 'noteExternalUpdate', sessionId: upsert.sessionId });
+        commit({ type: 'noteExternalUpdate', sessionId: upsert.sessionId }, 'replace', { origin: 'sync' });
       } else {
         markSessionAttention(upsert.sessionId);
       }
@@ -751,7 +753,7 @@ export function useProjectsState({
       // Tabs still on the provider-native id move to the canonical one, and so
       // does the URL when the focused tab was one of them — by replace, because
       // the alias was never a page of its own.
-      commit({ type: 'replaceSessionId', fromId: aliasSessionId, toId: upsert.sessionId }, 'replace');
+      commit({ type: 'replaceSessionId', fromId: aliasSessionId, toId: upsert.sessionId }, 'replace', { origin: 'sync' });
       const canonicalSession: ProjectSession = {
         ...upsert.session,
         id: upsert.sessionId,
@@ -762,7 +764,7 @@ export function useProjectsState({
       if (!canonicalSession.summary?.trim()) {
         delete canonicalSession.summary;
       }
-      commit({ type: 'patchSession', sessionId: upsert.sessionId, patch: canonicalSession });
+      commit({ type: 'patchSession', sessionId: upsert.sessionId, patch: canonicalSession }, 'replace', { origin: 'sync' });
     };
 
     return subscribe(handleEvent);
@@ -812,7 +814,7 @@ export function useProjectsState({
       for (const openSessionId of openSessionIds) {
         const refreshed = findLoadedSession(openSessionId, mergedProjects);
         if (refreshed) {
-          commit({ type: 'patchSession', sessionId: openSessionId, patch: refreshed.session });
+          commit({ type: 'patchSession', sessionId: openSessionId, patch: refreshed.session }, 'replace', { origin: 'sync' });
         }
       }
     } catch (error) {
@@ -977,12 +979,27 @@ export function useProjectsState({
 
   const focusedTabKey = getPane(layout, layout.focusedSide)?.activeTabKey ?? null;
 
-  /** Switches the focused tab's view as a user action (a preview becomes a kept tab); no-op for an empty pane. */
+  // The command state's project (focused pane's, else the fallback), read when setActiveTab runs.
+  const commandProjectRef = useRef<Project | null>(selectedProject ?? fallbackProject);
+  useLayoutEffect(() => {
+    commandProjectRef.current = selectedProject ?? fallbackProject;
+  });
+
+  /**
+   * Switches the focused tab's view as a user action (a preview becomes a kept tab). A pane that shows
+   * nothing (empty, or a conversation that is gone) opens a new chat in the command project on that view
+   * instead, so the palette's Navigate items and the quick settings act there too.
+   */
   const setActiveTab = useCallback((view: AppTab) => {
     const current = layoutRef.current;
     const tab = getActiveTab(getPane(current, current.focusedSide));
-    if (tab) {
+    if (tab && !tab.isMissing) {
       actions.setTabView(current.focusedSide, tab.key, view, { pin: true });
+      return;
+    }
+    const project = commandProjectRef.current;
+    if (project) {
+      actions.openNewSession(project, { target: current.focusedSide, view });
     }
   }, [actions, layoutRef]);
 
@@ -1014,6 +1031,8 @@ export function useProjectsState({
     fallbackProject,
     sessionPlacements,
     visibleSessionIds,
+    setCanShowBothPanes,
+    setPaneEditorUnsaved,
     /** Focused pane's project; null for an empty pane. */
     selectedProject,
     /** Focused pane's session; null for a new chat or an empty pane. */

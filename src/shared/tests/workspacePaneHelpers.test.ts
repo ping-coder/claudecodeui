@@ -52,11 +52,11 @@ test('without any title a missing session says so and others get the generic ses
 
 const renderPanes = () => {
   document.body.innerHTML = `
-    <div data-workspace-pane="left" tabindex="-1">
+    <div data-workspace-pane="left">
       <button type="button" data-test="inside">inside</button>
       <textarea data-slot="prompt-input-textarea"></textarea>
     </div>
-    <div data-workspace-pane="right" tabindex="-1"></div>
+    <div data-workspace-pane="right"></div>
     <button type="button" data-test="outside">outside</button>
   `;
   const select = (selector: string) => document.querySelector<HTMLElement>(selector) as HTMLElement;

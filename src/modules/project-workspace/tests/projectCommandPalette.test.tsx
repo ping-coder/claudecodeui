@@ -100,6 +100,7 @@ const createTab = (key: string, sessionId: string | null, overrides: Partial<Wor
 });
 
 const createPane = (tabs: WorkspaceSessionTab[], activeTabKey: string | null): WorkspacePaneState => ({
+  id: `pane-${tabs[0]?.key ?? 'empty'}`,
   tabs,
   activeTabKey,
   mru: activeTabKey ? [activeTabKey, ...tabs.map((tab) => tab.key).filter((key) => key !== activeTabKey)] : [],
@@ -122,11 +123,11 @@ const createActions = (): WorkspaceLayoutActions => ({
   closeTabsToRight: vi.fn(),
   closeAllTabs: vi.fn(),
   pinTab: vi.fn(),
-  moveTab: vi.fn((from, tabKey, to) => dispatch({ type: 'move', from, tabKey, to, newTabKey: 'tab-copy' })),
+  moveTab: vi.fn((from, tabKey, to) => dispatch({ type: 'move', from, tabKey, to, newTabKey: 'tab-copy', newPaneId: 'pane-moved' })),
   setTabView: vi.fn(),
   focusPane: vi.fn((side) => dispatch({ type: 'focus', side })),
   split: vi.fn(),
-  toggleSplit: vi.fn(() => dispatch(layoutState.right ? { type: 'closePane', side: 'right' } : { type: 'split' })),
+  toggleSplit: vi.fn(() => dispatch(layoutState.right ? { type: 'merge' } : { type: 'split', newPaneId: 'pane-split' })),
   closePane: vi.fn((side) => dispatch({ type: 'closePane', side })),
   setSplitRatio: vi.fn(),
 });

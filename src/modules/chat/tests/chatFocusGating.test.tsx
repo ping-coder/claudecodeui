@@ -11,6 +11,7 @@ import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { ChatInstancesProvider } from '@/modules/chat/context/ChatInstancesContext';
 import { SessionProtectionProvider, useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
+import { ActionMenu } from '@/shared/ui';
 import type { ChatMessage, NormalizedMessage, Project, ProjectSession, WorkspacePaneSide } from '@/shared/types';
 
 /**
@@ -212,6 +213,91 @@ describe('Esc', () => {
     await workspace.rerender({ focused: false }, { focused: true, isActive: false });
     fireEvent.keyDown(document, { key: 'Escape' });
     assert.deepEqual(page.aborts, ['session-a', 'session-b']);
+  });
+
+  it('closes an open menu without stopping the run, as a menu or dialog owns Escape', async () => {
+    await renderWorkspace({ focused: true }, { focused: false });
+    act(() => {
+      sessionProtection.markSessionProcessing?.('session-a');
+    });
+    // The pane tab bar's "Pane actions" and "All tabs" are this shared menu.
+    const menu = render(
+      <ActionMenu label="Pane actions" items={[{ key: 'close', label: 'Close tab', onSelect: () => undefined }]} />,
+    );
+    fireEvent.click(menu.getByRole('button', { name: 'Pane actions' }));
+
+    fireEvent.keyDown(menu.getByRole('menuitem', { name: 'Close tab' }), { key: 'Escape' });
+
+    assert.equal(menu.queryByRole('menu') === null, true, 'the menu closed');
+    assert.deepEqual(page.aborts, []);
+
+    // With the menu gone, Escape is the run's again; so too after a modal dialog closes.
+    const dialog = document.body.appendChild(document.createElement('div'));
+    try {
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      fireEvent.keyDown(document, { key: 'Escape' });
+      assert.deepEqual(page.aborts, []);
+    } finally {
+      dialog.remove();
+    }
+    fireEvent.keyDown(document, { key: 'Escape' });
+    assert.deepEqual(page.aborts, ['session-a']);
+  });
+
+  describe('in the workspace\'s fullscreen, which holds the key', () => {
+    let now = 0;
+    const secureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+
+    beforeEach(() => {
+      // Chromium on a secure origin: the root fullscreen locked Escape (useImmersiveMode).
+      Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => document.documentElement });
+      Object.defineProperty(navigator, 'keyboard', { configurable: true, value: { lock: async () => undefined } });
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'fullscreenElement');
+      Reflect.deleteProperty(navigator, 'keyboard');
+      Reflect.deleteProperty(window, 'isSecureContext');
+      if (secureContext) {
+        Object.defineProperty(window, 'isSecureContext', secureContext);
+      }
+    });
+
+    const renderRunningPane = async () => {
+      await renderWorkspace({ focused: true }, { focused: false });
+      act(() => {
+        sessionProtection.markSessionProcessing?.('session-a');
+      });
+    };
+
+    it('stops the run on a short press, once it is released', async () => {
+      await renderRunningPane();
+
+      now = 1_000;
+      fireEvent.keyDown(document, { key: 'Escape' });
+      assert.deepEqual(page.aborts, [], 'the press may still be the start of a hold');
+
+      now = 1_120;
+      fireEvent.keyUp(document, { key: 'Escape' });
+      assert.deepEqual(page.aborts, ['session-a']);
+    });
+
+    it('leaves the run going when Escape is held to leave fullscreen', async () => {
+      await renderRunningPane();
+
+      now = 1_000;
+      fireEvent.keyDown(document, { key: 'Escape' });
+      // The held key repeats; no handler below (the editor's Escape) takes a repeat either.
+      now = 1_600;
+      assert.equal(fireEvent.keyDown(document, { key: 'Escape', repeat: true }), false, 'the repeat was claimed');
+      now = 3_000;
+      fireEvent.keyUp(document, { key: 'Escape' });
+
+      assert.deepEqual(page.aborts, []);
+    });
   });
 });
 

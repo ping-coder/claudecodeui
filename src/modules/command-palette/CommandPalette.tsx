@@ -38,7 +38,13 @@ import {
 } from '@/shared/ui';
 import { useTheme } from '@/shared/context/ThemeContext';
 import { usePaletteOps } from '@/modules/command-palette/context/PaletteOpsContext';
-import { SETTINGS_MAIN_TABS } from '@/shared/constants';
+import {
+  SETTINGS_MAIN_TABS,
+  WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
+  WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
+  WORKSPACE_FULLSCREEN_SHORTCUT,
+  WORKSPACE_SPLIT_SHORTCUT,
+} from '@/shared/constants';
 import type { AppTab, CommandPaletteWorkspaceCommands, Project, SessionOpenOptions } from '@/shared/types';
 import { formatShortcut } from '@/shared/utils';
 import { useSessionsSource } from '@/modules/command-palette/hooks/useSessionsSource';
@@ -61,11 +67,6 @@ type CommandPaletteProps = {
   workspace?: CommandPaletteWorkspaceCommands;
 };
 
-/** Workspace shortcuts listed beside their commands. project-workspace handles the keys; the palette only shows them. */
-const SPLIT_SHORTCUT = ['mod', '\\'] as const;
-const FOCUS_LEFT_PANE_SHORTCUT = ['mod', '1'] as const;
-const FOCUS_RIGHT_PANE_SHORTCUT = ['mod', '2'] as const;
-const FULLSCREEN_SHORTCUT = ['mod', 'shift', 'enter'] as const;
 /** Picks a session result for the other pane instead of the focused one. Handled here, inside the palette. */
 const OPEN_ON_OTHER_SIDE_SHORTCUT = ['mod', 'enter'] as const;
 
@@ -478,7 +479,7 @@ function WorkspaceCommandGroup({ workspace, run }: WorkspaceCommandGroupProps) {
         {isSplitUnavailable && (
           <span className="text-xs text-muted-foreground">{t('workspace.splitDisabled')}</span>
         )}
-        <ShortcutHint keys={SPLIT_SHORTCUT} />
+        <ShortcutHint keys={WORKSPACE_SPLIT_SHORTCUT} />
       </CommandItem>
       {isSplit && (
         <CommandItem
@@ -487,7 +488,7 @@ function WorkspaceCommandGroup({ workspace, run }: WorkspaceCommandGroupProps) {
         >
           <PanelLeft className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="flex-1">{t('workspace.focusLeftPane')}</span>
-          <ShortcutHint keys={FOCUS_LEFT_PANE_SHORTCUT} />
+          <ShortcutHint keys={WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT} />
         </CommandItem>
       )}
       {isSplit && (
@@ -497,7 +498,7 @@ function WorkspaceCommandGroup({ workspace, run }: WorkspaceCommandGroupProps) {
         >
           <PanelRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="flex-1">{t('workspace.focusRightPane')}</span>
-          <ShortcutHint keys={FOCUS_RIGHT_PANE_SHORTCUT} />
+          <ShortcutHint keys={WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT} />
         </CommandItem>
       )}
       {canMoveTab && (
@@ -533,7 +534,7 @@ function WorkspaceCommandGroup({ workspace, run }: WorkspaceCommandGroupProps) {
       >
         <FullscreenIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
         <span className="flex-1">{fullscreenLabel}</span>
-        <ShortcutHint keys={FULLSCREEN_SHORTCUT} />
+        <ShortcutHint keys={WORKSPACE_FULLSCREEN_SHORTCUT} />
       </CommandItem>
     </CommandGroup>
   );

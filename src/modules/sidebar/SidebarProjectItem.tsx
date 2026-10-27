@@ -8,7 +8,6 @@ import type {
   LLMProvider,
   MCPServerStatus,
   Project,
-  ProjectSession,
   SessionOpenOptions,
   SessionPanePlacement,
   SessionWithProvider,
@@ -21,8 +20,13 @@ import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
 
 type SidebarProjectItemProps = {
   project: Project;
-  selectedProject: Project | null;
-  selectedSession: ProjectSession | null;
+  /**
+   * This row is the focused pane's project. Resolved for the row like the renames (and so is
+   * `selectedSessionId`): a focus switch changes props only on the rows whose highlight it moves.
+   */
+  isSelected: boolean;
+  /** The focused pane's session while this is the focused pane's project, else null. */
+  selectedSessionId: string | null;
   isExpanded: boolean;
   isDeleting: boolean;
   isStarred: boolean;
@@ -66,7 +70,7 @@ type SidebarProjectItemProps = {
   onDeleteSelectedSessions: (sessionIds: string[]) => void;
   /**
    * The list's split targeting, resolved to what this row's sessions need and nothing that
-   * follows the focused pane, so a focus switch leaves every project row's props alone.
+   * follows the focused pane, so a focus switch leaves these props alone on every row.
    */
   canTargetSides: boolean;
   isWorkspaceSplit: boolean;
@@ -83,8 +87,8 @@ const getSessionCountDisplay = (project: Project, sessions: SessionWithProvider[
 /** Rendered by SidebarProjectList for one project row, including its expand, rename, star and delete controls. */
 function SidebarProjectItem({
   project,
-  selectedProject,
-  selectedSession,
+  isSelected,
+  selectedSessionId,
   isExpanded,
   isDeleting,
   isStarred,
@@ -127,9 +131,6 @@ function SidebarProjectItem({
   panePlacements,
   t,
 }: SidebarProjectItemProps) {
-  // Project identity is tracked by the DB-assigned `projectId` everywhere
-  // after the projectName → projectId migration.
-  const isSelected = selectedProject?.projectId === project.projectId;
   const totalSessionCount = Number(project.sessionMeta?.total ?? sessions.length);
   const sessionCountDisplay = getSessionCountDisplay(project, sessions);
   const sessionCountLabel = `${sessionCountDisplay} session${totalSessionCount === 1 ? '' : 's'}`;
@@ -168,7 +169,7 @@ function SidebarProjectItem({
   };
 
   const selectAndToggleProject = () => {
-    if (selectedProject?.projectId !== project.projectId) {
+    if (!isSelected) {
       onProjectSelect(project);
     }
 
@@ -464,7 +465,7 @@ function SidebarProjectItem({
         project={project}
         isExpanded={isExpanded}
         sessions={sessions}
-        selectedSession={selectedSession}
+        selectedSessionId={selectedSessionId}
         initialSessionsLoaded={initialSessionsLoaded}
         hasMoreSessions={Boolean(project.sessionMeta?.hasMore)}
         isLoadingMoreSessions={isLoadingMoreSessions}

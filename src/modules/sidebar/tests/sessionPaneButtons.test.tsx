@@ -289,7 +289,7 @@ const renderRow = (props: { isWorkspaceSplit: boolean; panePlacement: SessionPan
     <SidebarSessionItem
       project={PROJECT}
       session={SESSION}
-      selectedSession={null}
+      isSelected={false}
       isProcessing={false}
       hasBackgroundWork={false}
       needsAttention={false}

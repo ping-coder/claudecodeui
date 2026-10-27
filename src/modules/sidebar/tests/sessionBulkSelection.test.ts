@@ -96,7 +96,7 @@ const renderSessions = (overrides: ListOverrides = {}) =>
       project: PROJECT,
       isExpanded: true,
       sessions: SESSIONS,
-      selectedSession: null,
+      selectedSessionId: null,
       initialSessionsLoaded: true,
       hasMoreSessions: false,
       isLoadingMoreSessions: false,

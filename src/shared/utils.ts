@@ -427,6 +427,19 @@ export const formatShortcut = (keys: readonly string[]): string => {
 
 //----------------- WORKSPACE PANES ------------
 
+/** The side across from `side`. Used wherever the split workspace acts on "the other pane". */
+export const getOtherPaneSide = (side: WorkspacePaneSide): WorkspacePaneSide => (side === 'left' ? 'right' : 'left');
+
+/**
+ * The provider a session object belongs to: its `__provider`, else its `provider`, else 'claude' (blank
+ * values count as missing). The one rule project-workspace uses when it puts a session in a tab, resolves
+ * a session id, or lists recent conversations.
+ */
+export const readSessionProvider = (session: ProjectSession): LLMProvider => {
+  const provider = session.__provider ?? session.provider;
+  return typeof provider === 'string' && provider.trim() ? provider as LLMProvider : 'claude';
+};
+
 /** MIME type a dragged sidebar row or pane tab carries its SessionDragPayload under. Private to the session drag helpers. */
 const SESSION_DRAG_MIME = 'application/x-cloudcli-session';
 
@@ -548,11 +561,34 @@ export const resolvePaneTabTitle = (
 };
 
 /**
- * Puts DOM focus in a workspace pane: the composer on the Chat view, otherwise the pane root (pane DOM
- * contract: data-workspace-pane, data-slot="prompt-input-textarea"). Does nothing when the pane is not
- * on the page; keepFocusInside also leaves focus alone when it is already somewhere inside the pane.
- * Callers run it once the layout change has rendered: project-workspace's useWorkspaceShortcuts
- * (Mod+1/2, always moves) and ProjectCommandPalette (pane commands, keepFocusInside).
+ * Lends a pane root the tabindex programmatic focus needs, focuses it, and takes the tabindex back as
+ * soon as focus leaves or a pointer presses inside: a root that stayed focusable would take the focus
+ * of every click on plain text in the pane, and keyboard scrolling of the scroll area under it with it.
+ * Private to `focusWorkspacePaneElement`.
+ */
+const focusPaneRoot = (pane: HTMLElement): void => {
+  if (!pane.hasAttribute('tabindex')) {
+    pane.setAttribute('tabindex', '-1');
+    const release = () => {
+      pane.removeAttribute('tabindex');
+      pane.removeEventListener('blur', release);
+      pane.removeEventListener('pointerdown', release, true);
+    };
+    pane.addEventListener('blur', release);
+    // Capture, before the press's own focus step, so the click focuses what it would without the root.
+    pane.addEventListener('pointerdown', release, true);
+  }
+  pane.focus();
+};
+
+/**
+ * Puts DOM focus in a workspace pane: the composer on the Chat view, otherwise (or when the composer
+ * cannot take focus, e.g. hidden behind an editor expanded over the chat) the pane root, which is only
+ * made focusable for that moment (pane DOM contract: data-workspace-pane, data-slot="prompt-input-textarea").
+ * Does nothing when the pane is not on the page; keepFocusInside also leaves focus alone when it is
+ * already somewhere inside the pane. Callers run it once the layout change has rendered: project-workspace's
+ * useWorkspaceShortcuts (Mod+1/2 always move; after Mod+\ focus already inside the pane stays) and
+ * ProjectCommandPalette (pane commands, keepFocusInside).
  */
 export const focusWorkspacePaneElement = (
   side: WorkspacePaneSide,
@@ -564,5 +600,12 @@ export const focusWorkspacePaneElement = (
     return;
   }
   const composer = view === 'chat' ? pane.querySelector<HTMLElement>('[data-slot="prompt-input-textarea"]') : null;
-  (composer ?? pane).focus();
+  if (composer) {
+    composer.focus();
+    // focus() does nothing on a hidden or disabled field; the pane then takes focus itself.
+    if (document.activeElement === composer) {
+      return;
+    }
+  }
+  focusPaneRoot(pane);
 };

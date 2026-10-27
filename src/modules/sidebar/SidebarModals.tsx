@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
@@ -74,6 +74,29 @@ export default function SidebarModals({
     [projects],
   );
 
+  // Read by the Escape listener, which stays put while the parent hands over a new callback each render.
+  const cancelDeletionRef = useRef(onCancelDeletion);
+  useEffect(() => {
+    cancelDeletionRef.current = onCancelDeletion;
+  }, [onCancelDeletion]);
+
+  // Escape cancels a delete confirmation, as it closes the app's other modals. Window capture, so
+  // the chat's abort never hears it; the confirmations carry the Escape-layer marker, which is what
+  // makes the code editor, the workspace shortcuts and the immersive sidebar drawer behind them
+  // leave the key alone.
+  const isDeletionPending = pendingDeletion !== null;
+  useEffect(() => {
+    if (!isDeletionPending) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      cancelDeletionRef.current();
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [isDeletionPending]);
+
   return (
     <>
       {showNewProject &&
@@ -98,7 +121,7 @@ export default function SidebarModals({
 
       {pendingDeletion?.kind === 'project' &&
         ReactDOM.createPortal(
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div data-escape-layer className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
             <div className="w-full max-w-md overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
               <div className="p-6">
                 <div className="flex items-start gap-4">
@@ -152,7 +175,7 @@ export default function SidebarModals({
 
       {pendingDeletion?.kind === 'session' &&
         ReactDOM.createPortal(
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div data-escape-layer className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
             <div className="w-full max-w-md overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
               <div className="p-6">
                 <div className="flex items-start gap-4">
@@ -208,7 +231,7 @@ export default function SidebarModals({
 
       {pendingDeletion?.kind === 'sessions' &&
         ReactDOM.createPortal(
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div data-escape-layer className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
             <div className="w-full max-w-md overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
               <div className="p-6">
                 <div className="flex items-start gap-4">

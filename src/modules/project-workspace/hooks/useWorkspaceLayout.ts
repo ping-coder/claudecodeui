@@ -32,10 +32,14 @@ const readStoredLayout = (store: LayoutStore): string | null => {
   }
 };
 
-/** Writes both copies: sessionStorage is this browser tab's own, localStorage the seed new pages start from. */
-const writeStoredLayout = (layout: WorkspaceLayout): void => {
+/**
+ * Writes this browser tab's own copy (sessionStorage) and, when `includeSeed`, the seed new pages start
+ * from (localStorage).
+ */
+const writeStoredLayout = (layout: WorkspaceLayout, includeSeed: boolean): void => {
   const raw = JSON.stringify(serializeLayout(layout));
-  for (const store of ['sessionStorage', 'localStorage'] as const) {
+  const stores: LayoutStore[] = includeSeed ? ['sessionStorage', 'localStorage'] : ['sessionStorage'];
+  for (const store of stores) {
     try {
       window[store].setItem(WORKSPACE_LAYOUT_STORAGE_KEY, raw);
     } catch {
@@ -71,6 +75,15 @@ const createTabKey = (): string => {
   return `tab-${Date.now().toString(36)}-${createdTabKeyCount.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 };
 
+/** Pane ids made in this page; never repeated, so a pane created later never takes over an earlier pane's chat. */
+let createdPaneIdCount = 0;
+
+/** An id for a pane a layout change may create (WorkspacePaneState.id); never equal to the ids a page starts with. */
+const createPaneId = (): string => {
+  createdPaneIdCount += 1;
+  return `pane-new-${createdPaneIdCount.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+};
+
 /**
  * Hands the pre-split app-wide view to the first tab an empty layout creates, once: the key is
  * deleted on read, valid or not.
@@ -99,15 +112,23 @@ export function useWorkspaceLayout({ initialSessionId }: UseWorkspaceLayoutArgs)
   // (a click and a websocket frame, say) each build on the previous result rather than on the last render.
   const layoutRef = useRef(layout);
   // Whether the layout changed since it was last written. The layout a page starts with is never
-  // written back, so merely opening a deep link in a new browser tab leaves the shared seed alone.
+  // written back.
   const hasUnsavedChangesRef = useRef(false);
+  // Whether this page may write the localStorage seed: only once the user changed the layout. What the
+  // page does on its own (opening the URL's session, restoring rows, resolving tabs) stays in its own
+  // sessionStorage, so a deep link opened in a new browser tab leaves the shared seed alone.
+  const isSeedWritableRef = useRef(false);
 
-  const setLayout = useCallback((next: WorkspaceLayout) => {
+  /** `byUser: false` marks a change the page made on its own; it does not unlock the seed. */
+  const setLayout = useCallback((next: WorkspaceLayout, { byUser = true }: { byUser?: boolean } = {}) => {
     if (next === layoutRef.current) {
       return;
     }
     layoutRef.current = next;
     hasUnsavedChangesRef.current = true;
+    if (byUser) {
+      isSeedWritableRef.current = true;
+    }
     setLayoutState(next);
   }, []);
 
@@ -117,7 +138,7 @@ export function useWorkspaceLayout({ initialSessionId }: UseWorkspaceLayoutArgs)
     }
     const timer = window.setTimeout(() => {
       hasUnsavedChangesRef.current = false;
-      writeStoredLayout(layoutRef.current);
+      writeStoredLayout(layoutRef.current, isSeedWritableRef.current);
     }, LAYOUT_WRITE_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [layout]);
@@ -129,11 +150,11 @@ export function useWorkspaceLayout({ initialSessionId }: UseWorkspaceLayoutArgs)
         return;
       }
       hasUnsavedChangesRef.current = false;
-      writeStoredLayout(layoutRef.current);
+      writeStoredLayout(layoutRef.current, isSeedWritableRef.current);
     };
     window.addEventListener('pagehide', flush);
     return () => window.removeEventListener('pagehide', flush);
   }, []);
 
-  return { layout, layoutRef, setLayout, createTabKey, takeLegacyView };
+  return { layout, layoutRef, setLayout, createTabKey, createPaneId, takeLegacyView };
 }

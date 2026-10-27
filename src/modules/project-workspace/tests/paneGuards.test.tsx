@@ -103,6 +103,8 @@ const makeTab = (key: string, project: Project, view: AppTab, overrides: Partial
 };
 
 const makePane = (tabs: WorkspaceSessionTab[], activeTabKey = tabs[0]?.key ?? null): WorkspacePaneState => ({
+  // Ids follow the first tab, so the two panes of a layout differ and a pane keeps its id across renders.
+  id: `pane-${tabs[0]?.key ?? 'empty'}`,
   tabs,
   activeTabKey,
   mru: activeTabKey ? [activeTabKey] : [],

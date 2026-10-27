@@ -325,7 +325,8 @@
     "paletteGroup": "工作区",
     "openTabsGroup": "已打开标签",
     "resizePanes": "调整窗格宽度",
-    "chooseProject": "选择项目"
+    "chooseProject": "选择项目",
+    "sidebarDrawer": "侧栏"
   },
   "commandPalette": {
     "title": "命令面板",

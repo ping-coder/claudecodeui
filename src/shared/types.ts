@@ -1489,6 +1489,18 @@ export type ProjectWorkspaceShellProps = RealtimeProps & {
   navigate: NavigateFunction;
 };
 
+/**
+ * Chromium's Keyboard Lock API, which TypeScript's DOM types do not include. Read by
+ * project-workspace's useImmersiveMode (locks Escape in full screen) and chat's ChatInterface
+ * (tells whether Escape is locked before stopping a turn on it).
+ */
+export type KeyboardLockNavigator = Navigator & {
+  keyboard?: {
+    lock?: (keyCodes?: string[]) => Promise<void>;
+    unlock?: () => void;
+  };
+};
+
 /** One side of the split workspace; 'right' exists only while the workspace is split. */
 export type WorkspacePaneSide = 'left' | 'right';
 
@@ -1512,6 +1524,12 @@ export type SessionOpenOptions = {
   ownerProject?: Project | null;
   /** How the URL follows when the focused session changes. Default 'push'. */
   history?: 'push' | 'replace';
+  /**
+   * The open is the late result of something that finished on its own (a fork), not a click the user
+   * is waiting on: the focused pane, a pending open and the phone's sidebar drawer are left alone, and
+   * the URL follows only when the target pane is the focused one. Default false.
+   */
+  inBackground?: boolean;
 };
 
 /** A session, or the project's one unsent new chat, open as a tab in a pane. `session`/`isMissing` are runtime-only, never persisted. */
@@ -1536,6 +1554,13 @@ export type WorkspaceSessionTab = {
 
 /** One pane: its tabs, the active one, recency order and the runtime counters fed to its single ChatInterface. */
 export type WorkspacePaneState = {
+  /**
+   * Runtime identity of the pane, and the React key of its WorkspacePane: given when the pane is
+   * created and kept when the pane moves into the left slot (the left one closing, a merge keeping
+   * the focused pane), so the pane's chat and editor (with any unsaved buffer) move with it. Never
+   * persisted; a restored layout gets fresh ids.
+   */
+  id: string;
   tabs: WorkspaceSessionTab[];
   activeTabKey: string | null;
   /** Tab keys, most recently active first; picks the tab shown after a close. */
@@ -1568,8 +1593,12 @@ export type WorkspaceLayoutActions = {
   openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
   /** Opens or reveals the project's single unsent new chat; an explicit side moves an existing draft there. */
   openNewSession: (project: Project, options?: SessionOpenOptions) => void;
-  /** First send created a session: upserts it into `projects` and converts that project's draft tab in place (URL replace). Layout no-op when the draft was closed meanwhile. */
-  establishDraft: (sessionId: string, context: SessionEstablishedContext) => void;
+  /**
+   * First send created a session: upserts it into `projects` and converts the draft tab that sent it in
+   * place (URL replace). `draftTabKey` names that tab (WorkspacePane binds it at send time); without it
+   * the project's draft is used. Layout no-op when that draft was closed meanwhile.
+   */
+  establishDraft: (sessionId: string, context: SessionEstablishedContext, options?: { draftTabKey?: string }) => void;
   /** Activates a tab and focuses its pane (URL replace). */
   activateTab: (side: WorkspacePaneSide, tabKey: string) => void;
   /** MRU fallback; an emptied right pane closes; an emptied left pane is replaced by the right one. */
@@ -1590,7 +1619,11 @@ export type WorkspaceLayoutActions = {
   focusPane: (side: WorkspacePaneSide) => void;
   /** Unsplit: adds an empty right pane and focuses it. Split: focuses the other pane. */
   split: () => void;
-  /** Split <-> merge; merging appends the right pane's tabs to the left (deduped), nothing is closed. */
+  /**
+   * Split <-> merge. Merging appends the right pane's tabs to the left ones (deduped, nothing is closed)
+   * and keeps the focused pane's active tab and instance (its chat and editor); an empty focused pane
+   * gives way to the other one.
+   */
   toggleSplit: () => void;
   /** Closes one side, merging its tabs into the other. */
   closePane: (side: WorkspacePaneSide) => void;

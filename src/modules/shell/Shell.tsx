@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import '@xterm/xterm/css/xterm.css';
 import { api } from '@/shared/api';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import type { Project, ProjectSession } from '@/shared/types';
 import { useShellRuntime } from '@/modules/shell/hooks/useShellRuntime';
 import { sendSocketMessage } from '@/modules/shell/utils/socket';
@@ -88,6 +89,16 @@ export default function Shell({
   isActive = true,
 }: ShellProps) {
   const { t } = useTranslation('chat');
+  // Only the focused pane takes DOM focus. Read when the terminal connects,
+  // not followed: a terminal in the other pane that connects or reconnects
+  // (the socket dropped, the other pane handed its terminal over, a layout
+  // came back on reload) must not pull the caret out of what the user is
+  // typing, and a pane focused by a click keeps the caret where it landed.
+  const { isFocusedPane } = useWorkspacePane();
+  const isFocusedPaneRef = useRef(isFocusedPane);
+  useLayoutEffect(() => {
+    isFocusedPaneRef.current = isFocusedPane;
+  }, [isFocusedPane]);
   const [isRestarting, setIsRestarting] = useState(false);
   // Header-toggle choices per CLI. Each CLI starts from its own chat
   // permission setting (see readShellBypassSeed); the toggle only changes this
@@ -267,12 +278,14 @@ export default function Shell({
   }, [isConnected]);
 
   useEffect(() => {
-    if (!isActive || !isInitialized || !isConnected) {
+    if (!isActive || !isInitialized || !isConnected || !isFocusedPaneRef.current) {
       return;
     }
 
     const focusTerminal = () => {
-      terminalRef.current?.focus();
+      if (isFocusedPaneRef.current) {
+        terminalRef.current?.focus();
+      }
     };
 
     const animationFrameId = window.requestAnimationFrame(focusTerminal);

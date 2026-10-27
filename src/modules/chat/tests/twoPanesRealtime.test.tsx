@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 
 import '@/modules/i18n';
+import { ChatInstancesProvider as BarrelChatInstancesProvider } from '@/modules/chat';
 import ChatInterface from '@/modules/chat/ChatInterface';
 import { ChatInstancesProvider, useChatInstanceCoordinator } from '@/modules/chat/context/ChatInstancesContext';
 import {
@@ -244,10 +245,12 @@ const transcript = (side: WorkspacePaneSide) => within(screen.getByTestId(`pane-
   .queryAllByRole('listitem')
   .map((row) => row.textContent);
 
-let nextSeq = 1;
+/** The seq each session's run has reached: the server numbers every run's frames from 1. */
+const runSeqs = new Map<string, number>();
 const delta = (sessionId: string, content: string) => {
-  const seq = nextSeq++;
-  dispatch({ kind: 'stream_delta', id: `delta-${seq}`, sessionId, seq, content });
+  const seq = (runSeqs.get(sessionId) ?? 0) + 1;
+  runSeqs.set(sessionId, seq);
+  dispatch({ kind: 'stream_delta', id: `${sessionId}-delta-${seq}`, sessionId, seq, content });
 };
 
 beforeEach(() => {
@@ -256,7 +259,7 @@ beforeEach(() => {
   page.sounds.title = 0;
   page.sent.length = 0;
   page.history.clear();
-  nextSeq = 1;
+  runSeqs.clear();
   localStorage.clear();
   resetChatDrafts();
   // The transcript pane is a stand-in, so nothing is there to scroll.
@@ -438,6 +441,19 @@ describe('sounds and the title marker', () => {
     assert.deepEqual(page.sounds, { completion: 1, title: 1, notification: 1 });
   });
 
+  it('play again for the next run of the same session that completes', async () => {
+    await renderWorkspace({
+      left: { session: SESSION_A, focused: true },
+      right: { session: SESSION_B, focused: false },
+    });
+
+    dispatch({ kind: 'complete', id: 'run-1-complete', sessionId: 'session-a', seq: 4, success: true });
+    // The next run counts seq from 1 again, under its own ids.
+    dispatch({ kind: 'complete', id: 'run-2-complete', sessionId: 'session-a', seq: 2, success: true });
+
+    assert.deepEqual(page.sounds, { completion: 2, title: 2, notification: 0 });
+  });
+
   it('do not sound again for a prompt the subscribe ack already announced and the replay delivers', async () => {
     await renderWorkspace({
       left: { session: SESSION_A, focused: true },
@@ -600,6 +616,32 @@ describe('the page coordinator', () => {
     assert.equal(left.claimPageEffect('complete:S:9:c1'), true);
     assert.equal(right.claimPageEffect('complete:S:9:c1'), true);
     assert.deepEqual(reporterOf('S'), ['left', 'right']);
+  });
+
+  it('keeps what the page claimed, and its chats, when the provider renders again', () => {
+    // The provider re-renders with the route above it; a registry made anew on a render would
+    // forget the keys claimed so far and sound every effect a second time.
+    function PageAbove({ generation }: { generation: number }) {
+      return (
+        <ChatInstancesProvider>
+          <ChatProbe name="left" view="S" focused={false} render={generation} />
+          <ChatProbe name="right" view="T" focused render={generation} />
+        </ChatInstancesProvider>
+      );
+    }
+    const view = render(<PageAbove generation={0} />);
+    assert.equal(coordinators.get('left')!.claimPageEffect('complete:S:9:c1'), true);
+
+    view.rerender(<PageAbove generation={1} />);
+
+    assert.equal(coordinators.get('right')!.claimPageEffect('complete:S:9:c1'), false);
+    assert.equal(coordinators.get('left')!.statusCheckSentAtRef, coordinators.get('right')!.statusCheckSentAtRef);
+    assert.deepEqual(reporterOf('S'), ['left']);
+    assert.deepEqual(reporterOf('unseen'), ['left']);
+  });
+
+  it('is the provider the chat barrel exports for the workspace route to mount', () => {
+    assert.equal(BarrelChatInstancesProvider, ChatInstancesProvider);
   });
 
   it('keeps a chat\'s place in the election when it renders again on its own', () => {

@@ -4,14 +4,13 @@ import type { TFunction } from 'i18next';
 
 import { PaneSideGlyph } from '@/shared/ui';
 import { cn } from '@/shared/utils';
+import { WORKSPACE_PANE_SIDES } from '@/shared/constants';
 import type { SidebarPaneTargeting, WorkspacePaneSide } from '@/shared/types';
 
 type SidebarPaneTargetBarProps = {
   paneTargeting: SidebarPaneTargeting | null | undefined;
   t: TFunction;
 };
-
-const SIDES: readonly WorkspacePaneSide[] = ['left', 'right'];
 
 /**
  * Rendered by SidebarContent above the Projects, Conversations and Running lists while the
@@ -59,7 +58,7 @@ export default function SidebarPaneTargetBar({ paneTargeting, t }: SidebarPaneTa
         className="flex min-w-0 flex-1 items-center gap-0.5 rounded-lg bg-muted/60 p-0.5"
         onKeyDown={handleKeyDown}
       >
-        {SIDES.map((side) => {
+        {WORKSPACE_PANE_SIDES.map((side) => {
           const isChecked = side === focusedSide;
           return (
             <button

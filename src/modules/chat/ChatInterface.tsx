@@ -11,9 +11,11 @@ import PermissionContext from '@/modules/chat/context/PermissionContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
+import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
 import { buildModelRunOptions } from '@/shared/utils';
 import type {
   ChatMessage,
+  KeyboardLockNavigator,
   Project,
   ProjectSession,
   SessionEstablishedContext,
@@ -54,6 +56,26 @@ type ChatInterfaceProps = {
 };
 
 /**
+ * The longest Escape press that still stops a run while the workspace's
+ * fullscreen holds the key; a longer one is the user holding Escape to leave
+ * fullscreen, as the browser tells them to.
+ */
+const SHORT_ESCAPE_PRESS_MS = 500;
+
+
+/**
+ * Whether the browser holds Escape for the page: the workspace's fullscreen of
+ * the root element locks the key where Keyboard Lock exists (Chromium, secure
+ * origins). A press then reaches the page as it starts and only holding it on
+ * leaves fullscreen, so its start cannot tell the two apart.
+ */
+const isEscapeHeldByFullscreen = (): boolean => (
+  document.fullscreenElement === document.documentElement
+  && window.isSecureContext
+  && typeof (navigator as KeyboardLockNavigator).keyboard?.lock === 'function'
+);
+
+/**
  * Used by the project-workspace module (via the chat barrel) to render each
  * pane's Chat view, one instance per pane that follows the pane's active tab;
  * it owns the session, provider, realtime and composer state that
@@ -91,9 +113,10 @@ function ChatInterface({
 
   const sessionStore = useSessionStore();
   // Highest live `seq` observed per session. Written by the realtime handler
-  // on every sequenced frame, read whenever a `chat.subscribe` is sent so the
-  // server replays only the events this client actually missed. Kept per chat:
-  // a pane opened mid-run needs the replay its own subscribe asks for.
+  // on every sequenced frame of a run this chat follows from its start, read
+  // whenever a `chat.subscribe` is sent so the server replays only the events
+  // this client actually missed. Kept per chat: a pane opened mid-run needs the
+  // replay its own subscribe asks for, whatever the other pane has heard.
   const lastSeqRef = useRef(new Map<string, number>());
 
   // What the page's coordinator reads when it elects a chat for page-wide work:
@@ -350,24 +373,58 @@ function ChatInterface({
 
   // Esc stops the run on screen: only while Chat is the visible view of the
   // focused pane, so another pane's run, or one behind the Files view, is
-  // never stopped by a key meant for something else.
+  // never stopped by a key meant for something else, and never while a menu,
+  // dialog or drawer that owns Escape is open: that Escape closes it alone.
+  // Where the workspace's fullscreen holds the key, a press stops the run when
+  // it is released early, since holding it is how fullscreen is left.
   useEffect(() => {
     if (!canAbortSession || !isActive || !isFocusedPane) {
       return;
     }
 
-    const handleGlobalEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented) {
+    // When the press being held began, while fullscreen holds Escape; null when none is.
+    let heldPressStartedAt: number | null = null;
+
+    const handleEscapeDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      if (event.repeat) {
+        // The rest of a press being timed stays this handler's, as its start did.
+        if (heldPressStartedAt !== null) {
+          event.preventDefault();
+        }
+        return;
+      }
+      heldPressStartedAt = null;
+      if (event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR)) {
         return;
       }
 
       event.preventDefault();
+      if (isEscapeHeldByFullscreen()) {
+        heldPressStartedAt = Date.now();
+        return;
+      }
       handleAbortSession();
     };
 
-    document.addEventListener('keydown', handleGlobalEscape, { capture: true });
+    const handleEscapeUp = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || heldPressStartedAt === null) {
+        return;
+      }
+      const heldForMs = Date.now() - heldPressStartedAt;
+      heldPressStartedAt = null;
+      if (heldForMs < SHORT_ESCAPE_PRESS_MS) {
+        handleAbortSession();
+      }
+    };
+
+    document.addEventListener('keydown', handleEscapeDown, { capture: true });
+    document.addEventListener('keyup', handleEscapeUp, { capture: true });
     return () => {
-      document.removeEventListener('keydown', handleGlobalEscape, { capture: true });
+      document.removeEventListener('keydown', handleEscapeDown, { capture: true });
+      document.removeEventListener('keyup', handleEscapeUp, { capture: true });
     };
   }, [canAbortSession, handleAbortSession, isActive, isFocusedPane]);
 

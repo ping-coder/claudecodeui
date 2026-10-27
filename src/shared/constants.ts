@@ -11,7 +11,15 @@ import {
 } from 'lucide-react';
 import type { ComponentType } from 'react';
 
-import type { FileStatusCode, LLMProvider, McpProvider, McpScope, McpTransport, SettingsMainTab } from '@/shared/types';
+import type {
+  FileStatusCode,
+  LLMProvider,
+  McpProvider,
+  McpScope,
+  McpTransport,
+  SettingsMainTab,
+  WorkspacePaneSide,
+} from '@/shared/types';
 import type { UserPreferenceKey } from '@/shared/userSettings';
 
 /** The four buckets the git changes view sorts working-tree files into. */
@@ -251,14 +259,45 @@ export const PROVIDER_TERMINAL_SIGN_IN_COMMANDS: Partial<Record<LLMProvider, str
  * Layers that own the Escape key while they are open: menus, modal dialogs and anything carrying
  * the app's `data-escape-layer` marker. Keyboard handlers underneath step aside while one matches:
  * code-editor's useEditorKeyboardShortcuts (Escape closing the editor), project-workspace's
- * useWorkspaceShortcuts (the split, pane focus and full-screen shortcuts) and project-workspace's
- * ProjectSidebarRegion (Escape closing the immersive sidebar drawer, which skips its own marker).
+ * useWorkspaceShortcuts (the split, pane focus and full-screen shortcuts, which only step aside for a
+ * layer that owns the whole keyboard: a non-modal dialog such as the immersive sidebar drawer owns
+ * Escape alone), project-workspace's ProjectSidebarRegion (Escape closing that drawer, which skips
+ * its own marker) and chat's ChatInterface (Escape stopping the running turn).
  */
 export const ESCAPE_LAYER_SELECTOR = '[data-escape-layer], [aria-modal="true"], [role="menu"]';
+
+/**
+ * Split or merge the workspace. Like the three shortcuts below it is written in formatShortcut's tokens:
+ * project-workspace's useWorkspaceShortcuts matches the keys it names (by physical key), and its tab
+ * bar tooltips and empty-pane hints show them, so the keys and what the hints say change together.
+ */
+export const WORKSPACE_SPLIT_SHORTCUT = ['mod', '\\'] as const;
+
+/** Focus the left pane while split (see WORKSPACE_SPLIT_SHORTCUT for who reads it). */
+export const WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT = ['mod', '1'] as const;
+
+/** Focus the right pane while split (see WORKSPACE_SPLIT_SHORTCUT for who reads it). */
+export const WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT = ['mod', '2'] as const;
+
+/** Toggle full screen (see WORKSPACE_SPLIT_SHORTCUT for who reads it). */
+export const WORKSPACE_FULLSCREEN_SHORTCUT = ['mod', 'shift', 'enter'] as const;
 
 // ---------------------------
 
 //----------------- WORKSPACE PANES ------------
+
+/** Both sides of the split workspace, left first: the order panes render and get listed in. */
+export const WORKSPACE_PANE_SIDES: readonly WorkspacePaneSide[] = ['left', 'right'];
+
+/**
+ * Separators of the string keys project-workspace builds to keep derived maps stable (tab placements in
+ * useWorkspaceNavigation, tab labels in ProjectMainRegion): between entries, and between the fields of
+ * one entry. Session ids, titles and project names never contain these control characters.
+ */
+export const WORKSPACE_KEY_ENTRY_SEPARATOR = '\u0000';
+
+/** See WORKSPACE_KEY_ENTRY_SEPARATOR: separates the fields of one entry. */
+export const WORKSPACE_KEY_FIELD_SEPARATOR = '\u0001';
 
 /** Narrowest a pane may get; two panes need 2x this + PANE_SPLITTER_WIDTH_PX, else only the focused pane shows. */
 export const PANE_MIN_WIDTH_PX = 360;

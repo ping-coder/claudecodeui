@@ -97,7 +97,7 @@ const renderProjectsRow = ({ canTargetSides = true, isSelecting = false, onSessi
     <SidebarSessionItem
       project={PROJECT}
       session={SESSION}
-      selectedSession={null}
+      isSelected={false}
       isProcessing={false}
       hasBackgroundWork={false}
       needsAttention={false}
@@ -377,7 +377,7 @@ const renderProjectSessions = (onNewSession: (project: Project, options?: Sessio
       project={PROJECT}
       isExpanded
       sessions={[SESSION]}
-      selectedSession={null}
+      selectedSessionId={null}
       initialSessionsLoaded
       hasMoreSessions={false}
       isLoadingMoreSessions={false}
@@ -439,8 +439,8 @@ test('a project row hands its split targeting down to its session rows', () => {
   const { container } = render(
     <SidebarProjectItem
       project={PROJECT}
-      selectedProject={null}
-      selectedSession={null}
+      isSelected={false}
+      selectedSessionId={null}
       isExpanded
       isDeleting={false}
       isStarred={false}

@@ -51,6 +51,8 @@ const REPLAY_FRAME_KEYS_PER_SESSION = 5_000;
 type StreamBuffer = {
   text: string;
   timer: number | null;
+  /** Seq of the last delta added. Each run counts seq from 1, so a delta numbered at or below it starts a later run. */
+  lastSeq: number | null;
 };
 
 type UseChatRealtimeHandlersArgs = {
@@ -73,7 +75,10 @@ type UseChatRealtimeHandlersArgs = {
    * Highest live `seq` observed per session. Essential for reconnect catch-up:
    * `chat.subscribe` sends this value as `lastSeq` so the server replays only
    * the events this client actually missed. Written here on every sequenced
-   * frame; read wherever a `chat.subscribe` is sent (session open, reconnect).
+   * frame of a run this chat follows from its start (absent for a run it only
+   * joined part-way, so its subscribe asks for the whole run), dropped once the
+   * server reports no run going on; read wherever a `chat.subscribe` is sent
+   * (session open, reconnect).
    */
   lastSeqRef: MutableRefObject<Map<string, number>>;
   /**
@@ -120,7 +125,9 @@ type UseChatRealtimeHandlersArgs = {
  * workspace mounts two), so streamed text is buffered per session, a replay
  * this chat has already handled is dropped, and the work only one chat may do
  * (a sound, the title marker, a background-work report) goes through the
- * page's coordinator.
+ * page's coordinator. A chat stores a session's frames only from the start of
+ * its run: the frames of a run it joined part-way, because another chat had
+ * attached the socket to it, wait for the replay its own subscribe asks for.
  */
 export function useChatRealtimeHandlers({
   isActive,
@@ -169,6 +176,20 @@ export function useChatRealtimeHandlers({
   // Another chat subscribing a running session makes the server replay the run
   // to the page's single socket, and every chat hears that replay.
   const handledFrameKeysRef = useRef(new Map<string, Set<string>>());
+  // Sessions whose run this chat has followed from its first frame: it heard
+  // the run start, or the replay of a subscribe from scratch, or the server
+  // said no run was going on. Only their sequenced frames are stored. A run
+  // joined part-way (the socket was already attached for another chat when
+  // this one mounted) would store the tail of a reply without its beginning,
+  // which no history refresh removes, and a seq that makes this chat's
+  // subscribe ask the server for nothing earlier; such a chat holds no seq for
+  // the session, so its subscribe asks for the whole run. Never cleared: a
+  // followed session's later runs are heard from their start.
+  const followedRunsRef = useRef(new Set<string>());
+  // For a session not followed yet, the seq of the frame a replay of its run
+  // starts at, when the server no longer buffers the run's first frame (see
+  // REPLAY_FRAME_KEYS_PER_SESSION); 1 when absent.
+  const replayStartSeqRef = useRef(new Map<string, number>());
 
   // A flush still pending when the chat goes away has no transcript to write.
   useEffect(() => {
@@ -266,6 +287,23 @@ export function useChatRealtimeHandlers({
       return true;
     };
 
+    // Forgets what this chat holds of a session's run once the server says no
+    // run is going on. A stream still buffered then is one whose end the socket
+    // was away for (it dropped, or the server restarted): its text stays
+    // unfinished, and the session's next run must neither continue it nor find
+    // it on screen. No replay can resend that run, so its frame keys and seq go
+    // too, and a later subscribe asks for whatever run comes next in full.
+    const forgetFinishedRun = (sid: string) => {
+      const buffer = streamBuffersRef.current.get(sid);
+      if (buffer && buffer.timer !== null) {
+        window.clearTimeout(buffer.timer);
+      }
+      streamBuffersRef.current.delete(sid);
+      handledFrameKeysRef.current.delete(sid);
+      lastSeqRef.current.delete(sid);
+      sessionStore.discardStreaming(sid);
+    };
+
     // Records a sequenced frame as handled; false when this chat already
     // handled it, so this delivery is a replay. The oldest keys go first once a
     // session holds a whole run's worth.
@@ -310,18 +348,35 @@ export function useChatRealtimeHandlers({
       }
       const sid = frameSessionId ?? activeViewSessionId;
 
+      // Whether this frame may be written into the store. A sequenced frame of
+      // a run this chat has not followed from its start is not: its effects on
+      // the page (activity, prompts, sounds) still run, and the replay this
+      // chat's own subscribe asks for delivers it again, in order.
+      let storesFrame = true;
       if (sid && typeof msg.seq === 'number') {
-        // A replay of a frame already handled. Keyed by both: agy and OpenCode
-        // stream every delta of a part under one id, each with its own seq,
-        // and every run counts seq from 1 again.
-        if (typeof msg.id === 'string' && msg.id && !rememberHandledFrame(sid, `${msg.seq}:${msg.id}`)) {
-          return;
+        if (!followedRunsRef.current.has(sid)) {
+          if (msg.seq === (replayStartSeqRef.current.get(sid) ?? 1)) {
+            // The run's first frame: its live start, or a replay from scratch.
+            followedRunsRef.current.add(sid);
+            replayStartSeqRef.current.delete(sid);
+          } else {
+            storesFrame = false;
+          }
         }
 
-        // Record replay progress for every sequenced live event.
-        const known = lastSeqRef.current.get(sid) ?? 0;
-        if (msg.seq > known) {
-          lastSeqRef.current.set(sid, msg.seq);
+        if (storesFrame) {
+          // A replay of a frame already handled. Keyed by both: agy and
+          // OpenCode stream every delta of a part under one id, each with its
+          // own seq, and every run counts seq from 1 again.
+          if (typeof msg.id === 'string' && msg.id && !rememberHandledFrame(sid, `${msg.seq}:${msg.id}`)) {
+            return;
+          }
+
+          // Record replay progress for every sequenced live event.
+          const known = lastSeqRef.current.get(sid) ?? 0;
+          if (msg.seq > known) {
+            lastSeqRef.current.set(sid, msg.seq);
+          }
         }
       }
 
@@ -330,7 +385,7 @@ export function useChatRealtimeHandlers({
           // An already-sent message was replaced. Every client watching this
           // session drops the superseded turns before the replacement streams
           // in, so a second tab does not end up showing the question twice.
-          if (sid && typeof msg.anchorId === 'string') {
+          if (sid && storesFrame && typeof msg.anchorId === 'string') {
             sessionStore.truncateAt(sid, msg.anchorId);
           }
           return;
@@ -343,12 +398,25 @@ export function useChatRealtimeHandlers({
 
           if (msg.isProcessing) {
             onSessionProcessing?.(sid);
+            if (!followedRunsRef.current.has(sid)) {
+              // A replay follows this ack, from the run's first frame the
+              // server still buffers: its last REPLAY_FRAME_KEYS_PER_SESSION.
+              const runLastSeq = typeof msg.lastSeq === 'number' ? msg.lastSeq : 0;
+              replayStartSeqRef.current.set(sid, Math.max(1, runLastSeq - REPLAY_FRAME_KEYS_PER_SESSION + 1));
+            }
           } else {
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
             onSessionIdle?.(sid, {
               ifStartedBefore: statusCheckSentAtRef.current.get(sid),
             });
+            // Acks come after every frame sent before them, so whatever this
+            // chat holds of the session belongs to a run that is over, and any
+            // frame from here on starts the next run or is the background work
+            // of the one that ended: either can be stored as it comes.
+            forgetFinishedRun(sid);
+            followedRunsRef.current.add(sid);
+            replayStartSeqRef.current.delete(sid);
           }
 
           const isViewedSession = sid === activeViewSessionId;
@@ -432,9 +500,17 @@ export function useChatRealtimeHandlers({
       // mid-stream shows everything streamed so far in one row.
       if (msg.kind === 'stream_delta') {
         const text = (msg.content as string) || '';
-        if (!text || !sid) return;
-        const buffer = streamBuffersRef.current.get(sid) ?? { text: '', timer: null };
+        if (!text || !sid || !storesFrame) return;
+        const buffer = streamBuffersRef.current.get(sid) ?? { text: '', timer: null, lastSeq: null };
         streamBuffersRef.current.set(sid, buffer);
+        if (typeof msg.seq === 'number') {
+          if (buffer.lastSeq !== null && msg.seq <= buffer.lastSeq) {
+            // A later run, while the buffer still holds text of a run whose
+            // end the socket was away for: that text is no part of this reply.
+            buffer.text = '';
+          }
+          buffer.lastSeq = msg.seq;
+        }
         buffer.text += text;
         if (buffer.timer === null) {
           buffer.timer = window.setTimeout(() => {
@@ -446,7 +522,7 @@ export function useChatRealtimeHandlers({
       }
 
       if (msg.kind === 'stream_end') {
-        if (sid) {
+        if (sid && storesFrame) {
           flushStreamBuffer(sid);
           sessionStore.finalizeStreaming(sid);
         }
@@ -461,14 +537,14 @@ export function useChatRealtimeHandlers({
         && msg.kind !== 'permission_resolved'
         && msg.kind !== 'permission_cancelled';
 
-      if (sid && shouldPersist) {
+      if (sid && shouldPersist && storesFrame) {
         sessionStore.appendRealtime(sid, msg as unknown as NormalizedMessage);
       }
 
       // --- UI side effects for specific kinds ---
       switch (msg.kind) {
         case 'complete': {
-          if (sid) {
+          if (sid && storesFrame) {
             // Flush what the session still has buffered.
             if (flushStreamBuffer(sid)) {
               sessionStore.finalizeStreaming(sid);
@@ -476,6 +552,9 @@ export function useChatRealtimeHandlers({
             // The server replays only a running run, so nothing of this one
             // can arrive again.
             handledFrameKeysRef.current.delete(sid);
+          } else if (sid) {
+            // Not followed: the session's next run starts at seq 1 again.
+            replayStartSeqRef.current.delete(sid);
           }
 
           // `complete` is the unified terminal event — every provider run ends

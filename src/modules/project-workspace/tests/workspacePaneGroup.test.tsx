@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { createEvent, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { beforeEach, test, vi } from 'vitest';
@@ -81,6 +81,8 @@ const makeTab = (key: string, projectId: string): WorkspaceSessionTab => ({
 });
 
 const makePane = (tabs: WorkspaceSessionTab[]): WorkspacePaneState => ({
+  // Ids follow the first tab, so the two panes of a layout differ and a pane keeps its id across renders.
+  id: `pane-${tabs[0]?.key ?? 'empty'}`,
   tabs,
   activeTabKey: tabs[0]?.key ?? null,
   mru: tabs[0] ? [tabs[0].key] : [],
@@ -180,7 +182,8 @@ test('unsplit, one pane fills the column with no divider', () => {
   assert.equal(pane('right') === null, true);
   assert.ok(pane('left')?.classList.contains('flex-1'));
   assert.equal(pane('left')?.getAttribute('role'), 'group');
-  assert.equal(pane('left')?.getAttribute('tabindex'), '-1');
+  // Not focusable by default: a click on plain text would park focus on it and stop keyboard scrolling.
+  assert.equal(pane('left')?.hasAttribute('tabindex'), false);
   assert.equal(screen.queryByRole('separator') === null, true);
   assert.equal(lastMainProps('left')?.isPaneVisible, true);
   assert.equal(lastMainProps('left')?.isSplitPane, false);
@@ -476,4 +479,119 @@ test('a freshly split, empty right pane offers the left pane\'s conversation and
   assert.equal(opened.id, 'session-a1');
   assert.equal(opened.__projectId, 'alpha');
   assert.deepEqual(options, { target: 'right', preview: false });
+});
+
+test('workspace-wide buttons in a tab bar do not focus that pane; anything else pressed in it does', () => {
+  setLayout(splitLayout('left'));
+  const view = render(regionElement({ canSplit: true }));
+  const rightPane = pane('right') as HTMLElement;
+
+  fireEvent.pointerDown(within(rightPane).getByRole('button', { name: 'Full screen' }));
+  fireEvent.pointerDown(within(rightPane).getByRole('button', { name: 'Merge panes' }));
+  assert.deepEqual(vi.mocked(actions.focusPane).mock.calls, [], 'the user keeps working on the left');
+
+  fireEvent.pointerDown(within(rightPane).getByRole('tab', { name: /Chat b1/ }));
+  assert.deepEqual(vi.mocked(actions.focusPane).mock.calls, [['right']]);
+
+  // Immersive, "Show sidebar" sits in the left bar: opening the drawer from the right leaves the right focused.
+  vi.mocked(actions.focusPane).mockClear();
+  setLayout(splitLayout('right'));
+  view.rerender(regionElement({ canSplit: true, isImmersive: true }));
+  fireEvent.pointerDown(within(pane('left') as HTMLElement).getByRole('button', { name: 'Show sidebar' }));
+  assert.deepEqual(vi.mocked(actions.focusPane).mock.calls, []);
+});
+
+test('keyboard focus follows the split button into the tab bar that carries it after a split and a merge', () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  const runFrames = () => frames.splice(0).forEach((callback) => callback(0));
+  setLayout(unsplitLayout());
+  const view = render(regionElement({ canSplit: true }));
+  const splitButton = within(pane('left') as HTMLElement).getByRole('button', { name: 'Split view' });
+
+  splitButton.focus();
+  fireEvent.click(splitButton);
+  assert.equal(vi.mocked(actions.toggleSplit).mock.calls.length, 1);
+  // The split renders: the button now lives in the right pane's bar.
+  setLayout(splitLayout('right'));
+  view.rerender(regionElement({ canSplit: true }));
+  runFrames();
+  const mergeButton = within(pane('right') as HTMLElement).getByRole('button', { name: 'Merge panes' });
+  assert.equal(document.activeElement === mergeButton, true);
+
+  fireEvent.click(mergeButton);
+  setLayout(unsplitLayout());
+  view.rerender(regionElement({ canSplit: true }));
+  runFrames();
+  assert.equal(document.activeElement === within(pane('left') as HTMLElement).getByRole('button', { name: 'Split view' }), true);
+});
+
+test('a single pane keeps its title however narrow; only a pane beside another goes compact', () => {
+  measurePanes({ left: 480 });
+  setLayout(unsplitLayout());
+  const view = render(regionElement({ canSplit: false }));
+  assert.equal(lastMainProps('left')?.compact, false, 'the project name and the rename box stay');
+
+  // Collapsed, the visible pane is alone on screen too.
+  setLayout(splitLayout('left'));
+  view.rerender(regionElement({ canSplit: false }));
+  assert.equal(lastMainProps('left')?.compact, false);
+});
+
+test('a pane only re-renders when its width crosses the compact threshold, not on every pixel of a drag', () => {
+  let leftWidth = 720;
+  const notifyResize: Array<() => void> = [];
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private readonly callback: ResizeObserverCallback) {}
+
+    observe() {
+      notifyResize.push(() => this.callback([], this as unknown as ResizeObserver));
+    }
+
+    unobserve() {}
+
+    disconnect() {}
+  });
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure(this: HTMLElement) {
+    const width = this.getAttribute('data-workspace-pane') === 'left' ? leftWidth : 900;
+    return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 600, width, height: 600, toJSON: () => ({}) } as DOMRect;
+  });
+  try {
+    setLayout(splitLayout());
+    render(regionElement({ canSplit: true }));
+    const leftRenders = () => mainRenders.filter((props) => props.side === 'left').length;
+    const before = leftRenders();
+
+    // Ten frames of a divider drag, 3px each, all wider than 640px.
+    for (let frame = 0; frame < 10; frame += 1) {
+      leftWidth -= 3;
+      act(() => {
+        notifyResize.forEach((notify) => notify());
+      });
+    }
+    assert.equal(leftRenders(), before, 'no re-render while the width stays on one side of 640px');
+
+    leftWidth = 600;
+    act(() => {
+      notifyResize.forEach((notify) => notify());
+    });
+    assert.equal(lastMainProps('left')?.compact, true);
+    assert.equal(leftRenders(), before + 1, 'one re-render for the crossing');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('collapsed, the switcher dot also counts background work left running on the hidden side', () => {
+  sessionActivity.background = new Set(['session-b1']);
+  setLayout(splitLayout('left'));
+  render(regionElement({ canSplit: false }));
+
+  const dot = within(pane('left') as HTMLElement)
+    .getByRole('button', { name: 'Focus right pane' })
+    .querySelector('[data-hidden-pane-activity]');
+  assert.equal(dot?.getAttribute('data-hidden-pane-activity'), 'running');
 });

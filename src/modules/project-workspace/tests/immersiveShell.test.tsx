@@ -18,7 +18,7 @@ import type { WorkspaceLayout, WorkspaceLayoutActions } from '@/shared/types';
  */
 
 const UNSPLIT: WorkspaceLayout = {
-  left: { tabs: [], activeTabKey: null, mru: [], draftActivation: 0, externalRevision: 0 },
+  left: { id: 'pane-left', tabs: [], activeTabKey: null, mru: [], draftActivation: 0, externalRevision: 0 },
   right: null,
   focusedSide: 'left',
   splitRatio: 0.5,
@@ -26,10 +26,13 @@ const UNSPLIT: WorkspaceLayout = {
 
 const toggleSplit = vi.fn<() => void>();
 const setSidebarOpen = vi.fn<(open: boolean) => void>();
+// What the shell reports to the pane state about the room for two panes.
+const setCanShowBothPanes = vi.fn<(canShowBothPanes: boolean) => void>();
 const PANES_STATE = {
   layout: UNSPLIT,
   actions: { toggleSplit, focusPane: vi.fn(), split: vi.fn() } as unknown as WorkspaceLayoutActions,
   setSidebarOpen,
+  setCanShowBothPanes,
 };
 const COMMAND_STATE = { selectedProject: null, setActiveTab: () => undefined };
 
@@ -159,6 +162,17 @@ test('the panes may split only while the main column holds two of them', () => {
   assert.equal(canSplit(), 'false');
   resizeMainColumn(726);
   assert.equal(canSplit(), 'true');
+});
+
+test('the pane state hears whether both panes fit, so a hidden pane\'s session can still need attention', () => {
+  setCanShowBothPanes.mockReset();
+  renderShell();
+  assert.equal(setCanShowBothPanes.mock.calls.at(-1)?.[0], true);
+
+  resizeMainColumn(725);
+  assert.equal(setCanShowBothPanes.mock.calls.at(-1)?.[0], false);
+  resizeMainColumn(900);
+  assert.equal(setCanShowBothPanes.mock.calls.at(-1)?.[0], true);
 });
 
 test('phones never split, however wide', () => {

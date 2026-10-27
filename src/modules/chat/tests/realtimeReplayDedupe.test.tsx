@@ -156,10 +156,11 @@ describe('frames that only look alike', () => {
     const socket = createSocket();
     const chat = renderChat(socket, 'S');
 
-    // agy streams a step's text as many deltas under `agy:<conversation>:<step>:text`.
-    socket.dispatch(delta('S', 'agy:conv-1:4:text', 3, 'Hel'));
-    socket.dispatch(delta('S', 'agy:conv-1:4:text', 4, 'lo, '));
-    socket.dispatch(delta('S', 'agy:conv-1:4:text', 5, 'world'));
+    // agy streams a step's text as many deltas under `agy:<conversation>:<step>:text`,
+    // each numbered on in the run.
+    socket.dispatch(delta('S', 'agy:conv-1:4:text', 1, 'Hel'));
+    socket.dispatch(delta('S', 'agy:conv-1:4:text', 2, 'lo, '));
+    socket.dispatch(delta('S', 'agy:conv-1:4:text', 3, 'world'));
     act(() => {
       vi.advanceTimersByTime(150);
     });

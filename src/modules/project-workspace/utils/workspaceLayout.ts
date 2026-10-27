@@ -1,4 +1,5 @@
 import {
+  WORKSPACE_PANE_SIDES,
   WORKSPACE_SPLIT_RATIO_DEFAULT,
   WORKSPACE_SPLIT_RATIO_MAX,
   WORKSPACE_SPLIT_RATIO_MIN,
@@ -14,11 +15,13 @@ import type {
   WorkspacePaneState,
   WorkspaceSessionTab,
 } from '@/shared/types';
+import { getOtherPaneSide as otherSide } from '@/shared/utils';
 
 /**
  * The split workspace's pure layout reducer, its persistence format and the selectors
  * the workspace reads it through. useWorkspaceNavigation's commit is the only caller of
- * the reducer; it generates the keys of new tabs, so everything here stays pure.
+ * the reducer; it generates the keys of new tabs and the ids of new panes, so everything
+ * here stays pure.
  */
 
 /** A session being opened: the object handed to the chat plus the tab fields read off it. */
@@ -34,9 +37,11 @@ type OpenPayload = {
  * `workspaceLayoutReducer`'s signature, so the union has a single definition.
  */
 type WorkspaceLayoutAction =
-  | { type: 'open'; payload: OpenPayload; target: SessionOpenTarget; preview: boolean; view?: AppTab; newTabKey: string }
-  | { type: 'openDraft'; projectId: string; provider: LLMProvider; target: SessionOpenTarget; view?: AppTab; newTabKey: string }
-  | { type: 'establishDraft'; projectId: string; payload: OpenPayload }
+  // `focus: false` leaves the focused pane as it is (a late result opening in its own pane).
+  | { type: 'open'; payload: OpenPayload; target: SessionOpenTarget; preview: boolean; view?: AppTab; focus?: boolean; newTabKey: string; newPaneId: string }
+  | { type: 'openDraft'; projectId: string; provider: LLMProvider; target: SessionOpenTarget; view?: AppTab; newTabKey: string; newPaneId: string }
+  // With draftTabKey only that draft converts; without it, the project's draft.
+  | { type: 'establishDraft'; projectId: string; draftTabKey?: string; payload: OpenPayload }
   | { type: 'activate'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'close'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'closeOthers'; side: WorkspacePaneSide; tabKey: string }
@@ -44,9 +49,10 @@ type WorkspaceLayoutAction =
   | { type: 'closeAll'; side: WorkspacePaneSide }
   | { type: 'pin'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'focus'; side: WorkspacePaneSide }
-  | { type: 'split' }
+  | { type: 'split'; newPaneId: string }
+  | { type: 'merge' }
   | { type: 'closePane'; side: WorkspacePaneSide }
-  | { type: 'move'; from: WorkspacePaneSide; tabKey: string; to: WorkspacePaneSide; index?: number; copy?: boolean; newTabKey: string }
+  | { type: 'move'; from: WorkspacePaneSide; tabKey: string; to: WorkspacePaneSide; index?: number; copy?: boolean; newTabKey: string; newPaneId: string }
   | { type: 'setView'; side: WorkspacePaneSide; tabKey: string; view: AppTab; pin: boolean }
   | { type: 'patchSession'; sessionId: string; patch: Partial<ProjectSession>; dropSearchTarget?: boolean }
   | { type: 'replaceSessionId'; fromId: string; toId: string }
@@ -67,9 +73,13 @@ const BUILT_IN_VIEWS: ReadonlySet<string> = new Set(['chat', 'files', 'shell', '
 export const isWorkspaceView = (value: unknown): value is AppTab =>
   typeof value === 'string' && (BUILT_IN_VIEWS.has(value) || (value.startsWith('plugin:') && value.length > 'plugin:'.length));
 
-const otherSide = (side: WorkspacePaneSide): WorkspacePaneSide => (side === 'left' ? 'right' : 'left');
+/** Ids of the panes a page starts with. Never equal to the ids commit generates for the panes created later. */
+const INITIAL_PANE_ID = 'pane-initial';
+const RESTORED_LEFT_PANE_ID = 'pane-restored-left';
+const RESTORED_RIGHT_PANE_ID = 'pane-restored-right';
 
-const createEmptyPane = (): WorkspacePaneState => ({
+const createEmptyPane = (id: string): WorkspacePaneState => ({
+  id,
   tabs: [],
   activeTabKey: null,
   mru: [],
@@ -79,7 +89,7 @@ const createEmptyPane = (): WorkspacePaneState => ({
 
 /** One empty, focused left pane at the default ratio: a fresh page with nothing open. */
 export const createInitialLayout = (): WorkspaceLayout => ({
-  left: createEmptyPane(),
+  left: createEmptyPane(INITIAL_PANE_ID),
   right: null,
   focusedSide: 'left',
   splitRatio: WORKSPACE_SPLIT_RATIO_DEFAULT,
@@ -106,8 +116,9 @@ export const isLayoutEmpty = (layout: WorkspaceLayout): boolean =>
 const withPane = (layout: WorkspaceLayout, side: WorkspacePaneSide, pane: WorkspacePaneState): WorkspaceLayout =>
   (side === 'left' ? { ...layout, left: pane } : { ...layout, right: pane });
 
-const ensurePane = (layout: WorkspaceLayout, side: WorkspacePaneSide): WorkspaceLayout =>
-  (getPane(layout, side) ? layout : withPane(layout, side, createEmptyPane()));
+/** The pane on `side`, created (with `newPaneId`) when that side has none; only the right side ever does. */
+const ensurePane = (layout: WorkspaceLayout, side: WorkspacePaneSide, newPaneId: string): WorkspaceLayout =>
+  (getPane(layout, side) ? layout : withPane(layout, side, createEmptyPane(newPaneId)));
 
 const touchMru = (mru: string[], key: string): string[] => [key, ...mru.filter((candidate) => candidate !== key)];
 
@@ -146,11 +157,32 @@ export const findSessionTab = (
 const isDraftOf = (projectId: string) => (tab: WorkspaceSessionTab): boolean =>
   tab.sessionId === null && tab.projectId === projectId;
 
+/** A missing tab an open found again: it takes the open's session, project and provider and shows the conversation again. */
+const reviveTab = (tab: WorkspaceSessionTab, payload: OpenPayload): WorkspaceSessionTab => {
+  const { isMissing: _isMissing, ...rest } = tab;
+  return {
+    ...rest,
+    session: payload.session,
+    projectId: payload.projectId,
+    provider: payload.provider,
+    title: payload.title || tab.title,
+  };
+};
+
+type ActivateOptions = {
+  pin?: boolean;
+  /** The session object an open hands over; a search target in it reaches the tab. */
+  incoming?: ProjectSession;
+  view?: AppTab;
+  /** false leaves the focused pane as it is. Default true. */
+  takesFocus?: boolean;
+};
+
 const activateInPane = (
   layout: WorkspaceLayout,
   side: WorkspacePaneSide,
   tabKey: string,
-  options: { pin?: boolean; incoming?: ProjectSession; view?: AppTab } = {},
+  options: ActivateOptions = {},
 ): WorkspaceLayout => {
   const pane = getPane(layout, side);
   const current = pane?.tabs.find((tab) => tab.key === tabKey);
@@ -163,8 +195,9 @@ const activateInPane = (
   // off every new session identity, so the tab gets one carrying it.
   const incoming = options.incoming && hasSearchTarget(options.incoming) && current.session ? options.incoming : null;
   const view = options.view && options.view !== current.view ? options.view : null;
+  const focusedSide = options.takesFocus === false ? layout.focusedSide : side;
   // Every click in a pane re-focuses it, so a no-op must keep the state object.
-  if (layout.focusedSide === side && pane.activeTabKey === tabKey && !needsPin && !incoming && !view) {
+  if (layout.focusedSide === focusedSide && pane.activeTabKey === tabKey && !needsPin && !incoming && !view) {
     return layout;
   }
 
@@ -187,12 +220,21 @@ const activateInPane = (
       return next;
     });
   const mru = pane.mru[0] === tabKey ? pane.mru : touchMru(pane.mru, tabKey);
-  return withPane({ ...layout, focusedSide: side }, side, { ...pane, tabs, activeTabKey: tabKey, mru });
+  return withPane({ ...layout, focusedSide }, side, { ...pane, tabs, activeTabKey: tabKey, mru });
 };
 
-/** Inserts a tab right of the active one (a preview replaces the pane's preview in place), activates it and focuses its pane. */
-const insertTab = (layout: WorkspaceLayout, side: WorkspacePaneSide, tab: WorkspaceSessionTab): WorkspaceLayout => {
-  const withTarget = ensurePane(layout, side);
+/**
+ * Inserts a tab right of the active one (a preview replaces the pane's preview in place) and activates
+ * it; its pane takes the focus unless `takesFocus` is false. A missing right pane is created with `newPaneId`.
+ */
+const insertTab = (
+  layout: WorkspaceLayout,
+  side: WorkspacePaneSide,
+  tab: WorkspaceSessionTab,
+  newPaneId: string,
+  takesFocus = true,
+): WorkspaceLayout => {
+  const withTarget = ensurePane(layout, side, newPaneId);
   const pane = getPane(withTarget, side) as WorkspacePaneState;
   const previewIndex = tab.isPreview ? pane.tabs.findIndex((candidate) => candidate.isPreview) : -1;
   let tabs: WorkspaceSessionTab[];
@@ -206,7 +248,7 @@ const insertTab = (layout: WorkspaceLayout, side: WorkspacePaneSide, tab: Worksp
     const insertAt = activeIndex >= 0 ? activeIndex + 1 : pane.tabs.length;
     tabs = [...pane.tabs.slice(0, insertAt), tab, ...pane.tabs.slice(insertAt)];
   }
-  return withPane({ ...withTarget, focusedSide: side }, side, {
+  return withPane({ ...withTarget, focusedSide: takesFocus ? side : withTarget.focusedSide }, side, {
     ...pane,
     tabs,
     activeTabKey: tab.key,
@@ -215,16 +257,9 @@ const insertTab = (layout: WorkspaceLayout, side: WorkspacePaneSide, tab: Worksp
 };
 
 /**
- * Keeps a pane slot's counters monotonic when another pane's state moves into it: the
- * ChatInterface already mounted in that slot compares against the values it last saw.
+ * A pane whose last tab is gone closes; an emptied left pane hands its place to the right one, which
+ * keeps its id and counters: its chat moves along with it (ProjectMainRegion keys panes by id).
  */
-const carryCounters = (incoming: WorkspacePaneState, previous: WorkspacePaneState): WorkspacePaneState => ({
-  ...incoming,
-  draftActivation: Math.max(incoming.draftActivation, previous.draftActivation),
-  externalRevision: Math.max(incoming.externalRevision, previous.externalRevision),
-});
-
-/** A pane whose last tab is gone closes; an emptied left pane hands its place to the right one. */
 const dropEmptyPane = (layout: WorkspaceLayout, side: WorkspacePaneSide): WorkspaceLayout => {
   const pane = getPane(layout, side);
   if (!pane || pane.tabs.length > 0) {
@@ -234,7 +269,7 @@ const dropEmptyPane = (layout: WorkspaceLayout, side: WorkspacePaneSide): Worksp
     return { ...layout, right: null, focusedSide: 'left' };
   }
   if (layout.right) {
-    return { ...layout, left: carryCounters(layout.right, layout.left), right: null, focusedSide: 'left' };
+    return { ...layout, left: layout.right, right: null, focusedSide: 'left' };
   }
   return layout;
 };
@@ -331,6 +366,7 @@ const moveTab = (
   index: number | undefined,
   copy: boolean,
   newTabKey: string,
+  newPaneId: string,
 ): WorkspaceLayout => {
   const source = getPane(layout, from);
   const tab = source?.tabs.find((candidate) => candidate.key === tabKey);
@@ -353,7 +389,7 @@ const moveTab = (
 
   // A draft has one home (one unsent chat per project), so copying it is a move.
   const isCopy = copy && tab.sessionId !== null;
-  let next = ensurePane(layout, to);
+  let next = ensurePane(layout, to, newPaneId);
   const destination = getPane(next, to) as WorkspacePaneState;
   const duplicate = destination.tabs.find((candidate) => (
     tab.sessionId ? candidate.sessionId === tab.sessionId : isDraftOf(tab.projectId)(candidate)
@@ -414,28 +450,71 @@ const closePane = (layout: WorkspaceLayout, side: WorkspacePaneSide): WorkspaceL
       ...incoming.map((tab) => tab.key).filter((key) => !closing.mru.includes(key)),
     ],
   };
-  const left = side === 'left' ? carryCounters(merged, layout.left) : merged;
-  return { ...layout, left, right: null, focusedSide: 'left' };
+  return { ...layout, left: merged, right: null, focusedSide: 'left' };
+};
+
+/**
+ * Merge (toggleSplit): one pane holding the left tabs, then the right ones, with no session or draft
+ * twice. The focused pane is the one that stays (its id, counters, active tab and recency order), so the
+ * chat and editor the user works in survive and keep showing what they showed; an empty focused pane
+ * gives way to the other one. Of a duplicated session the staying pane's tab is kept.
+ */
+const mergePanes = (layout: WorkspaceLayout): WorkspaceLayout => {
+  if (!layout.right) {
+    return layout;
+  }
+  const focusedPane = getPane(layout, layout.focusedSide) as WorkspacePaneState;
+  const keptSide = focusedPane.tabs.length > 0 ? layout.focusedSide : otherSide(layout.focusedSide);
+  const kept = getPane(layout, keptSide) as WorkspacePaneState;
+  const other = getPane(layout, otherSide(keptSide)) as WorkspacePaneState;
+  const keptSessionIds = new Set(kept.tabs.map((tab) => tab.sessionId).filter(Boolean));
+  const keptDraftProjects = new Set(kept.tabs.filter((tab) => tab.sessionId === null).map((tab) => tab.projectId));
+  // The other pane's preview turns into a kept tab: one pane holds at most one preview.
+  const joining = other.tabs
+    .filter((tab) => (tab.sessionId ? !keptSessionIds.has(tab.sessionId) : !keptDraftProjects.has(tab.projectId)))
+    .map((tab) => (tab.isPreview ? { ...tab, isPreview: false } : tab));
+  const joiningKeys = new Set(joining.map((tab) => tab.key));
+  const tabs = keptSide === 'left' ? [...kept.tabs, ...joining] : [...joining, ...kept.tabs];
+  const activeTabKey = kept.activeTabKey ?? (other.activeTabKey && joiningKeys.has(other.activeTabKey) ? other.activeTabKey : null) ?? tabs[0]?.key ?? null;
+  // The other pane's recency order follows the kept one's, so a later close falls back sensibly.
+  const mru = [
+    ...kept.mru,
+    ...other.mru.filter((key) => joiningKeys.has(key)),
+    ...joining.map((tab) => tab.key).filter((key) => !other.mru.includes(key)),
+  ];
+  return { ...layout, left: { ...kept, tabs, activeTabKey, mru }, right: null, focusedSide: 'left' };
 };
 
 const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): WorkspaceLayout => {
   switch (action.type) {
     case 'open': {
       const sessionId = action.payload.session.id;
-      const revealOptions = { pin: !action.preview, incoming: action.payload.session, view: action.view };
+      const takesFocus = action.focus !== false;
+      const revealOptions: ActivateOptions = { pin: !action.preview, incoming: action.payload.session, view: action.view, takesFocus };
+      // An open that names the owning project proves the session is there: every tab of it flagged
+      // missing takes the open's session and shows the conversation again.
+      const revived = action.payload.projectId
+        ? mapAllTabs(layout, (tab) => (tab.sessionId === sessionId && tab.isMissing ? reviveTab(tab, action.payload) : tab))
+        : layout;
       // A plain open never duplicates: it goes wherever the session already is.
       if (action.target === 'focused') {
-        const hit = findSessionTab(layout, sessionId);
+        const hit = findSessionTab(revived, sessionId);
         if (hit) {
-          return activateInPane(layout, hit.side, hit.tab.key, revealOptions);
+          return activateInPane(revived, hit.side, hit.tab.key, revealOptions);
         }
       }
-      const side = resolveTargetSide(layout, action.target);
-      const existing = getPane(layout, side)?.tabs.find((tab) => tab.sessionId === sessionId);
+      const side = resolveTargetSide(revived, action.target);
+      const existing = getPane(revived, side)?.tabs.find((tab) => tab.sessionId === sessionId);
       if (existing) {
-        return activateInPane(layout, side, existing.key, revealOptions);
+        return activateInPane(revived, side, existing.key, revealOptions);
       }
-      return insertTab(layout, side, createSessionTab(action.payload, action.newTabKey, action.preview, action.view));
+      return insertTab(
+        revived,
+        side,
+        createSessionTab(action.payload, action.newTabKey, action.preview, action.view),
+        action.newPaneId,
+        takesFocus,
+      );
     }
     case 'openDraft': {
       const existing = findTab(layout, isDraftOf(action.projectId));
@@ -448,7 +527,7 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
           return activateInPane(layout, side, existing.tab.key, { view: action.view });
         }
         // An explicit side moves the draft there: two panes never share a project's draft scope.
-        const moved = moveTab(layout, existing.side, existing.tab.key, side, undefined, false, action.newTabKey);
+        const moved = moveTab(layout, existing.side, existing.tab.key, side, undefined, false, action.newTabKey, action.newPaneId);
         const movedHit = findTab(moved, (tab) => tab.key === existing.tab.key);
         return movedHit ? activateInPane(moved, movedHit.side, movedHit.tab.key, { view: action.view }) : moved;
       }
@@ -462,11 +541,15 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
         view: action.view ?? 'chat',
         isPreview: false,
         session: null,
-      });
+      }, action.newPaneId);
     }
     case 'establishDraft': {
-      // Found by project, not by tab key: the user may have switched tabs or moved the draft meanwhile.
-      const hit = findTab(layout, isDraftOf(action.projectId));
+      // The key of the draft that sent survives tab switches and moves to the other side; once that
+      // draft is closed nothing converts, not even a newer draft of the same project.
+      const isEstablishingDraft = action.draftTabKey
+        ? (tab: WorkspaceSessionTab) => tab.key === action.draftTabKey && isDraftOf(action.projectId)(tab)
+        : isDraftOf(action.projectId);
+      const hit = findTab(layout, isEstablishingDraft);
       if (!hit) {
         return layout;
       }
@@ -516,11 +599,22 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
     case 'split':
       return layout.right
         ? { ...layout, focusedSide: otherSide(layout.focusedSide) }
-        : { ...layout, right: createEmptyPane(), focusedSide: 'right' };
+        : { ...layout, right: createEmptyPane(action.newPaneId), focusedSide: 'right' };
+    case 'merge':
+      return mergePanes(layout);
     case 'closePane':
       return closePane(layout, action.side);
     case 'move':
-      return moveTab(layout, action.from, action.tabKey, action.to, action.index, Boolean(action.copy), action.newTabKey);
+      return moveTab(
+        layout,
+        action.from,
+        action.tabKey,
+        action.to,
+        action.index,
+        Boolean(action.copy),
+        action.newTabKey,
+        action.newPaneId,
+      );
     case 'setView': {
       const pane = getPane(layout, action.side);
       const tab = pane?.tabs.find((candidate) => candidate.key === action.tabKey);
@@ -534,7 +628,13 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
           : candidate)),
       });
     }
-    case 'patchSession':
+    case 'patchSession': {
+      // A patch naming the owning project is an authoritative row (the loaded pages, a lookup, an
+      // upsert): it settles the tab's project and provider, and a tab flagged missing shows again.
+      const owner = typeof action.patch.__projectId === 'string' && action.patch.__projectId ? action.patch.__projectId : null;
+      const ownerProvider = owner && typeof action.patch.__provider === 'string' && action.patch.__provider
+        ? action.patch.__provider
+        : null;
       return mapAllTabs(layout, (tab) => {
         if (tab.sessionId !== action.sessionId || !tab.session) {
           return tab;
@@ -543,14 +643,25 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
         const dropsTarget = Boolean(action.dropSearchTarget)
           && ('__searchTargetSnippet' in current || '__searchTargetTimestamp' in current);
         const changesFields = Object.entries(action.patch).some(([key, value]) => !sameValue(current[key], value));
+        const relocates = owner !== null && owner !== tab.projectId;
+        const reprovides = ownerProvider !== null && ownerProvider !== tab.provider;
+        const revives = owner !== null && Boolean(tab.isMissing);
         // A refresh that brings nothing new keeps the session identity, so the chat does not react.
-        if (!dropsTarget && !changesFields) {
+        if (!dropsTarget && !changesFields && !relocates && !reprovides && !revives) {
           return tab;
         }
         const base = dropsTarget ? omitSearchTarget(current) : current;
         const title = typeof action.patch.summary === 'string' && action.patch.summary ? action.patch.summary : tab.title;
-        return { ...tab, session: { ...base, ...action.patch }, title };
+        const { isMissing: _isMissing, ...rest } = tab;
+        return {
+          ...(revives ? rest : tab),
+          session: changesFields || dropsTarget ? { ...base, ...action.patch } : current,
+          title,
+          projectId: owner ?? tab.projectId,
+          provider: ownerProvider ?? tab.provider,
+        };
       });
+    }
     case 'replaceSessionId': {
       if (action.fromId === action.toId) {
         return layout;
@@ -581,7 +692,7 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
     case 'noteExternalUpdate': {
       // Only panes showing the session reload it; a background tab loads fresh when activated.
       let next = layout;
-      for (const side of ['left', 'right'] as const) {
+      for (const side of WORKSPACE_PANE_SIDES) {
         const pane = getPane(next, side);
         if (pane && getActiveTab(pane)?.sessionId === action.sessionId) {
           next = withPane(next, side, { ...pane, externalRevision: pane.externalRevision + 1 });
@@ -600,16 +711,28 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
   }
 };
 
-/** Bumps a pane's draft counter whenever a different draft becomes its active tab (feeds ChatInterface.newSessionTrigger). */
+/** The pane with this id, wherever it sits; null when the layout has none. */
+const findPaneById = (layout: WorkspaceLayout, paneId: string): WorkspacePaneState | null => {
+  if (layout.left.id === paneId) {
+    return layout.left;
+  }
+  return layout.right?.id === paneId ? layout.right : null;
+};
+
+/**
+ * Bumps a pane's draft counter whenever a different draft becomes its active tab (feeds
+ * ChatInterface.newSessionTrigger). Compared per pane id, not per side: a pane moving into the left slot
+ * keeps its chat, which already shows that draft.
+ */
 const bumpDraftActivations = (previous: WorkspaceLayout, next: WorkspaceLayout): WorkspaceLayout => {
   let result = next;
-  for (const side of ['left', 'right'] as const) {
+  for (const side of WORKSPACE_PANE_SIDES) {
     const pane = getPane(result, side);
     const activeTab = getActiveTab(pane);
     if (!pane || !activeTab || activeTab.sessionId !== null) {
       continue;
     }
-    if (getActiveTab(getPane(previous, side))?.key === activeTab.key) {
+    if (getActiveTab(findPaneById(previous, pane.id))?.key === activeTab.key) {
       continue;
     }
     result = withPane(result, side, { ...pane, draftActivation: pane.draftActivation + 1 });
@@ -628,7 +751,7 @@ export function workspaceLayoutReducer(layout: WorkspaceLayout, action: Workspac
 /** One tab as both stores hold it: no runtime session object or missing flag. */
 type StoredTab = Omit<WorkspaceSessionTab, 'session' | 'isMissing'>;
 
-/** One pane as both stores hold it: no runtime counters. */
+/** One pane as both stores hold it: no runtime id or counters. */
 type StoredPane = { tabs: StoredTab[]; activeTabKey: string | null; mru: string[] };
 
 /** The JSON written to sessionStorage and localStorage under WORKSPACE_LAYOUT_STORAGE_KEY. */
@@ -660,7 +783,7 @@ const toStoredPane = (pane: WorkspacePaneState): StoredPane => {
   };
 };
 
-/** The persisted form of a layout: tab identity, order, views, focus and ratio; never session objects, missing flags or counters. */
+/** The persisted form of a layout: tab identity, order, views, focus and ratio; never session objects, missing flags, pane ids or counters. */
 export const serializeLayout = (layout: WorkspaceLayout): StoredLayout => ({
   version: 1,
   left: toStoredPane(layout.left),
@@ -699,7 +822,7 @@ const parseTab = (raw: unknown): WorkspaceSessionTab | null => {
   };
 };
 
-const parsePane = (raw: unknown, usedKeys: Set<string>, draftProjects: Set<string>): WorkspacePaneState | null => {
+const parsePane = (raw: unknown, id: string, usedKeys: Set<string>, draftProjects: Set<string>): WorkspacePaneState | null => {
   if (!raw || typeof raw !== 'object') {
     return null;
   }
@@ -737,6 +860,7 @@ const parsePane = (raw: unknown, usedKeys: Set<string>, draftProjects: Set<strin
     ? value.mru.filter((key): key is string => typeof key === 'string' && keys.has(key))
     : [];
   return {
+    id,
     tabs: normalized,
     activeTabKey,
     mru: activeTabKey ? touchMru([...new Set(mru)], activeTabKey) : [],
@@ -762,8 +886,8 @@ export const parseStoredLayout = (raw: string | null): WorkspaceLayout | null =>
   const stored = value as Record<string, unknown>;
   const usedKeys = new Set<string>();
   const draftProjects = new Set<string>();
-  const left = parsePane(stored.left, usedKeys, draftProjects) ?? createEmptyPane();
-  const right = parsePane(stored.right, usedKeys, draftProjects);
+  const left = parsePane(stored.left, RESTORED_LEFT_PANE_ID, usedKeys, draftProjects) ?? createEmptyPane(RESTORED_LEFT_PANE_ID);
+  const right = parsePane(stored.right, RESTORED_RIGHT_PANE_ID, usedKeys, draftProjects);
   // A pane Split just created (still empty) survives a reload; an empty left hands its place to the right.
   const panes = left.tabs.length === 0 && right ? { left: right, right: null } : { left, right };
   const focusedSide: WorkspacePaneSide = stored.focusedSide === 'right' && panes.right ? 'right' : 'left';
@@ -779,7 +903,7 @@ export const parseStoredLayout = (raw: string | null): WorkspaceLayout | null =>
 /** sessionId -> the side(s) showing it, for the sidebar's per-row marker and side buttons. Sessions in no tab are absent. */
 export const collectSessionPlacements = (layout: WorkspaceLayout): Map<string, Exclude<SessionPanePlacement, null>> => {
   const placements = new Map<string, Exclude<SessionPanePlacement, null>>();
-  for (const side of ['left', 'right'] as const) {
+  for (const side of WORKSPACE_PANE_SIDES) {
     for (const tab of getPane(layout, side)?.tabs ?? []) {
       if (!tab.sessionId) {
         continue;
@@ -791,7 +915,22 @@ export const collectSessionPlacements = (layout: WorkspaceLayout): Map<string, E
   return placements;
 };
 
-/** Sessions on screen: each pane's active tab, or only the focused pane's when `focusedOnly` (phones show one pane). */
+/**
+ * Ids of the panes the workspace mounts: both, except on a phone, which mounts the focused pane only
+ * (ProjectMainRegion renders from this). A layout change that drops an id unmounts that pane's chat and
+ * editor, which is what useWorkspaceNavigation's commit asks about before discarding unsaved edits.
+ */
+export const collectMountedPaneIds = (layout: WorkspaceLayout, { isMobile }: { isMobile: boolean }): string[] => {
+  if (!layout.right) {
+    return [layout.left.id];
+  }
+  if (isMobile) {
+    return [(getPane(layout, layout.focusedSide) as WorkspacePaneState).id];
+  }
+  return [layout.left.id, layout.right.id];
+};
+
+/** Sessions on screen: each pane's active tab, or only the focused pane's when `focusedOnly` (a phone, or a split too narrow to show both). */
 export const collectVisibleSessionIds = (
   layout: WorkspaceLayout,
   { focusedOnly = false }: { focusedOnly?: boolean } = {},

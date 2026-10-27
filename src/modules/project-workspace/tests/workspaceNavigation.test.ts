@@ -460,3 +460,372 @@ test('a project title click records the browsed project without touching any pan
   assert.equal(harness.result.current.layout, layoutBefore);
   assert.deepEqual(harness.navigate.mock.calls, []);
 });
+
+// ---------------------------------------------------------------- review fixes
+
+const unavailable = { ok: false, status: 503 };
+
+test('a partial session object (a dropped row, a fork) takes its title and fields from the loaded row', async () => {
+  const harness = await renderNavigation();
+
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'a2', __projectId: 'pa', __provider: 'claude' }, { target: 'left', preview: false });
+  });
+
+  // The header and the browser tab read this object: no "New Session" for a titled conversation.
+  assert.equal(harness.result.current.focused.session?.summary, 'Title a2');
+  assert.equal(harness.result.current.layout.left.tabs[0].title, 'Title a2');
+  assert.equal(harness.result.current.focused.session?.__projectId, 'pa');
+});
+
+test('a background open (a fork) resolves its project from its own row, keeps the focus and leaves a pending open alone', async () => {
+  let resolveUserLookup: ((value: unknown) => void) | null = null;
+  sessionDetailsResponse.mockImplementation(() => new Promise((resolve) => {
+    resolveUserLookup = resolve;
+  }));
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+    harness.result.current.actions.openSession(rowOf(projectB, 'b1'), { target: 'other' });
+    harness.result.current.actions.focusPane('left');
+  });
+  // The user opens a conversation that needs a lookup.
+  act(() => {
+    harness.result.current.actions.openSessionById('old-7');
+  });
+  harness.navigate.mockClear();
+
+  // The fork of a3 comes back to the right pane: no project or provider handed over.
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'a3' }, { target: 'right', preview: false, inBackground: true });
+  });
+  const forkTab = harness.result.current.layout.right?.tabs.find((tab) => tab.sessionId === 'a3');
+  assert.equal(forkTab?.projectId, 'pa', 'the project its row names, not the pane\'s');
+  assert.equal(harness.result.current.layout.focusedSide, 'left', 'the focus stays where the user is');
+  assert.deepEqual(harness.navigate.mock.calls, [], 'the URL follows the focused pane only');
+
+  await act(async () => {
+    resolveUserLookup?.(detailsFor('old-7'));
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs.some((tab) => tab.sessionId === 'old-7'), true, 'the user\'s open was not cancelled');
+  });
+});
+
+test('a session established from a draft that was closed meanwhile changes no pane', async () => {
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openNewSession(projectA);
+  });
+  const draftKey = harness.result.current.layout.left.tabs[0].key;
+  act(() => {
+    harness.result.current.actions.closeTab('left', draftKey);
+    harness.result.current.actions.openNewSession(projectA);
+  });
+  const layoutBefore = harness.result.current.layout;
+  harness.navigate.mockClear();
+
+  act(() => {
+    harness.result.current.actions.establishDraft('late-1', { provider: 'claude', project: projectA, summary: 'Late' }, { draftTabKey: draftKey });
+  });
+
+  assert.equal(harness.result.current.layout, layoutBefore, 'the new blank chat stays blank');
+  assert.deepEqual(harness.navigate.mock.calls, []);
+  assert.equal(harness.registerEstablishedSession.mock.calls.length, 1, 'the session still reaches the sidebar');
+});
+
+test('a tab flagged missing after a failed lookup comes back once the loaded pages list its session', async () => {
+  sessionDetailsResponse.mockResolvedValue(unavailable);
+  const harness = await renderNavigation({ projects: [projectA, projectB] });
+
+  harness.update({ sessionId: 'late-row' });
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs[0]?.isMissing, true);
+  });
+  const lookups = sessionDetailsResponse.mock.calls.length;
+
+  harness.update({ projects: [buildProject('pa', ['a1', 'a2', 'a3', 'late-row']), projectB] });
+
+  const tab = harness.result.current.layout.left.tabs[0];
+  assert.equal(tab.isMissing, undefined);
+  assert.equal(tab.projectId, 'pa');
+  assert.equal(harness.result.current.paneProjects.left?.projectId, 'pa');
+  assert.equal(sessionDetailsResponse.mock.calls.length, lookups, 'no request needed');
+});
+
+test('reopening a missing tab\'s session from the sidebar or by id brings the conversation back', async () => {
+  const harness = await renderNavigation();
+  harness.update({ sessionId: 'a2-gone' });
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs[0]?.isMissing, true);
+  });
+
+  // From a sidebar row, which names the project.
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'a2-gone', summary: 'Found again', __projectId: 'pa', __provider: 'claude' }, { preview: true });
+  });
+  let tab = harness.result.current.layout.left.tabs[0];
+  assert.equal(tab.isMissing, undefined);
+  assert.equal(tab.projectId, 'pa');
+  assert.equal(harness.result.current.layout.left.tabs.length, 1, 'the same tab, not a second one');
+
+  // By id (palette, notification): the flagged tab is looked past, the loaded row found.
+  act(() => {
+    harness.result.current.commit({ type: 'markMissing', sessionId: 'a1-flag' });
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+    harness.result.current.commit({ type: 'markMissing', sessionId: 'a1' });
+  });
+  assert.equal(harness.result.current.layout.left.tabs.find((candidate) => candidate.sessionId === 'a1')?.isMissing, true);
+  act(() => {
+    harness.result.current.actions.openSessionById('a1');
+  });
+  tab = harness.result.current.layout.left.tabs.find((candidate) => candidate.sessionId === 'a1') as typeof tab;
+  assert.equal(tab.isMissing, undefined);
+});
+
+test('opening a missing deep-linked session by id asks again instead of reviving the stranded tab as it is', async () => {
+  const harness = await renderNavigation();
+  harness.update({ sessionId: 'gone-2' });
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs[0]?.isMissing, true);
+  });
+  assert.equal(harness.result.current.layout.left.tabs[0].projectId, '', 'a stranded tab knows no project');
+
+  // The server answers now (it was restarting): a palette or notification open finds the session.
+  sessionDetailsResponse.mockImplementation(async (sessionId: string) => detailsFor(sessionId));
+  act(() => {
+    harness.result.current.actions.openSessionById('gone-2');
+  });
+
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined);
+  });
+  assert.equal(harness.result.current.layout.left.tabs[0].projectId, 'pa');
+  assert.equal(harness.result.current.layout.left.tabs.length, 1);
+});
+
+test('a session opened with its project is never looked up, so a failing lookup cannot flag it missing', async () => {
+  sessionDetailsResponse.mockResolvedValue(unavailable);
+  const harness = await renderNavigation();
+
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'older-1', summary: 'Older chat', __projectId: 'pa', __provider: 'claude' }, { preview: true });
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  assert.deepEqual(sessionDetailsResponse.mock.calls, []);
+  assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined);
+});
+
+test('a restored tab whose lookup could not reach the server stays as it is and is asked again later', async () => {
+  sessionStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    left: {
+      tabs: [
+        { key: 'k1', sessionId: 'deep-1', projectId: 'pa', provider: 'claude', title: 'Deep', view: 'chat', isPreview: false },
+        { key: 'k2', sessionId: 'a1', projectId: 'pa', provider: 'claude', title: 'A1', view: 'chat', isPreview: false },
+      ],
+      activeTabKey: 'k1',
+      mru: ['k1'],
+    },
+    right: null,
+    focusedSide: 'left',
+    splitRatio: 0.5,
+  }));
+  sessionDetailsResponse.mockResolvedValue(unavailable);
+  const harness = await renderNavigation({ sessionId: 'deep-1' });
+
+  await waitFor(() => {
+    assert.equal(sessionDetailsResponse.mock.calls.length, 1);
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined, 'a 503 says nothing about the session');
+
+  // Shown again later, it is asked again, and a real answer lands.
+  sessionDetailsResponse.mockImplementation(async (sessionId: string) => detailsFor(sessionId));
+  act(() => {
+    harness.result.current.actions.activateTab('left', 'k2');
+  });
+  act(() => {
+    harness.result.current.actions.activateTab('left', 'k1');
+  });
+  await waitFor(() => {
+    assert.equal(harness.result.current.layout.left.tabs[0].session?.summary, 'Resolved deep-1');
+  });
+});
+
+test('clicking the session on screen while the URL sits on / puts it back into the URL', async () => {
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+  });
+  harness.followUrl();
+  // Forward/Back landed on / while the pane still shows a1.
+  harness.update({ sessionId: undefined });
+  harness.navigate.mockClear();
+
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'), { preview: true });
+  });
+  assert.deepEqual(harness.navigate.mock.calls, [['/session/a1']]);
+  harness.followUrl();
+
+  harness.update({ sessionId: undefined });
+  harness.navigate.mockClear();
+  act(() => {
+    harness.result.current.actions.activateTab('left', harness.result.current.layout.left.tabs[0].key);
+  });
+  assert.deepEqual(harness.navigate.mock.calls, [['/session/a1', { replace: true }]]);
+});
+
+test('a deep link opened in a new browser tab leaves the shared seed alone until the user changes something', async () => {
+  const seed = JSON.stringify({
+    version: 1,
+    left: { tabs: [{ key: 's1', sessionId: 'b1', projectId: 'pb', provider: 'claude', title: 'B1', view: 'chat', isPreview: false }], activeTabKey: 's1', mru: ['s1'] },
+    right: { tabs: [{ key: 's2', sessionId: 'a2', projectId: 'pa', provider: 'claude', title: 'A2', view: 'chat', isPreview: false }], activeTabKey: 's2', mru: ['s2'] },
+    focusedSide: 'left',
+    splitRatio: 0.4,
+  });
+  localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, seed);
+  const harness = await renderNavigation({ sessionId: 'a3' });
+
+  await waitFor(() => {
+    assert.deepEqual(tabIds(harness.result.current.layout.left), ['a3*']);
+  });
+  await new Promise((resolve) => {
+    setTimeout(resolve, 400);
+  });
+  assert.equal(localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY), seed, 'opening the link is not a change of the user\'s');
+  assert.ok(sessionStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY)?.includes('a3'), 'the tab keeps its own copy');
+
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+  });
+  await new Promise((resolve) => {
+    setTimeout(resolve, 400);
+  });
+  assert.ok(localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY)?.includes('a1'), 'a change the user made does reach it');
+});
+
+test('merging keeps the conversation of the focused pane on screen and in the URL', async () => {
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+  });
+  harness.followUrl();
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectB, 'b1'), { target: 'other' });
+  });
+  harness.followUrl();
+  harness.navigate.mockClear();
+
+  act(() => {
+    harness.result.current.actions.toggleSplit();
+  });
+
+  assert.equal(harness.result.current.layout.right, null);
+  assert.equal(harness.result.current.focused.session?.id, 'b1');
+  assert.deepEqual(tabIds(harness.result.current.layout.left), ['a1', 'b1']);
+  assert.deepEqual(harness.navigate.mock.calls, [], 'the URL already shows b1');
+});
+
+test('a split too narrow for two panes counts only the focused pane\'s session as on screen', async () => {
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'));
+    harness.result.current.actions.openSession(rowOf(projectB, 'b1'), { target: 'other' });
+  });
+  assert.deepEqual([...harness.result.current.visibleSessionIds].sort(), ['a1', 'b1']);
+
+  act(() => {
+    harness.result.current.setCanShowBothPanes(false);
+  });
+  assert.deepEqual([...harness.result.current.visibleSessionIds], ['b1']);
+});
+
+test('the new-chat fallback keeps its object across a refresh that only touched session rows', async () => {
+  const harness = await renderNavigation();
+  const fallback = harness.result.current.fallbackProject;
+  assert.equal(fallback?.projectId, 'pa');
+
+  harness.update({ projects: [{ ...projectA, sessions: [...(projectA.sessions ?? []), sessionRow('a9')] }, projectB] });
+  assert.equal(harness.result.current.fallbackProject, fallback, 'what reads it (the quick settings\' commands) does not reload');
+
+  harness.update({ projects: [{ ...projectA, displayName: 'Renamed' }, projectB] });
+  assert.equal(harness.result.current.fallbackProject?.displayName, 'Renamed');
+});
+
+test('an archived session keeps its project through the unlisted cache, from the sidebar or from a deep link', async () => {
+  const archived = buildProject('old', []);
+  const harness = await renderNavigation();
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'arch-1', summary: 'Archived chat', __provider: 'claude' }, { ownerProject: archived });
+  });
+  assert.equal(harness.result.current.paneProjects.left?.projectId, 'old');
+  assert.equal(harness.result.current.focused.project?.projectId, 'old');
+
+  sessionDetailsResponse.mockImplementation(async (sessionId: string) => detailsFor(sessionId, 'old-2'));
+  const linked = await renderNavigation({ sessionId: 'arch-2' });
+  await waitFor(() => {
+    assert.equal(linked.result.current.paneProjects.left?.projectId, 'old-2');
+  });
+});
+
+test('a restored draft of a browsed, unlisted project survives the first load', async () => {
+  sessionStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    left: {
+      tabs: [
+        { key: 'k1', sessionId: 'a1', projectId: 'pa', provider: 'claude', title: 'A1', view: 'chat', isPreview: false },
+        { key: 'k2', sessionId: null, projectId: 'old', provider: 'claude', title: '', view: 'chat', isPreview: false },
+      ],
+      activeTabKey: 'k1',
+      mru: ['k1'],
+    },
+    right: null,
+    focusedSide: 'left',
+    splitRatio: 0.5,
+  }));
+  const harness = await renderNavigation({ projects: [], isLoadingProjects: true });
+  act(() => {
+    harness.result.current.recordBrowsedProject(buildProject('old', []));
+  });
+
+  harness.update({ projects: [projectA, projectB], isLoadingProjects: false });
+  assert.deepEqual(tabIds(harness.result.current.layout.left), ['a1', 'draft:old']);
+});
+
+test('a restored visible tab that turns out to be an alias moves to the canonical id, and so does the URL', async () => {
+  sessionStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    left: {
+      tabs: [{ key: 'k1', sessionId: 'native-9', projectId: 'pa', provider: 'claude', title: 'Native', view: 'chat', isPreview: false }],
+      activeTabKey: 'k1',
+      mru: ['k1'],
+    },
+    right: null,
+    focusedSide: 'left',
+    splitRatio: 0.5,
+  }));
+  sessionDetailsResponse.mockImplementation(async (sessionId: string) => detailsFor(sessionId, 'pa', 'app-9'));
+  const harness = await renderNavigation({ sessionId: 'native-9' });
+
+  await waitFor(() => {
+    assert.deepEqual(tabIds(harness.result.current.layout.left), ['app-9']);
+  });
+  assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined);
+  assert.deepEqual(harness.navigate.mock.calls.at(-1), ['/session/app-9', { replace: true }]);
+});
+
+test('on a phone, opening a session by id (a notification, the palette) closes the sidebar drawer', async () => {
+  const phone = await renderNavigation({ isMobile: true });
+  act(() => {
+    phone.result.current.actions.openSessionById('a1');
+  });
+  assert.deepEqual(phone.setSidebarOpen.mock.calls, [[false]]);
+});

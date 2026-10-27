@@ -5,11 +5,17 @@ import { useTranslation } from 'react-i18next';
 import { useTaskMasterProjectSync } from '@/modules/task-master';
 import { useProjectPanesState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
-import { getActiveTab, getPane } from '@/modules/project-workspace/utils/workspaceLayout';
+import { collectMountedPaneIds, getActiveTab, getPane } from '@/modules/project-workspace/utils/workspaceLayout';
 import PaneSplitter from '@/modules/project-workspace/PaneSplitter';
 import PaneTabsSheet from '@/modules/project-workspace/PaneTabsSheet';
 import WorkspacePane from '@/modules/project-workspace/WorkspacePane';
-import { PANE_MIN_WIDTH_PX, PANE_SPLITTER_WIDTH_PX } from '@/shared/constants';
+import {
+  PANE_MIN_WIDTH_PX,
+  PANE_SPLITTER_WIDTH_PX,
+  WORKSPACE_KEY_ENTRY_SEPARATOR,
+  WORKSPACE_KEY_FIELD_SEPARATOR,
+  WORKSPACE_PANE_SIDES,
+} from '@/shared/constants';
 import { useBackgroundSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
 import type {
   PaneTabActivity,
@@ -20,7 +26,7 @@ import type {
   UntitledPaneTabLabels,
   WorkspacePaneSide,
 } from '@/shared/types';
-import { cn, hasSessionDragPayload, resolvePaneTabTitle } from '@/shared/utils';
+import { cn, getOtherPaneSide, hasSessionDragPayload, resolvePaneTabTitle } from '@/shared/utils';
 
 /**
  * The left pane while two panes share the main column: the share PaneSplitter writes into
@@ -33,17 +39,11 @@ const LEFT_PANE_STYLE: CSSProperties = {
 /** A new right pane fades in over 120ms; opacity only, no transform, so fixed overlays inside it stay viewport-fixed. */
 const NEW_PANE_FADE_CLASS_NAME = 'animate-dialog-overlay-show [animation-duration:120ms] motion-reduce:animate-none';
 
-/** Separators of the tab display key below; titles and project names never contain these control characters. */
-const DISPLAY_ENTRY_SEPARATOR = '\u0000';
-const DISPLAY_FIELD_SEPARATOR = '\u0001';
-
 /**
  * Which pane keeps a terminal both visible panes want. `left`/`right` are the terminal keys each
  * pane showed at the last render, so the pane that showed a key first can be told apart.
  */
 type ShellLease = { left: string | null; right: string | null; holder: WorkspacePaneSide | null };
-
-const SIDES: readonly WorkspacePaneSide[] = ['left', 'right'];
 
 /** Handed to panes that have tabs: only an empty pane lists projects, so the others skip re-rendering on every projects refresh. */
 const NO_PROJECTS: Project[] = [];
@@ -73,6 +73,7 @@ function ProjectMainRegion({
     setSidebarOpen,
     renameSession,
     refreshProjectsSilently,
+    setPaneEditorUnsaved,
   } = useProjectPanesState();
   const { canSplit } = useWorkspaceChrome();
   const busySessionIds = useBusySessionIdSet();
@@ -95,10 +96,9 @@ function ProjectMainRegion({
   const isSideVisible = (side: WorkspacePaneSide): boolean => (side === 'left'
     ? !isSplit || isSideBySide || focusedSide === 'left'
     : isSplit && (isSideBySide || focusedSide === 'right'));
-  // Phones mount the focused pane only; a collapsed desktop split keeps the hidden pane mounted.
-  const isSideRendered = (side: WorkspacePaneSide): boolean => (side === 'left'
-    ? !isMobile || !isSplit || focusedSide === 'left'
-    : isSplit && (!isMobile || focusedSide === 'right'));
+  // Phones mount the focused pane only; a collapsed desktop split keeps the hidden pane mounted. The same
+  // rule tells commit which layout changes unmount a pane (and its unsaved editor).
+  const mountedPaneIds = collectMountedPaneIds(layout, { isMobile });
 
   // ---------------------------------------------------------------- tab labels and activity
 
@@ -151,12 +151,12 @@ function ProjectMainRegion({
       resolvePaneTabTitle(tab, tab.sessionId ? liveTitles.get(tab.sessionId) : null, untitledLabels),
       projectNames.get(tab.projectId) ?? '',
       getActivity(tab.sessionId) ?? '',
-    ].join(DISPLAY_FIELD_SEPARATOR))
-    .join(DISPLAY_ENTRY_SEPARATOR);
+    ].join(WORKSPACE_KEY_FIELD_SEPARATOR))
+    .join(WORKSPACE_KEY_ENTRY_SEPARATOR);
   const tabDisplay = useMemo<ReadonlyMap<string, PaneTabDisplay>>(() => new Map(
     tabDisplayKey
-      ? tabDisplayKey.split(DISPLAY_ENTRY_SEPARATOR).map((entry) => {
-        const [tabKey, title, projectName, activity] = entry.split(DISPLAY_FIELD_SEPARATOR);
+      ? tabDisplayKey.split(WORKSPACE_KEY_ENTRY_SEPARATOR).map((entry) => {
+        const [tabKey, title, projectName, activity] = entry.split(WORKSPACE_KEY_FIELD_SEPARATOR);
         return [tabKey, { title, projectName, activity: (activity || null) as PaneTabActivity | null }];
       })
       : [],
@@ -238,16 +238,28 @@ function ProjectMainRegion({
   };
 
   // A drop anywhere, or a drag that ends (Escape, dropped outside the window), clears the zones.
+  // It waits for the next task: this window listener runs before React hands the drop to a zone,
+  // and a browser lets React commit between the two, so clearing at once would unmount the zone
+  // before it ever saw the drop.
   useEffect(() => {
     if (!isSessionDragOver) {
       return undefined;
     }
-    const clearDragOver = () => setIsSessionDragOver(false);
+    let clearTimer: number | null = null;
+    const clearDragOver = () => {
+      clearTimer ??= window.setTimeout(() => {
+        clearTimer = null;
+        setIsSessionDragOver(false);
+      }, 0);
+    };
     window.addEventListener('drop', clearDragOver, true);
     window.addEventListener('dragend', clearDragOver, true);
     return () => {
       window.removeEventListener('drop', clearDragOver, true);
       window.removeEventListener('dragend', clearDragOver, true);
+      if (clearTimer !== null) {
+        window.clearTimeout(clearTimer);
+      }
     };
   }, [isSessionDragOver]);
 
@@ -261,8 +273,14 @@ function ProjectMainRegion({
       return;
     }
     if (payload.sessionId) {
+      // The row's title travels with the drop: a conversation the loaded pages lack still gets one.
       actions.openSession(
-        { id: payload.sessionId, __projectId: payload.projectId ?? undefined, __provider: payload.provider },
+        {
+          id: payload.sessionId,
+          __projectId: payload.projectId ?? undefined,
+          __provider: payload.provider,
+          ...(payload.title ? { summary: payload.title } : {}),
+        },
         { target: side, preview: false },
       );
     }
@@ -276,11 +294,11 @@ function ProjectMainRegion({
 
   const renderPane = (side: WorkspacePaneSide) => {
     const pane = getPane(layout, side);
-    if (!pane || !isSideRendered(side)) {
+    if (!pane || !mountedPaneIds.includes(pane.id)) {
       return null;
     }
     const isVisible = isSideVisible(side);
-    const otherSide: WorkspacePaneSide = side === 'left' ? 'right' : 'left';
+    const otherSide = getOtherPaneSide(side);
     // Only an empty pane reads these (its recent list and "open the current conversation here").
     const isEmpty = pane.tabs.length === 0;
     let className: string;
@@ -294,9 +312,10 @@ function ProjectMainRegion({
       className = cn('h-full flex-1', isSideBySide && side === 'right' && NEW_PANE_FADE_CLASS_NAME);
     }
 
+    // Keyed by pane id, not side: a right pane taking the left slot keeps its chat and editor.
     return (
       <WorkspacePane
-        key={side}
+        key={pane.id}
         side={side}
         pane={pane}
         otherPane={isEmpty ? getPane(layout, otherSide) : null}
@@ -326,6 +345,7 @@ function ProjectMainRegion({
         setSidebarOpen={setSidebarOpen}
         renameSession={renameSession}
         refreshProjectsSilently={refreshProjectsSilently}
+        onEditorUnsavedChange={setPaneEditorUnsaved}
         className={className}
         style={style}
       />
@@ -341,11 +361,11 @@ function ProjectMainRegion({
       onDragOver={handleGroupDragOver}
       onDragLeave={handleGroupDragLeave}
     >
-      {renderPane(SIDES[0])}
+      {renderPane(WORKSPACE_PANE_SIDES[0])}
       {isSideBySide && (
         <PaneSplitter containerRef={groupRef} ratio={layout.splitRatio} onCommit={actions.setSplitRatio} />
       )}
-      {renderPane(SIDES[1])}
+      {renderPane(WORKSPACE_PANE_SIDES[1])}
       {isMobile && (
         <PaneTabsSheet
           open={isTabsSheetOpen}

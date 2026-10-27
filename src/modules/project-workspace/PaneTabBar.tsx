@@ -11,7 +11,12 @@ import { useTranslation } from 'react-i18next';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { useHorizontalWheelScroll } from '@/modules/project-workspace/hooks/useHorizontalWheelScroll';
 import PaneTabContextMenu from '@/modules/project-workspace/PaneTabContextMenu';
-import { PANE_TAB_DRAG_EFFECT } from '@/shared/constants';
+import {
+  PANE_TAB_DRAG_EFFECT,
+  WORKSPACE_FULLSCREEN_SHORTCUT,
+  WORKSPACE_PANE_SIDES,
+  WORKSPACE_SPLIT_SHORTCUT,
+} from '@/shared/constants';
 import type {
   PaneTabActivity,
   PaneTabDisplay,
@@ -26,6 +31,7 @@ import {
   cn,
   copyTextToClipboard,
   formatShortcut,
+  getOtherPaneSide,
   hasSessionDragPayload,
   readSessionDragPayload,
   writeSessionDragPayload,
@@ -61,7 +67,8 @@ type PaneTabBarProps = {
 /** Open state of the tab context menu: which tab it acts on and the viewport point it opens at. */
 type TabMenuState = { tabKey: string; anchor: { x: number; y: number } };
 
-const otherSideOf = (side: WorkspacePaneSide): WorkspacePaneSide => (side === 'left' ? 'right' : 'left');
+/** Marks the split/merge button, so focus can follow it into whichever tab bar carries it after the layout changed. */
+const SPLIT_TOGGLE_SELECTOR = '[data-workspace-split-toggle]';
 
 const ICON_BUTTON_CLASS_NAME = 'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60';
 
@@ -132,7 +139,7 @@ export default function PaneTabBar({
   immersiveContent,
 }: PaneTabBarProps) {
   const { t } = useTranslation();
-  const { canSplit, isImmersive, toggleImmersive, setSidebarPeekOpen } = useWorkspaceChrome();
+  const { canSplit, isImmersive, toggleImmersive, isSidebarPeekOpen, setSidebarPeekOpen } = useWorkspaceChrome();
   const stripRef = useRef<HTMLDivElement>(null);
   const { canScrollLeft, canScrollRight, updateScrollState } = useHorizontalWheelScroll(stripRef, pane.activeTabKey);
   const hasOverflow = canScrollLeft || canScrollRight;
@@ -278,9 +285,12 @@ export default function PaneTabBar({
     }
     // Allows the drop; the event still bubbles so the pane group keeps its drag state.
     event.preventDefault();
-    if (event.dataTransfer.effectAllowed === PANE_TAB_DRAG_EFFECT) {
-      event.dataTransfer.dropEffect = event.altKey ? 'copy' : 'move';
+    // Only a dragged tab lands at a position: a conversation from the sidebar opens like any other open
+    // (right of the active tab), so it gets no insertion caret that would promise otherwise.
+    if (event.dataTransfer.effectAllowed !== PANE_TAB_DRAG_EFFECT) {
+      return;
     }
+    event.dataTransfer.dropEffect = event.altKey ? 'copy' : 'move';
     const nextDropIndex = getDropIndex(stripRef.current, event.clientX);
     setDropIndex((current) => (current === nextDropIndex ? current : nextDropIndex));
   };
@@ -325,11 +335,33 @@ export default function PaneTabBar({
     }
 
     if (payload.sessionId) {
+      // The row's title travels with the drop: a conversation the loaded pages lack still gets one.
       actions.openSession(
-        { id: payload.sessionId, __projectId: payload.projectId ?? undefined, __provider: payload.provider },
+        {
+          id: payload.sessionId,
+          __projectId: payload.projectId ?? undefined,
+          __provider: payload.provider,
+          ...(payload.title ? { summary: payload.title } : {}),
+        },
         { target: side, preview: false },
       );
     }
+  };
+
+  // The split/merge button moves to whichever pane is rightmost after the change, so the one that was
+  // pressed is gone: keyboard focus follows the button to its new place instead of dropping to the page.
+  const toggleSplitKeepingFocus = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const hadFocus = document.activeElement === event.currentTarget;
+    actions.toggleSplit();
+    if (!hadFocus) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        document.querySelector<HTMLElement>(SPLIT_TOGGLE_SELECTOR)?.focus();
+      }
+    });
   };
 
   const handleStripDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -341,7 +373,7 @@ export default function PaneTabBar({
 
   const menuTab = tabMenu ? tabs.find((tab) => tab.key === tabMenu.tabKey) ?? null : null;
   const menuTabIndex = menuTab ? tabs.indexOf(menuTab) : -1;
-  const otherSide = otherSideOf(side);
+  const otherSide = getOtherPaneSide(side);
   const menuItems = menuTab ? [
     { key: 'close', label: t('workspace.closeTab', { defaultValue: 'Close tab' }), onSelect: () => actions.closeTab(side, menuTab.key) },
     {
@@ -413,8 +445,8 @@ export default function PaneTabBar({
     }] : []),
   ];
 
-  const splitShortcut = formatShortcut(['mod', '\\']);
-  const fullscreenShortcut = formatShortcut(['mod', 'shift', 'enter']);
+  const splitShortcut = formatShortcut(WORKSPACE_SPLIT_SHORTCUT);
+  const fullscreenShortcut = formatShortcut(WORKSPACE_FULLSCREEN_SHORTCUT);
   const isSplitUnavailable = !isSplit && !canSplit;
   const splitLabel = isSplit ? t('workspace.merge', { defaultValue: 'Merge panes' }) : t('workspace.split', { defaultValue: 'Split view' });
   const splitTooltip = isSplitUnavailable
@@ -441,7 +473,7 @@ export default function PaneTabBar({
     >
       {isCollapsed && (
         <div className="flex flex-shrink-0 items-center gap-0.5 border-r border-border/50 px-1">
-          {(['left', 'right'] as const).map((switchSide) => {
+          {WORKSPACE_PANE_SIDES.map((switchSide) => {
             const isCurrent = switchSide === side;
             const label = switchSide === 'left'
               ? t('workspace.focusLeftPane', { defaultValue: 'Focus left pane' })
@@ -480,12 +512,15 @@ export default function PaneTabBar({
         </div>
       )}
 
+      {/* Workspace-wide controls (data-workspace-control): pressing them does not focus this pane. */}
       {isImmersive && isLeftmost && (
-        <div className="flex flex-shrink-0 items-center px-1">
+        <div data-workspace-control="" className="flex flex-shrink-0 items-center px-1">
           <Tooltip content={t('workspace.showSidebar', { defaultValue: 'Show sidebar' })} position="bottom">
             <button
               type="button"
               aria-label={t('workspace.showSidebar', { defaultValue: 'Show sidebar' })}
+              aria-haspopup="dialog"
+              aria-expanded={isSidebarPeekOpen}
               onClick={() => setSidebarPeekOpen(true)}
               className={ICON_BUTTON_CLASS_NAME}
             >
@@ -627,15 +662,16 @@ export default function PaneTabBar({
           />
         )}
         {showWorkspaceControls && (
-          <>
+          <div data-workspace-control="" className="flex items-center gap-0.5">
             <Tooltip content={splitTooltip} position="bottom">
               <button
                 type="button"
+                data-workspace-split-toggle=""
                 aria-label={splitLabel}
                 aria-disabled={isSplitUnavailable || undefined}
-                onClick={() => {
+                onClick={(event) => {
                   if (!isSplitUnavailable) {
-                    actions.toggleSplit();
+                    toggleSplitKeepingFocus(event);
                   }
                 }}
                 className={cn(ICON_BUTTON_CLASS_NAME, isSplitUnavailable && 'cursor-not-allowed opacity-50 hover:bg-transparent')}
@@ -653,7 +689,7 @@ export default function PaneTabBar({
                 {isImmersive ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </button>
             </Tooltip>
-          </>
+          </div>
         )}
       </div>
 

@@ -9,6 +9,7 @@ import {
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { findLoadedSession } from '@/modules/project-workspace/utils/resolveSessionTarget';
 import { getActiveTab, getPane } from '@/modules/project-workspace/utils/workspaceLayout';
+import { WORKSPACE_PANE_SIDES } from '@/shared/constants';
 import type {
   CommandPaletteWorkspaceCommands,
   Project,
@@ -19,7 +20,7 @@ import type {
   WorkspacePaneSide,
   WorkspaceSessionTab,
 } from '@/shared/types';
-import { focusWorkspacePaneElement, resolvePaneTabTitle } from '@/shared/utils';
+import { focusWorkspacePaneElement, getOtherPaneSide, resolvePaneTabTitle } from '@/shared/utils';
 
 /** A tab session's title in the loaded projects, where renames and generated summaries land; empty for a draft, an unloaded session or an untitled one. */
 const getLiveTabTitle = (tab: WorkspaceSessionTab, projects: Project[]): string | undefined => {
@@ -51,7 +52,7 @@ const collectOpenTabs = (
   labels: UntitledPaneTabLabels,
 ): WorkspaceOpenTabSummary[] => {
   const focusedTabKey = getActiveTab(getPane(layout, layout.focusedSide))?.key ?? null;
-  return (['left', 'right'] as const).flatMap((side) => (getPane(layout, side)?.tabs ?? []).map((tab) => ({
+  return WORKSPACE_PANE_SIDES.flatMap((side) => (getPane(layout, side)?.tabs ?? []).map((tab) => ({
     side,
     tabKey: tab.key,
     title: resolvePaneTabTitle(tab, getLiveTabTitle(tab, projects), labels),
@@ -136,7 +137,7 @@ function ProjectCommandPalette() {
       onMoveActiveTabToOtherSide: () => runMovingFocus(() => {
         const focused = readFocusedTab();
         if (focused.tab) {
-          actions.moveTab(focused.side, focused.tab.key, focused.side === 'left' ? 'right' : 'left');
+          actions.moveTab(focused.side, focused.tab.key, getOtherPaneSide(focused.side));
         }
       }),
       onCloseOtherTabs: () => {

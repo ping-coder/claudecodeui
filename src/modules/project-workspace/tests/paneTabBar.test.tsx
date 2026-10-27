@@ -43,7 +43,7 @@ const TABS = [
   makeTab('t3', { sessionId: null, session: null }),
   makeTab('t4'),
 ];
-const PANE: WorkspacePaneState = { tabs: TABS, activeTabKey: 't1', mru: ['t1'], draftActivation: 0, externalRevision: 0 };
+const PANE: WorkspacePaneState = { id: 'pane-left', tabs: TABS, activeTabKey: 't1', mru: ['t1'], draftActivation: 0, externalRevision: 0 };
 const DISPLAY = new Map<string, PaneTabDisplay>([
   ['t1', { title: 'First chat', projectName: 'Alpha', activity: 'running' }],
   ['t2', { title: 'Second chat', projectName: 'Alpha', activity: 'attention' }],
@@ -407,7 +407,7 @@ test('tabs added in the background bring up the all-tabs menu once they overflow
 });
 
 test('unsplit, the only tab can be opened on the other side but not moved there', () => {
-  const lonePane: WorkspacePaneState = { tabs: [TABS[0]], activeTabKey: 't1', mru: ['t1'], draftActivation: 0, externalRevision: 0 };
+  const lonePane: WorkspacePaneState = { id: 'pane-left', tabs: [TABS[0]], activeTabKey: 't1', mru: ['t1'], draftActivation: 0, externalRevision: 0 };
   const view = renderBar({ pane: lonePane });
 
   fireEvent.contextMenu(tabNamed('First chat'), { clientX: 10, clientY: 10 });

@@ -1,6 +1,7 @@
 import { api } from '@/shared/api';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 import type { LLMProvider, Project, ProjectSession } from '@/shared/types';
+import { readSessionProvider } from '@/shared/utils';
 
 /**
  * Resolves a session id (from a URL, the palette, a notification, a restored tab) to the
@@ -34,22 +35,24 @@ type SessionDetails = {
  * found: the session and its project; isListed is false for a project the sidebar list does not
  * hold (archived), which the caller keeps in its unlisted-project cache.
  * alias: the id was a provider-native alias of `canonicalId`.
- * missing: no such session (deleted elsewhere), the lookup failed, or it has no owning project.
+ * missing: the server has no such session (deleted elsewhere), or it has no owning project.
+ * unavailable: the server could not be asked or did not answer (offline, restarting, 5xx); the session
+ * may well exist, so callers can ask again later.
  */
 type SessionTargetResolution =
   | { kind: 'found'; session: ProjectSession; project: Project; isListed: boolean }
   | { kind: 'alias'; canonicalId: string }
-  | { kind: 'missing' };
+  | { kind: 'missing' }
+  | { kind: 'unavailable' };
 
-const DEFAULT_PROVIDER: LLMProvider = 'claude';
+/** What one lookup learned: the details, a definite "no such session" (404), or nothing (the request failed). */
+type SessionDetailsLookup =
+  | { kind: 'found'; details: SessionDetails }
+  | { kind: 'missing' }
+  | { kind: 'unavailable' };
 
 /** Lookups in flight by session id, so every caller asking about one id shares a single request. */
-const pendingLookups = new Map<string, Promise<SessionDetails | null>>();
-
-const getSessionProvider = (session: ProjectSession): LLMProvider => {
-  const provider = session.__provider ?? session.provider;
-  return typeof provider === 'string' && provider.trim() ? provider as LLMProvider : DEFAULT_PROVIDER;
-};
+const pendingLookups = new Map<string, Promise<SessionDetailsLookup>>();
 
 /** Finds a session in the loaded project pages, tagged with its provider and owning project; null when no page holds it. */
 export const findLoadedSession = (
@@ -60,7 +63,7 @@ export const findLoadedSession = (
     const match = project.sessions?.find((session) => session.id === sessionId);
     if (match) {
       return {
-        session: { ...match, __provider: getSessionProvider(match), __projectId: project.projectId },
+        session: { ...match, __provider: readSessionProvider(match), __projectId: project.projectId },
         project,
       };
     }
@@ -68,23 +71,27 @@ export const findLoadedSession = (
   return null;
 };
 
-const fetchSessionDetails = (sessionId: string): Promise<SessionDetails | null> => {
+const fetchSessionDetails = (sessionId: string): Promise<SessionDetailsLookup> => {
   const pending = pendingLookups.get(sessionId);
   if (pending) {
     return pending;
   }
 
-  const lookup = (async () => {
+  const lookup = (async (): Promise<SessionDetailsLookup> => {
     try {
       const response = await api.sessionDetails(sessionId);
+      // Only a 404 (SESSION_NOT_FOUND) says the session is gone; any other failure says nothing about it.
+      if (response.status === 404) {
+        return { kind: 'missing' };
+      }
       if (!response.ok) {
-        return null;
+        return { kind: 'unavailable' };
       }
       const payload = (await response.json()) as SessionDetailsApiPayload;
-      return payload.data ?? null;
+      return payload.data ? { kind: 'found', details: payload.data } : { kind: 'missing' };
     } catch (error) {
       console.error(`Error resolving session ${sessionId}:`, error);
-      return null;
+      return { kind: 'unavailable' };
     } finally {
       pendingLookups.delete(sessionId);
     }
@@ -107,10 +114,11 @@ export async function resolveSessionTarget(
     return { kind: 'found', ...loaded, isListed: true };
   }
 
-  const details = await fetchSessionDetails(sessionId);
-  if (!details) {
-    return { kind: 'missing' };
+  const lookup = await fetchSessionDetails(sessionId);
+  if (lookup.kind !== 'found') {
+    return lookup;
   }
+  const { details } = lookup;
 
   if (typeof details.sessionId === 'string' && details.sessionId && details.sessionId !== sessionId) {
     return { kind: 'alias', canonicalId: details.sessionId };

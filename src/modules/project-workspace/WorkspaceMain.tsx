@@ -13,6 +13,7 @@ import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { TaskMasterPanel, useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import type {
   AppTab,
+  CodeEditorDiffInfo,
   DirectoryRevealRequest,
   Project,
   ProjectSession,
@@ -74,6 +75,10 @@ type WorkspaceMainProps = {
   onProjectsRefresh: () => void;
   /** Persists a new title for a session; resolves false when the backend refuses it. Used by the header's inline rename. */
   onRenameSession: (sessionId: string, summary: string) => Promise<boolean>;
+  /** Hears the editor's buffer turn dirty or clean (clean again when it unmounts), for the pane's layout guard. */
+  onEditorUnsavedChange: (hasUnsavedChanges: boolean) => void;
+  /** The user opened a file from the chat: a preview tab becomes a kept one, as on a view switch. */
+  onKeepTab: () => void;
 };
 
 /** What an unfocused pane registers with the command palette: nothing, so palette actions land in the focused pane. */
@@ -135,6 +140,8 @@ function WorkspaceMain({
   onProjectSelect,
   onProjectsRefresh,
   onRenameSession,
+  onEditorUnsavedChange,
+  onKeepTab,
 }: WorkspaceMainProps) {
   const { t } = useTranslation();
   const preferences = useUiPreferences();
@@ -172,9 +179,28 @@ function WorkspaceMain({
     isMobile,
   });
 
+  // The editor reports its buffer here; the pane's layout guard hears it too, so a layout change that
+  // would unmount this pane asks before the edits go.
+  const handleEditorUnsavedChange = useCallback((hasUnsavedChanges: boolean) => {
+    handleUnsavedChangesChange(hasUnsavedChanges);
+    onEditorUnsavedChange(hasUnsavedChanges);
+  }, [handleUnsavedChangesChange, onEditorUnsavedChange]);
+
+  // A file opened from the chat (a link in a message, a tool result) is the user working in this tab,
+  // so a preview tab is kept, as on a view switch; nothing happens when the user keeps an unsaved buffer.
+  const openFileFromChat = useCallback((
+    filePath: string,
+    diffInfo: CodeEditorDiffInfo | null = null,
+    line: number | null = null,
+  ) => {
+    if (handleFileOpen(filePath, diffInfo, line)) {
+      onKeepTab();
+    }
+  }, [handleFileOpen, onKeepTab]);
+
   // Resolves bare/partial file references (e.g. links inside chat messages) to
   // real project files before opening them in the in-app editor.
-  const resolvedFileOpen = useFileOpenResolver(selectedProject, handleFileOpen);
+  const resolvedFileOpen = useFileOpenResolver(selectedProject, openFileFromChat);
 
   // Programmatic fallbacks: they leave a preview tab a preview.
   useEffect(() => {
@@ -269,7 +295,7 @@ function WorkspaceMain({
                   selectedSession={selectedSession}
                   ws={ws}
                   sendMessage={sendMessage}
-                  onFileOpen={handleFileOpen}
+                  onFileOpen={openFileFromChat}
                   onNavigateToSession={onNavigateToSession}
                   onSessionEstablished={onSessionEstablished}
                   onShowSettings={onShowSettings}
@@ -364,7 +390,7 @@ function WorkspaceMain({
             onResizeStart={handleResizeStart}
             onCloseEditor={handleCloseEditor}
             onToggleEditorExpand={handleToggleEditorExpand}
-            onUnsavedChangesChange={handleUnsavedChangesChange}
+            onUnsavedChangesChange={handleEditorUnsavedChange}
             projectPath={selectedProject.path}
             fillSpace={activeTab === 'files'}
           />

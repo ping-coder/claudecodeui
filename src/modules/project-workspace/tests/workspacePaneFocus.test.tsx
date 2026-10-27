@@ -8,6 +8,7 @@ import { beforeEach, test, vi } from 'vitest';
 import '@/modules/i18n';
 import type {
   Project,
+  SessionEstablishedContext,
   WorkspaceLayout,
   WorkspaceLayoutActions,
   WorkspacePaneState,
@@ -24,6 +25,16 @@ import type {
 
 const panes: { state: Record<string, unknown> } = { state: {} };
 const openedFiles: string[] = [];
+// Text the focused pane's chat took from the palette, as `<project>:<text>`.
+const insertedTexts: string[] = [];
+type ChatProps = {
+  selectedProject: Project;
+  onFileOpen?: (filePath: string) => void;
+  onNavigateToSession?: (sessionId: string) => void;
+  onSessionEstablished?: (sessionId: string, context: SessionEstablishedContext) => void;
+};
+// The props each pane's chat got at its latest render, by side.
+const chatProps: Partial<Record<'left' | 'right', ChatProps>> = {};
 const NO_SESSIONS: ReadonlySet<string> = new Set();
 const noop = () => undefined;
 
@@ -41,13 +52,32 @@ vi.mock('@/shared/context/UiPreferencesContext', () => ({
 // The chat reads its pane from WorkspacePaneContext; a file link in it opens through the pane's own action.
 vi.mock('@/modules/chat', async () => {
   const { useWorkspacePane } = await import('@/shared/context/WorkspacePaneContext');
+  const { usePaletteOpsRegister } = await import('@/modules/command-palette');
   return {
-    ChatInterface: ({ selectedProject }: { selectedProject: Project }) => {
+    ChatInterface: (props: ChatProps) => {
+      const { selectedProject, onFileOpen, onNavigateToSession, onSessionEstablished } = props;
       const { side, isFocusedPane, openFileInEditor } = useWorkspacePane();
+      chatProps[side ?? 'left'] = props;
+      // Like the real chat: only the focused pane takes text from other modules.
+      usePaletteOpsRegister(isFocusedPane
+        ? { insertComposerText: (text: string) => insertedTexts.push(`${selectedProject.projectId}:${text}`) }
+        : {});
       return (
         <div data-testid={`chat-${side}`} data-focused={String(isFocusedPane)}>
           <textarea aria-label={`composer ${selectedProject.projectId}`} data-slot="prompt-input-textarea" />
           <button type="button" onClick={() => openFileInEditor?.('src/link.ts', 3)}>{`file link in ${selectedProject.projectId}`}</button>
+          <button type="button" onClick={() => onFileOpen?.('src/tool.ts')}>{`tool result file in ${selectedProject.projectId}`}</button>
+          <button type="button" onClick={() => onNavigateToSession?.('fork-1')}>{`fork in ${selectedProject.projectId}`}</button>
+          <button
+            type="button"
+            onClick={() => {
+              // What the chat does once a first send created the session.
+              onSessionEstablished?.('new-1', { provider: 'claude', project: selectedProject, summary: 'First' });
+              onNavigateToSession?.('new-1');
+            }}
+          >
+            {`establish in ${selectedProject.projectId}`}
+          </button>
         </div>
       );
     },
@@ -113,7 +143,9 @@ const makeTab = (key: string, project: Project, overrides: Partial<WorkspaceSess
   ...overrides,
 });
 
-const makePane = (tabs: WorkspaceSessionTab[]): WorkspacePaneState => ({
+const makePane = (tabs: WorkspaceSessionTab[], id = `pane-${tabs[0]?.key ?? 'empty'}`): WorkspacePaneState => ({
+  // Ids follow the first tab unless given, so the two panes of a layout differ and a pane keeps its id across renders.
+  id,
   tabs,
   activeTabKey: tabs[0]?.key ?? null,
   mru: tabs[0] ? [tabs[0].key] : [],
@@ -203,7 +235,10 @@ const splitLayout = (focusedSide: 'left' | 'right'): WorkspaceLayout => ({
 beforeEach(() => {
   actions = makeActions();
   openedFiles.length = 0;
+  insertedTexts.length = 0;
   palette.ops = null;
+  delete chatProps.left;
+  delete chatProps.right;
 });
 
 test('a press anywhere in an unfocused pane focuses it; presses in the focused pane change nothing', () => {
@@ -324,4 +359,93 @@ test('the chat and editor in each pane read their own pane, and a file link open
   // Collapsed, the visible pane is not sharing the main area any more.
   view.rerender(regionElement({ canSplit: false }));
   assert.equal(screen.getByTestId('editor-left').getAttribute('data-split'), 'false');
+});
+
+/** Animation frames the panes request, run by hand. */
+const captureFrames = () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+  return () => frames.splice(0).forEach((callback) => callback(0));
+};
+
+const draftTab = (key: string, project: Project): WorkspaceSessionTab => makeTab(key, project, { sessionId: null, session: null, title: '' });
+
+test('a focused pane that shows nothing opens a new chat for a palette action, then runs the action there', () => {
+  const runFrames = captureFrames();
+  // Split a moment ago: the right pane is empty and focused; the palette lists the fallback project's files.
+  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([]), focusedSide: 'right', splitRatio: 0.5 });
+  const view = render(regionElement());
+  const ops = () => palette.ops as NonNullable<typeof palette.ops>;
+
+  ops().openFile('README.md');
+  assert.deepEqual(vi.mocked(actions.openNewSession).mock.calls, [[ALPHA, { target: 'right', view: 'files' }]]);
+  assert.deepEqual(openedFiles, [], 'nothing to open it in yet');
+
+  // The new chat shows up in the right pane: the file opens in its editor, under its project.
+  // The new chat shows up in the same pane (same id).
+  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([draftTab('d1', ALPHA)], 'pane-empty'), focusedSide: 'right', splitRatio: 0.5 });
+  view.rerender(regionElement());
+  runFrames();
+  assert.deepEqual(openedFiles, ['alpha:README.md']);
+});
+
+test('a slash command picked while the focused pane is empty lands in the composer of the chat it opens', () => {
+  const runFrames = captureFrames();
+  setLayout({ left: makePane([]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  const view = render(regionElement());
+
+  (palette.ops as NonNullable<typeof palette.ops>).insertComposerText('/review ');
+  assert.deepEqual(vi.mocked(actions.openNewSession).mock.calls, [[ALPHA, { target: 'left', view: 'chat' }]]);
+
+  setLayout({ left: makePane([draftTab('d1', ALPHA)], 'pane-empty'), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  view.rerender(regionElement());
+  runFrames();
+  assert.deepEqual(insertedTexts, ['alpha:/review ']);
+});
+
+test('a file opened from the chat, by a link or a tool result, keeps a preview tab open', () => {
+  setLayout(splitLayout('right'));
+  render(regionElement());
+
+  fireEvent.click(screen.getByRole('button', { name: 'file link in beta' }));
+  fireEvent.click(screen.getByRole('button', { name: 'tool result file in beta' }));
+
+  assert.deepEqual(openedFiles, ['beta:src/link.ts', 'beta:src/tool.ts']);
+  assert.deepEqual(vi.mocked(actions.pinTab).mock.calls, [['right', 'b1'], ['right', 'b1']]);
+});
+
+test('a fork opens kept in its own pane, in the background, under the project its row names', () => {
+  setLayout(splitLayout('left'));
+  render(regionElement());
+
+  fireEvent.click(screen.getByRole('button', { name: 'fork in beta' }));
+
+  // No project or provider read off whatever tab the pane shows when the fork comes back.
+  assert.deepEqual(vi.mocked(actions.openSession).mock.calls, [[
+    { id: 'fork-1' },
+    { target: 'right', preview: false, history: 'push', inBackground: true },
+  ]]);
+});
+
+test('a first send converts the draft that sent it and opens nothing more; a late one never takes a newer draft', () => {
+  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([draftTab('d1', BETA)], 'pane-right'), focusedSide: 'right', splitRatio: 0.5 });
+  const view = render(regionElement());
+
+  fireEvent.click(screen.getByRole('button', { name: 'establish in beta' }));
+  assert.equal(vi.mocked(actions.establishDraft).mock.calls.length, 1);
+  assert.deepEqual(vi.mocked(actions.establishDraft).mock.calls[0][2], { draftTabKey: 'd1' });
+  assert.equal(vi.mocked(actions.openSession).mock.calls.length, 0, 'no second open: no focus pulled back, no URL push, no pane rebuilt');
+
+  // A send started on d1; d1 is closed and a new draft d2 opened in the same pane before the session comes back.
+  const sentFromD1 = chatProps.right as ChatProps;
+  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([draftTab('d2', BETA)], 'pane-right'), focusedSide: 'right', splitRatio: 0.5 });
+  view.rerender(regionElement());
+  sentFromD1.onSessionEstablished?.('late-1', { provider: 'claude', project: BETA, summary: 'Late' });
+  sentFromD1.onNavigateToSession?.('late-1');
+  assert.deepEqual(vi.mocked(actions.establishDraft).mock.calls[1][2], { draftTabKey: 'd1' }, 'bound to the draft that sent it');
+  assert.equal(vi.mocked(actions.openSession).mock.calls.length, 0);
 });

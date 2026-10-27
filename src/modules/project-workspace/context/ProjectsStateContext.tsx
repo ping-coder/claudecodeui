@@ -33,6 +33,17 @@ type ProjectPanesState = {
   setSidebarOpen: Dispatch<SetStateAction<boolean>>;
   renameSession: (sessionId: string, summary: string) => Promise<boolean>;
   refreshProjectsSilently: () => Promise<void>;
+  /**
+   * Reported by ProjectWorkspaceShell from its main-column measurement (canSplit): whether two panes fit
+   * side by side. A split that does not fit shows the focused pane only, so only that pane's session
+   * counts as on screen (no attention dot, external reloads) and the hidden pane's can be flagged.
+   */
+  setCanShowBothPanes: (canShowBothPanes: boolean) => void;
+  /**
+   * Reported per pane (WorkspacePaneState.id) by the pane's WorkspaceMain whenever its editor's buffer
+   * turns dirty or clean: a layout change that would unmount a pane with unsaved edits asks first.
+   */
+  setPaneEditorUnsaved: (paneId: string, hasUnsavedChanges: boolean) => void;
 };
 
 /** What ProjectSidebarRegion needs to render the sidebar module for the focused pane. */
@@ -49,12 +60,12 @@ type ProjectSidebarState = {
 
 /** What the command palette and quick settings act on: the focused pane. */
 type ProjectCommandState = {
-  /** Focused pane's project, else fallbackProject. */
+  /** Focused pane's project, else fallbackProject (a stable object). A focused pane that shows nothing runs file and composer actions in a new chat of it. */
   selectedProject: Project | null;
   /** New chat in the focused pane. */
   handleNewSession: (project: Project) => void;
   openSettings: (tab?: string) => void;
-  /** Focused tab's view, user-initiated (pins). */
+  /** Focused tab's view, user-initiated (pins); a focused pane that shows nothing opens a new chat in selectedProject on that view. */
   setActiveTab: (view: AppTab) => void;
   openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
   layout: WorkspaceLayout;
@@ -115,6 +126,8 @@ export function ProjectsStateProvider({
       setSidebarOpen: state.setSidebarOpen,
       renameSession: state.renameSession,
       refreshProjectsSilently: state.refreshProjectsSilently,
+      setCanShowBothPanes: state.setCanShowBothPanes,
+      setPaneEditorUnsaved: state.setPaneEditorUnsaved,
     }),
     [
       state.actions,
@@ -127,6 +140,8 @@ export function ProjectsStateProvider({
       state.projects,
       state.refreshProjectsSilently,
       state.renameSession,
+      state.setCanShowBothPanes,
+      state.setPaneEditorUnsaved,
       state.setSidebarOpen,
     ],
   );
@@ -204,9 +219,10 @@ function useRequiredProjectContext<T>(value: T | null, hookName: string): T {
 }
 
 /**
- * Read by ProjectMainRegion to draw both panes and change the layout, by ProjectWorkspaceShell for the
- * workspace shortcuts and the phone's immersive menu button, and by ProjectCommandPalette for the titles
- * and project names of its Open tabs.
+ * Read by ProjectMainRegion to draw both panes, change the layout and collect the panes' unsaved-editor
+ * reports, by ProjectWorkspaceShell for the workspace shortcuts, the phone's immersive menu button and
+ * to report whether two panes fit, and by ProjectCommandPalette for the titles and project names of its
+ * Open tabs.
  */
 export function useProjectPanesState(): ProjectPanesState {
   return useRequiredProjectContext(useContext(ProjectPanesContext), 'useProjectPanesState');

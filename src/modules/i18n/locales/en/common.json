@@ -450,6 +450,7 @@
     "paletteGroup": "Workspace",
     "openTabsGroup": "Open tabs",
     "resizePanes": "Resize panes",
-    "chooseProject": "Choose project"
+    "chooseProject": "Choose project",
+    "sidebarDrawer": "Sidebar"
   }
 }

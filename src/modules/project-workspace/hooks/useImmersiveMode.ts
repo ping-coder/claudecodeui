@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { KeyboardLockNavigator } from '@/shared/types';
+
 /** Safari's prefixed Fullscreen API on the document; widened here instead of augmenting the global DOM types. */
 type PrefixedFullscreenDocument = Document & {
   webkitFullscreenEnabled?: boolean;
@@ -17,13 +19,6 @@ type DesktopShellWindow = Window & {
   cloudcliDesktopNotifications?: unknown;
 };
 
-/** Chromium's Keyboard Lock API, which TypeScript's DOM types do not include. */
-type KeyboardLockNavigator = Navigator & {
-  keyboard?: {
-    lock?: (keyCodes?: string[]) => Promise<void>;
-    unlock?: () => void;
-  };
-};
 
 const getFullscreenElement = (): Element | null => {
   const prefixedDocument = document as PrefixedFullscreenDocument;

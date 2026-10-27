@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import {
+  collectMountedPaneIds,
   collectSessionPlacements,
   collectVisibleSessionIds,
   createInitialLayout,
@@ -26,6 +27,8 @@ type Action = Parameters<typeof reduce>[1];
 
 let keySeq = 0;
 const nextKey = () => `t${(keySeq += 1)}`;
+let paneSeq = 0;
+const nextPaneId = () => `p${(paneSeq += 1)}`;
 
 const payload = (id: string, projectId = 'p1', extra: Partial<ProjectSession> = {}) => ({
   session: { id, summary: id.toUpperCase(), __provider: 'claude' as const, __projectId: projectId, ...extra },
@@ -40,6 +43,7 @@ const open = (id: string, target: SessionOpenTarget = 'focused', preview = true,
   target,
   preview,
   newTabKey: nextKey(),
+  newPaneId: nextPaneId(),
 });
 
 const draft = (projectId = 'p1', target: SessionOpenTarget = 'focused'): Action => ({
@@ -48,7 +52,10 @@ const draft = (projectId = 'p1', target: SessionOpenTarget = 'focused'): Action 
   provider: 'claude',
   target,
   newTabKey: nextKey(),
+  newPaneId: nextPaneId(),
 });
+
+const splitAction = (): Action => ({ type: 'split', newPaneId: nextPaneId() });
 
 const run = (...actions: Action[]): WorkspaceLayout => actions.reduce(reduce, createInitialLayout());
 
@@ -102,7 +109,7 @@ test('an explicit side may show the same session on both sides', () => {
 test('Split never copies the active tab: the left keeps its Shell tab and the right starts empty', () => {
   const opened = run(open('a', 'focused', false));
   const onShell = reduce(opened, { type: 'setView', side: 'left', tabKey: opened.left.activeTabKey as string, view: 'shell', pin: true });
-  const split = reduce(onShell, { type: 'split' });
+  const split = reduce(onShell, splitAction());
   assert.deepEqual(ids(split, 'left'), ['a']);
   assert.equal(split.left.tabs[0].view, 'shell');
   assert.deepEqual(ids(split, 'right'), []);
@@ -149,7 +156,7 @@ test('closing the last tab of the left pane promotes the right pane', () => {
 
 test("moving a pane's only tab collapses the split and keeps focus on the tab", () => {
   const layout = run(open('a', 'focused', false), open('b', 'other', false));
-  const moved = reduce(layout, { type: 'move', from: 'left', tabKey: layout.left.tabs[0].key, to: 'right', newTabKey: nextKey() });
+  const moved = reduce(layout, { type: 'move', from: 'left', tabKey: layout.left.tabs[0].key, to: 'right', newTabKey: nextKey(), newPaneId: nextPaneId() });
   assert.deepEqual(ids(moved, 'left'), ['b', 'a']);
   assert.equal(moved.right, null);
   assert.equal(activeId(moved, 'left'), 'a');
@@ -158,7 +165,7 @@ test("moving a pane's only tab collapses the split and keeps focus on the tab", 
 
 test('moving onto a pane that already shows the session just reveals it', () => {
   const layout = run(open('a', 'focused', false), open('b', 'focused', false), open('a', 'other', false));
-  const moved = reduce(layout, { type: 'move', from: 'left', tabKey: layout.left.tabs[0].key, to: 'right', newTabKey: nextKey() });
+  const moved = reduce(layout, { type: 'move', from: 'left', tabKey: layout.left.tabs[0].key, to: 'right', newTabKey: nextKey(), newPaneId: nextPaneId() });
   assert.deepEqual(ids(moved, 'left'), ['b']);
   assert.deepEqual(ids(moved, 'right'), ['a']);
   assert.equal(moved.focusedSide, 'right');
@@ -196,7 +203,7 @@ test('a user view switch pins the preview, and every tab remembers its own view'
 
 test('rename fans out to every copy and drops the one-shot search target', () => {
   const layout = run(
-    { type: 'open', payload: payload('a', 'p1', { __searchTargetSnippet: 'hit' }), target: 'focused', preview: false, newTabKey: nextKey() },
+    { type: 'open', payload: payload('a', 'p1', { __searchTargetSnippet: 'hit' }), target: 'focused', preview: false, newTabKey: nextKey(), newPaneId: nextPaneId() },
     open('a', 'other'),
   );
   const renamed = reduce(layout, { type: 'patchSession', sessionId: 'a', patch: { summary: 'Renamed' }, dropSearchTarget: true });
@@ -218,6 +225,7 @@ test('a search hit on an already open session still hands the chat a new identit
     target: 'focused',
     preview: true,
     newTabKey: nextKey(),
+    newPaneId: nextPaneId(),
   });
   assert.notEqual(jumped.left.tabs[0].session, before);
   assert.equal(jumped.left.tabs[0].session?.__searchTargetTimestamp, '2026-10-01');
@@ -330,7 +338,7 @@ test('re-focusing the focused pane or re-activating the active tab keeps the sam
 // ---------------------------------------------------------------- final-contract suite
 
 test('split opens an empty right pane and focuses it; the next plain open lands there', () => {
-  const split = run(open('a', 'focused', false), { type: 'split' });
+  const split = run(open('a', 'focused', false), splitAction());
   assert.deepEqual(ids(split, 'right'), []);
   assert.equal(split.focusedSide, 'right');
   const opened = reduce(split, open('b'));
@@ -340,7 +348,7 @@ test('split opens an empty right pane and focuses it; the next plain open lands 
 
 test('split while split only moves focus; closePane merges without losing tabs', () => {
   const layout = run(open('a', 'focused', false), open('b', 'other', false), open('c', 'right'));
-  const refocused = reduce(layout, { type: 'split' });
+  const refocused = reduce(layout, splitAction());
   assert.equal(refocused.focusedSide, 'left');
   assert.equal(refocused.right, layout.right);
   const merged = reduce(refocused, { type: 'closePane', side: 'right' });
@@ -420,20 +428,20 @@ test('copying a tab keeps the source and opens a Chat copy; copying a draft move
   const opened = run(open('a', 'focused', false));
   const tabKey = opened.left.activeTabKey as string;
   const onShell = reduce(opened, { type: 'setView', side: 'left', tabKey, view: 'shell', pin: true });
-  const copied = reduce(onShell, { type: 'move', from: 'left', tabKey, to: 'right', copy: true, newTabKey: nextKey() });
+  const copied = reduce(onShell, { type: 'move', from: 'left', tabKey, to: 'right', copy: true, newTabKey: nextKey(), newPaneId: nextPaneId() });
   assert.deepEqual(ids(copied, 'left'), ['a']);
   assert.deepEqual(ids(copied, 'right'), ['a']);
   assert.equal(copied.right?.tabs[0].view, 'chat');
   assert.notEqual(copied.right?.tabs[0].key, tabKey);
   assert.equal(copied.left.tabs[0].view, 'shell');
   const withDraft = run(draft('p1'));
-  const draftCopy = reduce(withDraft, { type: 'move', from: 'left', tabKey: withDraft.left.tabs[0].key, to: 'right', copy: true, newTabKey: nextKey() });
+  const draftCopy = reduce(withDraft, { type: 'move', from: 'left', tabKey: withDraft.left.tabs[0].key, to: 'right', copy: true, newTabKey: nextKey(), newPaneId: nextPaneId() });
   assert.equal(draftCopy.right, null, 'the emptied left pane hands its place to the right one');
   assert.deepEqual(ids(draftCopy, 'left'), ['draft:p1']);
 });
 
 test('closing the last tab of the right pane unsplits; the empty split pane survives a reload', () => {
-  const split = run(open('a', 'focused', false), { type: 'split' });
+  const split = run(open('a', 'focused', false), splitAction());
   const restored = parseStoredLayout(JSON.stringify(serializeLayout(split)));
   assert.ok(restored?.right);
   assert.equal(restored?.focusedSide, 'right');
@@ -495,19 +503,43 @@ test('findSessionTab looks in the focused pane first', () => {
   assert.equal(findSessionTab(layout, 'b'), null);
 });
 
-test('a pane promoted into the left slot never repeats that slot\'s draft counter', () => {
-  // The left ChatInterface stays mounted when the right pane takes the left slot, and it only
-  // resets when newSessionTrigger differs from the value it last saw.
+test('a pane promoted into the left slot keeps its id and counters: its own chat moves along and does not reset', () => {
+  // ProjectMainRegion keys panes by id, so the right pane's ChatInterface is the one that keeps
+  // showing the draft; a counter bump would wipe what it shows.
   let layout = run(draft('p1'), open('a', 'focused', false));
   layout = reduce(layout, { type: 'activate', side: 'left', tabKey: layout.left.tabs[0].key });
   layout = reduce(layout, { type: 'activate', side: 'left', tabKey: layout.left.tabs[1].key });
-  const leftCounter = layout.left.draftActivation;
   layout = reduce(layout, draft('p2', 'right'));
-  assert.equal(layout.right?.draftActivation, 1);
+  const right = layout.right as NonNullable<typeof layout.right>;
+  assert.equal(right.draftActivation, 1);
+  assert.notEqual(right.id, layout.left.id);
+
   const promoted = reduce(layout, { type: 'closeAll', side: 'left' });
   assert.equal(promoted.right, null);
   assert.deepEqual(ids(promoted, 'left'), ['draft:p2']);
-  assert.ok(promoted.left.draftActivation > leftCounter, `${promoted.left.draftActivation} must exceed ${leftCounter}`);
+  assert.equal(promoted.left.id, right.id, 'the right pane, not the left slot, survives');
+  assert.equal(promoted.left.draftActivation, right.draftActivation);
+  assert.equal(promoted.left.externalRevision, right.externalRevision);
+
+  // Closing the left side through its menu is the same move.
+  const closed = reduce(layout, { type: 'closePane', side: 'left' });
+  assert.equal(closed.left.id, right.id);
+  assert.equal(closed.left.draftActivation, right.draftActivation);
+});
+
+test('a new pane gets the id commit generated; a restored layout gets ids that persistence never stores', () => {
+  const single = run(open('a', 'focused', false));
+  const split = reduce(single, { type: 'split', newPaneId: 'fresh-right' });
+  assert.equal(split.left.id, single.left.id, 'the left pane keeps its id');
+  assert.equal(split.right?.id, 'fresh-right');
+  const opened = reduce(single, { ...open('b', 'right', false), newPaneId: 'opened-right' } as Action);
+  assert.equal(opened.right?.id, 'opened-right');
+
+  const raw = JSON.stringify(serializeLayout(split));
+  assert.equal(raw.includes('fresh-right'), false, 'pane ids are runtime only');
+  const restored = parseStoredLayout(raw) as WorkspaceLayout;
+  assert.ok(restored.left.id && restored.right?.id);
+  assert.notEqual(restored.left.id, restored.right?.id);
 });
 
 test('an alias rewrite keeps the tab that is on screen', () => {
@@ -529,14 +561,14 @@ test('a patch that changes nothing keeps the session identity', () => {
 test('reordering within a pane pins the tab; dropping it where it already is changes nothing', () => {
   const layout = run(open('a', 'focused', false), open('b', 'focused', false), open('c'));
   const cKey = tabKeyOf(layout, 'left', 'c');
-  const reordered = reduce(layout, { type: 'move', from: 'left', tabKey: cKey, to: 'left', index: 0, newTabKey: nextKey() });
+  const reordered = reduce(layout, { type: 'move', from: 'left', tabKey: cKey, to: 'left', index: 0, newTabKey: nextKey(), newPaneId: nextPaneId() });
   assert.deepEqual(ids(reordered, 'left'), ['c', 'a', 'b']);
   assert.equal(reordered.left.activeTabKey, cKey);
-  assert.equal(reduce(reordered, { type: 'move', from: 'left', tabKey: cKey, to: 'left', index: 0, newTabKey: nextKey() }), reordered);
+  assert.equal(reduce(reordered, { type: 'move', from: 'left', tabKey: cKey, to: 'left', index: 0, newTabKey: nextKey(), newPaneId: nextPaneId() }), reordered);
 });
 
 test('closing the left side merges it into the right and keeps its active tab', () => {
-  const layout = run(open('a', 'focused', false), open('b', 'focused', false), { type: 'split' });
+  const layout = run(open('a', 'focused', false), open('b', 'focused', false), splitAction());
   const bKey = tabKeyOf(layout, 'left', 'b');
   const closed = reduce(layout, { type: 'closePane', side: 'left' });
   assert.equal(closed.right, null);
@@ -592,4 +624,121 @@ test('persisting a pane with more than 30 tabs keeps the most recently used ones
   assert.ok(stored.left.tabs.some((tab) => tab.sessionId === 's0'));
   assert.ok(!stored.left.tabs.some((tab) => tab.sessionId === 's1'), 'the least recently used tabs are dropped');
   assert.ok(stored.left.mru.every((key) => stored.left.tabs.some((tab) => tab.key === key)));
+});
+
+// ---------------------------------------------------------------- review fixes
+
+test('merging keeps the focused pane: its id, its active tab and its tabs after the left ones', () => {
+  // a1 on the left; b on the right, focused, with a1 open there too.
+  let layout = run(open('a1', 'focused', false), open('a2', 'focused', false), open('b', 'other', false), open('a1', 'right', false));
+  layout = reduce(layout, { type: 'activate', side: 'right', tabKey: tabKeyOf(layout, 'right', 'b') });
+  const rightId = layout.right?.id;
+  const bKey = tabKeyOf(layout, 'right', 'b');
+
+  const merged = reduce(layout, { type: 'merge' });
+  assert.equal(merged.right, null);
+  assert.equal(merged.focusedSide, 'left');
+  assert.equal(merged.left.id, rightId, 'the pane the user works in stays mounted');
+  assert.equal(merged.left.activeTabKey, bKey, 'the conversation on screen stays on screen');
+  assert.deepEqual(ids(merged, 'left'), ['a2', 'b', 'a1'], 'left tabs first; a session open twice keeps the focused pane\'s tab');
+
+  // Focused on the left, the left pane stays, as before.
+  const fromLeft = reduce({ ...layout, focusedSide: 'left' }, { type: 'merge' });
+  assert.equal(fromLeft.left.id, layout.left.id);
+  assert.equal(getActiveTab(fromLeft.left)?.sessionId, getActiveTab(layout.left)?.sessionId);
+  assert.deepEqual(ids(fromLeft, 'left'), ['a1', 'a2', 'b']);
+});
+
+test('merging from an empty focused pane keeps the other pane', () => {
+  const layout = run(open('a', 'focused', false), splitAction());
+  assert.equal(layout.focusedSide, 'right');
+  const merged = reduce(layout, { type: 'merge' });
+  assert.equal(merged.left.id, layout.left.id);
+  assert.deepEqual(ids(merged, 'left'), ['a']);
+  assert.equal(reduce(run(open('a')), { type: 'merge' }).right, null, 'nothing to merge while unsplit');
+});
+
+test('an open naming the project revives a tab flagged missing; one without a project leaves it flagged', () => {
+  const flagged = reduce(run(open('gone', 'focused', false)), { type: 'markMissing', sessionId: 'gone' });
+  const stranded = { ...flagged, left: { ...flagged.left, tabs: flagged.left.tabs.map((tab) => ({ ...tab, projectId: '' })) } };
+
+  const unresolved = reduce(stranded, { ...open('gone', 'focused', true), payload: { ...payload('gone'), projectId: '' } } as Action);
+  assert.equal(unresolved.left.tabs[0].isMissing, true);
+
+  const revived = reduce(stranded, { ...open('gone', 'focused', true), payload: payload('gone', 'p9', { summary: 'Back again' }) } as Action);
+  const tab = revived.left.tabs[0];
+  assert.equal(tab.isMissing, undefined);
+  assert.equal(tab.projectId, 'p9');
+  assert.equal(tab.session?.summary, 'Back again');
+  assert.equal(tab.key, stranded.left.tabs[0].key, 'the same tab comes back');
+
+  // Open on both sides and flagged on both: one open brings back every copy.
+  const both = reduce(run(open('twice', 'focused', false), open('twice', 'other', false)), { type: 'markMissing', sessionId: 'twice' });
+  const bothRevived = reduce(both, { ...open('twice', 'focused', true), payload: payload('twice', 'p9') } as Action);
+  assert.deepEqual([bothRevived.left.tabs[0].isMissing, bothRevived.right?.tabs[0].isMissing], [undefined, undefined]);
+});
+
+test('a patch from an authoritative row settles the tab\'s project and provider and clears a missing flag', () => {
+  // A fork once opened under the project of whatever tab was on screen.
+  const layout = run(open('fork', 'focused', false, 'wrong'));
+  const missing = reduce(layout, { type: 'markMissing', sessionId: 'fork' });
+
+  const patched = reduce(missing, {
+    type: 'patchSession',
+    sessionId: 'fork',
+    patch: { id: 'fork', summary: 'Fork', __projectId: 'right-project', __provider: 'codex' },
+  });
+  const tab = patched.left.tabs[0];
+  assert.equal(tab.projectId, 'right-project');
+  assert.equal(tab.provider, 'codex');
+  assert.equal(tab.isMissing, undefined);
+
+  // A rename names no project: the tab's project and flag are left alone.
+  const renamed = reduce(missing, { type: 'patchSession', sessionId: 'fork', patch: { summary: 'Renamed' } });
+  assert.equal(renamed.left.tabs[0].projectId, 'wrong');
+  assert.equal(renamed.left.tabs[0].isMissing, true);
+});
+
+test('establishing by draft key converts only that draft, wherever it went, and nothing once it was closed', () => {
+  const establish = (draftTabKey: string): Action => ({
+    type: 'establishDraft',
+    projectId: 'p1',
+    draftTabKey,
+    payload: payload('s-new'),
+  });
+  const layout = run(draft('p1'), open('a', 'focused', false));
+  const firstDraftKey = tabKeyOf(layout, 'left', null);
+
+  // The user switched tabs and moved the draft to the other side meanwhile: it is still found.
+  const moved = reduce(layout, { type: 'move', from: 'left', tabKey: firstDraftKey, to: 'right', newTabKey: nextKey(), newPaneId: nextPaneId() });
+  const converted = reduce(moved, establish(firstDraftKey));
+  assert.deepEqual(ids(converted, 'right'), ['s-new']);
+
+  // Closed, then a new draft of the same project opened: the late establish leaves the new one alone.
+  const closed = reduce(layout, { type: 'close', side: 'left', tabKey: firstDraftKey });
+  const reopened = reduce(closed, draft('p1'));
+  const late = reduce(reopened, establish(firstDraftKey));
+  assert.equal(late, reopened);
+  assert.deepEqual(ids(late, 'left'), ['a', 'draft:p1']);
+});
+
+test('an open with focus false lands in its pane without taking the focus', () => {
+  const layout = run(open('a', 'focused', false), open('b', 'other', false), { type: 'focus', side: 'left' });
+  const background = reduce(layout, { ...open('fork', 'right', false), focus: false } as Action);
+  assert.equal(background.focusedSide, 'left');
+  assert.deepEqual(ids(background, 'right'), ['b', 'fork']);
+  assert.equal(getActiveTab(background.right)?.sessionId, 'fork');
+
+  // Revealing a tab already open over there does not move the focus either, and changes nothing else.
+  const again = reduce(background, { ...open('fork', 'right', false), focus: false } as Action);
+  assert.equal(again, background);
+});
+
+test('the mounted panes: both on desktop, the focused one only on a phone', () => {
+  const layout = run(open('a', 'focused', false), open('b', 'other', false));
+  const leftId = layout.left.id;
+  const rightId = layout.right?.id as string;
+  assert.deepEqual(collectMountedPaneIds(layout, { isMobile: false }), [leftId, rightId]);
+  assert.deepEqual(collectMountedPaneIds(layout, { isMobile: true }), [rightId]);
+  assert.deepEqual(collectMountedPaneIds(run(open('a')), { isMobile: true }), [run(open('a')).left.id]);
 });

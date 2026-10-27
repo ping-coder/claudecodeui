@@ -101,6 +101,12 @@ export default function SidebarProjectList({
               // the rows offer absolute sides, so a focus switch changes nothing they draw.
               const isExpanded = isProjectExpanded(project.projectId);
               const sessions = getProjectSessions(project);
+              // The highlight as well. The focused pane's session belongs to the focused pane's
+              // project, so only that row is handed its id: a focus switch between two panes
+              // changes props on the two project rows and the two session rows it moves the
+              // highlight between, and on no other row.
+              const isSelected = selectedProject?.projectId === project.projectId;
+              const selectedSessionId = isSelected ? selectedSession?.id ?? null : null;
 
               // React key + per-project state lookups all use the DB `projectId`
               // so they remain stable across renames and session changes.
@@ -108,8 +114,8 @@ export default function SidebarProjectList({
               <SidebarProjectItem
                 key={project.projectId}
                 project={project}
-                selectedProject={selectedProject}
-                selectedSession={selectedSession}
+                isSelected={isSelected}
+                selectedSessionId={selectedSessionId}
                 isExpanded={isExpanded}
                 isDeleting={deletingProjects.has(project.projectId)}
                 isStarred={isProjectStarred(project.projectId)}

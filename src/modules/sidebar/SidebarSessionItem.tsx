@@ -8,7 +8,6 @@ import { cn, writeSessionDragPayload } from '@/shared/utils';
 import type {
   LLMProvider,
   Project,
-  ProjectSession,
   SessionOpenOptions,
   SessionPanePlacement,
   SessionWithProvider,
@@ -23,7 +22,8 @@ import { PanePlacementMarker } from '@/modules/sidebar/SessionPaneButtons';
 type SidebarSessionItemProps = {
   project: Project;
   session: SessionWithProvider;
-  selectedSession: ProjectSession | null;
+  /** This row is the focused pane's session. Resolved per row, so a focus switch re-renders only the rows it highlights or unhighlights. */
+  isSelected: boolean;
   isProcessing: boolean;
   /** The session's turn has ended but the agents, workflows or commands it launched still run. */
   hasBackgroundWork: boolean;
@@ -59,7 +59,7 @@ type SidebarSessionItemProps = {
 function SidebarSessionItem({
   project,
   session,
-  selectedSession,
+  isSelected,
   isProcessing,
   hasBackgroundWork,
   needsAttention,
@@ -83,7 +83,6 @@ function SidebarSessionItem({
 }: SidebarSessionItemProps) {
   const isCompact = useCompactSidebar();
   const sessionView = createSessionViewModel(session, currentTime, t);
-  const isSelected = selectedSession?.id === session.id;
   const compactSessionAge = formatCompactAge(sessionView.sessionTime, currentTime);
   const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
   const showAttentionIndicator = needsAttention && !isSelected;

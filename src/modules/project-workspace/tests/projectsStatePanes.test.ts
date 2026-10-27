@@ -280,3 +280,96 @@ test('registering an optimistic session only writes projects; the command state 
   });
   assert.equal(result.current.layout.left.tabs[0].view, 'git');
 });
+
+test('a split too narrow for two panes hides one: that pane\'s session can need attention, and an upsert marks it', async () => {
+  const { result } = await renderProjectsState();
+  openBothPanes(result);
+  act(() => {
+    result.current.actions.focusPane('left');
+  });
+
+  // The shell measured the main column: the right pane is hidden behind the switcher.
+  act(() => {
+    result.current.setCanShowBothPanes(false);
+  });
+  act(() => {
+    emit({ kind: 'permission_request', sessionId: 'b1' });
+    emit({ kind: 'permission_request', sessionId: 'a1' });
+  });
+  assert.deepEqual([...result.current.attentionSessionIds], ['b1'], 'the hidden side\'s session waits for the user');
+
+  // Showing it (focusing that side) clears the mark.
+  act(() => {
+    result.current.actions.focusPane('right');
+  });
+  assert.deepEqual([...result.current.attentionSessionIds], []);
+
+  // Side by side again, both sessions are on screen.
+  act(() => {
+    result.current.setCanShowBothPanes(true);
+    emit({ kind: 'permission_request', sessionId: 'a1' });
+  });
+  assert.deepEqual([...result.current.attentionSessionIds], []);
+});
+
+test('the sidebar refresh hands every open tab its refreshed row', async () => {
+  const { result } = await renderProjectsState();
+  openBothPanes(result);
+
+  projectsResponse.mockResolvedValue({
+    ok: true,
+    json: async () => [
+      { ...projectA, sessions: [{ id: 'a1', summary: 'Refreshed a1', provider: 'claude' }, { id: 'a2', summary: 'Title a2', provider: 'claude' }] },
+      projectB,
+    ],
+  });
+  await act(async () => {
+    await result.current.handleSidebarRefresh();
+  });
+
+  assert.equal(result.current.layout.left.tabs[0].session?.summary, 'Refreshed a1');
+  assert.equal(result.current.layout.left.tabs[0].title, 'Refreshed a1');
+});
+
+test('an upsert that names a tab\'s provider alias moves the tab to the canonical id with the canonical row', async () => {
+  const { result } = await renderProjectsState();
+  act(() => {
+    result.current.actions.openSession({ id: 'native-1', summary: '', __projectId: 'pa', __provider: 'claude' });
+  });
+
+  act(() => {
+    emit({
+      ...upsertFor('app-1', 'pa'),
+      providerSessionId: 'native-1',
+      session: { id: 'app-1', summary: 'Canonical title', lastActivity: '2026-10-27T00:00:00.000Z' },
+    });
+  });
+
+  const tab = result.current.layout.left.tabs[0];
+  assert.equal(tab.sessionId, 'app-1');
+  assert.equal(tab.session?.id, 'app-1');
+  assert.equal(tab.session?.summary, 'Canonical title');
+  assert.equal(tab.title, 'Canonical title');
+});
+
+test('switching views in a pane that shows nothing opens a new chat there, on that view', async () => {
+  const { result } = await renderProjectsState();
+  act(() => {
+    result.current.actions.openSession(rowOf(projectA, 'a1'));
+  });
+  act(() => {
+    result.current.actions.split();
+  });
+  assert.equal(result.current.layout.right?.tabs.length, 0);
+
+  // The palette's Navigate > Files, or quick settings switching to Chat before inserting a command.
+  act(() => {
+    result.current.setActiveTab('files');
+  });
+
+  const rightTab = result.current.layout.right?.tabs[0];
+  assert.equal(rightTab?.sessionId, null);
+  assert.equal(rightTab?.projectId, 'pa', 'the project the palette lists: the other pane\'s');
+  assert.equal(rightTab?.view, 'files');
+  assert.equal(result.current.layout.focusedSide, 'right');
+});

@@ -45,7 +45,7 @@ const renderRow = (state: RowState) => render(
   React.createElement(SidebarSessionItem, {
     project: PROJECT,
     session: SESSION,
-    selectedSession: null,
+    isSelected: false,
     needsAttention: false,
     currentTime: NOW,
     isEditing: false,
