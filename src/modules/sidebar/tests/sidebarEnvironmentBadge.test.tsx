@@ -141,6 +141,6 @@ test('in production neither the header nor the collapsed rail shows a badge', as
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(screen.queryByTitle(/^Deployment environment/), null);
+  assert.equal(screen.queryByTitle(/^Deployment environment/) === null, true);
   assert.equal(screen.getAllByText('app.title').length, 2);
 });

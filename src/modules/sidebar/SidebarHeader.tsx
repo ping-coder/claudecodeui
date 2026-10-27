@@ -3,13 +3,10 @@ import type { TFunction } from 'i18next';
 
 import { Button, DeploymentEnvironmentBadge, Input } from '@/shared/ui';
 import { CLOUDCLI_WORDMARK_FONT_FAMILY } from '@/shared/constants';
-import { IS_PLATFORM } from '@/shared/utils';
+import { IS_PLATFORM, formatShortcut } from '@/shared/utils';
 import type { SidebarSearchMode } from '@/shared/types';
 import GitHubStarBadge from '@/modules/sidebar/GitHubStarBadge';
 import SidebarModeTabs from '@/modules/sidebar/SidebarModeTabs';
-
-const MOD_KEY =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
 type SidebarHeaderProps = {
   isPWA: boolean;
@@ -27,7 +24,8 @@ type SidebarHeaderProps = {
   onRefresh: () => void;
   isRefreshing: boolean;
   onCreateProject: () => void;
-  onCollapseSidebar: () => void;
+  /** Absent while the sidebar is forced open (the immersive drawer): the hide button is left out. */
+  onCollapseSidebar?: () => void;
   t: TFunction;
 };
 
@@ -85,6 +83,8 @@ export default function SidebarHeader({
       : searchMode === 'running'
         ? t('search.runningPlaceholder', 'Search running sessions...')
         : t('projects.searchPlaceholder');
+  // The palette shortcut's modifier as this platform writes it (⌘ or Ctrl), read on render.
+  const modKeyLabel = formatShortcut(['mod']);
 
   return (
     <div className="flex-shrink-0">
@@ -130,15 +130,17 @@ export default function SidebarHeader({
             >
               <Plus className="h-3.5 w-3.5" />
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded-lg p-0 text-muted-foreground hover:bg-accent/80 hover:text-foreground"
-              onClick={onCollapseSidebar}
-              title={t('tooltips.hideSidebar')}
-            >
-              <PanelLeftClose className="h-3.5 w-3.5" />
-            </Button>
+            {onCollapseSidebar && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 rounded-lg p-0 text-muted-foreground hover:bg-accent/80 hover:text-foreground"
+                onClick={onCollapseSidebar}
+                title={t('tooltips.hideSidebar')}
+              >
+                <PanelLeftClose className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </div>
         </div>
 
@@ -177,7 +179,7 @@ export default function SidebarHeader({
                   title={t('tooltips.openCommandPalette')}
                   className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground md:inline-flex"
                 >
-                  {MOD_KEY}
+                  {modKeyLabel}
                   <span>K</span>
                 </kbd>
               )}

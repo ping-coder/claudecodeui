@@ -1,9 +1,18 @@
 import { CheckSquare, Plus, Trash2 } from 'lucide-react';
+import type { MouseEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '@/shared/ui';
 import { cn } from '@/shared/utils';
-import type { LLMProvider, Project, ProjectSession, SessionWithProvider, SidebarSessionSelection } from '@/shared/types';
+import type {
+  LLMProvider,
+  Project,
+  ProjectSession,
+  SessionOpenOptions,
+  SessionPanePlacement,
+  SessionWithProvider,
+  SidebarSessionSelection,
+} from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
 
@@ -26,18 +35,23 @@ type SidebarProjectSessionsProps = {
   onStartEditingSession: (projectId: string, sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;
   onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
-  onProjectSelect: (project: Project) => void;
-  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
+  onSessionSelect: (session: SessionWithProvider, projectId: string, options?: SessionOpenOptions) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
   onLoadMoreSessions: (projectId: string) => void;
-  onNewSession: (project: Project) => void;
+  onNewSession: (project: Project, options?: SessionOpenOptions) => void;
   /** The sessions ticked here, or null when this project's list is not in selection mode. */
   selectedSessionIds: ReadonlySet<string> | null;
   onSetSessionSelection: (selection: SidebarSessionSelection) => void;
   onToggleSessionSelected: (projectId: string, sessionId: string) => void;
   onCancelSessionSelection: () => void;
   onDeleteSelectedSessions: (sessionIds: string[]) => void;
+  /** Desktop, and the workspace is split or wide enough to split. */
+  canTargetSides?: boolean;
+  /** A right pane exists. */
+  isWorkspaceSplit?: boolean;
+  /** sessionId -> placement, or null when none of this project's rows needs it; resolved per row here. */
+  panePlacements?: ReadonlyMap<string, SessionPanePlacement> | null;
   t: TFunction;
 };
 
@@ -78,7 +92,6 @@ export default function SidebarProjectSessions({
   onStartEditingSession,
   onCancelEditingSession,
   onSaveEditingSession,
-  onProjectSelect,
   onSessionSelect,
   onDeleteSession,
   onForkSession,
@@ -89,6 +102,9 @@ export default function SidebarProjectSessions({
   onToggleSessionSelected,
   onCancelSessionSelection,
   onDeleteSelectedSessions,
+  canTargetSides = false,
+  isWorkspaceSplit = false,
+  panePlacements = null,
   t,
 }: SidebarProjectSessionsProps) {
   const isCompact = useCompactSidebar();
@@ -122,16 +138,20 @@ export default function SidebarProjectSessions({
       ? t('sessions.selectAllLoaded')
       : t('sessions.selectAll');
 
+  // Alt+click puts the new chat on the other side, like Alt+click on a row; where no split
+  // is possible it opens in the focused pane as usual.
+  const startNewSession = (event: MouseEvent<HTMLButtonElement>) => {
+    onNewSession(project, event.altKey && canTargetSides ? { target: 'other' } : undefined);
+  };
+
   return (
     <div className="ml-3 space-y-1 border-l border-border pl-3">
       {isCompact ? (
         <div className="px-3 pb-1 pt-1">
           <button
             className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-primary text-xs font-medium text-primary-foreground transition-all duration-150 hover:bg-primary/90 active:scale-[0.98]"
-            onClick={() => {
-              onProjectSelect(project);
-              onNewSession(project);
-            }}
+            // The new chat opens in the focused pane and closes the drawer itself.
+            onClick={() => onNewSession(project)}
           >
             <Plus className="h-3 w-3" />
             {t('sessions.newSession')}
@@ -142,7 +162,7 @@ export default function SidebarProjectSessions({
           variant="default"
           size="sm"
           className="flex h-8 w-full justify-start gap-2 bg-primary text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-          onClick={() => onNewSession(project)}
+          onClick={startNewSession}
         >
           <Plus className="h-3 w-3" />
           {t('sessions.newSession')}
@@ -234,13 +254,17 @@ export default function SidebarProjectSessions({
               onStartEditingSession={onStartEditingSession}
               onCancelEditingSession={onCancelEditingSession}
               onSaveEditingSession={onSaveEditingSession}
-              onProjectSelect={onProjectSelect}
               onSessionSelect={onSessionSelect}
               onDeleteSession={onDeleteSession}
               onForkSession={onForkSession}
               isSelecting={isSelecting}
               isChecked={checkedSessionIds.has(session.id)}
               onToggleSessionSelected={onToggleSessionSelected}
+              // Scalars, like isEditing: a tab opening for another session or a focus
+              // switch hands this row the same values, so its memo holds.
+              panePlacement={panePlacements?.get(session.id) ?? null}
+              canTargetSides={canTargetSides}
+              isWorkspaceSplit={isWorkspaceSplit}
               t={t}
             />
           ))}

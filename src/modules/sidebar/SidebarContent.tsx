@@ -1,12 +1,25 @@
-import { type ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { Activity, Archive, Folder, MessageSquare, RotateCcw, Search, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { LLMProviderLogo, ScrollArea } from '@/shared/ui';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationSearchResults, Project, RecentConversationListItem, ReleaseInfo, SearchProgress, SidebarProjectListProps, SidebarSearchMode } from '@/shared/types';
+import type {
+  ArchivedProjectListItem,
+  ArchivedSessionListItem,
+  ConversationSearchResults,
+  Project,
+  RecentConversationListItem,
+  ReleaseInfo,
+  SearchProgress,
+  SessionOpenOptions,
+  SidebarConversationOpenRequest,
+  SidebarProjectListProps,
+  SidebarSearchMode,
+} from '@/shared/types';
 import { formatCompactAge, getAllSessions } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SidebarFooter from '@/modules/sidebar/SidebarFooter';
 import SidebarHeader from '@/modules/sidebar/SidebarHeader';
+import SidebarPaneTargetBar from '@/modules/sidebar/SidebarPaneTargetBar';
 import SidebarProjectList from '@/modules/sidebar/SidebarProjectList';
 import SidebarRecentConversations from '@/modules/sidebar/SidebarRecentConversations';
 
@@ -108,16 +121,17 @@ type SidebarContentProps = {
   onRestoreArchivedProject: (projectId: string) => void;
   onLoadMoreRecentConversations: () => void;
   onRetryRecentConversations: () => void;
-  onArchivedSessionClick: (session: ArchivedSessionListItem) => void;
+  onArchivedSessionClick: (session: ArchivedSessionListItem, options?: SessionOpenOptions) => void;
   onRestoreArchivedSession: (sessionId: string) => void;
   onDeleteArchivedSession: (session: ArchivedSessionListItem) => void;
   // Conversation result clicks pass back the DB projectId (or null when the
   // server couldn't resolve it). Consumers must handle the null case.
-  onConversationResultClick: (projectId: string | null, sessionId: string, provider: string, messageTimestamp?: string | null, messageSnippet?: string | null) => void;
+  onConversationResultClick: (request: SidebarConversationOpenRequest, options?: SessionOpenOptions) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
   onCreateProject: () => void;
-  onCollapseSidebar: () => void;
+  /** Absent while the sidebar is forced open (the immersive drawer), where hiding it would do nothing. */
+  onCollapseSidebar?: () => void;
   updateAvailable: boolean;
   restartRequired: boolean;
   releaseInfo: ReleaseInfo | null;
@@ -183,11 +197,22 @@ export default function SidebarContent({
   const groupedArchivedSessions = groupArchivedSessionsByProject(archivedSessions);
   const visibleArchivedItemsCount = archivedProjects.length + archivedSessions.length;
   const isRenamingOnMobile = isMobile && projectListProps.activeRename !== null;
+  const { paneTargeting } = projectListProps;
+  const canTargetSides = paneTargeting?.canTargetSides ?? false;
+
+  // Search hits and archived sessions offer only click (a preview in the focused pane)
+  // and Alt+click (a kept tab on the other side, or here when no split is possible).
+  const getClickOpenOptions = (event: MouseEvent<HTMLElement>): SessionOpenOptions => (
+    event.altKey ? { target: canTargetSides ? 'other' : 'focused' } : { preview: true }
+  );
 
   return (
     <div
       className="flex h-full flex-col bg-background/80 backdrop-blur-sm md:w-full md:select-none"
       style={{}}
+      // Read by the rows' side buttons when hovered, to tell which side Alt+click opens on,
+      // without the rows themselves re-rendering on a focus switch.
+      data-focused-pane-side={paneTargeting?.focusedSide}
     >
       <SidebarHeader
         isPWA={isPWA}
@@ -208,6 +233,8 @@ export default function SidebarContent({
         onCollapseSidebar={onCollapseSidebar}
         t={t}
       />
+
+      {searchMode !== 'archived' && <SidebarPaneTargetBar paneTargeting={paneTargeting} t={t} />}
 
       <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">
         {showConversationSearch ? (
@@ -255,10 +282,13 @@ export default function SidebarContent({
                         key={`${session.provider}-${session.sessionId}`}
                         type="button"
                         className="group flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/60"
-                        onClick={() => onConversationResultClick(
-                          session.projectId,
-                          session.sessionId,
-                          session.provider,
+                        onClick={(event) => onConversationResultClick(
+                          {
+                            projectId: session.projectId,
+                            sessionId: session.sessionId,
+                            provider: session.provider,
+                          },
+                          getClickOpenOptions(event),
                         )}
                       >
                         <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted/60">
@@ -333,14 +363,17 @@ export default function SidebarContent({
                         <button
                           key={`${projectResult.projectId ?? projectResult.projectName}-${session.sessionId}`}
                           className="w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/50"
-                          onClick={() => onConversationResultClick(
-                            // Pass the DB projectId (preferred) so the parent can
-                            // cross-reference with the loaded projects list.
-                            projectResult.projectId,
-                            session.sessionId,
-                            session.provider || session.matches[0]?.provider || 'claude',
-                            session.matches[0]?.timestamp,
-                            session.matches[0]?.snippet
+                          onClick={(event) => onConversationResultClick(
+                            {
+                              // Pass the DB projectId (preferred) so the parent can
+                              // cross-reference with the loaded projects list.
+                              projectId: projectResult.projectId,
+                              sessionId: session.sessionId,
+                              provider: session.provider || session.matches[0]?.provider || 'claude',
+                              messageTimestamp: session.matches[0]?.timestamp,
+                              messageSnippet: session.matches[0]?.snippet,
+                            },
+                            getClickOpenOptions(event),
                           )}
                         >
                           <div className="mb-1 flex items-center gap-1.5">
@@ -540,7 +573,7 @@ export default function SidebarContent({
                           <button
                             key={String(session.id)}
                             className="flex w-full items-center gap-2.5 border-b border-border/35 px-2.5 py-2 text-left transition-colors last:border-b-0 hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                            onClick={() => onArchivedSessionClick({
+                            onClick={(event) => onArchivedSessionClick({
                               sessionId: String(session.id),
                               provider: session.__provider,
                               projectId: project.projectId,
@@ -563,7 +596,7 @@ export default function SidebarContent({
                                       ? session.created_at
                                       : null,
                               isProjectArchived: true,
-                            })}
+                            }, getClickOpenOptions(event))}
                           >
                             <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
                               <LLMProviderLogo provider={session.__provider} className="h-3.5 w-3.5" />
@@ -633,7 +666,7 @@ export default function SidebarContent({
                       >
                         <button
                           className="flex min-w-0 flex-1 items-center gap-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => onArchivedSessionClick(session)}
+                          onClick={(event) => onArchivedSessionClick(session, getClickOpenOptions(event))}
                         >
                           <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
                             <LLMProviderLogo provider={session.provider} className="h-3.5 w-3.5" />

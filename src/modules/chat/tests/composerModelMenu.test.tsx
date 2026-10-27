@@ -62,8 +62,8 @@ test('a model that cannot run ultracode offers no Ultracode row', () => {
   const view = renderMenu({ model: 'haiku', ultracode: null });
   openMenu(view);
 
-  assert.equal(view.queryByRole('menuitemcheckbox'), null);
-  assert.equal(view.queryByText('Ultracode'), null);
+  assert.equal(view.queryByRole('menuitemcheckbox') === null, true);
+  assert.equal(view.queryByText('Ultracode') === null, true);
 });
 
 test('the Ultracode row reports whether it is on', () => {
@@ -114,7 +114,7 @@ test('picking an effort still closes the menu', () => {
   fireEvent.click(view.getByRole('menuitemradio', { name: /^low/i }));
 
   assert.deepEqual(onSelectEffort.mock.calls, [['low']]);
-  assert.equal(view.queryByRole('menu'), null);
+  assert.equal(view.queryByRole('menu') === null, true);
 });
 
 test('the Ultracode row shows even when the model offers no reasoning levels', () => {
@@ -128,7 +128,7 @@ test('the Ultracode row shows even when the model offers no reasoning levels', (
 test('the trigger marks ultracode only while it is on', () => {
   const off = renderMenu({ ultracode: false });
   const offTrigger = off.getByRole('button', { name: /^Select model and reasoning effort/ });
-  assert.equal(offTrigger.querySelector('[data-testid="composer-ultracode-indicator"]'), null);
+  assert.equal(offTrigger.querySelector('[data-testid="composer-ultracode-indicator"]') === null, true);
   assert.doesNotMatch(offTrigger.getAttribute('aria-label') ?? '', /Ultracode on/);
   off.unmount();
 
@@ -143,7 +143,7 @@ test('the trigger marks ultracode only while it is on', () => {
   assert.match(onTrigger.className, /purple/);
   assert.doesNotMatch(offTrigger.className, /purple/);
   assert.ok(onTrigger.querySelector('svg.lucide-workflow'), 'the trigger shows the ultracode icon');
-  assert.equal(offTrigger.querySelector('svg.lucide-workflow'), null);
+  assert.equal(offTrigger.querySelector('svg.lucide-workflow') === null, true);
   assert.match(onTrigger.getAttribute('aria-label') ?? '', /Ultracode on/);
   assert.match(onTrigger.getAttribute('title') ?? '', /Ultracode on/);
 });

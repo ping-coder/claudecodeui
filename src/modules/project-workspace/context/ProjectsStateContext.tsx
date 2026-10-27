@@ -18,7 +18,7 @@ import type {
 
 type ProjectsState = ReturnType<typeof useProjectsState>;
 
-/** What the main region needs to render the panes: the layout, each pane's project and the layout actions. */
+/** The layout, each pane's project and the layout actions: what the main region renders the panes from, and what the shell and the palette read about the panes. */
 type ProjectPanesState = {
   layout: WorkspaceLayout;
   /** Stable object per pane (projects row merged via mergeProjectSelectionMetadata, or an unlisted/archived project); null for an empty pane. */
@@ -203,7 +203,11 @@ function useRequiredProjectContext<T>(value: T | null, hookName: string): T {
   return value;
 }
 
-/** Read by ProjectMainRegion (and the panes it renders) to draw both panes and change the layout. */
+/**
+ * Read by ProjectMainRegion to draw both panes and change the layout, by ProjectWorkspaceShell for the
+ * workspace shortcuts and the phone's immersive menu button, and by ProjectCommandPalette for the titles
+ * and project names of its Open tabs.
+ */
 export function useProjectPanesState(): ProjectPanesState {
   return useRequiredProjectContext(useContext(ProjectPanesContext), 'useProjectPanesState');
 }

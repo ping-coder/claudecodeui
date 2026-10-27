@@ -4,9 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 
 /**
- * Rendered by WorkspaceHeader so that a lost chat connection is visible on
- * every tab: while the socket is down nothing typed into the chat can reach the
- * server. Shows nothing while connected or during the first handshake.
+ * Rendered by WorkspaceHeader, and by WorkspacePane in the immersive one-line
+ * pane bar, so that a lost chat connection is visible on every tab: while the
+ * socket is down nothing typed into the chat can reach the server. Shows
+ * nothing while connected or during the first handshake.
  */
 export default function WorkspaceConnectionStatus() {
   const { t } = useTranslation();

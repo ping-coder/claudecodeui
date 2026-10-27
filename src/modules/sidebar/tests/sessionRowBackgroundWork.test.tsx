@@ -34,7 +34,14 @@ const PROJECT = { projectId: 'project-1', name: 'project-1', displayName: 'proje
 // Touched a minute ago, so the green "recently active" dot would apply.
 const SESSION = { id: 's1', summary: 'session one', lastActivity: '2026-08-21T09:59:00.000Z', __provider: 'claude' } as unknown as SessionWithProvider;
 
-const renderRow = (state: { isProcessing: boolean; hasBackgroundWork: boolean }) => render(
+type RowState = {
+  isProcessing: boolean;
+  hasBackgroundWork: boolean;
+  isWorkspaceSplit?: boolean;
+  panePlacement?: 'left' | 'right' | 'both' | null;
+};
+
+const renderRow = (state: RowState) => render(
   React.createElement(SidebarSessionItem, {
     project: PROJECT,
     session: SESSION,
@@ -47,7 +54,6 @@ const renderRow = (state: { isProcessing: boolean; hasBackgroundWork: boolean })
     onStartEditingSession: noop,
     onCancelEditingSession: noop,
     onSaveEditingSession: noop,
-    onProjectSelect: noop,
     onSessionSelect: noop,
     onDeleteSession: noop,
     isSelecting: false,
@@ -81,7 +87,17 @@ test('background work shows as the purple dot in place of the green one, with no
 test('a response in flight still spins and shows no dot', () => {
   const { container } = renderRow({ isProcessing: true, hasBackgroundWork: false });
 
-  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.ok(container.querySelector('[role="status"]') === null, 'no dot');
   assert.equal(container.querySelectorAll('.animate-spin').length, 1);
   assert.equal(recordedOptionsProps[0].isProcessing, true);
+});
+
+test('in a split workspace the placement marker sits beside the background-work dot, not in its place', () => {
+  const { container } = renderRow({ isProcessing: false, hasBackgroundWork: true, isWorkspaceSplit: true, panePlacement: 'right' });
+
+  const dot = container.querySelector('[role="status"]');
+  assert.ok(dot?.className.includes('bg-purple-500'), 'the dot still says background work runs');
+  assert.equal(container.querySelector('[data-pane-placement]')?.getAttribute('data-pane-placement'), 'right');
+  assert.equal(recordedOptionsProps.at(-1)?.panePlacement, 'right');
+  assert.equal(recordedOptionsProps.at(-1)?.isProcessing, false, 'background work alone does not lock the row');
 });

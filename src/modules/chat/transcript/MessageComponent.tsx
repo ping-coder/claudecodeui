@@ -1,8 +1,11 @@
 import { memo, useMemo, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { GitBranchIcon, PencilIcon } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,Project } from '@/shared/types';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
+import { getPaneScopedDomId } from '@/shared/utils';
 import { formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
 import { ToolRenderer, ToolErrorDisplay, SubagentPanel, WorkflowPanel, shouldHideToolResult } from '@/modules/chat/tools';
 import { LLMProviderLogo } from '@/shared/ui';
@@ -42,6 +45,29 @@ type MessageComponentProps = {
 };
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
+
+type ToolResultAnchorProps = {
+  toolId: string | undefined;
+  /** False renders the wrapper without the id: a non-Bash input row, whose result row is the anchor. */
+  isAnchor?: boolean;
+  children: ReactNode;
+};
+
+/**
+ * Wraps a tool row in its `tool-result-<toolId>` scroll target (OneLineDisplay's
+ * jump arrow points at it), scoped to the pane so two panes showing one session
+ * never share a DOM id. The pane is read here rather than in MessageComponent:
+ * a focus switch changes the pane context, and only this wrapper re-renders for
+ * it, while the memoized row and the children it passed in bail out.
+ */
+function ToolResultAnchor({ toolId, isAnchor = true, children }: ToolResultAnchorProps) {
+  const { side } = useWorkspacePane();
+  return (
+    <div id={isAnchor ? getPaneScopedDomId(side, `tool-result-${toolId}`) : undefined} className="scroll-mt-4">
+      {children}
+    </div>
+  );
+}
 
 /**
  * Rendered by chat's ChatMessagesPane and ToolGroupContainer to draw one
@@ -239,9 +265,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
           <div className="w-full">
 
             {message.isToolUse && message.toolName === 'Workflow' ? (
-              /* A workflow launch owns its whole card too. The anchor is what
-                 the background-tasks strip scrolls to. */
-              <div id={`tool-result-${message.toolId}`} className="scroll-mt-4">
+              /* A workflow launch owns its whole card too, so the card is its
+                 tool-result anchor. */
+              <ToolResultAnchor toolId={message.toolId}>
                 <WorkflowPanel
                   toolInput={message.toolInput}
                   toolResult={message.toolResult}
@@ -251,11 +277,11 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   createDiff={createDiff}
                   selectedProject={selectedProject}
                 />
-              </div>
+              </ToolResultAnchor>
             ) : message.isSubagentContainer ? (
               /* A spawned agent owns its whole card — header, timeline and
                  result — so it never goes through the tool input/result pair. */
-              <div id={`tool-result-${message.toolId}`} className="scroll-mt-4">
+              <ToolResultAnchor toolId={message.toolId}>
                 <SubagentPanel
                   toolInput={message.toolInput}
                   toolResult={message.toolResult}
@@ -266,7 +292,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   createDiff={createDiff}
                   selectedProject={selectedProject}
                 />
-              </div>
+              </ToolResultAnchor>
             ) : message.isToolUse ? (
               <>
                 <div className="flex flex-col">
@@ -279,9 +305,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
 
                 {message.toolInput && (
                   // Bash draws its output inside this row rather than in the
-                  // result section below, so for a backgrounded command this is
-                  // the row the background-tasks strip scrolls to.
-                  <div id={message.toolName === 'Bash' ? `tool-result-${message.toolId}` : undefined} className="scroll-mt-4">
+                  // result section below, so this row is its tool-result anchor.
+                  <ToolResultAnchor toolId={message.toolId} isAnchor={message.toolName === 'Bash'}>
                     <ToolRenderer
                       toolName={message.toolName || 'UnknownTool'}
                       toolInput={message.toolInput}
@@ -295,22 +320,22 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                       rawToolInput={typeof message.toolInput === 'string' ? message.toolInput : undefined}
                       toolStatus={message.toolStatus}
                     />
-                  </div>
+                  </ToolResultAnchor>
                 )}
 
                 {/* Tool Result Section — Bash renders its output inside the command row above. */}
                 {message.toolResult && message.toolName !== 'Bash' && !shouldHideToolResult(message.toolName || 'UnknownTool', message.toolResult) && (
                   message.toolResult.isError ? (
                     // Error results — collapsed red row that expands to the content
-                    <div id={`tool-result-${message.toolId}`} className="scroll-mt-4">
+                    <ToolResultAnchor toolId={message.toolId}>
                       <ToolErrorDisplay
                         label={t('messageTypes.error')}
                         content={String(message.toolResult.content || '')}
                       />
-                    </div>
+                    </ToolResultAnchor>
                   ) : (
                     // Non-error results - route through ToolRenderer (single source of truth)
-                    <div id={`tool-result-${message.toolId}`} className="scroll-mt-4">
+                    <ToolResultAnchor toolId={message.toolId}>
                       <ToolRenderer
                         toolName={message.toolName || 'UnknownTool'}
                         toolInput={message.toolInput}
@@ -321,7 +346,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                         createDiff={createDiff}
                         selectedProject={selectedProject}
                       />
-                    </div>
+                    </ToolResultAnchor>
                   )
                 )}
               </>

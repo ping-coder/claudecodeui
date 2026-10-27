@@ -126,7 +126,7 @@ test('the model library declares effort levels for a new custom model', async ()
   ));
   assert.equal(levelButtons.length, 5);
   // Ultracode is a switch beside the effort, never a level a model declares.
-  assert.equal(screen.queryByRole('button', { name: 'ultracode' }), null);
+  assert.equal(screen.queryByRole('button', { name: 'ultracode' }) === null, true);
 
   fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'Gateway Claude' } });
   fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'gateway-claude' } });
@@ -210,7 +210,7 @@ test('providers without effort support show no effort levels and send none', asy
   const { actions, created } = createActions();
   render(<ModelLibraryPanel initialProvider="cursor" providerModelCatalog={CATALOG} actions={actions} />);
 
-  assert.equal(screen.queryByText('Reasoning levels'), null);
+  assert.equal(screen.queryByText('Reasoning levels') === null, true);
   fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'Cursor Custom' } });
   fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'cursor-custom' } });
   fireEvent.click(screen.getByRole('button', { name: 'Add model' }));

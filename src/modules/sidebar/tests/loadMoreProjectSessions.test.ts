@@ -55,7 +55,6 @@ const renderController = (onLoadMoreSessions: (projectId: string) => Promise<voi
   onProjectSelect: vi.fn(),
   onSessionSelect: vi.fn(),
   onLoadMoreSessions,
-  setCurrentProject: vi.fn(),
   setSidebarVisible: vi.fn(),
   sidebarVisible: true,
 }));

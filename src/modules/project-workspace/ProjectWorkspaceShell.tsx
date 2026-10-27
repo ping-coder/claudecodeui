@@ -1,40 +1,102 @@
-import { memo } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
+import { useProjectPanesState } from '@/modules/project-workspace/context/ProjectsStateContext';
+import { WorkspaceChromeProvider } from '@/modules/project-workspace/context/WorkspaceChromeContext';
+import { useElementWidth } from '@/modules/project-workspace/hooks/useElementWidth';
+import { useImmersiveMode } from '@/modules/project-workspace/hooks/useImmersiveMode';
+import { useWorkspaceShortcuts } from '@/modules/project-workspace/hooks/useWorkspaceShortcuts';
+import { PANE_MIN_WIDTH_PX, PANE_SPLITTER_WIDTH_PX } from '@/shared/constants';
 import type { ProjectWorkspaceShellProps } from '@/shared/types';
+import ImmersiveExitControl from '@/modules/project-workspace/ImmersiveExitControl';
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
 import ProjectQuickSettingsRegion from '@/modules/project-workspace/ProjectQuickSettingsRegion';
 import ProjectSidebarRegion from '@/modules/project-workspace/ProjectSidebarRegion';
 
-/** Rendered by ProjectWorkspaceRoute to lay out the workspace sidebar, main region and global overlays. */
+/** Narrowest main column that holds two panes side by side. */
+const SPLIT_MAIN_COLUMN_MIN_WIDTH_PX = 2 * PANE_MIN_WIDTH_PX + PANE_SPLITTER_WIDTH_PX;
+
+/**
+ * Rendered by ProjectWorkspaceRoute to lay out the workspace sidebar, main region and global overlays.
+ * It owns the workspace chrome its regions share through WorkspaceChromeProvider: immersive (full
+ * screen) mode, the immersive sidebar drawer and whether the main column is wide enough to split.
+ */
 function ProjectWorkspaceShell({
   isMobile,
   ws,
   sendMessage,
   navigate,
 }: ProjectWorkspaceShellProps) {
+  const { layout, actions, setSidebarOpen } = useProjectPanesState();
+  const { isImmersive, isBrowserFullscreen, toggleImmersive, exitImmersive } = useImmersiveMode();
+  // Whether the sidebar is out as an overlay drawer in desktop immersive mode, where its docked
+  // column is hidden. Held here because a pane's "Show sidebar" button opens it and the sidebar
+  // region closes it; memory only, like immersive mode itself.
+  const [isSidebarPeekOpen, setSidebarPeekOpen] = useState(false);
+
+  // Kept mounted in every layout, so the width is known before the first paint and on every resize.
+  const mainColumnRef = useRef<HTMLDivElement>(null);
+  const mainColumnWidth = useElementWidth(mainColumnRef);
+  const canSplit = !isMobile && mainColumnWidth >= SPLIT_MAIN_COLUMN_MIN_WIDTH_PX;
+
+  // Every entry into immersive mode starts with the drawer closed; leaving it hides the drawer
+  // through `isPeekShown` below, whichever way immersive mode ends (the browser can end it too).
+  const toggleImmersiveWithClosedPeek = useCallback(() => {
+    setSidebarPeekOpen(false);
+    toggleImmersive();
+  }, [toggleImmersive]);
+
+  useWorkspaceShortcuts({
+    isMobile,
+    canSplit,
+    layout,
+    actions,
+    toggleImmersive: toggleImmersiveWithClosedPeek,
+  });
+
+  const isPeekShown = isSidebarPeekOpen && isImmersive && !isMobile;
+  const chrome = useMemo(() => ({
+    isImmersive,
+    isBrowserFullscreen,
+    toggleImmersive: toggleImmersiveWithClosedPeek,
+    exitImmersive,
+    isSidebarPeekOpen: isPeekShown,
+    setSidebarPeekOpen,
+    canSplit,
+  }), [canSplit, exitImmersive, isBrowserFullscreen, isImmersive, isPeekShown, toggleImmersiveWithClosedPeek]);
+
+  const openSidebarDrawer = useCallback(() => {
+    setSidebarOpen(true);
+  }, [setSidebarOpen]);
+
   return (
-    <div
-      className="fixed inset-0 flex bg-background"
-      style={{ bottom: 'var(--keyboard-height, 0px)' }}
-    >
-      <ProjectEffects />
-      <ProjectSidebarRegion isMobile={isMobile} />
+    <WorkspaceChromeProvider value={chrome}>
+      <div
+        className="fixed inset-0 flex bg-background"
+        style={{ bottom: 'var(--keyboard-height, 0px)' }}
+      >
+        <ProjectEffects />
+        <ProjectSidebarRegion isMobile={isMobile} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <ProjectMainRegion
-          isMobile={isMobile}
-          ws={ws}
-          sendMessage={sendMessage}
-          navigate={navigate}
-        />
+        <div ref={mainColumnRef} className="flex min-w-0 flex-1 flex-col">
+          <ProjectMainRegion
+            isMobile={isMobile}
+            ws={ws}
+            sendMessage={sendMessage}
+            navigate={navigate}
+          />
+        </div>
+
+        {/* Phones hide the header while immersive, so this capsule is the way back out. */}
+        {isMobile && isImmersive && (
+          <ImmersiveExitControl onOpenMenu={openSidebarDrawer} onExit={exitImmersive} />
+        )}
+        <ProjectCommandPalette />
+        {/* Last flex child on purpose: when pinned it docks to the right of the main region. */}
+        <ProjectQuickSettingsRegion />
       </div>
-
-      <ProjectCommandPalette />
-      {/* Last flex child on purpose: when pinned it docks to the right of the main region. */}
-      <ProjectQuickSettingsRegion />
-    </div>
+    </WorkspaceChromeProvider>
   );
 }
 

@@ -26,12 +26,16 @@ type QuickSettingsPanelViewProps = {
   // Receives a command picked on the Commands tab; the caller decides where
   // it goes (the project workspace hands it to the chat composer).
   onInsertCommand?: (command: SlashCommand) => void;
+  /** false while immersive: never docks, opens as an overlay, the stored pin is kept. Default true. */
+  allowDocking?: boolean;
 };
 
-/** Exported as QuickSettingsPanel and rendered by the project-workspace module as its quick settings drawer — an overlay by default, docked into the workspace row when pinned. */
-function QuickSettingsPanelView({ selectedProject, onInsertCommand }: QuickSettingsPanelViewProps) {
+/** Exported as QuickSettingsPanel and rendered by the project-workspace module as its quick settings drawer — an overlay by default, docked into the workspace row when pinned and docking is allowed. */
+function QuickSettingsPanelView({ selectedProject, onInsertCommand, allowDocking = true }: QuickSettingsPanelViewProps) {
   const { isMobile } = useDeviceSettings({ trackPWA: false });
-  const canPin = !isMobile;
+  // Where docking is not allowed the panel behaves as it does on mobile: a docked panel collapses
+  // behind its handle, the handle opens an overlay, and the stored pin waits for docking to return.
+  const canPin = !isMobile && allowDocking;
   const {
     isOpen,
     isPinned,

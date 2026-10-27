@@ -1,13 +1,17 @@
 import { useEffect, useRef } from 'react';
-import { Check, Edit2, GitBranch, MoreHorizontal, Trash2, X } from 'lucide-react';
+import type { ComponentProps } from 'react';
+import { Check, Edit2, GitBranch, MoreHorizontal, PanelLeft, PanelRight, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu } from '@/shared/ui';
 import { cn } from '@/shared/utils';
-import type { LLMProvider } from '@/shared/types';
+import type { LLMProvider, SessionPanePlacement, WorkspacePaneSide } from '@/shared/types';
 import { useSessionForkingProviders } from '@/shared/hooks/useProviderCapabilities';
 import { useProviderSessionIdCopy } from '@/modules/sidebar/hooks/useProviderSessionIdCopy';
 import { PROVIDER_LABELS } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import SessionPaneButtons from '@/modules/sidebar/SessionPaneButtons';
+
+type SessionMenuItem = ComponentProps<typeof ActionMenu>['items'][number];
 
 type SessionOptionsProps = {
   sessionId: string;
@@ -31,6 +35,14 @@ type SessionOptionsProps = {
   onFork?: () => void;
   /** Withheld where the row has nowhere to send a delete. */
   canDelete?: boolean;
+  /** Desktop, and the workspace is split or wide enough to split: the side buttons and menu items show. */
+  canTargetSides?: boolean;
+  /** A right pane exists: left and right are offered instead of "open on the right (split view)". */
+  isWorkspaceSplit?: boolean;
+  /** Where the session is open now, resolved for this row. */
+  panePlacement?: SessionPanePlacement;
+  /** Opens the session on an absolute side as a kept tab; bound by the caller, which owns the session. */
+  onOpenInPane?: (side: WorkspacePaneSide) => void;
   className?: string;
   t: TFunction;
 };
@@ -59,6 +71,10 @@ export default function SessionOptions({
   onDeleteSession,
   onFork,
   canDelete = true,
+  canTargetSides = false,
+  isWorkspaceSplit = false,
+  panePlacement = null,
+  onOpenInPane,
   className,
   t,
 }: SessionOptionsProps) {
@@ -98,8 +114,74 @@ export default function SessionOptions({
     onSaveEditingSession(projectId, sessionId, renameDraft, provider);
   };
 
+  // Absolute sides lead the menu, which is how touch screens (no hover buttons) choose one.
+  // Unsplit the only side to offer is the right one, and opening there splits.
+  const openInPane = canTargetSides ? onOpenInPane : undefined;
+  const paneItems: SessionMenuItem[] = !openInPane
+    ? []
+    : isWorkspaceSplit
+      ? [
+        {
+          key: 'open-left',
+          label: t('sessions.openOnLeft', { defaultValue: 'Open on the left' }),
+          icon: PanelLeft,
+          onSelect: () => openInPane('left'),
+        },
+        {
+          key: 'open-right',
+          label: t('sessions.openOnRight', { defaultValue: 'Open on the right' }),
+          icon: PanelRight,
+          onSelect: () => openInPane('right'),
+        },
+      ]
+      : [{
+        key: 'open-right',
+        label: t('sessions.openOnRightSplit', { defaultValue: 'Open on the right (split view)' }),
+        icon: PanelRight,
+        onSelect: () => openInPane('right'),
+      }];
+
+  const sessionItems: SessionMenuItem[] = [
+    ...(projectId !== null ? [{
+      key: 'rename',
+      label: 'Rename session',
+      icon: Edit2,
+      onSelect: () => onStartEditingSession(projectId, sessionId, sessionName),
+    }] : []),
+    {
+      key: 'copy',
+      label: copyLabel,
+      description: copyState === 'error' ? 'Click to try again.' : undefined,
+      icon: CopyStateIcon,
+      loading: isCopyPending,
+      closeOnSelect: false,
+      onSelect: handleCopyAction,
+    },
+    ...(canFork && onFork ? [{
+      key: 'fork',
+      label: 'Fork session',
+      description: 'Continue from a copy, leaving this one untouched.',
+      icon: GitBranch,
+      onSelect: onFork,
+    }] : []),
+    ...(canDelete && !isProcessing ? [{
+      key: 'delete',
+      label: 'Archive or delete session',
+      icon: Trash2,
+      isDanger: true,
+      showDividerBefore: true,
+      onSelect: () => onDeleteSession(sessionId, sessionName),
+    }] : []),
+  ];
+
+  // A divider between where the session opens and what is done to it.
+  const menuItems = paneItems.length > 0
+    ? [...paneItems, ...sessionItems.map((item, index) => (index === 0 ? { ...item, showDividerBefore: true } : item))]
+    : sessionItems;
+
   return (
-    <div ref={containerRef} className={cn('flex items-center gap-1', className)}>
+    // Positioned by default (callers pass their own placement), so the side buttons hang off it.
+    <div ref={containerRef} className={cn('relative flex items-center gap-1', className)}>
       {isEditing ? (
         <>
           <input
@@ -140,58 +222,42 @@ export default function SessionOptions({
           </button>
         </>
       ) : (
-        <ActionMenu
-          label="Session options"
-          ariaLabel={`Session options for ${sessionName}`}
-          icon={MoreHorizontal}
-          iconOnly
-          portal
-          variant="ghost"
-          size="icon"
-          onOpenChange={setOptionsOpen}
-          triggerClassName="h-7 w-7 text-muted-foreground opacity-70 hover:bg-muted hover:opacity-100"
-          menuClassName="w-[260px] rounded-xl p-1.5 shadow-xl"
-          header={(
-            <div className="mb-1 border-b border-border px-3 py-2">
-              <p className="truncate text-xs font-medium text-foreground" title={sessionName}>
-                {sessionName}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">{providerLabel} session</p>
-            </div>
+        <>
+          {openInPane && (
+            <SessionPaneButtons
+              // Hung off the left of the "…" rather than laid out beside it, so these controls'
+              // own box stays that button's size: while the side buttons are hidden, a click or
+              // tap on the row's time label still reaches the row's link.
+              className="absolute right-full top-1/2 mr-1 -translate-y-1/2"
+              canTargetSides={canTargetSides}
+              isWorkspaceSplit={isWorkspaceSplit}
+              panePlacement={panePlacement}
+              onOpenInPane={openInPane}
+              t={t}
+            />
           )}
-          items={[
-            ...(projectId !== null ? [{
-              key: 'rename',
-              label: 'Rename session',
-              icon: Edit2,
-              onSelect: () => onStartEditingSession(projectId, sessionId, sessionName),
-            }] : []),
-            {
-              key: 'copy',
-              label: copyLabel,
-              description: copyState === 'error' ? 'Click to try again.' : undefined,
-              icon: CopyStateIcon,
-              loading: isCopyPending,
-              closeOnSelect: false,
-              onSelect: handleCopyAction,
-            },
-            ...(canFork && onFork ? [{
-              key: 'fork',
-              label: 'Fork session',
-              description: 'Continue from a copy, leaving this one untouched.',
-              icon: GitBranch,
-              onSelect: onFork,
-            }] : []),
-            ...(canDelete && !isProcessing ? [{
-              key: 'delete',
-              label: 'Archive or delete session',
-              icon: Trash2,
-              isDanger: true,
-              showDividerBefore: true,
-              onSelect: () => onDeleteSession(sessionId, sessionName),
-            }] : []),
-          ]}
-        />
+          <ActionMenu
+            label="Session options"
+            ariaLabel={`Session options for ${sessionName}`}
+            icon={MoreHorizontal}
+            iconOnly
+            portal
+            variant="ghost"
+            size="icon"
+            onOpenChange={setOptionsOpen}
+            triggerClassName="h-7 w-7 text-muted-foreground opacity-70 hover:bg-muted hover:opacity-100"
+            menuClassName="w-[260px] rounded-xl p-1.5 shadow-xl"
+            header={(
+              <div className="mb-1 border-b border-border px-3 py-2">
+                <p className="truncate text-xs font-medium text-foreground" title={sessionName}>
+                  {sessionName}
+                </p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{providerLabel} session</p>
+              </div>
+            )}
+            items={menuItems}
+          />
+        </>
       )}
     </div>
   );

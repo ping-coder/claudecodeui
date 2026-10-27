@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionOpenOptions, SessionTitleSearchResult, SessionWithProvider, SidebarConversationOpenRequest, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -65,16 +65,18 @@ type UseSidebarControllerArgs = {
   isMobile: boolean;
   t: TFunction;
   onRefresh: () => Promise<void> | void;
+  /** Records the browsed project (a desktop title click); it opens and clears nothing. */
   onProjectSelect: (project: Project) => void;
-  onSessionSelect: (session: ProjectSession) => void;
+  onSessionSelect: (session: ProjectSession, options?: SessionOpenOptions) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
   // `projectId` is the DB-assigned identifier; callbacks use that post-migration.
   onProjectDelete?: (projectId: string) => void;
-  setCurrentProject: (project: Project) => void;
   setSidebarVisible: (visible: boolean) => void;
   sidebarVisible: boolean;
   keepProjectsExpanded?: boolean;
+  /** The immersive drawer: the full sidebar shows even when the user collapsed it to the rail. */
+  forceExpanded?: boolean;
 };
 
 /** Used by Sidebar to coordinate project navigation, expansion and session actions. */
@@ -93,10 +95,10 @@ export function useSidebarController({
   onSessionDelete,
   onLoadMoreSessions,
   onProjectDelete,
-  setCurrentProject,
   setSidebarVisible,
   sidebarVisible,
   keepProjectsExpanded = false,
+  forceExpanded = false,
 }: UseSidebarControllerArgs) {
   const paletteOps = usePaletteOps();
   // Remember whether a saved set existed before the first persistence effect.
@@ -188,7 +190,7 @@ export function useSidebarController({
   const migrationStartedRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
 
-  const isSidebarCollapsed = !isMobile && !sidebarVisible;
+  const isSidebarCollapsed = !isMobile && !sidebarVisible && !forceExpanded;
   const activeSessionIds = activeSessions;
   const runningSessionsCount = activeSessionIds.size;
 
@@ -638,12 +640,38 @@ export function useSidebarController({
   );
 
   const handleSessionClick = useCallback(
-    (session: SessionWithProvider, projectId: string) => {
-      // Tag the session with its owning projectId so downstream handlers
-      // can correlate it with the selectedProject in the app state.
-      onSessionSelect({ ...session, __projectId: projectId });
+    (session: SessionWithProvider, projectId: string, options?: SessionOpenOptions) => {
+      // Tag the session with its owning projectId so the workspace opens it in
+      // that project; the options say where and how (preview, side).
+      onSessionSelect({ ...session, __projectId: projectId }, options);
     },
     [onSessionSelect],
+  );
+
+  /**
+   * Opens a Conversations row or a search hit. A session the loaded list has is
+   * opened from it; anything else by id, with an empty project when the server
+   * could not name one, so the workspace looks the project up. The project is
+   * not selected first: that only records it as browsed, and opens nothing.
+   */
+  const openConversation = useCallback(
+    (request: SidebarConversationOpenRequest, options?: SessionOpenOptions) => {
+      const searchTarget = {
+        __searchTargetTimestamp: request.messageTimestamp || null,
+        __searchTargetSnippet: request.messageSnippet || null,
+      };
+      const project = request.projectId
+        ? projects.find((candidate) => candidate.projectId === request.projectId)
+        : undefined;
+      const loadedSession = project
+        ? getAllSessions(project).find((session) => session.id === request.sessionId)
+        : undefined;
+      const session: SessionWithProvider = loadedSession
+        ? { ...loadedSession, ...searchTarget }
+        : { id: request.sessionId, __provider: (request.provider || 'claude') as LLMProvider, ...searchTarget };
+      handleSessionClick(session, request.projectId ?? '', options);
+    },
+    [handleSessionClick, projects],
   );
 
   const resolveProjectStarState = useCallback(
@@ -1128,15 +1156,16 @@ export function useSidebarController({
     }
   }, [pendingDeletion, onProjectDelete, t]);
 
+  // A title click only records the browsed project. TaskMaster follows the
+  // focused pane now, so the sidebar no longer sets its current project.
   const handleProjectSelect = useCallback(
     (project: Project) => {
       onProjectSelect(project);
-      setCurrentProject(project);
     },
-    [onProjectSelect, setCurrentProject],
+    [onProjectSelect],
   );
 
-  const openArchivedSession = useCallback((session: ArchivedSessionListItem) => {
+  const openArchivedSession = useCallback((session: ArchivedSessionListItem, options?: SessionOpenOptions) => {
     const activeProject = session.projectId
       ? projects.find((candidate) => candidate.projectId === session.projectId)
       : null;
@@ -1151,15 +1180,14 @@ export function useSidebarController({
       __projectId: matchingProject?.projectId ?? session.projectId ?? undefined,
     };
 
-    // Archived sessions still need a selected project context. Active projects
-    // come from the normal sidebar list, while archived-project sessions resolve
-    // through the archive payload loaded by this controller.
-    if (matchingProject) {
-      handleProjectSelect(matchingProject);
-    }
-
-    onSessionSelect(sessionPayload);
-  }, [archivedProjects, handleProjectSelect, onSessionSelect, projects]);
+    // The pane needs the session's project. An active one is in the sidebar list;
+    // an archived one is not, so it travels with the open request instead of
+    // being selected first.
+    onSessionSelect(sessionPayload, {
+      ...options,
+      ownerProject: activeProject ? null : archivedProject,
+    });
+  }, [archivedProjects, onSessionSelect, projects]);
 
   const restoreArchivedProject = useCallback(async (projectId: string) => {
     try {
@@ -1274,12 +1302,13 @@ export function useSidebarController({
           throw new Error(payload?.message || `HTTP ${response.status}`);
         }
 
+        // A kept tab in the focused pane, the one the fork was started from.
         onSessionSelect({
           id: forkedSessionId,
           summary: payload.data.sessionName,
           __provider: session.__provider,
           __projectId: session.__projectId,
-        } as ProjectSession);
+        } as ProjectSession, { target: 'focused' });
       } catch (error) {
         console.error('[Sidebar] Error forking session:', error);
         alert(t('messages.forkSessionError'));
@@ -1332,6 +1361,7 @@ export function useSidebarController({
     loadMoreRecentConversations,
     toggleProject,
     handleSessionClick,
+    openConversation,
     forkSession,
     toggleStarProject,
     isProjectStarred,

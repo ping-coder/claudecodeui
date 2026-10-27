@@ -9,7 +9,6 @@ import { createMessageHistoryRefreshCoordinator } from '@/modules/chat/utils/mes
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { findSearchTargetIndex, resolveSearchWindowSize } from '@/modules/chat/utils/searchTargetLocator';
-import { readSelectedProvider } from '@/shared/selectedProvider';
 import type { SearchTarget } from '@/modules/chat/utils/searchTargetLocator';
 
 const INITIAL_VISIBLE_MESSAGES = 100;
@@ -95,12 +94,16 @@ type UseChatSessionStateArgs = {
   selectedSession: ProjectSession | null;
   ws: WebSocket | null;
   sendMessage: (message: unknown) => void;
+  /**
+   * The provider this chat sends under. Stamps the local echo of a sent
+   * message; the page-wide selected provider may belong to the other pane.
+   */
+  provider: LLMProvider;
   externalMessageUpdate?: number;
   newSessionTrigger?: number;
   processingSessions?: SessionActivityMap;
   onSessionIdle?: MarkSessionIdle;
-  resetStreamingState: () => void;
-  /** When each session's `chat.subscribe` was last sent; guards stale idle acks. */
+  /** When each session's `chat.subscribe` was last sent, by any chat on the page; guards stale idle acks. */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   /** Highest live seq observed per session; sent as `lastSeq` on subscribe. */
   lastSeqRef: MutableRefObject<Map<string, number>>;
@@ -195,11 +198,11 @@ export function useChatSessionState({
   selectedSession,
   ws,
   sendMessage,
+  provider,
   externalMessageUpdate,
   newSessionTrigger,
   processingSessions,
   onSessionIdle,
-  resetStreamingState,
   statusCheckSentAtRef,
   lastSeqRef,
   sessionStore,
@@ -247,12 +250,13 @@ export function useChatSessionState({
   const loadAllOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadedSessionKeyRef = useRef<string | null>(null);
   /**
-   * Tracks the last processed value from `useProjectsState.newSessionTrigger`.
+   * Tracks the last processed value of `newSessionTrigger`.
    *
-   * The trigger itself is intentionally increment-only and routed via:
-   * useProjectsState -> ProjectWorkspaceRoute -> WorkspaceMain -> ChatInterface -> this hook.
-   * We compare values to ensure each explicit New Session click runs exactly one
-   * reset pass in this local chat state domain.
+   * The trigger is the hosting pane's `draftActivation` (each pane has its
+   * own), bumped whenever that pane switches onto a draft tab and routed via:
+   * the pane in project-workspace -> WorkspaceMain -> ChatInterface -> this hook.
+   * It is increment-only; comparing values ensures each switch onto a draft
+   * runs exactly one reset pass in this local chat state domain.
    */
   const previousNewSessionTriggerRef = useRef(newSessionTrigger ?? 0);
 
@@ -266,22 +270,26 @@ export function useChatSessionState({
     previousNewSessionTriggerRef.current = trigger;
 
     /**
-     * Consumer-side reset for explicit New Session intent.
+     * Consumer-side reset for a switch onto a draft tab (a new chat).
      *
      * Why this is essential:
      * - Chat keeps local state that is not fully derived from `selectedSession`:
-     *   `currentSessionId`, `pendingUserMessage`, streaming/status flags, message
+     *   `currentSessionId`, `pendingUserMessage`, status flags, message
      *   pagination/scroll bookkeeping, and provider-specific sessionStorage keys.
-     * - If the user clicks New Session while already on the same route with no
-     *   selected session, parent state updates can be idempotent and this local
-     *   state would otherwise persist, making the click appear to "do nothing".
+     * - A draft's `selectedSession` is null, and that alone does not clear this
+     *   state: the loading effect keeps `currentSessionId` (and so the session
+     *   left on screen) while that session still has a response in flight, and
+     *   a `pendingUserMessage` stays until a session takes it.
      *
      * What this reset guarantees:
-     * - A deterministic clean draft state on every New Session click.
+     * - A clean draft state every time the pane switches onto a draft tab.
      * - No dependence on route/tab/session-object identity changes.
      * - No coupling to unrelated external update signals.
+     *
+     * Streamed text is left alone: it is buffered per session by the realtime
+     * handler, and the session just left may still be streaming in the
+     * background.
      */
-    resetStreamingState();
     setCurrentSessionId(null);
     setPendingUserMessage(null);
     messagesOffsetRef.current = 0;
@@ -311,7 +319,7 @@ export function useChatSessionState({
       clearTimeout(loadAllFinishedTimerRef.current);
       loadAllFinishedTimerRef.current = null;
     }
-  }, [newSessionTrigger, onSessionIdle, resetStreamingState]);
+  }, [newSessionTrigger, onSessionIdle]);
 
   /* ---------------------------------------------------------------- */
   /*  Derive processing state for the viewed session                  */
@@ -405,15 +413,14 @@ export function useChatSessionState({
       return;
     }
 
-    const prov = readSelectedProvider();
-    const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, prov);
+    const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, provider);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
     }
 
     flushedPendingUserMessageRef.current = pendingUserMessage;
     setPendingUserMessage(null);
-  }, [activeSessionId, pendingUserMessage, sessionStore]);
+  }, [activeSessionId, pendingUserMessage, provider, sessionStore]);
 
   const storeMessages = activeSessionId ? sessionStore.getMessages(activeSessionId) : NO_MESSAGES;
 
@@ -436,12 +443,11 @@ export function useChatSessionState({
       setPendingUserMessage(msg);
       return;
     }
-    const prov = readSelectedProvider();
-    const normalized = chatMessageToNormalized(msg, activeSessionId, prov);
+    const normalized = chatMessageToNormalized(msg, activeSessionId, provider);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
     }
-  }, [activeSessionId, sessionStore]);
+  }, [activeSessionId, provider, sessionStore]);
 
   // Mirrors the state into a ref so the two deferred scroll-to-bottom timers
   // can re-read it at fire time. An effect rather than assignments next to each
@@ -700,18 +706,18 @@ export function useChatSessionState({
   // because React recreates the closure on each render.
   useEffect(() => {
     if (!selectedSession || !selectedProject) {
-      // A freshly created session can be mid-run before the router has a
-      // canonical selectedSession (the URL effect synthesizes one on the
-      // next render). Keep the active view intact instead of wiping it — but
+      // A freshly created session can be mid-run before the pane's tab hands
+      // it back as selectedSession (the layout converts the draft tab in
+      // place). Keep the active view intact instead of wiping it — but
       // only for a response in flight: a session whose turn has ended with
       // background work still running has a canonical id, so a missing
-      // selection there is a real navigation away.
+      // selection there is a real navigation away. The session left keeps its
+      // streamed text either way: the realtime handler buffers it per session.
       const activity = currentSessionId ? processingSessionsRef.current?.get(currentSessionId) : undefined;
       if (activity && !activity.background) {
         return;
       }
 
-      resetStreamingState();
       setCurrentSessionId(null);
       messagesOffsetRef.current = 0;
       setHasMoreMessages(false);
@@ -744,9 +750,6 @@ export function useChatSessionState({
     }
 
     const sessionChanged = currentSessionId !== null && currentSessionId !== selectedSessionId;
-    if (sessionChanged) {
-      resetStreamingState();
-    }
 
     // Reset pagination/scroll state
     messagesOffsetRef.current = 0;
@@ -794,7 +797,6 @@ export function useChatSessionState({
     });
   }, [
     isActive,
-    resetStreamingState,
     requestLatestMessages,
     selectedProject,
     selectedSession?.id,

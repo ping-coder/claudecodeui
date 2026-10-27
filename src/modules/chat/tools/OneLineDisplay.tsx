@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { copyTextToClipboard } from '@/shared/utils';
+import { copyTextToClipboard, getPaneScopedDomId } from '@/shared/utils';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { ToolStatusBadge } from '@/modules/chat/tools/ToolStatusBadge';
 import type { ToolStatus } from '@/shared/types';
 
@@ -29,6 +30,34 @@ type OneLineDisplayProps = {
   toolId?: string;
   status?: ToolStatus;
 };
+
+/**
+ * The jump-to-results arrow, pointing at MessageComponent's pane-scoped
+ * `tool-result-<toolId>` row. It scrolls that row into view itself instead of
+ * following the hash, which would write the hash into the URL. The pane is
+ * read in this small component so a focus switch re-renders only the arrow.
+ */
+function JumpToResultsLink({ toolId }: { toolId?: string }) {
+  const { side } = useWorkspacePane();
+  // Unique to this pane, so the lookup never lands on the other pane's copy of
+  // the same session.
+  const resultElementId = getPaneScopedDomId(side, `tool-result-${toolId}`);
+
+  return (
+    <a
+      href={`#${resultElementId}`}
+      onClick={(event) => {
+        event.preventDefault();
+        document.getElementById(resultElementId)?.scrollIntoView({ block: 'nearest' });
+      }}
+      className="flex flex-shrink-0 items-center gap-0.5 text-[11px] text-primary transition-colors hover:text-primary/80"
+    >
+      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+      </svg>
+    </a>
+  );
+}
 
 /**
  * Unified one-line display for simple tool inputs and results
@@ -156,16 +185,7 @@ export const OneLineDisplay: React.FC<OneLineDisplayProps> = ({
           </span>
         )}
         {status && <ToolStatusBadge status={status} />}
-        {toolResult && (
-          <a
-            href={`#tool-result-${toolId}`}
-            className="flex flex-shrink-0 items-center gap-0.5 text-[11px] text-primary transition-colors hover:text-primary/80"
-          >
-            <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </a>
-        )}
+        {toolResult && <JumpToResultsLink toolId={toolId} />}
       </div>
     );
   }

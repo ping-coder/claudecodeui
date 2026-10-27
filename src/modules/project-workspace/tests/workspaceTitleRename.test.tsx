@@ -76,16 +76,16 @@ test('double-clicking the session title opens an input seeded with the title, fo
   const heading = titleHeading();
   assert.equal(heading.textContent, 'Original title');
   assert.equal(heading.getAttribute('title'), 'Original title (double-click to rename)');
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
 
   fireEvent.doubleClick(heading);
 
   const input = renameInput();
   assert.equal(input.value, 'Original title');
-  assert.equal(document.activeElement, input);
+  assert.equal(document.activeElement === input, true);
   assert.equal(input.selectionStart, 0);
   assert.equal(input.selectionEnd, 'Original title'.length);
-  assert.equal(screen.queryByRole('heading', { level: 2 }), null);
+  assert.equal(screen.queryByRole('heading', { level: 2 }) === null, true);
 });
 
 test('Enter saves the trimmed draft through the rename callback and closes the editor', async () => {
@@ -98,7 +98,7 @@ test('Enter saves the trimmed draft through the rename callback and closes the e
   });
 
   assert.deepEqual(onRenameSession.mock.calls, [['session-1', 'Renamed from header']]);
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
   assert.ok(titleHeading());
 });
 
@@ -110,7 +110,7 @@ test('Escape restores the title without calling the rename callback', () => {
   fireEvent.keyDown(renameInput(), { key: 'Escape' });
 
   assert.equal(onRenameSession.mock.calls.length, 0);
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
   assert.equal(titleHeading().textContent, 'Original title');
 });
 
@@ -150,14 +150,14 @@ test('an unchanged or blank draft closes the editor without a request', async ()
   await act(async () => {
     fireEvent.keyDown(renameInput(), { key: 'Enter' });
   });
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
 
   fireEvent.doubleClick(titleHeading());
   fireEvent.change(renameInput(), { target: { value: '   ' } });
   await act(async () => {
     fireEvent.keyDown(renameInput(), { key: 'Enter' });
   });
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
 
   assert.equal(onRenameSession.mock.calls.length, 0);
   assert.equal(titleHeading().textContent, 'Original title');
@@ -175,17 +175,17 @@ test('a refused rename is reported the way the sidebar reports it', async () => 
   });
 
   assert.deepEqual(alertSpy.mock.calls, [['sidebar:messages.renameSessionFailed']]);
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
 });
 
 test('the title is not editable without a session or off the chat tab', () => {
   const { unmount } = renderTitle({ selectedSession: null });
   fireEvent.doubleClick(titleHeading());
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
   unmount();
 
   renderTitle({ activeTab: 'files' });
   fireEvent.doubleClick(titleHeading());
-  assert.equal(queryRenameInput(), null);
+  assert.equal(queryRenameInput() === null, true);
   assert.equal(onRenameSession.mock.calls.length, 0);
 });

@@ -18,9 +18,11 @@ export type QuickSettingsPanelState = StoredQuickSettingsPanelState & {
 };
 
 /**
- * `canPin` is false on mobile, where docking makes no sense. It travels with
- * every action whose outcome depends on whether the panel is docked, so a pin
- * stored on desktop is ignored (not erased) while the viewport is narrow.
+ * `canPin` is false on mobile, where docking makes no sense, and while the
+ * caller does not allow docking (the immersive workspace). It travels with
+ * every action whose outcome depends on whether the panel is docked, so a
+ * stored pin is ignored (not erased) while the viewport is narrow or docking
+ * is off.
  */
 type QuickSettingsPanelAction =
   | { type: 'close'; canPin: boolean }
@@ -111,9 +113,10 @@ export function quickSettingsPanelReducer(
       // an overlay so the content does not jump away under the cursor.
       return { ...state, pinned: !state.pinned, isOpen: true };
     case 'leaveDesktop':
-      // The docked column cannot exist on a narrow viewport, and turning it
-      // into a full-screen overlay uninvited would cover the app; hide it and
-      // let the handle bring it back. The pin is kept for the next desktop visit.
+      // The docked column cannot exist on a narrow viewport or while docking is
+      // off, and turning it into an overlay uninvited would cover the app; hide
+      // it and let the handle bring it back. The pin is kept for when docking
+      // is possible again.
       if (!state.pinned || !state.isOpen) {
         return state;
       }
@@ -133,7 +136,8 @@ const initializeQuickSettingsPanelState = (canPin: boolean): QuickSettingsPanelS
 };
 
 type UseQuickSettingsPanelStateOptions = {
-  // False on mobile: pinning is ignored there and a stored pin is not applied.
+  // False on mobile and while docking is not allowed (immersive): pinning is
+  // ignored then and a stored pin is not applied.
   canPin: boolean;
 };
 
@@ -154,8 +158,9 @@ export function useQuickSettingsPanelState({ canPin }: UseQuickSettingsPanelStat
     writeStoredQuickSettingsPanelState({ pinned: state.pinned, tab: state.tab });
   }, [state.pinned, state.tab]);
 
-  // Crossing into the mobile breakpoint while docked: collapse rather than
-  // pop up as an overlay. On mount this is a no-op (a pin never starts open there).
+  // Crossing into the mobile breakpoint, or losing docking (going immersive),
+  // while docked: collapse rather than pop up as an overlay. On mount this is a
+  // no-op (a pin never starts open there).
   useEffect(() => {
     if (!canPin) {
       dispatch({ type: 'leaveDesktop' });
@@ -169,8 +174,9 @@ export function useQuickSettingsPanelState({ canPin }: UseQuickSettingsPanelStat
 
   return useMemo(() => ({
     isOpen: state.isOpen,
-    // A stored pin is only honoured where docking is possible; on mobile the
-    // panel behaves as an unpinned overlay regardless of what is stored.
+    // A stored pin is only honoured where docking is possible; on mobile and
+    // while immersive the panel behaves as an unpinned overlay regardless of
+    // what is stored.
     isPinned: state.pinned && canPin,
     activeTab: state.tab,
     close,

@@ -10,7 +10,7 @@ type WorkspaceStateViewProps = {
   onMenuClick: () => void;
 };
 
-/** Rendered by WorkspaceMain instead of the workspace while projects load or when none is selected. */
+/** Rendered by WorkspaceMain instead of the workspace while projects load or when none is selected, by WorkspacePane while an empty pane waits for projects, and by PaneEmptyState when there is no project at all. */
 export default function WorkspaceStateView({ mode, isMobile, onMenuClick }: WorkspaceStateViewProps) {
   const { t } = useTranslation();
 

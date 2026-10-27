@@ -24,7 +24,7 @@ type DialogProps = {
   children: React.ReactNode;
 };
 
-/** Used by the chat, command-palette, sidebar and skills modules as the modal container. */
+/** Used by the chat, command-palette, project-workspace, sidebar and skills modules as the modal container. */
 export const Dialog: React.FC<DialogProps> = ({ open: controlledOpen, onOpenChange: controlledOnOpenChange, defaultOpen = false, children }) => {
   const [internalOpen, setInternalOpen] = React.useState(defaultOpen);
   const triggerRef = React.useRef<HTMLElement | null>(null) as React.MutableRefObject<HTMLElement | null>;
@@ -100,7 +100,7 @@ type DialogContentProps = {
 
 const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-/** Focus-trapped panel of Dialog, used by the chat, command-palette, sidebar and skills modules. */
+/** Focus-trapped panel of Dialog, used by the chat, command-palette, project-workspace, sidebar and skills modules. */
 export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
   ({ className, children, onEscapeKeyDown, onPointerDownOutside, wrapperClassName, animationClassName, ...props }, ref) => {
     const { open, onOpenChange, triggerRef } = useDialog();
@@ -212,7 +212,7 @@ export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps
 );
 DialogContent.displayName = 'DialogContent';
 
-/** Accessible title of Dialog, used by the chat, command-palette, sidebar and skills modules. */
+/** Accessible title of Dialog, used by the chat, command-palette, project-workspace, sidebar and skills modules. */
 export const DialogTitle = React.forwardRef<HTMLHeadingElement, React.HTMLAttributes<HTMLHeadingElement>>(
   ({ className, ...props }, ref) => (
     <h2 ref={ref} className={cn('sr-only', className)} {...props} />

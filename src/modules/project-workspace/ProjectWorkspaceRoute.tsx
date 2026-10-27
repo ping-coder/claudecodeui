@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
+import { ChatInstancesProvider } from '@/modules/chat';
 import { PaletteOpsProvider } from '@/modules/command-palette';
 import { ProjectsStateProvider } from '@/modules/project-workspace/context/ProjectsStateContext';
 import {
@@ -16,11 +17,14 @@ const MemoizedProjectWorkspaceRouteContent = memo(ProjectWorkspaceRouteContent);
 
 /** This module's only public export: rendered by App for the "/" and "/session/:sessionId" routes. */
 export default function ProjectWorkspaceRoute() {
+  // One realtime coordinator for every ChatInterface on the page, whichever pane renders it.
   return (
     <SessionProtectionProvider>
-      <PaletteOpsProvider>
-        <MemoizedProjectWorkspaceRouteContent />
-      </PaletteOpsProvider>
+      <ChatInstancesProvider>
+        <PaletteOpsProvider>
+          <MemoizedProjectWorkspaceRouteContent />
+        </PaletteOpsProvider>
+      </ChatInstancesProvider>
     </SessionProtectionProvider>
   );
 }

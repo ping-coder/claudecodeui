@@ -245,6 +245,19 @@ export const PROVIDER_TERMINAL_SIGN_IN_COMMANDS: Partial<Record<LLMProvider, str
 
 // ---------------------------
 
+//----------------- KEYBOARD SHORTCUTS ------------
+
+/**
+ * Layers that own the Escape key while they are open: menus, modal dialogs and anything carrying
+ * the app's `data-escape-layer` marker. Keyboard handlers underneath step aside while one matches:
+ * code-editor's useEditorKeyboardShortcuts (Escape closing the editor), project-workspace's
+ * useWorkspaceShortcuts (the split, pane focus and full-screen shortcuts) and project-workspace's
+ * ProjectSidebarRegion (Escape closing the immersive sidebar drawer, which skips its own marker).
+ */
+export const ESCAPE_LAYER_SELECTOR = '[data-escape-layer], [aria-modal="true"], [role="menu"]';
+
+// ---------------------------
+
 //----------------- WORKSPACE PANES ------------
 
 /** Narrowest a pane may get; two panes need 2x this + PANE_SPLITTER_WIDTH_PX, else only the focused pane shows. */
@@ -264,3 +277,10 @@ export const WORKSPACE_SPLIT_RATIO_MAX = 0.8;
 
 /** Pane layout key in sessionStorage (this browser tab, authoritative) and localStorage (seed for new pages); removed on logout. */
 export const WORKSPACE_LAYOUT_STORAGE_KEY = 'workspace-layout';
+
+/**
+ * effectAllowed of a dragged pane tab, set by project-workspace's PaneTabBar. Drop targets (PaneTabBar's
+ * strip, PaneDropOverlay's zones) read it during dragover, where the payload itself is unreadable, to
+ * tell a tab (moves, Alt copies) from a sidebar row.
+ */
+export const PANE_TAB_DRAG_EFFECT = 'copyMove';

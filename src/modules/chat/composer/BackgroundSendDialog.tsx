@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Button, Dialog, DialogContent, DialogTitle } from '@/shared/ui';
@@ -21,6 +22,8 @@ type BackgroundSendDialogProps = {
  */
 export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSendDialogProps) {
   const { t } = useTranslation('chat');
+  // Per instance: each pane's composer renders its own dialog.
+  const descriptionId = useId();
 
   return (
     <Dialog
@@ -31,7 +34,7 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
         }
       }}
     >
-      <DialogContent aria-describedby="background-send-dialog-description" className="p-5">
+      <DialogContent aria-describedby={descriptionId} className="p-5">
         <DialogTitle className="not-sr-only text-base font-semibold text-foreground">
           {t('claudeStatus.backgroundTask.prompt.title', {
             defaultValue: 'This session still has background work running',
@@ -46,7 +49,7 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
           </ul>
         )}
 
-        <p id="background-send-dialog-description" className="mt-3 text-sm text-muted-foreground">
+        <p id={descriptionId} className="mt-3 text-sm text-muted-foreground">
           {t('claudeStatus.backgroundTask.prompt.description', {
             defaultValue: 'A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
           })}

@@ -41,7 +41,7 @@ test.each(['loading', 'empty'] as const)('on a phone the %s screen shows the bad
   render(<WorkspaceStateView mode={mode} isMobile onMenuClick={noop} />);
 
   const badge = await screen.findByTitle('Deployment environment: Stage');
-  assert.equal(badge.previousElementSibling, screen.getByRole('button', { name: 'Open menu' }));
+  assert.equal(badge.previousElementSibling === screen.getByRole('button', { name: 'Open menu' }), true);
 });
 
 test.each([
@@ -57,5 +57,5 @@ test.each([
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(screen.queryByTitle(/^Deployment environment/), null);
+  assert.equal(screen.queryByTitle(/^Deployment environment/) === null, true);
 });

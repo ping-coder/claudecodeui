@@ -53,6 +53,6 @@ test('in production the auth card shows no badge', async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(screen.queryByTitle(/^Deployment environment/), null);
+  assert.equal(screen.queryByTitle(/^Deployment environment/) === null, true);
   assert.ok(screen.getByRole('heading', { name: 'Welcome Back' }));
 });

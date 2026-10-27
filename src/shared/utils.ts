@@ -3,13 +3,16 @@ import type { TFunction } from 'i18next';
 import { twMerge } from 'tailwind-merge';
 
 import type {
+  AppTab,
   LLMProvider,
   Project,
   ProjectSession,
   QuickSettingsTab,
   SessionDragPayload,
   SlashCommand,
+  UntitledPaneTabLabels,
   WorkspacePaneSide,
+  WorkspaceSessionTab,
 } from '@/shared/types';
 
 //----------------- DEPLOYMENT MODE ------------
@@ -520,3 +523,46 @@ export const hasSessionDragPayload = (dataTransfer: DataTransfer | null): boolea
 /** `pane-${side}-${id}` inside a pane, unchanged outside, so two panes never share DOM ids (tool-result anchors, for one). */
 export const getPaneScopedDomId = (side: WorkspacePaneSide | null, id: string): string =>
   (side ? `pane-${side}-${id}` : id);
+
+/**
+ * A pane tab's label: labels.newChat for a draft; otherwise liveTitle (the session's title in the
+ * projects list, where renames and generated summaries land), then the tab's own snapshot, then
+ * labels.missing for a missing session or the generic session title. Each caller looks the live title
+ * up its own way: project-workspace's ProjectMainRegion (tab bar) and ProjectCommandPalette (Open tabs).
+ */
+export const resolvePaneTabTitle = (
+  tab: WorkspaceSessionTab,
+  liveTitle: string | null | undefined,
+  labels: UntitledPaneTabLabels,
+): string => {
+  if (!tab.sessionId) {
+    return labels.newChat;
+  }
+  const title = liveTitle || tab.title;
+  if (title) {
+    return title;
+  }
+  return tab.isMissing
+    ? labels.missing
+    : getSessionTitle(tab.session ?? { id: tab.sessionId, __provider: tab.provider });
+};
+
+/**
+ * Puts DOM focus in a workspace pane: the composer on the Chat view, otherwise the pane root (pane DOM
+ * contract: data-workspace-pane, data-slot="prompt-input-textarea"). Does nothing when the pane is not
+ * on the page; keepFocusInside also leaves focus alone when it is already somewhere inside the pane.
+ * Callers run it once the layout change has rendered: project-workspace's useWorkspaceShortcuts
+ * (Mod+1/2, always moves) and ProjectCommandPalette (pane commands, keepFocusInside).
+ */
+export const focusWorkspacePaneElement = (
+  side: WorkspacePaneSide,
+  view: AppTab | null | undefined,
+  { keepFocusInside = false }: { keepFocusInside?: boolean } = {},
+): void => {
+  const pane = document.querySelector<HTMLElement>(`[data-workspace-pane="${side}"]`);
+  if (!pane || (keepFocusInside && pane.contains(document.activeElement))) {
+    return;
+  }
+  const composer = view === 'chat' ? pane.querySelector<HTMLElement>('[data-slot="prompt-input-textarea"]') : null;
+  (composer ?? pane).focus();
+};

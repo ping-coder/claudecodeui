@@ -13,6 +13,7 @@ import { normalizeInlineCodeFences } from '@/modules/chat/utils/chatFormatting';
 import { normalizeLatexDelimiters } from '@/modules/chat/utils/latexDelimiters';
 import { copyTextToClipboard } from '@/shared/utils';
 import { SyntaxHighlighter } from '@/shared/syntaxHighlighter';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { usePaletteOps } from '@/modules/command-palette';
 import { buildSyntaxTheme } from '@/modules/chat/utils/syntaxHighlightTheme';
 import type { PrismStyleSheet } from '@/modules/chat/utils/syntaxHighlightTheme';
@@ -205,7 +206,80 @@ if (!document.getElementById(SYNTAX_THEME_STYLE_ELEMENT_ID)) {
   document.head.appendChild(styleElement);
 }
 
+type FileReferenceLinkProps = {
+  href?: string;
+  /** What the link opens: the href when it is a path, otherwise the link text. */
+  fileRef: string;
+  children?: React.ReactNode;
+};
+
+/**
+ * A workspace file or directory reference. It opens in the pane showing this
+ * message, whether or not that pane has focus, and falls back to the palette
+ * ops outside the split workspace. The pane is read here rather than in
+ * MarkdownBody: a focus switch changes the pane context, and only these links
+ * should re-render for it, not every message's remark/rehype pass.
+ */
+const FileReferenceLink = ({ href, fileRef, children }: FileReferenceLinkProps) => {
+  const paletteOps = usePaletteOps();
+  const pane = useWorkspacePane();
+  const openFileInEditor = pane.openFileInEditor ?? paletteOps.openFileInEditor;
+  const openDirectory = pane.openDirectory ?? paletteOps.openDirectory;
+
+  return (
+    <a
+      href={href || fileRef}
+      className="cursor-pointer text-blue-600 hover:underline dark:text-blue-400"
+      onClick={(event) => {
+        event.preventDefault();
+        // Normalized once for every branch below: the href arrives trimmed
+        // from the parser, but the link-text fallback keeps a trailing space
+        // (``[`src/foo.ts:12` ]()``), and that space defeats the `$`-anchored
+        // suffix strip.
+        const reference = fileRef.trim();
+        if (reference.endsWith('/')) {
+          openDirectory(reference);
+          return;
+        }
+        openFileInEditor(stripLineSuffix(reference), lineFromRef(reference));
+      }}
+    >
+      {children}
+    </a>
+  );
+};
+
+/** Every markdown link: workspace paths open in the app, anything else in a new browser tab. */
+const MarkdownLink = ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+  // Prefer the href when it is a real path; otherwise fall back to the link
+  // text, since models often emit `[src/foo.ts]()` with an empty href.
+  const linkText = childrenToText(children);
+  const fileRef = looksLikeFilePath(href) ? href : looksLikeFilePath(linkText) ? linkText : undefined;
+
+  if (fileRef && !isExternalHref(href)) {
+    return (
+      <FileReferenceLink href={href} fileRef={fileRef}>
+        {children}
+      </FileReferenceLink>
+    );
+  }
+
+  return (
+    <a
+      href={href}
+      className="text-blue-600 hover:underline dark:text-blue-400"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {children}
+    </a>
+  );
+};
+
 const markdownComponents = {
+  // A module-level component rather than a per-instance closure, so links can
+  // read the pane and palette themselves (see FileReferenceLink).
+  a: MarkdownLink,
   code: CodeBlock,
   // Workspace image paths are fetched through the authenticated files route;
   // a bare <img src> would resolve against the web origin and 404.
@@ -283,58 +357,9 @@ function MarkdownBodyRenderer({ children, breaks = false }: Omit<MarkdownProps, 
     [breaks, hasMath],
   );
   const rehypePlugins = useMemo(() => (hasMath ? [rehypeKatex] : EMPTY_PLUGINS), [hasMath]);
-  const { openFileInEditor, openDirectory } = usePaletteOps();
-
-  const components = useMemo(
-    () => ({
-      ...markdownComponents,
-      a: ({ href, children: linkChildren }: { href?: string; children?: React.ReactNode }) => {
-        // Prefer the href when it is a real path; otherwise fall back to the
-        // link text, since models often emit `[src/foo.ts]()` with an empty href.
-        const linkText = childrenToText(linkChildren);
-        const fileRef = looksLikeFilePath(href) ? href : looksLikeFilePath(linkText) ? linkText : undefined;
-
-        if (fileRef && !isExternalHref(href)) {
-          return (
-            <a
-              href={href || fileRef}
-              className="cursor-pointer text-blue-600 hover:underline dark:text-blue-400"
-              onClick={(event) => {
-                event.preventDefault();
-                // Normalized once for every branch below: the href arrives
-                // trimmed from the parser, but the link-text fallback keeps a
-                // trailing space (``[`src/foo.ts:12` ]()``), and that space
-                // defeats the `$`-anchored suffix strip.
-                const reference = fileRef.trim();
-                if (reference.endsWith('/')) {
-                  openDirectory(reference);
-                  return;
-                }
-                openFileInEditor(stripLineSuffix(reference), lineFromRef(reference));
-              }}
-            >
-              {linkChildren}
-            </a>
-          );
-        }
-
-        return (
-          <a
-            href={href}
-            className="text-blue-600 hover:underline dark:text-blue-400"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {linkChildren}
-          </a>
-        );
-      },
-    }),
-    [openFileInEditor, openDirectory],
-  );
 
   return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components as any}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={markdownComponents as any}>
       {content}
     </ReactMarkdown>
   );

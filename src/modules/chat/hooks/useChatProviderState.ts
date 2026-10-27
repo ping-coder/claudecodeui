@@ -139,6 +139,13 @@ type ProviderCapabilitiesApiResponse = {
 type UseChatProviderStateArgs = {
   selectedSession: ProjectSession | null;
   selectedProject: Project | null;
+  /**
+   * Whether this chat's pane is the focused one. Only the focused pane writes
+   * the page-wide selected provider, which new chats, the shell and the git
+   * panel start from. Defaults to true: outside the split workspace the lone
+   * chat is the focused one.
+   */
+  isFocusedPane?: boolean;
 };
 
 type ProviderModelsApiResponse = {
@@ -285,7 +292,11 @@ const readResponseUltracode = (body: SessionSelectionApiResponse): boolean | nul
   typeof body.data?.ultracode === 'boolean' ? body.data.ultracode : null
 );
 
-export function useChatProviderState({ selectedSession, selectedProject: _selectedProject }: UseChatProviderStateArgs) {
+export function useChatProviderState({
+  selectedSession,
+  selectedProject: _selectedProject,
+  isFocusedPane = true,
+}: UseChatProviderStateArgs) {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
   // The provider the composer sends under. Held here rather than read from
@@ -625,14 +636,33 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     setPermissionMode(savedMode ?? getDefaultPermissionModeForProvider(provider));
   }, [selectedSession?.id, provider, getDefaultPermissionModeForProvider, getPermissionModesForProvider]);
 
+  // Whether the pane was focused at the last pass of the effect below, so it
+  // can tell the commit in which the pane gains focus.
+  const wasFocusedPaneRef = useRef(isFocusedPane);
+
+  // The composer follows the provider of the session it shows, in every pane.
+  // The page-wide selected provider follows only the focused pane: a session
+  // opened in the other pane must not change what new chats start with. A
+  // pane that gains focus writes its provider once, as what it synced while
+  // in the background was not written; when that commit also brings a session
+  // of another provider, the session's provider is the one written.
   useEffect(() => {
-    if (!selectedSession?.__provider || selectedSession.__provider === provider) {
+    const gainedFocus = isFocusedPane && !wasFocusedPaneRef.current;
+    wasFocusedPaneRef.current = isFocusedPane;
+
+    const sessionProvider = selectedSession?.__provider;
+    if (sessionProvider && sessionProvider !== provider) {
+      setProvider(sessionProvider);
+      if (isFocusedPane) {
+        writeSelectedProvider(sessionProvider);
+      }
       return;
     }
 
-    setProvider(selectedSession.__provider);
-    writeSelectedProvider(selectedSession.__provider);
-  }, [provider, selectedSession]);
+    if (gainedFocus) {
+      writeSelectedProvider(provider);
+    }
+  }, [isFocusedPane, provider, selectedSession]);
 
   // Permission prompts belong to a session, not to the transient provider
   // selection that is synchronized after navigation.

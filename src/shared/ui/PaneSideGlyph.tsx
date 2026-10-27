@@ -10,7 +10,7 @@ type PaneSideGlyphProps = {
  * Two-cell picture of the split workspace with the cell(s) for `placement` filled: 'left',
  * 'right', 'both', or null for neither. Used by the sidebar module (row side buttons,
  * placement marker, Open-in switch) and the project-workspace module (collapsed pane
- * switcher, drop overlay, empty pane). Decorative: the control around it carries the label.
+ * switcher, drop overlay). Decorative: the control around it carries the label.
  */
 export function PaneSideGlyph({ placement, className }: PaneSideGlyphProps) {
   const fillsLeft = placement === 'left' || placement === 'both';

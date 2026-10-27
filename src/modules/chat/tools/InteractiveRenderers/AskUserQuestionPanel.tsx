@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { PermissionPanelProps,Question } from '@/shared/types';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 
 /** Stable fallback so the memoized handlers below are not invalidated on every
  *  render by a fresh `[]` literal when a request carries no questions. */
@@ -28,19 +29,31 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const otherInputRef = useRef<HTMLInputElement>(null);
 
+  // Only the focused pane takes DOM focus: a question arriving in the other
+  // pane must not pull the caret out of the composer being typed in. The two
+  // auto-focus effects below read this through a ref rather than re-running on
+  // it, so a pane that gains focus later (a Tab into it, Ctrl/Cmd+1/2 putting
+  // the caret in its composer) keeps the focus it was given.
+  const { isFocusedPane } = useWorkspacePane();
+  const isFocusedPaneRef = useRef(isFocusedPane);
+  // Declared before the auto-focus effects so it has run by the time they read it.
+  useEffect(() => {
+    isFocusedPaneRef.current = isFocusedPane;
+  }, [isFocusedPane]);
+
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
   }, []);
 
   // Focus the container for keyboard events when step changes
   useEffect(() => {
-    if (!otherActive.get(currentStep)) {
+    if (isFocusedPaneRef.current && !otherActive.get(currentStep)) {
       containerRef.current?.focus();
     }
   }, [currentStep, otherActive]);
 
   useEffect(() => {
-    if (otherActive.get(currentStep)) {
+    if (isFocusedPaneRef.current && otherActive.get(currentStep)) {
       otherInputRef.current?.focus();
     }
   }, [otherActive, currentStep]);

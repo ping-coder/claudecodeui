@@ -6,7 +6,7 @@ type MobileMenuButtonProps = {
   compact?: boolean;
 };
 
-/** Rendered by WorkspaceHeader and WorkspaceStateView to open the sidebar drawer on mobile. */
+/** Rendered by WorkspaceHeader, WorkspaceStateView and WorkspacePane (the phone header above an empty pane or a missing conversation) to open the sidebar drawer on mobile. */
 export default function MobileMenuButton({ onMenuClick, compact = false }: MobileMenuButtonProps) {
   const { t } = useTranslation();
   const { handleMobileMenuClick, handleMobileMenuTouchEnd } = useMobileMenuHandlers(onMenuClick);

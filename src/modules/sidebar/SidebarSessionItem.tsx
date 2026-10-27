@@ -1,15 +1,24 @@
 import { memo, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { DragEvent, KeyboardEvent } from 'react';
 import { Check, CheckSquare, Edit2, Loader2, MoreHorizontal, Square, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Badge, Dialog, DialogContent, DialogTitle, LLMProviderLogo, Tooltip, buttonVariants } from '@/shared/ui';
-import { cn } from '@/shared/utils';
-import type { LLMProvider, Project, ProjectSession, SessionWithProvider } from '@/shared/types';
+import { cn, writeSessionDragPayload } from '@/shared/utils';
+import type {
+  LLMProvider,
+  Project,
+  ProjectSession,
+  SessionOpenOptions,
+  SessionPanePlacement,
+  SessionWithProvider,
+  WorkspacePaneSide,
+} from '@/shared/types';
 import { PROVIDER_LABELS, createSessionViewModel, formatCompactAge } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
 import { useProviderSessionIdCopy } from '@/modules/sidebar/hooks/useProviderSessionIdCopy';
 import SessionOptions from '@/modules/sidebar/SessionOptions';
+import { PanePlacementMarker } from '@/modules/sidebar/SessionPaneButtons';
 
 type SidebarSessionItemProps = {
   project: Project;
@@ -27,8 +36,7 @@ type SidebarSessionItemProps = {
   onStartEditingSession: (projectId: string, sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;
   onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
-  onProjectSelect: (project: Project) => void;
-  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
+  onSessionSelect: (session: SessionWithProvider, projectId: string, options?: SessionOpenOptions) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches this session into an independent one; absent when its provider cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
@@ -38,6 +46,12 @@ type SidebarSessionItemProps = {
   isChecked: boolean;
   /** Takes the owning projectId so this memoized row binds itself without the list making a closure per row. */
   onToggleSessionSelected: (projectId: string, sessionId: string) => void;
+  /** Which pane(s) show this session, resolved by the list so a tab opening elsewhere leaves this row alone. */
+  panePlacement?: SessionPanePlacement;
+  /** Desktop, and the workspace is split or wide enough to split: side buttons, side menu items, Alt+click to the other side. */
+  canTargetSides?: boolean;
+  /** A right pane exists: the placement marker shows and both sides are offered. */
+  isWorkspaceSplit?: boolean;
   t: TFunction;
 };
 
@@ -56,13 +70,15 @@ function SidebarSessionItem({
   onStartEditingSession,
   onCancelEditingSession,
   onSaveEditingSession,
-  onProjectSelect,
   onSessionSelect,
   onDeleteSession,
   onForkSession,
   isSelecting,
   isChecked,
   onToggleSessionSelected,
+  panePlacement = null,
+  canTargetSides = false,
+  isWorkspaceSplit = false,
   t,
 }: SidebarSessionItemProps) {
   const isCompact = useCompactSidebar();
@@ -89,10 +105,44 @@ function SidebarSessionItem({
     useProviderSessionIdCopy(session.id, providerLabel);
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
-  // after the projectName → projectId migration.
+  // after the projectName → projectId migration. A tap previews the session in the
+  // focused pane, and the open itself closes the drawer.
   const selectMobileSession = () => {
-    onProjectSelect(project);
-    onSessionSelect(session, project.projectId);
+    onSessionSelect(session, project.projectId, { preview: true });
+  };
+
+  // Alt/Option+click and Alt/Option+Enter: a kept tab on the other side, splitting first.
+  // Where no split is possible it is an ordinary kept open in the focused pane.
+  const openOnOtherSide = () => {
+    onSessionSelect(session, project.projectId, { target: canTargetSides ? 'other' : 'focused' });
+  };
+
+  const openInPane = (side: WorkspacePaneSide) => {
+    onSessionSelect(session, project.projectId, { target: side });
+  };
+
+  // Alt+Enter is the keyboard Alt+click. Prevented so the link is not followed as well.
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' || !event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    openOnOtherSide();
+  };
+
+  // A drag carries the session for the workspace's drop targets and keeps the link
+  // for everything else (another browser tab, the address bar). The ticked rows of
+  // a bulk selection stay put.
+  const handleDragStart = (event: DragEvent<HTMLAnchorElement>) => {
+    if (isSelecting) {
+      event.preventDefault();
+      return;
+    }
+    writeSessionDragPayload(
+      event.dataTransfer,
+      { sessionId: session.id, projectId: project.projectId, provider: session.__provider, title: sessionView.sessionName },
+      `/session/${session.id}`,
+    );
   };
 
   const saveEditedSession = () => {
@@ -198,6 +248,7 @@ function SidebarSessionItem({
             >
               <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
             </div>
+            <PanePlacementMarker isWorkspaceSplit={isWorkspaceSplit} panePlacement={panePlacement} t={t} />
 
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -396,8 +447,9 @@ function SidebarSessionItem({
                 : 'hover:bg-accent/50',
             isChecked && 'border-primary/40 bg-primary/10',
           )}
-          // Left-click keeps in-app navigation; Ctrl/Cmd/middle-click and the
-          // native right-click menu use the href to open a new tab/window.
+          // A click previews the session in the focused pane and a double-click keeps
+          // it; Alt+click sends it to the other side. Ctrl/Cmd/Shift/middle-click and
+          // the native right-click menu use the href to open a new tab/window.
           // While selecting, every click ticks the row instead.
           onClick={(event) => {
             if (isSelecting) {
@@ -407,11 +459,28 @@ function SidebarSessionItem({
               }
               return;
             }
-            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            if (event.button !== 0) return;
+            if (event.altKey) {
+              // Ahead of the modifier pass-through, and prevented first so the browser
+              // does not take Alt+click as "download this link".
+              event.preventDefault();
+              // The second click of a double-click would send it back across.
+              if (event.detail > 1) return;
+              openOnOtherSide();
+              return;
+            }
+            if (event.metaKey || event.ctrlKey || event.shiftKey) return;
             event.preventDefault();
-            onSessionSelect(session, project.projectId);
+            onSessionSelect(session, project.projectId, { preview: true });
           }}
-          onKeyDown={isSelecting ? handleSelectionKeyDown : undefined}
+          onDoubleClick={(event) => {
+            if (isSelecting || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
+            event.preventDefault();
+            onSessionSelect(session, project.projectId, { preview: false });
+          }}
+          onKeyDown={isSelecting ? handleSelectionKeyDown : handleRowKeyDown}
+          draggable={isSelecting ? false : undefined}
+          onDragStart={handleDragStart}
         >
           <div className="flex w-full min-w-0 items-center gap-2">
             {selectionIcon}
@@ -423,6 +492,7 @@ function SidebarSessionItem({
             >
               <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
             </div>
+            <PanePlacementMarker isWorkspaceSplit={isWorkspaceSplit} panePlacement={panePlacement} t={t} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div
@@ -478,6 +548,10 @@ function SidebarSessionItem({
             onSaveEditingSession={onSaveEditingSession}
             onDeleteSession={onDeleteSession}
             onFork={onForkSession ? () => onForkSession(session) : undefined}
+            canTargetSides={canTargetSides}
+            isWorkspaceSplit={isWorkspaceSplit}
+            panePlacement={panePlacement}
+            onOpenInPane={openInPane}
             t={t}
           />
         )}

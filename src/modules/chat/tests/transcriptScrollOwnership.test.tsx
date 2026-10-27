@@ -107,7 +107,7 @@ async function renderChatSessionState(options: {
         selectedSession: session,
         ws: null,
         sendMessage: vi.fn(),
-        resetStreamingState: vi.fn(),
+        provider: 'claude',
         statusCheckSentAtRef: { current: new Map() },
         lastSeqRef: { current: new Map() },
         sessionStore: options.store as never,

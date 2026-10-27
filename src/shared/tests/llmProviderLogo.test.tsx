@@ -17,7 +17,7 @@ test('an Antigravity provider is drawn with its own mark, not the Claude fallbac
 
   const logo = screen.getByRole('img', { name: 'Antigravity' });
   assert.equal(logo.getAttribute('class'), 'h-4 w-4');
-  assert.equal(screen.queryByRole('img', { name: 'Claude' }), null);
+  assert.equal(screen.queryByRole('img', { name: 'Claude' }) === null, true);
 });
 
 test('an unrecognised provider still falls back to the Claude mark', () => {

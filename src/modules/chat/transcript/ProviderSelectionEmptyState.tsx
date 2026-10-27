@@ -25,6 +25,8 @@ import {
 import ModelGroupList, { type ModelGroup } from "@/modules/chat/composer/ModelGroupList";
 import ModelLibraryPanel from "@/modules/chat/modals/ModelLibraryPanel";
 import { writeSelectedProvider } from '@/shared/selectedProvider';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
+import { formatShortcut } from '@/shared/utils';
 
 const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "claude", name: "Anthropic" },
@@ -33,9 +35,6 @@ const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "opencode", name: "OpenCode" },
   { id: "agy", name: "Antigravity" },
 ];
-
-const MOD_KEY =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 // cmdk's default filter is fuzzy (loose character-subsequence scoring), which
 // surfaces unrelated models — e.g. searching "chatgpt" also matched "Fable".
@@ -104,6 +103,10 @@ export default function ProviderSelectionEmptyState({
   setInput,
 }: ProviderSelectionEmptyStateProps) {
   const { t } = useTranslation("chat");
+  // TaskMaster has one current project and it follows the focused pane, so
+  // only that pane offers the next task; the other pane's would be for the
+  // wrong project whenever the two differ.
+  const { isFocusedPane } = useWorkspacePane();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [modelLibraryOpen, setModelLibraryOpen] = useState(false);
 
@@ -343,7 +346,7 @@ export default function ProviderSelectionEmptyState({
             <Trans
               ns="chat"
               i18nKey="providerSelection.pressToSearch"
-              values={{ shortcut: MOD_KEY === "⌘" ? "⌘K" : "Ctrl+K" }}
+              values={{ shortcut: formatShortcut(["mod", "K"]) }}
               components={{
                 kbd: (
                   <kbd className="inline-flex items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px]" />
@@ -352,7 +355,7 @@ export default function ProviderSelectionEmptyState({
             />
           </p>
 
-          {provider && tasksEnabled && isTaskMasterInstalled && (
+          {isFocusedPane && provider && tasksEnabled && isTaskMasterInstalled && (
             <div className="mt-5">
               <NextTaskBanner
                 onStartTask={() => setInput(nextTaskPrompt)}
@@ -376,7 +379,7 @@ export default function ProviderSelectionEmptyState({
             {t("session.continue.description")}
           </p>
 
-          {tasksEnabled && isTaskMasterInstalled && (
+          {isFocusedPane && tasksEnabled && isTaskMasterInstalled && (
             <div className="mt-5">
               <NextTaskBanner
                 onStartTask={() => setInput(nextTaskPrompt)}

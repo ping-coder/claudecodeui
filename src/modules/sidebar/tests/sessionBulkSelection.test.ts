@@ -110,7 +110,6 @@ const renderSessions = (overrides: ListOverrides = {}) =>
       onStartEditingSession: noop,
       onCancelEditingSession: noop,
       onSaveEditingSession: noop,
-      onProjectSelect: noop,
       onSessionSelect: noop,
       onDeleteSession: noop,
       onLoadMoreSessions: noop,
@@ -170,7 +169,7 @@ test('the idle list offers Select and opens an empty selection with it', () => {
 test('a list whose every session is running has nothing to offer Select for', () => {
   const { container } = renderSessions({ activeSessions: new Set(['s1', 's2', 's3']) });
 
-  assert.equal(buttonWithText(container, 'sessions.select'), null);
+  assert.equal(buttonWithText(container, 'sessions.select') === null, true);
 });
 
 test('selection mode replaces the row options with a checkbox on every row', () => {
@@ -182,7 +181,7 @@ test('selection mode replaces the row options with a checkbox on every row', () 
     ['false', 'false', 'false'],
   );
   assert.equal(recordedOptionsProps.length, 0, 'the per-row options menu is hidden while selecting');
-  assert.equal(buttonWithText(container, 'sessions.select'), null);
+  assert.equal(buttonWithText(container, 'sessions.select') === null, true);
   assert.ok(buttonWithText(container, 'sessions.selectAll'));
   assert.ok(buttonWithText(container, 'actions.cancel'));
 
@@ -260,8 +259,8 @@ test('Select all flips to Clear once every loaded row is ticked', () => {
     onSetSessionSelection,
   });
   assert.equal(
-    buttonWithText(unloadedLeft.container, 'sessions.selectAll'),
-    null,
+    buttonWithText(unloadedLeft.container, 'sessions.selectAll') === null,
+    true,
     'with sessions still unloaded the button must not promise to select all of them',
   );
   fireEvent.click(buttonWithText(unloadedLeft.container, 'sessions.selectAllLoaded') as HTMLButtonElement);
@@ -301,7 +300,7 @@ test('a page emptied by deleting every loaded row keeps Load more', () => {
 
   const reallyEmpty = renderSessions({ sessions: [], hasMoreSessions: false });
   assert.equal(reallyEmpty.container.textContent?.includes('sessions.noSessions'), true);
-  assert.equal(buttonWithText(reallyEmpty.container, 'Load more sessions'), null);
+  assert.equal(buttonWithText(reallyEmpty.container, 'Load more sessions') === null, true);
 });
 
 test('the compact layout selects with the same rules and hides its options button', () => {
@@ -317,8 +316,8 @@ test('the compact layout selects with the same rules and hides its options butto
   assert.equal(rows.length, SESSIONS.length);
   assert.deepEqual(rows.map((row) => row.getAttribute('aria-checked')), ['true', 'false', 'false']);
   assert.equal(
-    container.querySelector('[aria-label^="Session options for"]'),
-    null,
+    container.querySelector('[aria-label^="Session options for"]') === null,
+    true,
     'the mobile row hides its "..." button while selecting',
   );
 
@@ -359,7 +358,6 @@ const renderController = (onSessionDelete = vi.fn(), initialActivity: SessionAct
         onSessionDelete,
         onLoadMoreSessions: noop,
         onProjectDelete: noop,
-        setCurrentProject: noop,
         setSidebarVisible: noop,
         sidebarVisible: true,
         keepProjectsExpanded,

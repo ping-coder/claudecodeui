@@ -233,7 +233,7 @@ anything.**
 | Where | Delay | Re-checks? |
 | --- | --- | --- |
 | Append follow effect (`useChatSessionState.ts`) | 50 ms | yes — `if (!isUserScrolledUpRef.current)` |
-| External-update refresh (same file, the `externalMessageUpdate` effect) | 200 ms | yes — same guard, and only armed when `isNearBottom()` held before the refetch |
+| External-update refresh (same file, the `externalMessageUpdate` effect, driven by the pane's `externalRevision`) | 200 ms | yes — same guard, and only armed when `isNearBottom()` held before the refetch |
 | Composer send (`useChatComposerState.ts` → `handleSubmit`) | 100 ms | **no** — it sets the flag false itself, then calls `scrollToBottom()` unconditionally |
 
 The first two used to fire unconditionally. Commit `a1a42774` describes the failure:
@@ -383,8 +383,10 @@ while the tab is active, and the `useLayoutEffect` reactivation branch — recog
 **RULE: resolve the target in the data first; only then look for its row, and only ever by
 exact timestamp until the final try.**
 
-The sidebar (`Sidebar.tsx`, `onConversationResultClick`) puts `__searchTargetSnippet` and
-`__searchTargetTimestamp` on the selected session object. The jump then:
+The sidebar (`openConversation` in `useSidebarController.ts`) puts `__searchTargetSnippet` and
+`__searchTargetTimestamp` on the session it opens. The tab keeps them on its session object,
+which the pane's chat gets as `selectedSession`; a hit in a session that is already open gives
+its tab a new object carrying them, so the jump still runs. The jump then:
 
 1. Sets `searchScrollActiveRef` — the initial settle and the append-follow both stand down.
    The arming effect requires a non-empty snippet string; without one there is no jump.

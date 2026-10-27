@@ -60,10 +60,12 @@
     "clearSearch": "清除搜索",
     "openCommandPalette": "打开命令面板",
     "attentionRequiredIndicator": "会话需要处理",
-    "altClickOtherSide": "也可以 Alt+单击",
+    "altClickOtherSide": "也可以 Alt+单击（Mac 上是 Option+单击）",
     "openedLeft": "已在左侧打开",
     "openedRight": "已在右侧打开",
-    "openedBoth": "两侧都已打开"
+    "openedBoth": "两侧都已打开",
+    "processingSessionIndicator": "会话处理中",
+    "backgroundWorkIndicator": "后台任务运行中"
   },
   "navigation": {
     "chat": "聊天",

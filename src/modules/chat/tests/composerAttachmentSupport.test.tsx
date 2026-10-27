@@ -197,7 +197,7 @@ test('the attach button is disabled and says why for a provider that takes no at
 
   const button = screen.getByRole('button', { name: 'Antigravity does not support attachments yet' });
   assert.equal((button as HTMLButtonElement).disabled, true);
-  assert.equal(screen.queryByRole('button', { name: 'Attach files' }), null);
+  assert.equal(screen.queryByRole('button', { name: 'Attach files' }) === null, true);
 });
 
 test('the attach button stays available by default', () => {

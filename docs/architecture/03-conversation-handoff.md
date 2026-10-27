@@ -76,7 +76,9 @@ rendered messages is [the realtime stream](./02-realtime-stream.md).
 | `src/modules/chat/utils/messageHistoryRefreshCoordinator.ts` | Coalesces refresh signals; keeps hidden sessions dirty |
 | `src/modules/chat/utils/messageKeys.ts` | `getIntrinsicMessageKey` — stable React keys across re-fetches |
 | `src/shared/context/SessionProtectionContext.tsx`, `src/shared/hooks/useSessionProtection.ts` | The busy map: which sessions are producing a response |
-| `src/modules/project-workspace/hooks/useProjectsState.ts` | `registerOptimisticSession`, `upsertSessionIntoProject`, `handleNewSession` |
+| `src/modules/project-workspace/hooks/useProjectsState.ts` | `registerOptimisticSession`, `upsertSessionIntoProject`, the `session_upserted` handler |
+| `src/modules/project-workspace/hooks/useWorkspaceNavigation.ts` | `openNewSession`, `establishDraft`, and `commit`, the only writer of the pane layout, which also moves the URL |
+| `src/modules/project-workspace/utils/workspaceLayout.ts` | The layout reducer, including each pane's `draftActivation` and `externalRevision` counters |
 
 ## The two ids and where they meet
 
@@ -200,12 +202,14 @@ Three details worth pinning:
   `recordProviderSessionId`. The reducer matches it to the optimistic row by alias id,
   updates in place, and refuses to blank a title it already has.
 
-Navigation happens once. `ChatInterface.handleSessionEstablished` sets `currentSessionId`,
-calls `onSessionEstablished` (which registers the optimistic row) and then
-`onNavigateToSession`, which is `ProjectMainRegion.handleNavigateToSession` doing
-`navigate('/session/:id')`. The only other navigate in this area is the alias fix-up
-described under [transcripts on disk](#transcripts-on-disk), and it fires only when the URL
-holds a provider-native id.
+Navigation happens once. `ChatInterface.handleSessionEstablished` sets `currentSessionId`
+and calls `onSessionEstablished`, which is the layout's `establishDraft`: it registers the
+optimistic row and turns the project's draft tab into the session's tab in place, keeping
+its key. If that tab is the focused pane's active tab, the URL becomes `/session/:id` by
+replace, so Back does not land on an empty new chat. The `onNavigateToSession` call that
+follows opens the same session in the same pane and normally finds it already there. The
+only other navigate in this area is the alias fix-up described under
+[transcripts on disk](#transcripts-on-disk).
 
 ## Switching sessions in the UI
 
@@ -223,14 +227,19 @@ holds a provider-native id.
 A background run therefore keeps accumulating. Frames for A arrive on the same socket,
 `useChatRealtimeHandlers` reads `msg.sessionId`, and `sessionStore.appendRealtime(A, msg)`
 writes into A's slot, capped at `MAX_REALTIME_MESSAGES = 500`. Switching back renders what
-was collected. The store lives as long as `ChatInterface` is mounted, which is the whole
-time a project is selected: `WorkspaceMain` hides the chat tab with a `hidden` class instead
-of unmounting it.
+was collected. Each pane mounts one `ChatInterface`, so each pane has its own store, alive
+while the pane shows a session or a new chat: switching tabs hands the same chat another
+`selectedSession`, and `WorkspaceMain` hides the Chat view with a `hidden` class instead of
+unmounting it. A session open in both panes is loaded into both stores. A phone mounts only
+the focused pane.
 
-"New Session" is not a switch. `handleNewSession` selects the project, clears
-`selectedSession`, navigates to `/` and increments `newSessionTrigger`, which drives a
-dedicated reset effect in `useChatSessionState.ts`. The counter exists because the click
-must still do something when the app is already in that exact visible state.
+"New Session" opens a draft tab. `openNewSession` opens the project's single draft in the
+focused pane, or reveals it where it already is (an explicit side moves it there), and the
+URL goes to `/`. Whenever a pane's active tab changes to a draft, the layout reducer bumps
+that pane's `draftActivation`; the pane passes it to its `ChatInterface` as
+`newSessionTrigger`, which drives a dedicated reset effect in `useChatSessionState.ts`. The
+counter exists because every draft's `selectedSession` is `null`, which on its own does not
+make the chat drop what it kept from the previous tab.
 
 ## Session protection: the busy map
 
@@ -264,10 +273,11 @@ Two guards make it stable:
   send that has not reached the registry yet.
 
 Consumers: `useProcessingSessions` (chat — the activity line and the abort button),
-`useBusySessionIdSet` (sidebar — membership only, derived from a sorted membership key so
-its `Set` identity survives the several-times-a-second `statusText` rewrites; pinned by
-`src/shared/tests/busySessionIds.test.tsx`), and `isSessionProcessing` (`useProjectsState`,
-to decide whether a `session_upserted` for the viewed session should force a reload).
+`useBusySessionIdSet` (sidebar and pane tabs — membership only, derived from a sorted
+membership key so its `Set` identity survives the several-times-a-second `statusText`
+rewrites; pinned by `src/shared/tests/busySessionIds.test.tsx`), and `isSessionProcessing`
+(`useProjectsState`, to decide whether a `session_upserted` for a session on screen should
+reload the panes showing it).
 
 ## Reconciling live events with the persisted transcript
 
@@ -296,9 +306,12 @@ The refresh is coordinated, never fired directly:
   only when `sid` is the viewed session.
 - `ChatInterface.handleWebSocketReconnect` awaits `requestLatestMessages` **before**
   re-sending `chat.subscribe`, so replay lands on top of a fresh transcript.
-- `useProjectsState` bumps `externalMessageUpdate` when a `session_upserted` names the viewed
-  session and it is *not* processing. That is the "changed on disk from somewhere else"
-  signal, and the effect that consumes it also skips while the session is processing.
+- `useProjectsState` commits `noteExternalUpdate` when a `session_upserted` names a session
+  on screen (the active tab of either pane; on a phone, of the focused pane only) and it is
+  *not* processing. The reducer bumps `externalRevision` on each pane showing it, and that
+  pane's `ChatInterface` receives it as `externalMessageUpdate`. That is the "changed on disk
+  from somewhere else" signal, and the effect that consumes it also skips while the session
+  is processing.
 
 All three go through `createMessageHistoryRefreshCoordinator`: one in-flight request per
 session, at most one trailing request, and a session that cannot refresh right now (chat tab
@@ -392,7 +405,7 @@ gateway writer stays a drop-in for `WebSocketWriter`, whose version does replace
 
 | Tab B's situation when tab A sends | What tab B observes |
 | --- | --- |
-| Had the session open, subscribed before the run started | No live frames. The busy dot appears within 5 s from the running-sessions poll. The transcript catches up after the run, when a `session_upserted` for an idle session bumps `externalMessageUpdate` |
+| Had the session open, subscribed before the run started | No live frames. The busy dot appears within 5 s from the running-sessions poll. The transcript catches up after the run, when a `session_upserted` for an idle session bumps the pane's `externalRevision` |
 | Opens or refreshes the session mid-run | `chat.subscribe` attaches it, `chat_subscribed.isProcessing` is true, replay delivers every `seq > lastSeq`, and everything after that is live |
 | Socket drops and reconnects mid-run | Tail refresh first, then subscribe: attach plus replay |
 | Was the tab that got refreshed | Its abandoned socket is dropped from the set on the next `forward()` |
@@ -449,9 +462,10 @@ The sidebar's `session_upserted` reducer in `useProjectsState.ts` then does five
 2. Refuses to blank a summary it already has.
 3. Creates the project entry from the delta's `project` payload when the client has never
    seen that project.
-4. Bumps `externalMessageUpdate` when the delta names the viewed session and that session is
-   not processing; otherwise marks the row for attention.
-5. Navigates to `/session/:appId` when the URL still holds the provider-native alias.
+4. Bumps `externalRevision` on the panes showing the session when it is not processing;
+   otherwise marks the row for attention.
+5. Moves tabs still on the provider-native alias to the app id. When the focused tab was one
+   of them, the URL follows to `/session/:appId` by replace.
 
 ## Forking and resuming
 

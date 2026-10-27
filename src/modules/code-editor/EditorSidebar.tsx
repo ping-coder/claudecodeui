@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect, useRef } from 'react';
 import type { MouseEvent, MutableRefObject } from 'react';
 
 import type { CodeEditorFile } from '@/shared/types';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import CodeEditor from '@/modules/code-editor/CodeEditor';
 
 type EditorSidebarProps = {
@@ -26,7 +27,7 @@ const MIN_LEFT_CONTENT_WIDTH = 200;
 // Minimum width for the editor sidebar
 const MIN_EDITOR_WIDTH = 280;
 
-/** Used by the project-workspace module to dock the code editor beside the workspace content, with drag-to-resize and pop-out behaviour. */
+/** Used by the project-workspace module to dock the code editor beside a pane's content, with drag-to-resize; an editor that does not fit pops out, or fills its pane when that pane sits beside another. */
 export default function EditorSidebar({
   editingFile,
   isMobile,
@@ -48,25 +49,53 @@ export default function EditorSidebar({
   // `editorWidth` in this effect's dependencies rebuilt the ResizeObserver on
   // every one of those frames.
   const [maxEditorWidth, setMaxEditorWidth] = useState<number | null>(null);
+  // Side by side with another pane, a floating editor would cover both panes.
+  const { isSplitPane } = useWorkspacePane();
+  // Set once a split pane too narrow to dock the editor has expanded it in place
+  // (or found it expanded). The expand prop only toggles, and several
+  // measurements (this effect, the observer's first callback, a resize,
+  // StrictMode's re-run) can land before `editorExpanded` comes back; a second
+  // toggle would undo the first. It also leaves a user who collapses the editor
+  // in that pane alone. Cleared once the pane has room again and on close.
+  const narrowPaneExpandedRef = useRef(false);
 
   // Track how much room the container can spare so the left content keeps at
   // least MIN_LEFT_CONTENT_WIDTH as the window resizes.
   useEffect(() => {
-    if (!editingFile || isMobile || poppedOut) return;
+    if (!editingFile) {
+      // The next file opened in a narrow pane is expanded again.
+      narrowPaneExpandedRef.current = false;
+      return;
+    }
+    if (isMobile || poppedOut) return;
 
     const updateAvailableWidth = () => {
       if (!containerRef.current) return;
       const parentElement = containerRef.current.parentElement;
       if (!parentElement) return;
 
+      // A pane hidden while the split is collapsed measures 0, and popping out
+      // from there would cover the pane that is showing. The observer reports
+      // the real width once the pane is shown again.
+      if (parentElement.clientWidth === 0) return;
+
       const availableWidth = parentElement.clientWidth - MIN_LEFT_CONTENT_WIDTH;
 
       if (availableWidth < MIN_EDITOR_WIDTH) {
+        if (isSplitPane) {
+          // Fill this pane instead of popping out over both.
+          if (!narrowPaneExpandedRef.current) {
+            narrowPaneExpandedRef.current = true;
+            if (!editorExpanded) onToggleEditorExpand();
+          }
+          return;
+        }
         // Not enough space - pop out the editor so user can still see everything
         setPoppedOut(true);
         return;
       }
 
+      narrowPaneExpandedRef.current = false;
       setMaxEditorWidth(availableWidth);
     };
 
@@ -84,7 +113,7 @@ export default function EditorSidebar({
       window.removeEventListener('resize', updateAvailableWidth);
       resizeObserver.disconnect();
     };
-  }, [editingFile, isMobile, poppedOut]);
+  }, [editingFile, editorExpanded, isMobile, isSplitPane, onToggleEditorExpand, poppedOut]);
 
   const effectiveWidth = maxEditorWidth === null
     ? editorWidth

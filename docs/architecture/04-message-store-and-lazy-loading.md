@@ -2,9 +2,9 @@
 
 ## In one paragraph
 
-Every transcript this tab has opened lives in one `Map<sessionId, SessionSlot>` inside
-`useSessionStore` — a single instance, created by `ChatInterface` and alive for as long as the
-workspace is. A slot holds two arrays — `serverMessages` (what REST returned) and
+Every transcript a pane has opened lives in one `Map<sessionId, SessionSlot>` inside
+`useSessionStore` — one instance per pane, created by that pane's `ChatInterface` and alive for
+as long as it is mounted. A slot holds two arrays — `serverMessages` (what REST returned) and
 `realtimeMessages` (what the socket delivered since) — plus a cached `merged` array that is
 what actually renders. History is paginated from the *newest* row backwards: opening a session
 fetches the last 20 rows, scrolling up prepends 20 more. On the server those pages are sliced
@@ -222,7 +222,7 @@ and a hidden tab fails it — except export, which is allowed to finish.**
 | Session re-activated and stale | `requestLatestMessages` | Only when `isStale`. |
 | `complete` frame for the viewed session | `requestLatestMessages` | In `useChatRealtimeHandlers`. |
 | `websocket_reconnected` | `requestLatestMessages`, awaited, then `chat.subscribe` | `ChatInterface.tsx` `handleWebSocketReconnect`. |
-| `externalMessageUpdate` bumped by the sidebar | `requestLatestMessages` | Skipped while the session is processing. |
+| The pane's `externalRevision` bumped (`externalMessageUpdate` in the chat) | `requestLatestMessages` | Only in panes showing the session; skipped while it is processing. |
 | Scroll within 100 px of the top | `fetchMore` | Locked by `topLoadLockRef` until `scrollTop > 20`. |
 | "Load all" clicked | `fetchFromServer(limit: null)` | Also sets `visibleMessageCount = Infinity`. |
 | Search jump, unless the transcript is already fully loaded | `fetchFromServer(limit: null)` | Fetches everything; widens the window only as far as the hit needs. |

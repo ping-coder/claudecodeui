@@ -45,5 +45,5 @@ test('a folder nobody asked for stays closed', async () => {
   render(<FileTree selectedProject={project} revealDirectory={null} />);
 
   await waitFor(() => assert.ok(screen.getByText('decisions')));
-  assert.equal(screen.queryByText('0001-first.md'), null);
+  assert.equal(screen.queryByText('0001-first.md') === null, true);
 });

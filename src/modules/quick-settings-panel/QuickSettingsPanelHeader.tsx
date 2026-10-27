@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 
 type QuickSettingsPanelHeaderProps = {
   isPinned: boolean;
-  // False on mobile, where the panel is always an overlay and the pin is hidden.
+  // False on mobile and while immersive, where the panel is always an overlay
+  // and the pin is hidden.
   canPin: boolean;
   onTogglePin: () => void;
   onClose: () => void;

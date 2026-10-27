@@ -1613,6 +1613,35 @@ export type SessionDragPayload = {
   fromTab?: { side: WorkspacePaneSide; tabKey: string };
 };
 
+/**
+ * What a pane tab's session is doing, as the tab shows it: a spinner while a response runs, an amber
+ * dot when it needs attention, a purple dot while launched background work still runs. Resolved by
+ * project-workspace's ProjectMainRegion and drawn by PaneTabBar (also as the collapsed switcher's dot)
+ * and PaneTabsSheet.
+ */
+export type PaneTabActivity = 'running' | 'attention' | 'background';
+
+/**
+ * How one pane tab is labelled. ProjectMainRegion resolves it for every tab of both panes into one
+ * map that keeps its identity until a title, project name or activity changes; PaneTabBar and
+ * PaneTabsSheet render it.
+ */
+export type PaneTabDisplay = {
+  /** resolvePaneTabTitle's result: the live title from the projects list, else the tab's snapshot; "New chat" for a draft. */
+  title: string;
+  /** Owning project's name, for tooltips and menus. */
+  projectName: string;
+  activity: PaneTabActivity | null;
+};
+
+/** The localized names resolvePaneTabTitle gives tabs that have no title of their own. */
+export type UntitledPaneTabLabels = {
+  /** A draft tab: the project's unsent new chat. */
+  newChat: string;
+  /** A session that could not be resolved and has no stored title. */
+  missing: string;
+};
+
 /** One open tab as the command palette's Open tabs group lists it. */
 export type WorkspaceOpenTabSummary = {
   side: WorkspacePaneSide;

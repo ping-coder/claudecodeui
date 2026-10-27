@@ -1,12 +1,19 @@
 import { Loader2, MessageSquare } from 'lucide-react';
-import type { MouseEvent } from 'react';
+import type { DragEvent, KeyboardEvent, MouseEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { Button, LLMProviderLogo, Tooltip } from '@/shared/ui';
-import { cn } from '@/shared/utils';
-import type { ProjectSession, RecentConversationListItem, SessionRowActions } from '@/shared/types';
+import { cn, writeSessionDragPayload } from '@/shared/utils';
+import type {
+  ProjectSession,
+  RecentConversationListItem,
+  SessionOpenOptions,
+  SessionRowActions,
+  SidebarConversationOpenRequest,
+} from '@/shared/types';
 import { formatCompactAge } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SessionOptions from '@/modules/sidebar/SessionOptions';
+import { PanePlacementMarker } from '@/modules/sidebar/SessionPaneButtons';
 
 type SidebarRecentConversationsProps = {
   conversations: RecentConversationListItem[];
@@ -19,14 +26,12 @@ type SidebarRecentConversationsProps = {
   currentTime: Date;
   /**
    * The same row state and callbacks the Projects list hands its rows, so a
-   * conversation can be renamed, copied, forked or archived from here too.
+   * conversation can be renamed, copied, forked, archived or opened on a side
+   * from here too.
    */
   sessionActions: SessionRowActions;
-  onConversationSelect: (
-    projectId: string | null,
-    sessionId: string,
-    provider: string,
-  ) => void;
+  /** Opens the row's conversation; the options carry preview or a side, exactly as a Projects row sends them. */
+  onConversationSelect: (request: SidebarConversationOpenRequest, options?: SessionOpenOptions) => void;
   onLoadMore: () => void;
   onRetry: () => void;
   t: TFunction;
@@ -82,6 +87,12 @@ export default function SidebarRecentConversations({
     );
   }
 
+  // These rows are not memoized, so the targeting object is read here directly and
+  // resolved into the same scalars the Projects rows are handed one by one.
+  const { paneTargeting } = sessionActions;
+  const canTargetSides = paneTargeting?.canTargetSides ?? false;
+  const isWorkspaceSplit = paneTargeting?.isSplit ?? false;
+
   if (conversations.length === 0) {
     return (
       <div className="px-4 py-10 text-center">
@@ -107,6 +118,7 @@ export default function SidebarRecentConversations({
 
       <div className="space-y-0.5">
         {conversations.map((conversation) => {
+          const panePlacement = paneTargeting?.placements.get(conversation.sessionId) ?? null;
           const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
           const age = formatCompactAge(conversation.lastActivity, currentTime);
           const hasBackgroundWork = sessionActions.backgroundSessionIds.has(conversation.sessionId);
@@ -118,15 +130,65 @@ export default function SidebarRecentConversations({
           const sessionRename =
             rename?.target === 'session' && rename.id === conversation.sessionId ? rename : null;
 
+          const request: SidebarConversationOpenRequest = {
+            projectId: conversation.projectId,
+            sessionId: conversation.sessionId,
+            provider: conversation.provider,
+          };
+          // Alt+click and Alt+Enter: a kept tab on the other side, or here when no split is possible.
+          const openOnOtherSide = () => {
+            onConversationSelect(request, { target: canTargetSides ? 'other' : 'focused' });
+          };
+
+          // The same rules as a Projects row: click previews, double-click keeps, Alt+click
+          // goes to the other side ahead of the native Ctrl/Cmd/Shift/middle-click.
           const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+            if (event.button !== 0) {
+              return;
+            }
+            if (event.altKey) {
+              // Prevented first so the browser does not take Alt+click as a download.
+              event.preventDefault();
+              // The second click of a double-click would send it back across.
+              if (event.detail <= 1) {
+                openOnOtherSide();
+              }
+              return;
+            }
+            if (event.metaKey || event.ctrlKey || event.shiftKey) {
               return;
             }
             event.preventDefault();
-            onConversationSelect(
-              conversation.projectId,
-              conversation.sessionId,
-              conversation.provider,
+            onConversationSelect(request, { preview: true });
+          };
+
+          const handleDoubleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+            if (event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) {
+              return;
+            }
+            event.preventDefault();
+            onConversationSelect(request, { preview: false });
+          };
+
+          const handleKeyDown = (event: KeyboardEvent<HTMLAnchorElement>) => {
+            if (event.key !== 'Enter' || !event.altKey) {
+              return;
+            }
+            event.preventDefault();
+            openOnOtherSide();
+          };
+
+          // The project may be unknown here; the drop resolves it, as the payload allows.
+          const handleDragStart = (event: DragEvent<HTMLAnchorElement>) => {
+            writeSessionDragPayload(
+              event.dataTransfer,
+              {
+                sessionId: conversation.sessionId,
+                projectId: conversation.projectId,
+                provider: conversation.provider,
+                title: conversation.sessionTitle,
+              },
+              `/session/${conversation.sessionId}`,
             );
           };
 
@@ -155,6 +217,9 @@ export default function SidebarRecentConversations({
               <a
                 href={`/session/${conversation.sessionId}`}
                 onClick={handleClick}
+                onDoubleClick={handleDoubleClick}
+                onKeyDown={handleKeyDown}
+                onDragStart={handleDragStart}
                 data-testid="recent-conversation-row"
                 className={cn(
                   'flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 pr-11 text-left transition-colors',
@@ -169,6 +234,7 @@ export default function SidebarRecentConversations({
                 )}>
                   <LLMProviderLogo provider={conversation.provider} className="h-3.5 w-3.5" />
                 </span>
+                <PanePlacementMarker isWorkspaceSplit={isWorkspaceSplit} panePlacement={panePlacement} t={t} />
 
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] font-normal leading-4">
@@ -232,6 +298,10 @@ export default function SidebarRecentConversations({
                     __projectId: conversation.projectId ?? undefined,
                   })
                   : undefined}
+                canTargetSides={canTargetSides}
+                isWorkspaceSplit={isWorkspaceSplit}
+                panePlacement={panePlacement}
+                onOpenInPane={(side) => onConversationSelect(request, { target: side })}
                 t={t}
               />
             </div>

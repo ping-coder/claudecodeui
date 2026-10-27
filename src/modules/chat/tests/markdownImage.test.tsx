@@ -76,7 +76,7 @@ test('a missing file falls back to the alt text instead of a broken image', asyn
   const { findByText, queryByRole } = renderInProject('![gato](imagenes/nada.png)');
 
   await findByText('gato');
-  assert.equal(queryByRole('img'), null);
+  assert.equal(queryByRole('img') === null, true);
 });
 
 test('without a project the path cannot be resolved and the alt text is shown', async () => {

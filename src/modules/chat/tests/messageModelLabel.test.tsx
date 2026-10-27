@@ -118,7 +118,7 @@ describe('the model label in the message footer', () => {
       timestamp: '2026-08-19T12:00:00.000Z',
     });
 
-    assert.equal(container.querySelector('[title^="Answered by"]'), null);
+    assert.equal(container.querySelector('[title^="Answered by"]') === null, true);
   });
 
   it('leaves the user turn unlabelled', () => {
@@ -128,6 +128,6 @@ describe('the model label in the message footer', () => {
       timestamp: '2026-08-19T12:00:00.000Z',
     });
 
-    assert.equal(container.querySelector('[title^="Answered by"]'), null);
+    assert.equal(container.querySelector('[title^="Answered by"]') === null, true);
   });
 });

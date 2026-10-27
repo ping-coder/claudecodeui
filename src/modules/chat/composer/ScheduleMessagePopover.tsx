@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Clock } from 'lucide-react';
@@ -52,6 +52,8 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
   // Seeded an hour out, because a picker that opens on "now" is never what
   // scheduling means.
   const [customValue, setCustomValue] = useState(() => toLocalInputValue(new Date(Date.now() + 3_600_000)));
+  // Per instance: each pane's composer renders its own popover.
+  const customInputId = useId();
 
   const commit = (scheduledFor: Date) => {
     onSchedule(scheduledFor);
@@ -101,11 +103,11 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
 
           <ComposerMenuSeparator />
           <div className="px-2.5 pb-1.5">
-            <label className="block text-[11px] font-medium text-muted-foreground" htmlFor="schedule-at">
+            <label className="block text-[11px] font-medium text-muted-foreground" htmlFor={customInputId}>
               {t('schedule.customLabel')}
             </label>
             <input
-              id="schedule-at"
+              id={customInputId}
               type="datetime-local"
               value={customValue}
               onChange={(event) => setCustomValue(event.target.value)}

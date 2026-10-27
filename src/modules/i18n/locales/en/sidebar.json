@@ -61,10 +61,11 @@
     "openCommandPalette": "Open command palette",
     "attentionRequiredIndicator": "Session needs attention",
     "backgroundWorkIndicator": "Background work running",
-    "altClickOtherSide": "You can also Alt+click",
+    "altClickOtherSide": "You can also Alt+click (Option+click on a Mac)",
     "openedLeft": "Open in the left pane",
     "openedRight": "Open in the right pane",
-    "openedBoth": "Open in both panes"
+    "openedBoth": "Open in both panes",
+    "processingSessionIndicator": "Processing session"
   },
   "navigation": {
     "chat": "Chat",

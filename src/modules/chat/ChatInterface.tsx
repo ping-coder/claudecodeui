@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '@/modules/task-master';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
+import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
+import { useChatInstanceCoordinator } from '@/modules/chat/context/ChatInstancesContext';
 import PermissionContext from '@/modules/chat/context/PermissionContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
@@ -52,9 +54,10 @@ type ChatInterfaceProps = {
 };
 
 /**
- * Used by the project-workspace module (via the chat barrel) to render a
- * project session's chat tab; it owns the session, provider, realtime and
- * composer state that ChatMessagesPane and ChatComposer render.
+ * Used by the project-workspace module (via the chat barrel) to render each
+ * pane's Chat view, one instance per pane that follows the pane's active tab;
+ * it owns the session, provider, realtime and composer state that
+ * ChatMessagesPane and ChatComposer render.
  */
 function ChatInterface({
   isActive,
@@ -76,6 +79,8 @@ function ChatInterface({
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe } = useWebSocket();
   const { t } = useTranslation('chat');
+  // Only the focused pane answers page-wide keys and takes text from other modules.
+  const { isFocusedPane } = useWorkspacePane();
   const processingSessions = useProcessingSessions();
   const {
     markSessionProcessing: onSessionProcessing,
@@ -85,23 +90,25 @@ function ChatInterface({
   } = useSessionProtectionActions();
 
   const sessionStore = useSessionStore();
-  const streamTimerRef = useRef<number | null>(null);
-  const accumulatedStreamRef = useRef('');
-  // When each session's `chat.subscribe` was last sent; idle acks older than
-  // a later local request are discarded as stale.
-  const statusCheckSentAtRef = useRef(new Map<string, number>());
   // Highest live `seq` observed per session. Written by the realtime handler
   // on every sequenced frame, read whenever a `chat.subscribe` is sent so the
-  // server replays only the events this client actually missed.
+  // server replays only the events this client actually missed. Kept per chat:
+  // a pane opened mid-run needs the replay its own subscribe asks for.
   const lastSeqRef = useRef(new Map<string, number>());
 
-  const resetStreamingState = useCallback(() => {
-    if (streamTimerRef.current) {
-      clearTimeout(streamTimerRef.current);
-      streamTimerRef.current = null;
-    }
-    accumulatedStreamRef.current = '';
-  }, []);
+  // What the page's coordinator reads when it elects a chat for page-wide work:
+  // the session this chat shows and whether its pane is focused. Synced after
+  // every commit, below, once the session state is known.
+  const viewedSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const isFocusedPaneRef = useRef(isFocusedPane);
+  // Shared with every chat on the page: when each session's `chat.subscribe`
+  // was last sent (idle acks older than a later request are discarded as
+  // stale), the once-per-page sounds and title marker, and the one chat that
+  // reports a session's background work.
+  const { statusCheckSentAtRef, claimPageEffect, isBackgroundReporter } = useChatInstanceCoordinator({
+    getViewedSessionId: () => viewedSessionIdRef.current,
+    getIsFocused: () => isFocusedPaneRef.current,
+  });
 
   const {
     provider,
@@ -133,6 +140,7 @@ function ChatInterface({
   } = useChatProviderState({
     selectedSession,
     selectedProject,
+    isFocusedPane,
   });
 
   const {
@@ -173,14 +181,19 @@ function ChatInterface({
     selectedSession,
     ws,
     sendMessage,
+    provider,
     externalMessageUpdate,
     newSessionTrigger,
     processingSessions,
     onSessionIdle,
-    resetStreamingState,
     statusCheckSentAtRef,
     lastSeqRef,
     sessionStore,
+  });
+
+  useLayoutEffect(() => {
+    viewedSessionIdRef.current = selectedSession?.id || currentSessionId || null;
+    isFocusedPaneRef.current = isFocusedPane;
   });
 
   // Brand-new conversation: the composer allocated a stable session id via
@@ -288,10 +301,11 @@ function ChatInterface({
         lastSeq: lastSeqRef.current.get(selectedSession.id) ?? 0,
       }],
     });
-  }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
+  }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage, statusCheckSentAtRef]);
 
   useChatRealtimeHandlers({
     isActive,
+    isFocusedPane,
     subscribe,
     provider,
     selectedSession,
@@ -299,10 +313,10 @@ function ChatInterface({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
     lastSeqRef,
     statusCheckSentAtRef,
+    claimPageEffect,
+    isBackgroundReporter,
     onSessionProcessing,
     onSessionIdle,
     onSessionBackground,
@@ -314,7 +328,8 @@ function ChatInterface({
 
   // Lets other modules (the quick settings Commands tab) hand text to the
   // composer: append it after a separating space, then focus the textarea with
-  // the caret at the end once React has rendered the new value.
+  // the caret at the end once React has rendered the new value. Registered by
+  // the focused pane only, so the text lands in the pane the user is in.
   const insertComposerText = useCallback((text: string) => {
     setInput((previous) => {
       const separator = previous && !/\s$/.test(previous) ? ' ' : '';
@@ -331,10 +346,13 @@ function ChatInterface({
     });
   }, [setInput, textareaRef]);
 
-  usePaletteOpsRegister({ insertComposerText });
+  usePaletteOpsRegister(isFocusedPane ? { insertComposerText } : {});
 
+  // Esc stops the run on screen: only while Chat is the visible view of the
+  // focused pane, so another pane's run, or one behind the Files view, is
+  // never stopped by a key meant for something else.
   useEffect(() => {
-    if (!canAbortSession) {
+    if (!canAbortSession || !isActive || !isFocusedPane) {
       return;
     }
 
@@ -351,13 +369,7 @@ function ChatInterface({
     return () => {
       document.removeEventListener('keydown', handleGlobalEscape, { capture: true });
     };
-  }, [canAbortSession, handleAbortSession]);
-
-  useEffect(() => {
-    return () => {
-      resetStreamingState();
-    };
-  }, [resetStreamingState]);
+  }, [canAbortSession, handleAbortSession, isActive, isFocusedPane]);
 
   /**
    * Branches the conversation into a new session that ends at this message,

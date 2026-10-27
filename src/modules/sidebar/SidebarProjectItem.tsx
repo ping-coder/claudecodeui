@@ -4,7 +4,16 @@ import type { TFunction } from 'i18next';
 
 import { Button } from '@/shared/ui';
 import { cn } from '@/shared/utils';
-import type { LLMProvider, MCPServerStatus, Project, ProjectSession, SessionWithProvider, SidebarSessionSelection } from '@/shared/types';
+import type {
+  LLMProvider,
+  MCPServerStatus,
+  Project,
+  ProjectSession,
+  SessionOpenOptions,
+  SessionPanePlacement,
+  SessionWithProvider,
+  SidebarSessionSelection,
+} from '@/shared/types';
 import { getTaskIndicatorStatus } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import TaskIndicator from '@/modules/sidebar/TaskIndicator';
 import SidebarProjectSessions from '@/modules/sidebar/SidebarProjectSessions';
@@ -31,20 +40,21 @@ type SidebarProjectItemProps = {
   mcpServerStatus: MCPServerStatus;
   onRenameDraftChange: (name: string) => void;
   onToggleProject: (projectId: string) => void;
+  /** Records the project as the last one browsed (the default for new chats); it opens nothing. */
   onProjectSelect: (project: Project) => void;
   onToggleStarProject: (projectId: string) => void;
   onStartEditingProject: (project: Project) => void;
   onCancelEditingProject: () => void;
   onSaveProjectName: (projectId: string, nextName: string) => void;
   onDeleteProject: (project: Project) => void;
-  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
+  onSessionSelect: (session: SessionWithProvider, projectId: string, options?: SessionOpenOptions) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
   onLoadMoreSessions: (projectId: string) => void;
   activeSessions: ReadonlySet<string>;
   backgroundSessionIds: ReadonlySet<string>;
   attentionSessionIds: ReadonlySet<string>;
-  onNewSession: (project: Project) => void;
+  onNewSession: (project: Project, options?: SessionOpenOptions) => void;
   onStartEditingSession: (projectId: string, sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;
   onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
@@ -54,6 +64,14 @@ type SidebarProjectItemProps = {
   onToggleSessionSelected: (projectId: string, sessionId: string) => void;
   onCancelSessionSelection: () => void;
   onDeleteSelectedSessions: (sessionIds: string[]) => void;
+  /**
+   * The list's split targeting, resolved to what this row's sessions need and nothing that
+   * follows the focused pane, so a focus switch leaves every project row's props alone.
+   */
+  canTargetSides: boolean;
+  isWorkspaceSplit: boolean;
+  /** Null while collapsed or while none of its loaded sessions is open in a pane. */
+  panePlacements: ReadonlyMap<string, SessionPanePlacement> | null;
   t: TFunction;
 };
 
@@ -104,6 +122,9 @@ function SidebarProjectItem({
   onToggleSessionSelected,
   onCancelSessionSelection,
   onDeleteSelectedSessions,
+  canTargetSides,
+  isWorkspaceSplit,
+  panePlacements,
   t,
 }: SidebarProjectItemProps) {
   // Project identity is tracked by the DB-assigned `projectId` everywhere
@@ -457,7 +478,6 @@ function SidebarProjectItem({
         onStartEditingSession={onStartEditingSession}
         onCancelEditingSession={onCancelEditingSession}
         onSaveEditingSession={onSaveEditingSession}
-        onProjectSelect={onProjectSelect}
         onSessionSelect={onSessionSelect}
         onDeleteSession={onDeleteSession}
         onForkSession={onForkSession}
@@ -468,6 +488,9 @@ function SidebarProjectItem({
         onToggleSessionSelected={onToggleSessionSelected}
         onCancelSessionSelection={onCancelSessionSelection}
         onDeleteSelectedSessions={onDeleteSelectedSessions}
+        canTargetSides={canTargetSides}
+        isWorkspaceSplit={isWorkspaceSplit}
+        panePlacements={panePlacements}
         t={t}
       />
     </div>

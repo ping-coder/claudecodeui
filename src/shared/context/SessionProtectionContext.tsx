@@ -228,7 +228,7 @@ export function useBusySessionIdSet(): ReadonlySet<string> {
 /**
  * The busy sessions that are only running background tasks — no response in
  * flight. A subset of useBusySessionIdSet, with the same stable identity, for
- * the sidebar to draw those rows differently.
+ * the sidebar rows and the pane tabs to draw those sessions differently.
  */
 export function useBackgroundSessionIdSet(): ReadonlySet<string> {
   const backgroundSessionIds = useContext(BackgroundSessionIdsContext);

@@ -4,7 +4,14 @@ import { render } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import type { ActiveSidebarRename, Project, SidebarProjectListProps, SidebarSessionSelection } from '@/shared/types';
+import type {
+  ActiveSidebarRename,
+  Project,
+  SessionPanePlacement,
+  SidebarPaneTargeting,
+  SidebarProjectListProps,
+  SidebarSessionSelection,
+} from '@/shared/types';
 
 /**
  * SidebarProjectItem and SidebarSessionItem are memoized because a websocket
@@ -49,6 +56,7 @@ const makeProject = (projectId: string, sessionIds: string[]): Project => ({
 
 const PROJECT_A = makeProject('a', ['a1', 'a2']);
 const PROJECT_B = makeProject('b', ['b1']);
+const PROJECT_C = makeProject('c', ['c1']);
 
 const noop = () => {};
 const t = ((key: string) => key) as unknown as SidebarProjectListProps['t'];
@@ -63,6 +71,7 @@ const NO_SESSION_IDS: ReadonlySet<string> = new Set<string>();
 const listProps = (
   activeRename: ActiveSidebarRename | null,
   sessionSelection: SidebarSessionSelection | null = null,
+  paneTargeting?: SidebarPaneTargeting | null,
 ): SidebarProjectListProps => ({
   projects: [PROJECT_A, PROJECT_B],
   filteredProjects: [PROJECT_A, PROJECT_B],
@@ -103,6 +112,7 @@ const listProps = (
   onToggleSessionSelected: noop,
   onCancelSessionSelection: noop,
   onDeleteSelectedSessions: noop,
+  ...(paneTargeting !== undefined ? { paneTargeting } : {}),
   t,
 });
 
@@ -227,6 +237,7 @@ const sessionsProps = (
   sessionRenameId: string | null,
   sessionRenameDraft: string,
   selectedSessionIds: ReadonlySet<string> | null = null,
+  panes: { panePlacements?: ReadonlyMap<string, SessionPanePlacement> | null; canTargetSides?: boolean; isWorkspaceSplit?: boolean } = {},
 ) => ({
   project: PROJECT_A,
   isExpanded: true,
@@ -245,7 +256,6 @@ const sessionsProps = (
   onStartEditingSession: noop,
   onCancelEditingSession: noop,
   onSaveEditingSession: noop,
-  onProjectSelect: noop,
   onSessionSelect: noop,
   onDeleteSession: noop,
   onLoadMoreSessions: noop,
@@ -255,6 +265,7 @@ const sessionsProps = (
   onToggleSessionSelected: noop,
   onCancelSessionSelection: noop,
   onDeleteSelectedSessions: noop,
+  ...panes,
   t,
 });
 
@@ -303,5 +314,118 @@ test('the sorted session list is the same array until the project itself changes
     getAllSessions(replaced),
     getAllSessions(PROJECT_A),
     'a replaced project must not read a stale entry',
+  );
+});
+
+// ------------------------------------------------------------------ Split targeting
+
+// Owned by the workspace in production: the callback is stable and the map is
+// rebuilt only when the sessions open in a pane change, never on a focus switch.
+const onFocusSide = () => {};
+const placementsOf = (entries: Array<[string, SessionPanePlacement]>): ReadonlyMap<string, SessionPanePlacement> =>
+  new Map(entries);
+const targeting = (
+  placements: ReadonlyMap<string, SessionPanePlacement>,
+  focusedSide: 'left' | 'right' = 'left',
+): SidebarPaneTargeting => ({
+  canTargetSides: true,
+  isSplit: true,
+  focusedSide,
+  onFocusSide,
+  placements,
+});
+const isAExpanded = (projectId: string) => projectId === PROJECT_A.projectId;
+
+test('switching the focused pane changes no row props', () => {
+  // The rows offer absolute sides and mark absolute placements, so nothing they
+  // are handed depends on which pane is focused.
+  const placements = placementsOf([['a1', 'left'], ['b1', 'right']]);
+  const { rerender } = render(React.createElement(SidebarProjectList, {
+    ...listProps(null, null, targeting(placements, 'left')),
+    isProjectExpanded: isAExpanded,
+  }));
+  const [firstA, firstB] = recordedProjectRowProps;
+
+  rerender(React.createElement(SidebarProjectList, {
+    ...listProps(null, null, targeting(placements, 'right')),
+    isProjectExpanded: isAExpanded,
+  }));
+  const [, , secondA, secondB] = recordedProjectRowProps;
+
+  assert.deepEqual(changedProps(firstA, secondA), []);
+  assert.deepEqual(changedProps(firstB, secondB), []);
+  assert.equal(firstA.panePlacements, placements, 'the expanded project with an open session gets the placements');
+  assert.equal(firstB.panePlacements, null, 'a collapsed project draws no session rows to place');
+});
+
+test('a placement change reaches only the project rows that draw an open session', () => {
+  const before = placementsOf([['a1', 'left'], ['b1', 'right']]);
+  const after = placementsOf([['a1', 'left'], ['a2', 'right'], ['b1', 'right']]);
+  const renderList = (placements: ReadonlyMap<string, SessionPanePlacement>) => React.createElement(SidebarProjectList, {
+    ...listProps(null, null, targeting(placements)),
+    projects: [PROJECT_A, PROJECT_B, PROJECT_C],
+    filteredProjects: [PROJECT_A, PROJECT_B, PROJECT_C],
+    isProjectExpanded: () => true,
+  });
+  const { rerender } = render(renderList(before));
+  const [firstA, firstB, firstC] = recordedProjectRowProps;
+
+  rerender(renderList(after));
+  const [, , , secondA, secondB, secondC] = recordedProjectRowProps;
+
+  assert.deepEqual(changedProps(firstA, secondA), ['panePlacements']);
+  // b1 did not move, but b is handed the map it reads b1 from; its session rows
+  // resolve the same scalar from the new map, so their memo still holds.
+  assert.deepEqual(changedProps(firstB, secondB), ['panePlacements']);
+  assert.deepEqual(changedProps(firstC, secondC), [], 'nothing of project c is open, so it keeps being handed null');
+  assert.equal(firstC.panePlacements, null);
+});
+
+test('within a project, a placement change re-renders only the session rows it moved', () => {
+  const panes = (placements: ReadonlyMap<string, SessionPanePlacement>) => ({
+    panePlacements: placements,
+    canTargetSides: true,
+    isWorkspaceSplit: true,
+  });
+  const { rerender } = render(React.createElement(
+    SidebarProjectSessions,
+    sessionsProps(null, '', null, panes(placementsOf([['a1', 'left']]))),
+  ));
+  const [firstA1, firstA2] = recordedSessionRowProps;
+
+  rerender(React.createElement(
+    SidebarProjectSessions,
+    sessionsProps(null, '', null, panes(placementsOf([['a1', 'left'], ['a2', 'both']]))),
+  ));
+  const [, , secondA1, secondA2] = recordedSessionRowProps;
+
+  assert.deepEqual(changedProps(firstA1, secondA1), [], 'a1 is still on the left: same scalars, memo holds');
+  assert.deepEqual(changedProps(firstA2, secondA2), ['panePlacement']);
+  assert.deepEqual([firstA1.panePlacement, firstA2.panePlacement, secondA2.panePlacement], ['left', null, 'both']);
+});
+
+test('without split targeting the rows are handed what they were before the split', () => {
+  const { rerender } = render(React.createElement(SidebarProjectList, {
+    ...listProps(null),
+    isProjectExpanded: isAExpanded,
+  }));
+  const [withoutA] = recordedProjectRowProps;
+  assert.deepEqual(
+    [withoutA.canTargetSides, withoutA.isWorkspaceSplit, withoutA.panePlacements],
+    [false, false, null],
+  );
+
+  rerender(React.createElement(SidebarProjectList, {
+    ...listProps(null, null, null),
+    isProjectExpanded: isAExpanded,
+  }));
+  const [, , explicitNullA] = recordedProjectRowProps;
+  assert.deepEqual(changedProps(withoutA, explicitNullA), [], 'absent and null targeting are the same');
+
+  render(React.createElement(SidebarProjectSessions, sessionsProps(null, '')));
+  const [row] = recordedSessionRowProps;
+  assert.deepEqual(
+    [row.panePlacement, row.canTargetSides, row.isWorkspaceSplit],
+    [null, false, false],
   );
 });

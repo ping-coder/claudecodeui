@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
@@ -40,8 +40,28 @@ const CLI_WORKFLOW_REFRESH_INTERVAL_MS = 5_000;
  */
 const WIDE_WINDOW_REFRESH_EVERY_TICKS = 3;
 
+/**
+ * How many frames one session's replay record holds. The server buffers at
+ * most this many events per run for replay (MAX_BUFFERED_EVENTS_PER_RUN in
+ * chat-run-registry.service.ts), so no replay resends more.
+ */
+const REPLAY_FRAME_KEYS_PER_SESSION = 5_000;
+
+/** Text one session has streamed that is not in the store yet, and the timer that will write it there. */
+type StreamBuffer = {
+  text: string;
+  timer: number | null;
+};
+
 type UseChatRealtimeHandlersArgs = {
   isActive: boolean;
+  /**
+   * Whether this chat's pane is the focused one. Only the focused pane takes a
+   * frame that names no session, showing it in the session on screen; the
+   * others drop it. Defaults to true: outside the split workspace the lone chat
+   * is the focused one.
+   */
+  isFocusedPane?: boolean;
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   provider: LLMProvider;
   selectedSession: ProjectSession | null;
@@ -49,8 +69,6 @@ type UseChatRealtimeHandlersArgs = {
   setTokenBudget: (budget: Record<string, unknown> | null) => void;
   pendingPermissionRequests: PendingPermissionRequest[];
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
-  streamTimerRef: MutableRefObject<number | null>;
-  accumulatedStreamRef: MutableRefObject<string>;
   /**
    * Highest live `seq` observed per session. Essential for reconnect catch-up:
    * `chat.subscribe` sends this value as `lastSeq` so the server replays only
@@ -58,8 +76,18 @@ type UseChatRealtimeHandlersArgs = {
    * frame; read wherever a `chat.subscribe` is sent (session open, reconnect).
    */
   lastSeqRef: MutableRefObject<Map<string, number>>;
-  /** When each session's `chat.subscribe` was last sent; guards stale idle acks. */
+  /**
+   * When each session's `chat.subscribe` was last sent, by any chat on the
+   * page; guards stale idle acks. Shared because every chat hears every ack.
+   */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
+  /**
+   * Claims a page-wide effect (a sound, the title marker) by event key; false
+   * when another chat on the page already ran it for the same event.
+   */
+  claimPageEffect: (eventKey: string) => boolean;
+  /** Whether this chat is the one that writes a session's remaining background work into the activity map. */
+  isBackgroundReporter: (sessionId: string) => boolean;
   onSessionProcessing?: MarkSessionProcessing;
   onSessionIdle?: MarkSessionIdle;
   /** Reports the tasks a session still runs once its turn ends, so it reads as background work rather than idle. */
@@ -87,9 +115,16 @@ type UseChatRealtimeHandlersArgs = {
  * While such a turn's transcript shows a workflow still running, and a re-read
  * of its latest rows reaches the launch, it is also re-read on a timer, as the
  * run's progress is written where no event reports it.
+ *
+ * Every chat on the page hears every frame of the one shared socket (a split
+ * workspace mounts two), so streamed text is buffered per session, a replay
+ * this chat has already handled is dropped, and the work only one chat may do
+ * (a sound, the title marker, a background-work report) goes through the
+ * page's coordinator.
  */
 export function useChatRealtimeHandlers({
   isActive,
+  isFocusedPane = true,
   subscribe,
   provider,
   selectedSession,
@@ -97,10 +132,10 @@ export function useChatRealtimeHandlers({
   setTokenBudget,
   pendingPermissionRequests,
   setPendingPermissionRequests,
-  streamTimerRef,
-  accumulatedStreamRef,
   lastSeqRef,
   statusCheckSentAtRef,
+  claimPageEffect,
+  isBackgroundReporter,
   onSessionProcessing,
   onSessionIdle,
   onSessionBackground,
@@ -118,6 +153,35 @@ export function useChatRealtimeHandlers({
   activeViewSessionIdRef.current = viewedSessionId;
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
+  // Focus as of the last commit, read by the listener at event time, so a
+  // focus change does not resubscribe it.
+  const isFocusedPaneRef = useRef(isFocusedPane);
+  useLayoutEffect(() => {
+    isFocusedPaneRef.current = isFocusedPane;
+  }, [isFocusedPane]);
+
+  // Streamed text not yet written into the store, per session. Each session
+  // keeps its own text and flush timer, so two sessions streaming at once
+  // never mix, and switching the session on screen leaves a background
+  // stream's text where it is. Read and written only by this hook.
+  const streamBuffersRef = useRef(new Map<string, StreamBuffer>());
+  // `${seq}:${id}` of each sequenced frame this chat has handled, per session.
+  // Another chat subscribing a running session makes the server replay the run
+  // to the page's single socket, and every chat hears that replay.
+  const handledFrameKeysRef = useRef(new Map<string, Set<string>>());
+
+  // A flush still pending when the chat goes away has no transcript to write.
+  useEffect(() => {
+    const streamBuffers = streamBuffersRef.current;
+    return () => {
+      for (const buffer of streamBuffers.values()) {
+        if (buffer.timer !== null) {
+          window.clearTimeout(buffer.timer);
+        }
+      }
+      streamBuffers.clear();
+    };
+  }, []);
 
   // Keep the latest pending-permission snapshot available to the websocket
   // listener so back-to-back permission events can dedupe and re-arm the
@@ -174,9 +238,54 @@ export function useChatRealtimeHandlers({
     // What a session that has finished responding is left with: the tasks it
     // launched that are still running, or nothing, which marks it idle. The
     // store's records are what the transcript's cards fold their live status
-    // from, so this reads the same answer they draw.
+    // from, so this reads the same answer they draw. Only the chat the page
+    // elects writes it: each chat reads its own store, and of two that
+    // disagree the last writer would win.
     const reportRemainingBackgroundWork = (sid: string) => {
+      if (!isBackgroundReporter(sid)) {
+        return;
+      }
       onSessionBackground?.(sid, collectRunningBackgroundTasks(normalizedToChatMessages(sessionStore.getMessages(sid))));
+    };
+
+    // Writes a session's buffered text into the store and forgets the buffer;
+    // true when there was text to write.
+    const flushStreamBuffer = (sid: string): boolean => {
+      const buffer = streamBuffersRef.current.get(sid);
+      if (!buffer) {
+        return false;
+      }
+      if (buffer.timer !== null) {
+        window.clearTimeout(buffer.timer);
+      }
+      streamBuffersRef.current.delete(sid);
+      if (!buffer.text) {
+        return false;
+      }
+      sessionStore.updateStreaming(sid, buffer.text, provider);
+      return true;
+    };
+
+    // Records a sequenced frame as handled; false when this chat already
+    // handled it, so this delivery is a replay. The oldest keys go first once a
+    // session holds a whole run's worth.
+    const rememberHandledFrame = (sid: string, frameKey: string): boolean => {
+      let frameKeys = handledFrameKeysRef.current.get(sid);
+      if (!frameKeys) {
+        frameKeys = new Set<string>();
+        handledFrameKeysRef.current.set(sid, frameKeys);
+      }
+      if (frameKeys.has(frameKey)) {
+        return false;
+      }
+      frameKeys.add(frameKey);
+      if (frameKeys.size > REPLAY_FRAME_KEYS_PER_SESSION) {
+        const oldestKey = frameKeys.values().next().value;
+        if (oldestKey !== undefined) {
+          frameKeys.delete(oldestKey);
+        }
+      }
+      return true;
     };
 
     const handleEvent = (msg: ServerEvent) => {
@@ -184,11 +293,32 @@ export function useChatRealtimeHandlers({
         return;
       }
 
-      const activeViewSessionId = activeViewSessionIdRef.current;
-      const sid = (typeof msg.sessionId === 'string' && msg.sessionId) || activeViewSessionId;
+      // Not about any session: every chat re-syncs the session it shows.
+      if (msg.kind === 'websocket_reconnected') {
+        onWebSocketReconnect?.();
+        return;
+      }
 
-      // Record replay progress for every sequenced live event.
+      const activeViewSessionId = activeViewSessionIdRef.current;
+      const frameSessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null;
+      // A frame that names no session (a request the server rejected before it
+      // knew the session) belongs to the session on screen, but only in the
+      // focused pane: an unfocused one would file it under its own session and
+      // idle that session too.
+      if (!frameSessionId && !isFocusedPaneRef.current) {
+        return;
+      }
+      const sid = frameSessionId ?? activeViewSessionId;
+
       if (sid && typeof msg.seq === 'number') {
+        // A replay of a frame already handled. Keyed by both: agy and OpenCode
+        // stream every delta of a part under one id, each with its own seq,
+        // and every run counts seq from 1 again.
+        if (typeof msg.id === 'string' && msg.id && !rememberHandledFrame(sid, `${msg.seq}:${msg.id}`)) {
+          return;
+        }
+
+        // Record replay progress for every sequenced live event.
         const known = lastSeqRef.current.get(sid) ?? 0;
         if (msg.seq > known) {
           lastSeqRef.current.set(sid, msg.seq);
@@ -196,10 +326,6 @@ export function useChatRealtimeHandlers({
       }
 
       switch (msg.kind) {
-        case 'websocket_reconnected':
-          onWebSocketReconnect?.();
-          return;
-
         case 'history_truncated': {
           // An already-sent message was replaced. Every client watching this
           // session drops the superseded turns before the replacement streams
@@ -235,7 +361,15 @@ export function useChatRealtimeHandlers({
             setPendingPermissionRequests(nextPendingPermissionRequests);
 
             if (hasPendingActionablePermissionRequests && !hadActionablePermissionRequests) {
-              void playNotificationSound();
+              // Every request is claimed under the key its own frame uses, so
+              // the replayed `permission_request` that follows this ack, or the
+              // other pane hearing it, does not sound again.
+              const claims = nextPendingPermissionRequests
+                .filter((request) => isActionablePermissionRequest(request))
+                .map((request) => claimPageEffect(`perm:${sid}:${request.requestId}`));
+              if (claims.includes(true)) {
+                void playNotificationSound();
+              }
             }
           }
           return;
@@ -292,38 +426,30 @@ export function useChatRealtimeHandlers({
       /*  Provider NormalizedMessage handling                            */
       /* -------------------------------------------------------------- */
 
-      // --- Streaming: buffer for performance ---
+      // --- Streaming: buffered per session for performance ---
+      // Every session, on screen or not, streams into its own buffer, flushed
+      // into its store row at most every 100 ms, so a session the user opens
+      // mid-stream shows everything streamed so far in one row.
       if (msg.kind === 'stream_delta') {
         const text = (msg.content as string) || '';
-        if (!text) return;
-        accumulatedStreamRef.current += text;
-        if (!streamTimerRef.current) {
-          streamTimerRef.current = window.setTimeout(() => {
-            streamTimerRef.current = null;
-            if (sid) {
-              sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-            }
+        if (!text || !sid) return;
+        const buffer = streamBuffersRef.current.get(sid) ?? { text: '', timer: null };
+        streamBuffersRef.current.set(sid, buffer);
+        buffer.text += text;
+        if (buffer.timer === null) {
+          buffer.timer = window.setTimeout(() => {
+            buffer.timer = null;
+            sessionStore.updateStreaming(sid, buffer.text, provider);
           }, 100);
-        }
-        // Also route to store for non-active sessions
-        if (sid && sid !== activeViewSessionId) {
-          sessionStore.appendRealtime(sid, msg as unknown as NormalizedMessage);
         }
         return;
       }
 
       if (msg.kind === 'stream_end') {
-        if (streamTimerRef.current) {
-          clearTimeout(streamTimerRef.current);
-          streamTimerRef.current = null;
-        }
         if (sid) {
-          if (accumulatedStreamRef.current) {
-            sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-          }
+          flushStreamBuffer(sid);
           sessionStore.finalizeStreaming(sid);
         }
-        accumulatedStreamRef.current = '';
         return;
       }
 
@@ -342,16 +468,15 @@ export function useChatRealtimeHandlers({
       // --- UI side effects for specific kinds ---
       switch (msg.kind) {
         case 'complete': {
-          // Flush any remaining streaming state
-          if (streamTimerRef.current) {
-            clearTimeout(streamTimerRef.current);
-            streamTimerRef.current = null;
+          if (sid) {
+            // Flush what the session still has buffered.
+            if (flushStreamBuffer(sid)) {
+              sessionStore.finalizeStreaming(sid);
+            }
+            // The server replays only a running run, so nothing of this one
+            // can arrive again.
+            handledFrameKeysRef.current.delete(sid);
           }
-          if (sid && accumulatedStreamRef.current) {
-            sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-            sessionStore.finalizeStreaming(sid);
-          }
-          accumulatedStreamRef.current = '';
 
           // `complete` is the unified terminal event — every provider run ends
           // with exactly one, regardless of success, failure, or abort. The
@@ -376,8 +501,9 @@ export function useChatRealtimeHandlers({
             break;
           }
 
-          // Celebrate only successful runs (failed runs end with success: false).
-          if (msg.success !== false) {
+          // Celebrate only successful runs (failed runs end with success: false),
+          // once on the page however many chats hear the frame.
+          if (msg.success !== false && claimPageEffect(`complete:${sid}:${msg.seq}:${String(msg.id)}`)) {
             showCompletionTitleIndicator();
             void playChatCompletionSound();
           }
@@ -398,7 +524,12 @@ export function useChatRealtimeHandlers({
 
         case 'permission_request': {
           if (!msg.requestId) break;
-          if (isActionablePermissionRequest({ toolName: msg.toolName })) {
+          // One sound per request on the page, shared with the subscribe ack
+          // that may have announced it already.
+          if (
+            isActionablePermissionRequest({ toolName: msg.toolName })
+            && claimPageEffect(`perm:${sid}:${String(msg.requestId)}`)
+          ) {
             void playNotificationSound();
           }
 
@@ -494,10 +625,10 @@ export function useChatRealtimeHandlers({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
     lastSeqRef,
     statusCheckSentAtRef,
+    claimPageEffect,
+    isBackgroundReporter,
     onSessionProcessing,
     onSessionIdle,
     onSessionBackground,

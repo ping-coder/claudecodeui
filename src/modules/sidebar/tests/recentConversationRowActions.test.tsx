@@ -4,7 +4,14 @@ import { render } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import type { ActiveSidebarRename, RecentConversationListItem, SessionRowActions, SidebarProjectListProps } from '@/shared/types';
+import type {
+  ActiveSidebarRename,
+  RecentConversationListItem,
+  SessionOpenOptions,
+  SessionRowActions,
+  SidebarConversationOpenRequest,
+  SidebarProjectListProps,
+} from '@/shared/types';
 
 /**
  * The Conversations list renders the same controls as the Projects list, from
@@ -58,6 +65,7 @@ const makeActions = (overrides: Partial<SessionRowActions> = {}): SessionRowActi
 const renderList = (
   conversations: RecentConversationListItem[],
   sessionActions: SessionRowActions,
+  onConversationSelect: (request: SidebarConversationOpenRequest, options?: SessionOpenOptions) => void = noop,
 ) => render(
   <SidebarRecentConversations
     conversations={conversations}
@@ -69,7 +77,7 @@ const renderList = (
     selectedSession={null}
     currentTime={NOW}
     sessionActions={sessionActions}
-    onConversationSelect={noop}
+    onConversationSelect={onConversationSelect}
     onLoadMore={noop}
     onRetry={noop}
     t={t}
@@ -158,4 +166,61 @@ test('a session needing attention gets the amber dot', () => {
   assert.equal(dots.length, 1);
   const rows = container.querySelectorAll('[data-testid="recent-conversation-row"]');
   assert.equal(rows.length, 2);
+});
+
+test('the shared controls get each row\'s pane placement and open on absolute sides', () => {
+  const onConversationSelect = vi.fn();
+  renderList(
+    [conversation('s1'), conversation('s2', { projectId: null })],
+    makeActions({
+      paneTargeting: {
+        canTargetSides: true,
+        isSplit: true,
+        focusedSide: 'left',
+        onFocusSide: noop,
+        placements: new Map([['s1', 'both']]),
+      },
+    }),
+    onConversationSelect,
+  );
+
+  assert.deepEqual(
+    recordedOptionsProps.map(({ canTargetSides, isWorkspaceSplit, panePlacement }) => [canTargetSides, isWorkspaceSplit, panePlacement]),
+    [[true, true, 'both'], [true, true, null]],
+  );
+
+  (recordedOptionsProps[1].onOpenInPane as (side: 'left' | 'right') => void)('left');
+  assert.deepEqual(onConversationSelect.mock.calls, [
+    [{ projectId: null, sessionId: 's2', provider: 'claude' }, { target: 'left' }],
+  ]);
+});
+
+test('without split targeting the controls offer no sides and no row is marked', () => {
+  const { container } = renderList([conversation('s1')], makeActions());
+
+  assert.deepEqual(
+    [recordedOptionsProps[0].canTargetSides, recordedOptionsProps[0].isWorkspaceSplit, recordedOptionsProps[0].panePlacement],
+    [false, false, null],
+  );
+  assert.ok(container.querySelector('[data-pane-placement]') === null, 'no row is marked');
+});
+
+test('a split workspace marks where each conversation is open', () => {
+  const { container } = renderList(
+    [conversation('s1'), conversation('s2'), conversation('s3')],
+    makeActions({
+      paneTargeting: {
+        canTargetSides: true,
+        isSplit: true,
+        focusedSide: 'right',
+        onFocusSide: noop,
+        placements: new Map([['s1', 'left'], ['s3', 'right']]),
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    [...container.querySelectorAll('[data-pane-placement]')].map((marker) => marker.getAttribute('data-pane-placement')),
+    ['left', 'right'],
+  );
 });

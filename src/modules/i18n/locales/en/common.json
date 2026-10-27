@@ -24,7 +24,8 @@
     "git": "Source Control",
     "tasks": "Tasks",
     "browser": "Browser",
-    "computer": "Computer"
+    "computer": "Computer",
+    "views": "Workspace views"
   },
   "status": {
     "loading": "Loading...",
@@ -55,7 +56,9 @@
     "back": "Back",
     "next": "Next",
     "previous": "Previous",
-    "logout": "Logout"
+    "logout": "Logout",
+    "scrollTabsLeft": "Scroll tabs left",
+    "scrollTabsRight": "Scroll tabs right"
   },
   "common": {
     "language": "Language",
@@ -445,6 +448,8 @@
     "missingSession": "This conversation no longer exists",
     "showHiddenSide": "Show the hidden pane",
     "paletteGroup": "Workspace",
-    "openTabsGroup": "Open tabs"
+    "openTabsGroup": "Open tabs",
+    "resizePanes": "Resize panes",
+    "chooseProject": "Choose project"
   }
 }

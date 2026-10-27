@@ -24,7 +24,8 @@
     "git": "源代码管理",
     "tasks": "任务",
     "browser": "浏览器",
-    "computer": "计算机"
+    "computer": "计算机",
+    "views": "工作区视图"
   },
   "status": {
     "loading": "加载中...",
@@ -55,7 +56,9 @@
     "back": "返回",
     "next": "下一步",
     "previous": "上一步",
-    "logout": "退出登录"
+    "logout": "退出登录",
+    "scrollTabsLeft": "向左滚动标签",
+    "scrollTabsRight": "向右滚动标签"
   },
   "common": {
     "language": "语言",
@@ -320,6 +323,49 @@
     "missingSession": "这个对话已不存在",
     "showHiddenSide": "显示隐藏的窗格",
     "paletteGroup": "工作区",
-    "openTabsGroup": "已打开标签"
+    "openTabsGroup": "已打开标签",
+    "resizePanes": "调整窗格宽度",
+    "chooseProject": "选择项目"
+  },
+  "commandPalette": {
+    "title": "命令面板",
+    "pages": {
+      "actions": "操作",
+      "files": "文件",
+      "sessions": "会话",
+      "commits": "提交",
+      "branches": "分支"
+    },
+    "backToAll": "返回全部",
+    "backspaceHint": "按退格键返回",
+    "searchPage": "搜索{{page}}…",
+    "searchAnything": "输入以搜索…",
+    "noResults": "没有结果。",
+    "groupActions": "操作",
+    "groupNavigate": "跳转",
+    "groupGit": "Git",
+    "groupSettings": "设置",
+    "groupSessions": "会话",
+    "groupFiles": "文件",
+    "groupCommits": "提交",
+    "groupBranches": "分支",
+    "startNewChat": "新建对话",
+    "selectProjectFirst": "请先选择项目",
+    "openSettings": "打开设置",
+    "toggleTheme": "切换主题",
+    "navChat": "转到聊天",
+    "navFiles": "转到文件",
+    "navShell": "转到终端",
+    "navGit": "转到 Git",
+    "navTasks": "转到任务",
+    "gitFetch": "Git：Fetch",
+    "gitPull": "Git：Pull",
+    "gitPush": "Git：Push",
+    "settingsItem": "设置：{{label}}",
+    "browseAllSessions": "浏览全部会话（{{count}}）",
+    "browseAllFiles": "浏览全部文件（{{count}}）",
+    "browseAllCommits": "浏览全部提交（{{count}}）",
+    "browseAllBranches": "浏览全部分支（{{count}}）",
+    "switchTo": "切换到：{{name}}"
   }
 }

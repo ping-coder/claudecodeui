@@ -188,7 +188,7 @@ describe('a reload of the viewed transcript', () => {
         selectedSession: session,
         ws: null,
         sendMessage: noop,
-        resetStreamingState: noop,
+        provider: 'claude',
         statusCheckSentAtRef,
         lastSeqRef,
         sessionStore,

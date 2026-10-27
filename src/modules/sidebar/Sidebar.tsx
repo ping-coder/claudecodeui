@@ -8,7 +8,15 @@ import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarControll
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
 import { useBackgroundSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
-import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps } from '@/shared/types';
+import type {
+  LLMProvider,
+  LoadingProgress,
+  Project,
+  ProjectSession,
+  SessionOpenOptions,
+  SidebarPaneTargeting,
+  SidebarProjectListProps,
+} from '@/shared/types';
 import SidebarCollapsed from '@/modules/sidebar/SidebarCollapsed';
 import SidebarContent from '@/modules/sidebar/SidebarContent';
 import SidebarModals from '@/modules/sidebar/SidebarModals';
@@ -18,9 +26,10 @@ type SidebarProps = {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
   attentionSessionIds: ReadonlySet<string>;
+  /** Records the browsed project (desktop title click); no longer clears or navigates the workspace. */
   onProjectSelect: (project: Project) => void;
-  onSessionSelect: (session: ProjectSession) => void;
-  onNewSession: (project: Project) => void;
+  onSessionSelect: (session: ProjectSession, options?: SessionOpenOptions) => void;
+  onNewSession: (project: Project, options?: SessionOpenOptions) => void;
   onSessionDelete?: (sessionId: string) => void;
   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
   // `projectId` is the DB identifier; the sidebar hands it back to the parent
@@ -34,11 +43,10 @@ type SidebarProps = {
   settingsInitialTab: string;
   onCloseSettings: () => void;
   isMobile: boolean;
-};
-
-type TaskMasterSidebarContext = {
-  setCurrentProject: (project: Project) => void;
-  mcpServerStatus: MCPServerStatus;
+  /** Split targeting for the rows, their menus and the Open-in switch; absent outside the split workspace. */
+  paneTargeting?: SidebarPaneTargeting | null;
+  /** Immersive peek: full sidebar even when the user collapsed it to the rail. */
+  forceExpanded?: boolean;
 };
 
 /** Exported through the sidebar barrel; the project-workspace module renders it as the app's project and session navigation panel. */
@@ -61,6 +69,8 @@ function Sidebar({
   settingsInitialTab,
   onCloseSettings,
   isMobile,
+  paneTargeting = null,
+  forceExpanded = false,
 }: SidebarProps) {
   const { t } = useTranslation(['sidebar', 'common']);
   const { isPWA } = useDeviceSettings({ trackMobile: false });
@@ -71,7 +81,8 @@ function Sidebar({
   const preferences = useUiPreferences();
   const setPreference = useSetUiPreference();
   const { sidebarVisible } = preferences;
-  const { setCurrentProject, mcpServerStatus } = useTaskMaster() as TaskMasterSidebarContext;
+  // Only the MCP status: TaskMaster's current project follows the focused pane, not sidebar clicks.
+  const { mcpServerStatus } = useTaskMaster();
   const { tasksEnabled } = useTasksSettings();
   const paletteOps = usePaletteOps();
   // Only membership is rendered here, so subscribing to the full activity map
@@ -113,6 +124,7 @@ function Sidebar({
     loadMoreRecentConversations,
     toggleProject,
     handleSessionClick,
+    openConversation,
     toggleStarProject,
     isProjectStarred,
     getProjectSessions,
@@ -161,10 +173,10 @@ function Sidebar({
     onSessionDelete,
     onLoadMoreSessions,
     onProjectDelete,
-    setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
     keepProjectsExpanded: preferences.keepProjectsExpanded,
+    forceExpanded,
   });
 
   useEffect(() => {
@@ -234,6 +246,7 @@ function Sidebar({
     onToggleSessionSelected: toggleSessionSelected,
     onCancelSessionSelection: cancelSessionSelection,
     onDeleteSelectedSessions: showDeleteSelectedSessionsConfirmation,
+    paneTargeting,
     t,
   };
 
@@ -311,39 +324,14 @@ function Sidebar({
                 { isArchived: true },
               );
             }}
-            onConversationResultClick={(projectId: string | null, sessionId: string, provider: string, messageTimestamp?: string | null, messageSnippet?: string | null) => {
-              // `projectId` (DB key) is the canonical identifier post-migration.
-              // The server emits null when it can't resolve a project row for
-              // the search hit; treat that as "no project" and still navigate
-              // to the session so the user can open it from the URL.
-              const resolvedProvider = (provider || 'claude') as LLMProvider;
-              const project = projectId ? projects.find(p => p.projectId === projectId) : null;
-              const searchTarget = { __searchTargetTimestamp: messageTimestamp || null, __searchTargetSnippet: messageSnippet || null };
-              const sessionObj = {
-                id: sessionId,
-                __provider: resolvedProvider,
-                __projectId: projectId ?? undefined,
-                ...searchTarget,
-              };
-              if (project) {
-                handleProjectSelect(project);
-                const sessions = getProjectSessions(project);
-                const existing = sessions.find(s => s.id === sessionId);
-                if (existing) {
-                  handleSessionClick({ ...existing, ...searchTarget }, project.projectId);
-                } else {
-                  handleSessionClick(sessionObj, project.projectId);
-                }
-              } else {
-                handleSessionClick(sessionObj, projectId ?? '');
-              }
-            }}
+            onConversationResultClick={openConversation}
             onRefresh={() => {
               void refreshProjects();
             }}
             isRefreshing={isRefreshing}
             onCreateProject={() => setShowNewProject(true)}
-            onCollapseSidebar={handleCollapseSidebar}
+            // Forced open, the sidebar cannot be hidden from inside; its overlay closes instead.
+            onCollapseSidebar={forceExpanded ? undefined : handleCollapseSidebar}
             updateAvailable={updateAvailable}
             restartRequired={restartRequired}
             releaseInfo={releaseInfo}

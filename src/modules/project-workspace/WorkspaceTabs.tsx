@@ -1,17 +1,21 @@
 import { MessageSquare, Terminal, Folder, GitBranch, ClipboardCheck, MonitorPlay, type LucideIcon } from 'lucide-react';
 import { Fragment } from 'react';
-import type { Dispatch, KeyboardEvent, SetStateAction } from 'react';
+import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Tooltip, PillBar, Pill } from '@/shared/ui';
-import type { AppTab } from '@/shared/types';
+import type { AppTab, WorkspaceViewSetter } from '@/shared/types';
+import { cn } from '@/shared/utils';
 import { usePlugins,PluginIcon } from '@/modules/plugins';
 
 type WorkspaceTabsProps = {
   activeTab: AppTab;
-  setActiveTab: Dispatch<SetStateAction<AppTab>>;
+  /** Called with userInitiated, so picking a view keeps a preview tab open. */
+  setActiveTab: WorkspaceViewSetter;
   shouldShowTasksTab: boolean;
   shouldShowBrowserTab: boolean;
+  /** Narrow pane or the immersive one-line bar: smaller pills, and only the active view keeps its label at any viewport width. */
+  compact?: boolean;
 };
 
 type BuiltInTab = {
@@ -52,12 +56,16 @@ const TASKS_TAB: BuiltInTab = {
   icon: ClipboardCheck,
 };
 
-/** Rendered by WorkspaceHeader to show the built-in workspace tabs plus any enabled plugin tabs. */
+/**
+ * Rendered by WorkspaceHeader, and by WorkspacePane in the immersive one-line pane bar, to show the
+ * built-in workspace tabs plus any enabled plugin tabs.
+ */
 export default function WorkspaceTabs({
   activeTab,
   setActiveTab,
   shouldShowTasksTab,
   shouldShowBrowserTab,
+  compact = false,
 }: WorkspaceTabsProps) {
   const { t } = useTranslation();
   const { plugins } = usePlugins();
@@ -103,7 +111,11 @@ export default function WorkspaceTabs({
     <PillBar
       role="tablist"
       aria-label={t('tabs.views', { defaultValue: 'Workspace views' })}
-      className="min-w-max border border-border/40 bg-muted/50 shadow-inner shadow-black/[0.025] dark:shadow-black/10"
+      className={cn(
+        'min-w-max bg-muted/50',
+        // Compact drops the border and padding so the bar fits the 36px pane tab bar.
+        compact ? 'p-0.5' : 'border border-border/40 shadow-inner shadow-black/[0.025] dark:shadow-black/10',
+      )}
     >
       {tabs.map((tab, index) => {
         const isActive = tab.id === activeTab;
@@ -121,9 +133,9 @@ export default function WorkspaceTabs({
                 aria-selected={isActive}
                 tabIndex={isActive ? 0 : -1}
                 isActive={isActive}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => setActiveTab(tab.id, { userInitiated: true })}
                 onKeyDown={handleTabKeyDown}
-                className="h-8 max-w-44 px-2.5 py-[5px]"
+                className={compact ? 'h-7 max-w-40 px-2 py-1' : 'h-8 max-w-44 px-2.5 py-[5px]'}
               >
                 {tab.kind === 'builtin' ? (
                   <tab.icon className="h-3.5 w-3.5 shrink-0" strokeWidth={isActive ? 2.2 : 1.8} />
@@ -134,7 +146,7 @@ export default function WorkspaceTabs({
                     className="flex h-3.5 w-3.5 shrink-0 items-center justify-center [&>svg]:h-full [&>svg]:w-full"
                   />
                 )}
-                <span className={`${isActive ? 'inline max-w-28' : 'hidden'} truncate sm:max-w-36 lg:inline`}>
+                <span className={cn(isActive ? 'inline max-w-28' : 'hidden', 'truncate sm:max-w-36', !compact && 'lg:inline')}>
                   {displayLabel}
                 </span>
               </Pill>
