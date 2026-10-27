@@ -23,6 +23,7 @@ import type {
   WorkspacePaneSide,
   WorkspaceViewSetter,
 } from '@/shared/types';
+import { NO_PALETTE_OPS } from '@/shared/constants';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { useFileOpenResolver } from '@/modules/project-workspace/hooks/useFileOpenResolver';
@@ -80,9 +81,6 @@ type WorkspaceMainProps = {
   /** The user opened a file from the chat: a preview tab becomes a kept one, as on a view switch. */
   onKeepTab: () => void;
 };
-
-/** What an unfocused pane registers with the command palette: nothing, so palette actions land in the focused pane. */
-const NO_PALETTE_OPS = {};
 
 type PaneViewNoticeProps = {
   icon: LucideIcon;

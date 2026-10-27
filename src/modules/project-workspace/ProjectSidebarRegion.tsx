@@ -27,7 +27,7 @@ import type {
   SidebarPaneTargeting,
   WorkspacePaneSide,
 } from '@/shared/types';
-import { cn, hasSessionDragPayload } from '@/shared/utils';
+import { cn, focusWithLentTabIndex, hasSessionDragPayload } from '@/shared/utils';
 
 /**
  * How long the drawer stays out after a click in it opens a preview: the click may be the first
@@ -62,6 +62,13 @@ const findTabStopEdges = (container: HTMLElement): { first: HTMLElement | null; 
   }
   return { first, last };
 };
+
+/**
+ * Whether a layer opened over the drawer owns the keyboard: a menu, Settings (a modal dialog) or a
+ * delete confirmation (an Escape layer). The drawer's own Escape-layer marker does not count.
+ */
+const hasLayerOverDrawer = (drawer: HTMLElement | null): boolean => Array.from(document.querySelectorAll(ESCAPE_LAYER_SELECTOR))
+  .some((element) => element !== drawer);
 
 /**
  * A text field gets the first say over an Escape typed into it: the drawer's inline renames cancel
@@ -234,10 +241,13 @@ function ProjectSidebarRegion({
   }, [closePeek, isDraggingSessionOut]);
 
   // Tab and Shift+Tab wrap around inside the drawer instead of walking into the panes it covers.
-  // Focus in a menu or dialog opened from it (portaled elsewhere) is left for that layer to move.
+  // Focus in a menu or dialog opened from it (portaled elsewhere) is left for that layer to move, and
+  // while such a layer is open the drawer stops wrapping: Settings and the delete confirmations do not
+  // take the focus themselves, so Tab has to be able to walk out of the drawer to reach them.
   const handleDrawerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     const container = peekContainerRef.current;
     if (event.key !== 'Tab' || event.defaultPrevented || !isPeekOpenRef.current || !container) return;
+    if (hasLayerOverDrawer(container)) return;
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || !container.contains(active)) return;
     const { first, last } = findTabStopEdges(container);
@@ -343,9 +353,7 @@ function ProjectSidebarRegion({
 
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
-      const hasOtherEscapeOwner = Array.from(document.querySelectorAll(ESCAPE_LAYER_SELECTOR))
-        .some((element) => element !== peekContainerRef.current);
-      if (hasOtherEscapeOwner) return;
+      if (hasLayerOverDrawer(peekContainerRef.current)) return;
       event.preventDefault();
       if (isTextEntryTarget(event.target)) {
         escapeLeftToField = event;
@@ -398,7 +406,12 @@ function ProjectSidebarRegion({
   // Focus follows the drawer: in when it opens, so Tab walks the sidebar and not the panes it
   // covers, and back to where it came from (the "Show sidebar" button) when it closes. Only focus
   // the closed drawer dropped is handed back: focus that moved on (into a pane, a dialog) stays.
+  // The drawer itself takes the focus on a borrowed tabindex, given back on the first press or Tab
+  // inside it: a drawer that stayed focusable would take the focus of every click on its blank
+  // space, and with it the keyboard scrolling of the session list under that space.
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  // Takes back the tabindex the open drawer borrowed (a no-op once a press or Tab inside gave it back).
+  const releaseDrawerFocusRef = useRef<(() => void) | null>(null);
   const wasPeekOpenRef = useRef(false);
   useEffect(() => {
     const container = peekContainerRef.current;
@@ -411,7 +424,7 @@ function ProjectSidebarRegion({
       returnFocusRef.current = previous instanceof HTMLElement && previous !== document.body && !container.contains(previous)
         ? previous
         : null;
-      container.focus({ preventScroll: true });
+      releaseDrawerFocusRef.current = focusWithLentTabIndex(container, { preventScroll: true });
       return;
     }
 
@@ -423,6 +436,9 @@ function ProjectSidebarRegion({
     if (isFocusDropped && returnTo?.isConnected) {
       returnTo.focus({ preventScroll: true });
     }
+    // The docked or hidden sidebar is never focusable itself.
+    releaseDrawerFocusRef.current?.();
+    releaseDrawerFocusRef.current = null;
   }, [isImmersive, isPeekOpen]);
 
   if (!isMobile) {
@@ -440,11 +456,11 @@ function ProjectSidebarRegion({
             isImmersive && !isPeekOpen && 'hidden',
           )}
           style={isPeekOpen || isSidebarResizable ? { width: sidebarWidth } : undefined}
-          // A dialog while it is the drawer, focused when it opens. Not aria-modal: that would make it
-          // a layer that the app's other shortcuts step aside for, and it only owns Escape.
+          // A dialog while it is the drawer, focused when it opens (on a borrowed tabindex, see above).
+          // Not aria-modal: that would make it a layer that the app's other shortcuts step aside for,
+          // and it only owns Escape.
           role={isPeekOpen ? 'dialog' : undefined}
           aria-label={isPeekOpen ? t('workspace.sidebarDrawer', { defaultValue: 'Sidebar' }) : undefined}
-          tabIndex={isPeekOpen ? -1 : undefined}
           // Marks the drawer as the Escape owner for the app's other key handlers. Dropped while
           // Settings is open over it, because Settings only takes Escape when no such layer exists.
           data-escape-layer={isPeekOpen && !sidebarSharedProps.showSettings ? '' : undefined}

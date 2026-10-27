@@ -17,6 +17,7 @@ import WorkspaceConnectionStatus from '@/modules/project-workspace/WorkspaceConn
 import WorkspaceMain from '@/modules/project-workspace/WorkspaceMain';
 import WorkspaceStateView from '@/modules/project-workspace/WorkspaceStateView';
 import WorkspaceTabs from '@/modules/project-workspace/WorkspaceTabs';
+import { NO_PALETTE_OPS } from '@/shared/constants';
 import type {
   AppTab,
   PaneTabActivity,
@@ -40,8 +41,6 @@ const COMPACT_PANE_WIDTH_PX = 640;
 const TAB_FOCUS_WINDOW_MS = 120;
 /** An empty set, so panes without another pane pass the same object every render. */
 const NO_SESSION_IDS: ReadonlySet<string> = new Set();
-/** What a pane registers with the command palette while it shows content: its WorkspaceMain and chat register instead. */
-const NO_PALETTE_OPS = {};
 
 /** Whether a measured pane width calls for the compact header (0 is not measured yet). */
 const isCompactPaneWidth = (width: number): boolean => width > 0 && width < COMPACT_PANE_WIDTH_PX;
@@ -52,6 +51,13 @@ const isWorkspaceControlEvent = (event: SyntheticEvent): boolean => (
 );
 
 type PaletteOperations = ReturnType<typeof usePaletteOps>;
+
+/** A palette or quick-settings action picked while the focused pane showed nothing, waiting for the new chat it opened there. */
+type PendingContentOperation = {
+  run: (ops: PaletteOperations) => void;
+  /** The pane's draft counter at the pick: the new chat becoming its active tab bumps it. */
+  draftActivation: number;
+};
 
 /** What a pane's WorkspaceMain shows: the active tab's project, session and view. */
 type PaneContent = { project: Project; session: ProjectSession | null; view: AppTab };
@@ -245,9 +251,16 @@ function WorkspacePane({
     isPreview: Boolean(activeTab?.isPreview),
     hasContent,
     commandProject,
+    draftActivation: pane.draftActivation,
   });
   useLayoutEffect(() => {
-    latestTabRef.current = { tabKey: activeTab?.key ?? null, isPreview: Boolean(activeTab?.isPreview), hasContent, commandProject };
+    latestTabRef.current = {
+      tabKey: activeTab?.key ?? null,
+      isPreview: Boolean(activeTab?.isPreview),
+      hasContent,
+      commandProject,
+      draftActivation: pane.draftActivation,
+    };
   });
 
   // When the last Tab key went down: focus arriving right after it is the user moving into this pane.
@@ -360,15 +373,20 @@ function WorkspacePane({
 
   // ---------------------------------------------------------------- palette actions in a pane without content
 
-  // A palette or quick-settings action picked while this focused pane shows nothing: it runs once the new
-  // chat it opened is on screen, through the operations that pane's WorkspaceMain and chat register.
-  const pendingContentOpRef = useRef<((ops: PaletteOperations) => void) | null>(null);
-  const runInNewChat = useCallback((view: AppTab, operation: (ops: PaletteOperations) => void) => {
-    const targetProject = latestTabRef.current.commandProject;
+  // The action picked while this focused pane showed nothing: it runs once the new chat it opened here is
+  // this pane's active tab, through the operations that chat and its WorkspaceMain register. State, not a
+  // ref, so the pane renders right after the pick even when the open changed nothing (the user kept unsaved
+  // edits it would have dropped): an action whose chat never came is dropped then, never run on whatever
+  // this pane shows later.
+  const [pendingContentOperation, setPendingContentOperation] = useState<PendingContentOperation | null>(null);
+  const runInNewChat = useCallback((view: AppTab, run: (ops: PaletteOperations) => void) => {
+    const { commandProject: targetProject, draftActivation } = latestTabRef.current;
     if (!targetProject) {
       return;
     }
-    pendingContentOpRef.current = operation;
+    setPendingContentOperation({ run, draftActivation });
+    // Only the focused pane without content registers these, so `side` is still where this pane is: nothing
+    // opens a chat before them in the same event (ProjectQuickSettingsRegion leaves that to the insert).
     actions.openNewSession(targetProject, { target: side, view });
   }, [actions, side]);
   const contentlessPaneOps = useMemo(() => ({
@@ -378,16 +396,28 @@ function WorkspacePane({
     insertComposerText: (text: string) => runInNewChat('chat', (ops) => ops.insertComposerText(text)),
   }), [runInNewChat]);
   usePaletteOpsRegister(isFocused && !hasContent && !isLoadingProjects ? contentlessPaneOps : NO_PALETTE_OPS);
+  // The open put its chat here only if a draft became this pane's active tab since the pick; the render
+  // right after the pick already shows what the open did.
+  const landedContentOperation = pendingContentOperation
+    && hasContent
+    && pane.draftActivation !== pendingContentOperation.draftActivation
+    ? pendingContentOperation
+    : null;
+  if (pendingContentOperation && !landedContentOperation) {
+    // Adjusting state while rendering: React re-renders right away, before anything is committed.
+    setPendingContentOperation(null);
+  }
   useEffect(() => {
-    const operation = pendingContentOpRef.current;
-    if (!hasContent || !operation) {
+    if (!landedContentOperation) {
       return undefined;
     }
-    pendingContentOpRef.current = null;
     // A frame later the pane's chat and editor have registered their operations and settled on the new chat.
-    const frame = window.requestAnimationFrame(() => operation(paletteOps));
+    const frame = window.requestAnimationFrame(() => {
+      setPendingContentOperation(null);
+      landedContentOperation.run(paletteOps);
+    });
     return () => window.cancelAnimationFrame(frame);
-  }, [hasContent, paletteOps]);
+  }, [landedContentOperation, paletteOps]);
 
   // ---------------------------------------------------------------- chrome
 
@@ -472,6 +502,7 @@ function WorkspacePane({
           projects={projects}
           defaultProject={project ?? fallbackProject}
           isSplit={isSplit}
+          canSplit={canSplit}
           isMobile={isMobile}
           otherPaneSession={otherPaneSession}
           otherPaneSessionIds={otherPaneSessionIds}
@@ -506,8 +537,8 @@ function WorkspacePane({
     : {};
 
   // No tabIndex on the root: it would take the focus of every click on plain text in the pane, and the
-  // keyboard scrolling of the scroll area under it. Programmatic focus lends it one for the moment
-  // (focusWorkspacePaneElement).
+  // keyboard scrolling of the scroll area under it. Programmatic focus lends it one until a press or focus
+  // inside the pane takes it back (focusWorkspacePaneElement).
   return (
     <div
       ref={rootRef}

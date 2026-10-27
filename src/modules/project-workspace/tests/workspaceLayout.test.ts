@@ -658,6 +658,36 @@ test('merging from an empty focused pane keeps the other pane', () => {
   assert.equal(reduce(run(open('a')), { type: 'merge' }).right, null, 'nothing to merge while unsplit');
 });
 
+test('merging two empty panes keeps the left one, whichever side is focused', () => {
+  // Split from an empty pane: only the left one can hold a chat and an editor, kept hidden.
+  const layout = run(splitAction());
+  for (const focusedSide of ['left', 'right'] as const) {
+    const merged = reduce({ ...layout, focusedSide }, { type: 'merge' });
+    assert.equal(merged.right, null, focusedSide);
+    assert.equal(merged.left.id, layout.left.id, `focused ${focusedSide}: the left pane stays`);
+    assert.equal(merged.focusedSide, 'left');
+  }
+});
+
+test('closing every tab of both panes is one change that leaves the focused pane, empty', () => {
+  const layout = run(open('a1', 'focused', false), open('a2', 'focused', false), open('b', 'other', false));
+  assert.equal(layout.focusedSide, 'right');
+
+  const fromRight = reduce(layout, { type: 'closeAll', side: 'both' });
+  assert.equal(fromRight.right, null);
+  assert.equal(fromRight.left.id, layout.right?.id, 'the focused pane keeps its chat and editor');
+  assert.deepEqual(ids(fromRight, 'left'), []);
+  assert.equal(fromRight.left.activeTabKey, null);
+
+  const fromLeft = reduce({ ...layout, focusedSide: 'left' }, { type: 'closeAll', side: 'both' });
+  assert.equal(fromLeft.right, null);
+  assert.equal(fromLeft.left.id, layout.left.id);
+  assert.deepEqual(ids(fromLeft, 'left'), []);
+
+  const unsplit = run(open('a1', 'focused', false));
+  assert.deepEqual(ids(reduce(unsplit, { type: 'closeAll', side: 'both' }), 'left'), []);
+});
+
 test('an open naming the project revives a tab flagged missing; one without a project leaves it flagged', () => {
   const flagged = reduce(run(open('gone', 'focused', false)), { type: 'markMissing', sessionId: 'gone' });
   const stranded = { ...flagged, left: { ...flagged.left, tabs: flagged.left.tabs.map((tab) => ({ ...tab, projectId: '' })) } };

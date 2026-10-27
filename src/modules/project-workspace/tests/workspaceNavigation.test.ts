@@ -605,7 +605,7 @@ test('opening a missing deep-linked session by id asks again instead of reviving
   assert.equal(harness.result.current.layout.left.tabs.length, 1);
 });
 
-test('a session opened with its project is never looked up, so a failing lookup cannot flag it missing', async () => {
+test('a titled session opened with its project is never looked up, so a failing lookup cannot flag it missing', async () => {
   sessionDetailsResponse.mockResolvedValue(unavailable);
   const harness = await renderNavigation();
 
@@ -618,6 +618,42 @@ test('a session opened with its project is never looked up, so a failing lookup 
 
   assert.deepEqual(sessionDetailsResponse.mock.calls, []);
   assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined);
+});
+
+test('an untitled row opened with its project (a search hit the loaded pages lack) is looked up once for its title', async () => {
+  sessionDetailsResponse.mockResolvedValue(unavailable);
+  const harness = await renderNavigation();
+
+  // What the sidebar's search and Conversations rows hand over for a session past the loaded page.
+  act(() => {
+    harness.result.current.actions.openSession(
+      { id: 'old-1', __provider: 'claude', __searchTargetSnippet: 'needle', __projectId: 'pa' },
+      { preview: true },
+    );
+  });
+  await waitFor(() => {
+    assert.equal(sessionDetailsResponse.mock.calls.length, 1);
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  assert.equal(harness.result.current.layout.left.tabs[0].isMissing, undefined, 'a 503 says nothing about the session');
+  assert.equal(harness.result.current.layout.left.tabs[0].title, '');
+
+  // On screen again later, it is asked again, and the title lands in the tab and in the session the header reads.
+  sessionDetailsResponse.mockImplementation(async (sessionId: string) => detailsFor(sessionId));
+  act(() => {
+    harness.result.current.actions.openSession(rowOf(projectA, 'a1'), { preview: false });
+  });
+  act(() => {
+    harness.result.current.actions.openSession({ id: 'old-1', __provider: 'claude', __projectId: 'pa' }, { preview: true });
+  });
+  await waitFor(() => {
+    assert.equal(harness.result.current.focused.tab?.title, 'Resolved old-1');
+  });
+  assert.equal(harness.result.current.focused.session?.summary, 'Resolved old-1');
+  assert.equal(harness.result.current.focused.tab?.projectId, 'pa');
+  assert.deepEqual(sessionDetailsResponse.mock.calls.map(([sessionId]) => sessionId), ['old-1', 'old-1']);
 });
 
 test('a restored tab whose lookup could not reach the server stays as it is and is asked again later', async () => {

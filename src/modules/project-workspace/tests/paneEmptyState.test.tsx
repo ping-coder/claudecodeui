@@ -76,6 +76,7 @@ const renderEmpty = (overrides: Partial<ComponentProps<typeof PaneEmptyState>> =
     projects={[ALPHA, BETA]}
     defaultProject={ALPHA}
     isSplit
+    canSplit
     isMobile={false}
     otherPaneSession={OTHER_SESSION}
     otherPaneSessionIds={new Set(['s3'])}
@@ -160,6 +161,18 @@ test('desktop hints cover dragging and the shortcuts; touch pointers and phones 
   assert.equal(screen.queryByText('Drag a conversation here from the sidebar') === null, true);
   assert.equal(screen.queryByText(/split or merge/) === null, true);
   assert.equal(screen.getByText('Tap a conversation in the sidebar to open it on this side').className.includes('hidden'), false);
+});
+
+test('the shortcut hint names only keys that act: unsplit, Mod+1/2 belong to the browser, and Mod+\\ needs room to split', () => {
+  const lonePane = { side: 'left', isSplit: false, otherPaneSession: null, otherPaneSessionIds: new Set<string>() } as const;
+  const unsplit = renderEmpty(lonePane);
+  assert.ok(screen.getByText('Ctrl+\\ split · Ctrl+Shift+Enter full screen'));
+  assert.equal(screen.queryByText(/switch panes/) === null, true);
+  unsplit.unmount();
+
+  renderEmpty({ ...lonePane, canSplit: false });
+  assert.ok(screen.getByText('Ctrl+Shift+Enter full screen'));
+  assert.equal(screen.queryByText(/Ctrl\+\\/) === null, true);
 });
 
 test('without any project the pane shows the create-a-project guidance', () => {

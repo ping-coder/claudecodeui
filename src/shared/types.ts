@@ -1607,8 +1607,11 @@ export type WorkspaceLayoutActions = {
   closeOtherTabs: (side: WorkspacePaneSide, tabKey: string) => void;
   /** Closes the tabs after this one in the pane's tab order. */
   closeTabsToRight: (side: WorkspacePaneSide, tabKey: string) => void;
-  /** Closes every tab of the pane; the pane then closes like after its last tab. */
-  closeAllTabs: (side: WorkspacePaneSide) => void;
+  /**
+   * Closes every tab of the pane; the pane then closes like after its last tab. 'both' closes every tab of
+   * both panes in one change (asked about once, kept whole when declined); the focused pane is the one left.
+   */
+  closeAllTabs: (side: WorkspacePaneSide | 'both') => void;
   /** Turns a preview tab into a kept one; no-op for kept tabs. */
   pinTab: (side: WorkspacePaneSide, tabKey: string) => void;
   /** Reorder within a pane, or move across panes (kept + focused). copy duplicates a session tab onto the Chat view; drafts always move. index counts the destination's tabs without the moved one; default the end. */

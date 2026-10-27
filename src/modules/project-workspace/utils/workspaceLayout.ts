@@ -46,7 +46,8 @@ type WorkspaceLayoutAction =
   | { type: 'close'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'closeOthers'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'closeToRight'; side: WorkspacePaneSide; tabKey: string }
-  | { type: 'closeAll'; side: WorkspacePaneSide }
+  // 'both': every tab of both panes in one change (the focused pane is the one left, empty).
+  | { type: 'closeAll'; side: WorkspacePaneSide | 'both' }
   | { type: 'pin'; side: WorkspacePaneSide; tabKey: string }
   | { type: 'focus'; side: WorkspacePaneSide }
   | { type: 'split'; newPaneId: string }
@@ -457,14 +458,22 @@ const closePane = (layout: WorkspaceLayout, side: WorkspacePaneSide): WorkspaceL
  * Merge (toggleSplit): one pane holding the left tabs, then the right ones, with no session or draft
  * twice. The focused pane is the one that stays (its id, counters, active tab and recency order), so the
  * chat and editor the user works in survive and keep showing what they showed; an empty focused pane
- * gives way to the other one. Of a duplicated session the staying pane's tab is kept.
+ * gives way to the other one when that one has tabs. With no tabs on either side the left pane stays: a
+ * right pane never stays empty once it showed something (its last tab closing closes it), so only the
+ * left one can hold a chat and an editor, kept hidden. Of a duplicated session the staying pane's tab is kept.
  */
 const mergePanes = (layout: WorkspaceLayout): WorkspaceLayout => {
   if (!layout.right) {
     return layout;
   }
   const focusedPane = getPane(layout, layout.focusedSide) as WorkspacePaneState;
-  const keptSide = focusedPane.tabs.length > 0 ? layout.focusedSide : otherSide(layout.focusedSide);
+  const unfocusedPane = getPane(layout, otherSide(layout.focusedSide)) as WorkspacePaneState;
+  let keptSide: WorkspacePaneSide = 'left';
+  if (focusedPane.tabs.length > 0) {
+    keptSide = layout.focusedSide;
+  } else if (unfocusedPane.tabs.length > 0) {
+    keptSide = otherSide(layout.focusedSide);
+  }
   const kept = getPane(layout, keptSide) as WorkspacePaneState;
   const other = getPane(layout, otherSide(keptSide)) as WorkspacePaneState;
   const keptSessionIds = new Set(kept.tabs.map((tab) => tab.sessionId).filter(Boolean));
@@ -580,8 +589,15 @@ const reduceLayout = (layout: WorkspaceLayout, action: WorkspaceLayoutAction): W
       const index = getPane(layout, action.side)?.tabs.findIndex((tab) => tab.key === action.tabKey) ?? -1;
       return index < 0 ? layout : removeTabs(layout, action.side, (_tab, tabIndex) => tabIndex > index);
     }
-    case 'closeAll':
-      return removeTabs(layout, action.side, () => true);
+    case 'closeAll': {
+      if (action.side !== 'both') {
+        return removeTabs(layout, action.side, () => true);
+      }
+      // The unfocused side first: the focused pane is then the one left, empty, in the left slot, keeping
+      // its chat and editor (an unsaved buffer too) mounted and hidden, as after its own last tab closed.
+      const withoutUnfocused = removeTabs(layout, otherSide(layout.focusedSide), () => true);
+      return removeTabs(withoutUnfocused, 'left', () => true);
+    }
     case 'pin': {
       const pane = getPane(layout, action.side);
       if (!pane || !pane.tabs.some((tab) => tab.key === action.tabKey && tab.isPreview)) {

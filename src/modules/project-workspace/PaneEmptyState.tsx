@@ -29,6 +29,8 @@ type PaneEmptyStateProps = {
   defaultProject: Project | null;
   /** A right pane exists. */
   isSplit: boolean;
+  /** The main column has room for two panes, so Mod+\ splits while unsplit. */
+  canSplit: boolean;
   isMobile: boolean;
   /** The other pane's active conversation, offered as "Also open the current conversation here" while split. */
   otherPaneSession: ProjectSession | null;
@@ -58,6 +60,7 @@ export default function PaneEmptyState({
   projects,
   defaultProject,
   isSplit,
+  canSplit,
   isMobile,
   otherPaneSession,
   otherPaneSessionIds,
@@ -89,13 +92,31 @@ export default function PaneEmptyState({
     label: project.displayName,
     onSelect: () => actions.openNewSession(project, { target: side }),
   }));
-  const shortcutsHint = t('workspace.shortcutsHint', {
+  // Only the keys that act right now: unsplit, Mod+1/2 stay with the browser (they switch its tabs),
+  // and Mod+\ splits only where two panes fit.
+  const shortcutKeys = {
     split: formatShortcut(WORKSPACE_SPLIT_SHORTCUT),
     left: formatShortcut(WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT),
     right: formatShortcut(WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT),
     fullscreen: formatShortcut(WORKSPACE_FULLSCREEN_SHORTCUT),
-    defaultValue: '{{split}} split or merge · {{left}} / {{right}} switch panes · {{fullscreen}} full screen',
-  });
+  };
+  let shortcutsHint: string;
+  if (isSplit) {
+    shortcutsHint = t('workspace.shortcutsHint', {
+      ...shortcutKeys,
+      defaultValue: '{{split}} split or merge · {{left}} / {{right}} switch panes · {{fullscreen}} full screen',
+    });
+  } else if (canSplit) {
+    shortcutsHint = t('workspace.shortcutsHintUnsplit', {
+      ...shortcutKeys,
+      defaultValue: '{{split}} split · {{fullscreen}} full screen',
+    });
+  } else {
+    shortcutsHint = t('workspace.shortcutsHintFullscreen', {
+      ...shortcutKeys,
+      defaultValue: '{{fullscreen}} full screen',
+    });
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

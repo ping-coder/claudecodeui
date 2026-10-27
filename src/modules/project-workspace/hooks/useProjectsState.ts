@@ -988,7 +988,8 @@ export function useProjectsState({
   /**
    * Switches the focused tab's view as a user action (a preview becomes a kept tab). A pane that shows
    * nothing (empty, or a conversation that is gone) opens a new chat in the command project on that view
-   * instead, so the palette's Navigate items and the quick settings act there too.
+   * instead, so the palette's Navigate items act there too. The quick settings' command insert does not
+   * come here for such a pane: the insert opens that chat itself (ProjectQuickSettingsRegion).
    */
   const setActiveTab = useCallback((view: AppTab) => {
     const current = layoutRef.current;

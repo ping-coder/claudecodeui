@@ -14,7 +14,9 @@ import type {
   SessionPanePlacement,
   SessionWithProvider,
   SidebarPaneTargeting,
+  WorkspaceLayout,
   WorkspacePaneSide,
+  WorkspaceSessionTab,
 } from '@/shared/types';
 
 /**
@@ -139,6 +141,7 @@ vi.mock('@/modules/sidebar', async () => {
 
 const { WorkspaceChromeProvider } = await import('@/modules/project-workspace/context/WorkspaceChromeContext');
 const { default: ProjectSidebarRegion } = await import('@/modules/project-workspace/ProjectSidebarRegion');
+const { useWorkspaceShortcuts } = await import('@/modules/project-workspace/hooks/useWorkspaceShortcuts');
 
 const noop = () => {};
 const PLACEMENTS: ReadonlyMap<string, SessionPanePlacement> = new Map([['s1', 'left']]);
@@ -307,6 +310,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   document.querySelectorAll('[data-test-layer]').forEach((element) => element.remove());
 });
 
@@ -718,4 +722,166 @@ test('the targeting handed to the sidebar keeps its identity while nothing in it
   rerender(region());
 
   assert.equal(lastSidebarProps().paneTargeting, first);
+});
+
+/** Puts a layer over the drawer the way Settings (a modal dialog) or a delete confirmation (an Escape layer) marks itself. */
+const addLayerOverDrawer = (attribute: 'aria-modal' | 'data-escape-layer') => {
+  const layer = document.createElement('div');
+  layer.setAttribute(attribute, attribute === 'aria-modal' ? 'true' : '');
+  if (attribute === 'aria-modal') {
+    layer.setAttribute('role', 'dialog');
+  }
+  layer.setAttribute('data-test-layer', '');
+  document.body.appendChild(layer);
+  return layer;
+};
+
+test('while Settings or a delete confirmation is open over the drawer, Tab walks out of it instead of wrapping', () => {
+  // jsdom lays nothing out; every element counts as rendered here.
+  vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+  openDrawer();
+  const settings = screen.getByRole('button', { name: 'Settings' });
+  const search = screen.getByRole('textbox', { name: 'Search' });
+
+  for (const attribute of ['aria-modal', 'data-escape-layer'] as const) {
+    const layer = addLayerOverDrawer(attribute);
+    settings.focus();
+    const forward = fireEvent.keyDown(settings, { key: 'Tab' });
+    search.focus();
+    const backward = fireEvent.keyDown(search, { key: 'Tab', shiftKey: true });
+    layer.remove();
+
+    // Neither layer takes the focus itself: the browser's own Tab order has to be able to reach it.
+    assert.equal(forward && backward, true, `${attribute}: the keys are left to the browser`);
+    assert.equal(document.activeElement === search, true, attribute);
+  }
+});
+
+test('the drawer is focusable only for the focus it takes when it opens: a press inside, or a Tab, gives that back', () => {
+  const { unmount } = openDrawer();
+  const drawer = drawerElement();
+  assert.equal(document.activeElement === drawer, true);
+  assert.equal(drawer.getAttribute('tabindex'), '-1');
+
+  // A press on blank space in the list must not park focus on the drawer, whose keyboard scrolling then goes nowhere.
+  fireEvent.pointerDown(screen.getByTestId('sidebar'));
+  assert.equal(drawer.hasAttribute('tabindex'), false);
+  unmount();
+
+  // Tabbing in moves focus on to the first stop; the drawer gives its tabindex back then too.
+  openDrawer();
+  screen.getByRole('textbox', { name: 'Search' }).focus();
+  assert.equal(drawerElement().hasAttribute('tabindex'), false);
+
+  // Closed, it is the docked (here hidden) sidebar again, which is never focusable itself.
+  fireEvent.click(showSidebarButton());
+  pressEscape(document.activeElement ?? document.body);
+  assert.equal(isDrawerOut(), false);
+  assert.equal(drawerElement().hasAttribute('tabindex'), false);
+});
+
+const paneTab = (key: string): WorkspaceSessionTab => ({
+  key,
+  sessionId: key,
+  projectId: 'p1',
+  provider: 'claude',
+  title: key,
+  view: 'chat',
+  isPreview: false,
+  session: null,
+});
+
+const PANE_PAIR: WorkspaceLayout = {
+  left: { id: 'pane-left', tabs: [paneTab('a1')], activeTabKey: 'a1', mru: ['a1'], draftActivation: 0, externalRevision: 0 },
+  right: { id: 'pane-right', tabs: [paneTab('b1')], activeTabKey: 'b1', mru: ['b1'], draftActivation: 0, externalRevision: 0 },
+  focusedSide: 'left',
+  splitRatio: 0.5,
+};
+
+/**
+ * Two panes side by side in immersive mode, the drawer and the pane keys wired the way ProjectWorkspaceShell
+ * wires them. As in the layout reducer, focusing the focused pane changes nothing, and a merge keeps the
+ * focused pane and its active tab.
+ */
+function SplitImmersiveWorkspace() {
+  const [layout, setLayout] = React.useState<WorkspaceLayout>(PANE_PAIR);
+  const [isSidebarPeekOpen, setIsSidebarPeekOpen] = React.useState(false);
+  const actions = React.useMemo(() => ({
+    focusPane: (side: WorkspacePaneSide) => setLayout((current) => (current.focusedSide === side ? current : { ...current, focusedSide: side })),
+    toggleSplit: () => setLayout((current) => (current.right
+      ? { ...current, left: { ...current.left, tabs: [...current.left.tabs, ...current.right.tabs] }, right: null, focusedSide: 'left' }
+      : current)),
+  }), []);
+  const closeSidebarPeek = React.useCallback(() => setIsSidebarPeekOpen(false), []);
+  useWorkspaceShortcuts({ isMobile: false, canSplit: true, layout, actions, toggleImmersive: noop, closeSidebarPeek });
+  const focusedPane = layout.focusedSide === 'left' ? layout.left : layout.right;
+
+  return (
+    <WorkspaceSidebarStateContext.Provider
+      value={{
+        ...sidebarState,
+        paneTargetingBase: paneTargetingBase(layout.focusedSide, layout.right !== null),
+        focusedTabKey: focusedPane?.activeTabKey ?? null,
+      }}
+    >
+      <WorkspaceChromeProvider
+        value={{
+          isImmersive: true,
+          isBrowserFullscreen: false,
+          toggleImmersive: noop,
+          exitImmersive: noop,
+          isSidebarPeekOpen,
+          setSidebarPeekOpen: setIsSidebarPeekOpen,
+          canSplit: true,
+        }}
+      >
+        <ProjectSidebarRegion isMobile={false} />
+        <main>
+          <div data-workspace-pane="left" role="group">
+            <div data-workspace-control="">
+              <button type="button" onClick={() => setIsSidebarPeekOpen(true)}>Show sidebar</button>
+            </div>
+            <textarea data-slot="prompt-input-textarea" aria-label="left composer" />
+          </div>
+          {layout.right && (
+            <div data-workspace-pane="right" role="group">
+              <textarea data-slot="prompt-input-textarea" aria-label="right composer" />
+            </div>
+          )}
+        </main>
+      </WorkspaceChromeProvider>
+    </WorkspaceSidebarStateContext.Provider>
+  );
+}
+
+test('a pane key that puts focus in a pane closes the drawer over it, also when the focused tab stays the same', () => {
+  // The pane keys move DOM focus a frame later; the frames run by hand.
+  const frames: FrameRequestCallback[] = [];
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+  const cases: Array<[string, KeyboardEventInit, string]> = [
+    ['Mod+1 with the left pane focused already', { code: 'Digit1', key: '1', ctrlKey: true }, 'left composer'],
+    ['Mod+2, moving to the right pane', { code: 'Digit2', key: '2', ctrlKey: true }, 'right composer'],
+    ['Mod+\\, merging into the focused left pane', { code: 'Backslash', key: '\\', ctrlKey: true }, 'left composer'],
+  ];
+
+  for (const [label, keys, expectedFocus] of cases) {
+    const { unmount } = render(<SplitImmersiveWorkspace />);
+    const trigger = showSidebarButton();
+    trigger.focus();
+    fireEvent.click(trigger);
+    assert.equal(isDrawerOut(), true, label);
+
+    fireEvent.keyDown(document.activeElement ?? document.body, keys);
+    act(() => {
+      frames.splice(0).forEach((callback) => callback(0));
+    });
+
+    assert.equal(isDrawerOut(), false, `${label}: no drawer and overlay left over the pane that has the focus`);
+    assert.equal(document.activeElement?.getAttribute('aria-label'), expectedFocus, `${label}: the caret is in the composer`);
+    unmount();
+  }
 });

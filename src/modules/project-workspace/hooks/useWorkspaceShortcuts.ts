@@ -21,6 +21,12 @@ type UseWorkspaceShortcutsOptions = {
   layout: WorkspaceLayout;
   actions: Pick<WorkspaceLayoutActions, 'focusPane' | 'toggleSplit'>;
   toggleImmersive: () => void;
+  /**
+   * Closes the immersive sidebar drawer once a pane key has put DOM focus in a pane, which the drawer
+   * covers. Mod+1/2 on the pane already focused and a merge keep the focused tab, so the drawer's own
+   * rule (it closes when the focused tab changes) does not catch them.
+   */
+  closeSidebarPeek: () => void;
 };
 
 /** Each shortcut's keys, in formatShortcut's tokens: the same constants the tooltips, hints and palette show. */
@@ -103,16 +109,18 @@ export function useWorkspaceShortcuts(options: UseWorkspaceShortcutsOptions): vo
     // DOM focus follows the pane focus once the layout change has rendered: the composer on the Chat
     // view, the pane root on every other view (and on a new, empty right pane). Mod+1/2 move it even
     // when it is already inside that pane, so the shortcut always lands in the composer; after Mod+\
-    // focus already inside the focused pane stays where it is.
+    // focus already inside the focused pane stays where it is. The immersive sidebar drawer closes
+    // after the move, so it does not hand focus back to its "Show sidebar" button first.
     const moveFocusIntoPane = (side: WorkspacePaneSide | 'focused', keepFocusInside = false) => {
       if (focusFrame !== null) {
         window.cancelAnimationFrame(focusFrame);
       }
       focusFrame = window.requestAnimationFrame(() => {
         focusFrame = null;
-        const { layout } = optionsRef.current;
+        const { layout, closeSidebarPeek } = optionsRef.current;
         const targetSide = side === 'focused' ? layout.focusedSide : side;
         focusWorkspacePaneElement(targetSide, getActiveTab(getPane(layout, targetSide))?.view, { keepFocusInside });
+        closeSidebarPeek();
       });
     };
 

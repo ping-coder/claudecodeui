@@ -72,13 +72,15 @@ type UseChatRealtimeHandlersArgs = {
   pendingPermissionRequests: PendingPermissionRequest[];
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
   /**
-   * Highest live `seq` observed per session. Essential for reconnect catch-up:
-   * `chat.subscribe` sends this value as `lastSeq` so the server replays only
-   * the events this client actually missed. Written here on every sequenced
-   * frame of a run this chat follows from its start (absent for a run it only
-   * joined part-way, so its subscribe asks for the whole run), dropped once the
-   * server reports no run going on; read wherever a `chat.subscribe` is sent
-   * (session open, reconnect).
+   * Seq of the last live frame heard per session, of the run a subscribe can
+   * still replay. Essential for reconnect catch-up: `chat.subscribe` sends this
+   * value as `lastSeq` so the server replays only the events this client
+   * actually missed. Written here on every sequenced frame of a run this chat
+   * follows from its start (absent for a run it only joined part-way, so its
+   * subscribe asks for the whole run), dropped once that run ends (its
+   * `complete`, or a subscribe the server answers with no run going on), so a
+   * subscribe during the session's next run asks for it from its start; read
+   * wherever a `chat.subscribe` is sent (session open, reconnect).
    */
   lastSeqRef: MutableRefObject<Map<string, number>>;
   /**
@@ -190,6 +192,13 @@ export function useChatRealtimeHandlers({
   // starts at, when the server no longer buffers the run's first frame (see
   // REPLAY_FRAME_KEYS_PER_SESSION); 1 when absent.
   const replayStartSeqRef = useRef(new Map<string, number>());
+  // Per session, the seq the run that ended last had reached when this chat
+  // learned it was over, until the session's next run is heard. The run goes
+  // on numbering the background work it left going (task progress, the turn
+  // the CLI pushes when a task reports), and no replay resends any of it, so
+  // frames numbered past this set no lastSeq record; the next run counts from
+  // 1 again, so its first frame comes in at or below it and clears it.
+  const endedRunSeqRef = useRef(new Map<string, number>());
 
   // A flush still pending when the chat goes away has no transcript to write.
   useEffect(() => {
@@ -372,9 +381,15 @@ export function useChatRealtimeHandlers({
             return;
           }
 
-          // Record replay progress for every sequenced live event.
-          const known = lastSeqRef.current.get(sid) ?? 0;
-          if (msg.seq > known) {
+          // Record replay progress: this frame's seq. A frame numbered at or
+          // below the record is no replay (those were dropped above) but a
+          // later run's, which counts from 1 again, so the record starts over
+          // from it: kept at the earlier run's number, a reconnect would skip
+          // whatever this run streams up to that number. The background work
+          // of the run that ended last records nothing (see endedRunSeqRef).
+          const endedRunSeq = endedRunSeqRef.current.get(sid);
+          if (endedRunSeq === undefined || msg.seq <= endedRunSeq) {
+            endedRunSeqRef.current.delete(sid);
             lastSeqRef.current.set(sid, msg.seq);
           }
         }
@@ -417,6 +432,11 @@ export function useChatRealtimeHandlers({
             forgetFinishedRun(sid);
             followedRunsRef.current.add(sid);
             replayStartSeqRef.current.delete(sid);
+            // A run the server still holds has numbered its frames up to the
+            // ack's lastSeq; any it numbers after are its background work.
+            if (typeof msg.lastSeq === 'number' && msg.lastSeq > 0) {
+              endedRunSeqRef.current.set(sid, msg.lastSeq);
+            }
           }
 
           const isViewedSession = sid === activeViewSessionId;
@@ -550,8 +570,14 @@ export function useChatRealtimeHandlers({
               sessionStore.finalizeStreaming(sid);
             }
             // The server replays only a running run, so nothing of this one
-            // can arrive again.
+            // can arrive again: its frame keys go, and its seq, which would
+            // ask a reconnect during the next run (two runs in a row send no
+            // subscribe in between) for frames past this one's end.
             handledFrameKeysRef.current.delete(sid);
+            lastSeqRef.current.delete(sid);
+            if (typeof msg.seq === 'number') {
+              endedRunSeqRef.current.set(sid, msg.seq);
+            }
           } else if (sid) {
             // Not followed: the session's next run starts at seq 1 again.
             replayStartSeqRef.current.delete(sid);

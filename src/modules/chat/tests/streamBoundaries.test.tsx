@@ -71,6 +71,7 @@ const delta = (seq: number, content: string, id = 'agy:conv:1:text') => ({ kind:
 const streamEnd = (seq: number) => ({ kind: 'stream_end', id: `end-${seq}`, seq });
 const complete = (seq: number) => ({ kind: 'complete', id: `complete-${seq}`, seq, success: true });
 const toolUse = (seq: number) => ({ kind: 'tool_use', id: `tool-${seq}`, seq, toolName: 'Bash', toolId: `toolu_${seq}`, toolInput: {} });
+const taskProgress = (seq: number) => ({ kind: 'task_status', id: `task-${seq}`, seq, event: 'progress', taskId: 't1', toolUseId: 'toolu_1' });
 
 /** The reply rows as the transcript shows them: finished text, then a stream still running. */
 const replyTexts = (rows: NormalizedMessage[]) => rows
@@ -201,5 +202,64 @@ describe('a run this chat joined part-way', () => {
     chat.dispatch({ kind: 'task_status', id: 'task-9', seq: 9, event: 'progress', taskId: 't1', toolUseId: 'toolu_1' });
 
     assert.deepEqual(chat.rows().map((row) => row.id), ['task-9']);
+  });
+});
+
+// What a subscribe sends as lastSeq, so the server replays only what came after it. The server
+// replays only a running run, a run counts seq from 1 again, and two runs in a row send no
+// subscribe in between: a seq kept from a run that ended asked a reconnect during the next run
+// for frames past a number that run had not reached, and what it streamed meanwhile never came.
+describe('the seq a subscribe asks the replay to start after', () => {
+  it('goes with the run that ends, and the next run counts it again from its first frame', () => {
+    const chat = renderChat();
+
+    chat.dispatch(delta(1, 'Done.'));
+    chat.dispatch(streamEnd(2));
+    chat.dispatch(complete(3));
+    assert.equal(chat.lastSeq(), undefined, 'a reconnect during the next run asks for all of it');
+
+    chat.dispatch(delta(1, 'Next ', 'run-2:text'));
+    chat.dispatch(delta(2, 'reply', 'run-2:text'));
+    assert.equal(chat.lastSeq(), 2);
+  });
+
+  it('is not set by the background work the ended run goes on numbering, which no replay resends', () => {
+    const chat = renderChat();
+
+    chat.dispatch(delta(1, 'Done.'));
+    chat.dispatch(complete(2));
+    // A task's progress, then the turn the CLI pushes when it reports.
+    chat.dispatch(taskProgress(3));
+    chat.dispatch(delta(4, 'Later.', 'agy:conv:3:text'));
+    chat.dispatch(streamEnd(5));
+    assert.equal(chat.lastSeq(), undefined);
+
+    chat.dispatch(delta(1, 'Next', 'run-2:text'));
+    assert.equal(chat.lastSeq(), 1);
+  });
+
+  it('is not set by that background work either when only the server\'s answer said the run was over', () => {
+    const chat = renderChat();
+
+    chat.dispatch(delta(1, 'Partial '));
+    // The socket was away for the run's end; the server holds the run, numbered up to 8 so far.
+    chat.dispatch({ kind: 'chat_subscribed', isProcessing: false, lastSeq: 8, pendingPermissions: [] });
+    chat.dispatch(taskProgress(9));
+    assert.equal(chat.lastSeq(), undefined);
+
+    chat.dispatch(delta(1, 'Next', 'run-2:text'));
+    assert.equal(chat.lastSeq(), 1);
+  });
+
+  it('follows the next run down after a run whose end the socket was away for', () => {
+    const chat = renderChat();
+
+    [1, 2, 3, 4, 5].forEach((seq) => chat.dispatch(toolUse(seq)));
+    assert.equal(chat.lastSeq(), 5);
+
+    // No end heard: frames numbered from 1 again that are no replay are the next run's.
+    chat.dispatch(delta(1, 'Fresh ', 'run-2:text'));
+    chat.dispatch(delta(2, 'answer', 'run-2:text'));
+    assert.equal(chat.lastSeq(), 2);
   });
 });

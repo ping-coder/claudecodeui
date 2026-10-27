@@ -251,12 +251,17 @@ export function useWorkspaceNavigation({
     options: SessionOpenOptions,
     origin: ChangeOrigin = 'user',
   ) => {
-    // The owning project is known, so the tab already holds what the chat needs: the visible-tab
-    // lookup leaves it alone (a failed lookup there used to flag a perfectly good session missing).
-    resolvedSessionIdsRef.current.add(session.id);
+    // The owning project is known, so the tab holds what the chat needs. A row with its title is complete:
+    // the visible-tab lookup leaves it alone. One without (a search hit or a Conversations row the loaded
+    // pages lack) is looked up once it is on screen, for the title its tab, header and page title show; a
+    // lookup that cannot reach the server leaves the tab as it is.
+    const title = readSessionTitle(session);
+    if (title) {
+      resolvedSessionIdsRef.current.add(session.id);
+    }
     commit({
       type: 'open',
-      payload: { session, projectId, provider: readSessionProvider(session), title: readSessionTitle(session) },
+      payload: { session, projectId, provider: readSessionProvider(session), title },
       target: options.target ?? 'focused',
       preview: Boolean(options.preview),
       view: pickView(options.view),

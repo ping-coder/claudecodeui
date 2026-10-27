@@ -94,6 +94,10 @@ export function ImageLightbox({ src, alt, onClose }: { src: string; alt: string;
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
+        // Claimed, not only stopped: ChatInterface's abort-on-Escape listens on the document's
+        // capture phase too, and when it runs after this listener the preview may already be
+        // gone from the page (a browser commits the close in between), so it reads the claim.
+        event.preventDefault();
         event.stopPropagation();
         onClose();
       }

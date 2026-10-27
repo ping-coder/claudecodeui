@@ -116,9 +116,14 @@ const sendFrom: Record<WorkspacePaneSide, (message: unknown) => void> = {
   },
 };
 
-type PaneProps = { session: ProjectSession; focused: boolean };
+type PaneProps = {
+  session: ProjectSession;
+  focused: boolean;
+  /** The page's socket: null while the connection is lost, a new object once it is back, as the WebSocket context hands it out. */
+  socket?: WebSocket | null;
+};
 
-function Pane({ side, session: selectedSession, focused }: PaneProps & { side: WorkspacePaneSide }) {
+function Pane({ side, session: selectedSession, focused, socket = SOCKET }: PaneProps & { side: WorkspacePaneSide }) {
   return (
     <section data-testid={`pane-${side}`}>
       <WorkspacePaneProvider
@@ -128,7 +133,7 @@ function Pane({ side, session: selectedSession, focused }: PaneProps & { side: W
           isActive
           selectedProject={PROJECT}
           selectedSession={selectedSession}
-          ws={SOCKET}
+          ws={socket}
           sendMessage={sendFrom[side]}
         />
       </WorkspacePaneProvider>
@@ -191,8 +196,8 @@ const startRun = (sessionId: string) => {
   runs.set(sessionId, { processing: true, frames: [] });
 };
 
-/** A live frame of the session's run, sent to the page (some chat attached the socket to the run). */
-const emit = (sessionId: string, frame: Record<string, unknown>) => {
+/** Numbers a frame of the session's run and buffers it for replay, as the run registry does. */
+const record = (sessionId: string, frame: Record<string, unknown>) => {
   const run = runs.get(sessionId);
   if (!run) {
     throw new Error(`no run for ${sessionId}`);
@@ -202,15 +207,27 @@ const emit = (sessionId: string, frame: Record<string, unknown>) => {
   if (frame.kind === 'complete') {
     run.processing = false;
   }
-  dispatch(sequenced);
+  return sequenced;
 };
 
-const delta = (sessionId: string, content: string) => emit(sessionId, {
+/** A live frame of the session's run, sent to the page (some chat attached the socket to the run). */
+const emit = (sessionId: string, frame: Record<string, unknown>) => {
+  dispatch(record(sessionId, frame));
+};
+
+const deltaFrame = (sessionId: string, content: string) => ({
   kind: 'stream_delta',
   // agy streams every delta of a part under the part's id.
   id: `${sessionId}:part:text`,
   content,
 });
+
+const delta = (sessionId: string, content: string) => emit(sessionId, deltaFrame(sessionId, content));
+
+/** A delta streamed while the page's socket is away: the server only buffers it. */
+const deltaWhileAway = (sessionId: string, content: string) => {
+  record(sessionId, deltaFrame(sessionId, content));
+};
 
 const endRun = (sessionId: string) => {
   emit(sessionId, { kind: 'stream_end', id: `${sessionId}:part:end` });
@@ -423,5 +440,70 @@ describe('a run whose end the page never heard', () => {
     answerLatestSubscribe('right', 'session-a');
     await flushStreams();
     assert.deepEqual(transcript('right'), ['question', 'Partial answer', 'Fresh answer']);
+  });
+});
+
+// The seq a chat subscribes with is the last one it heard of the session's run. A run counts seq
+// from 1 again, and two runs in a row send no subscribe in between, so a chat that kept the seq
+// the earlier run ended on asked a reconnect during the later one for frames past that number:
+// the server had none to replay, the text streamed while the socket was away never came, and the
+// unfinished reply stayed beside the history's whole one.
+describe('a reconnect during a later run of the session', () => {
+  const RECONNECTED_SOCKET = {} as WebSocket;
+
+  const historyRow = (id: string, role: 'user' | 'assistant', content: string, timestamp: string) => (
+    { id, kind: 'text', role, content, sessionId: 'session-a', provider: 'agy', timestamp }
+  );
+  const FIRST_TURN = [
+    historyRow('h-q1', 'user', 'q1', '2026-01-01T09:58:00.000Z'),
+    historyRow('h-a1', 'assistant', 'one two three four five six ', '2026-01-01T09:58:30.000Z'),
+  ];
+  const SECOND_QUESTION = historyRow('h-q2', 'user', 'q2', '2026-01-01T09:59:00.000Z');
+  const SECOND_REPLY = historyRow('h-a2', 'assistant', 'Hello brave new world', '2026-01-01T10:00:30.000Z');
+
+  it('replays what the run streamed while the socket was away, in a single pane', async () => {
+    // The first run's reply, numbered 1 to 8 with its stream_end and complete.
+    startRun('session-a');
+    const workspace = await renderWorkspace({ left: { session: SESSION_A, focused: true } });
+    answerLatestSubscribe('left', 'session-a');
+    for (const word of ['one ', 'two ', 'three ', 'four ', 'five ', 'six ']) {
+      delta('session-a', word);
+    }
+    page.history.set('session-a', FIRST_TURN);
+    endRun('session-a');
+    await settle();
+    assert.deepEqual(transcript('left'), ['q1', 'one two three four five six ']);
+
+    // The user sends again from the same chat, and the second run streams.
+    startRun('session-a');
+    page.history.set('session-a', [...FIRST_TURN, SECOND_QUESTION]);
+    delta('session-a', 'Hello ');
+    delta('session-a', 'brave ');
+    await flushStreams();
+
+    // The connection drops, and the run streams on meanwhile.
+    await workspace.rerender({ left: { session: SESSION_A, focused: true, socket: null } });
+    deltaWhileAway('session-a', 'new ');
+    deltaWhileAway('session-a', 'world');
+
+    // Back online: the socket comes back and the chat hears the reconnect, re-reads the history and
+    // subscribes again. The server answers each subscribe from the seq it carries.
+    dispatch({ kind: 'websocket_reconnected' });
+    await workspace.rerender({ left: { session: SESSION_A, focused: true, socket: RECONNECTED_SOCKET } });
+    await settle();
+    const resubscribes = subscribesFrom('left').slice(1);
+    for (const target of resubscribes) {
+      answerSubscribe('session-a', Number(target.split('@')[1]));
+    }
+    await flushStreams();
+    assert.deepEqual(transcript('left'), ['q1', 'one two three four five six ', 'q2', 'Hello brave new world']);
+    // From the last frame of this run the chat heard, not the last of the run before.
+    assert.deepEqual(resubscribes, ['session-a@2', 'session-a@2']);
+
+    // The run ends, and the history read has the reply word for word: nothing of it is left over.
+    page.history.set('session-a', [...FIRST_TURN, SECOND_QUESTION, SECOND_REPLY]);
+    endRun('session-a');
+    await settle();
+    assert.deepEqual(transcript('left'), ['q1', 'one two three four five six ', 'q2', 'Hello brave new world']);
   });
 });

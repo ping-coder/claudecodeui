@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 
+import { fireEvent } from '@testing-library/react';
 import { afterEach, test } from 'vitest';
 
 import type { UntitledPaneTabLabels, WorkspaceSessionTab } from '@/shared/types';
-import { focusWorkspacePaneElement, resolvePaneTabTitle } from '@/shared/utils';
+import { focusWithLentTabIndex, focusWorkspacePaneElement, resolvePaneTabTitle } from '@/shared/utils';
 
 /**
  * Pane helpers the tab bar, the command palette and the pane shortcuts share: the label a tab
@@ -107,4 +108,44 @@ test('a pane that is not on the page leaves focus where it is', () => {
   outsideButton.focus();
   focusWorkspacePaneElement('right', 'chat');
   assert.equal(document.activeElement === outsideButton, true);
+});
+
+test('a pane root keeps its lent tabindex while focus is away, so focus can come back; a press or focus inside takes it back', () => {
+  const { rightPane, outsideButton } = renderPanes();
+  const fileRow = document.createElement('button');
+  rightPane.appendChild(fileRow);
+
+  focusWorkspacePaneElement('right', 'files');
+  assert.equal(document.activeElement === rightPane, true);
+  assert.equal(rightPane.getAttribute('tabindex'), '-1');
+
+  // A dialog takes the focus (the command palette), then hands it back when it closes.
+  outsideButton.focus();
+  assert.equal(rightPane.getAttribute('tabindex'), '-1');
+  rightPane.focus();
+  assert.equal(document.activeElement === rightPane, true);
+
+  fileRow.focus();
+  assert.equal(rightPane.hasAttribute('tabindex'), false, 'focus moving on inside the pane');
+
+  focusWorkspacePaneElement('right', 'files');
+  fireEvent.pointerDown(fileRow);
+  assert.equal(rightPane.hasAttribute('tabindex'), false, 'a press inside, before it can focus the root');
+});
+
+test('focusWithLentTabIndex shares one loan per element and never takes away a tabindex of its own', () => {
+  const lent = document.createElement('div');
+  const own = document.createElement('div');
+  own.setAttribute('tabindex', '0');
+  document.body.append(lent, own);
+
+  const release = focusWithLentTabIndex(lent, { preventScroll: true });
+  assert.equal(focusWithLentTabIndex(lent) === release, true, 'a second call shares the first loan');
+  assert.equal(document.activeElement === lent, true);
+  release();
+  assert.equal(lent.hasAttribute('tabindex'), false);
+
+  focusWithLentTabIndex(own)();
+  assert.equal(document.activeElement === own, true);
+  assert.equal(own.getAttribute('tabindex'), '0');
 });

@@ -25,8 +25,6 @@ import type {
 
 const panes: { state: Record<string, unknown> } = { state: {} };
 const openedFiles: string[] = [];
-// Text the focused pane's chat took from the palette, as `<project>:<text>`.
-const insertedTexts: string[] = [];
 type ChatProps = {
   selectedProject: Project;
   onFileOpen?: (filePath: string) => void;
@@ -52,16 +50,11 @@ vi.mock('@/shared/context/UiPreferencesContext', () => ({
 // The chat reads its pane from WorkspacePaneContext; a file link in it opens through the pane's own action.
 vi.mock('@/modules/chat', async () => {
   const { useWorkspacePane } = await import('@/shared/context/WorkspacePaneContext');
-  const { usePaletteOpsRegister } = await import('@/modules/command-palette');
   return {
     ChatInterface: (props: ChatProps) => {
       const { selectedProject, onFileOpen, onNavigateToSession, onSessionEstablished } = props;
       const { side, isFocusedPane, openFileInEditor } = useWorkspacePane();
       chatProps[side ?? 'left'] = props;
-      // Like the real chat: only the focused pane takes text from other modules.
-      usePaletteOpsRegister(isFocusedPane
-        ? { insertComposerText: (text: string) => insertedTexts.push(`${selectedProject.projectId}:${text}`) }
-        : {});
       return (
         <div data-testid={`chat-${side}`} data-focused={String(isFocusedPane)}>
           <textarea aria-label={`composer ${selectedProject.projectId}`} data-slot="prompt-input-textarea" />
@@ -235,7 +228,6 @@ const splitLayout = (focusedSide: 'left' | 'right'): WorkspaceLayout => ({
 beforeEach(() => {
   actions = makeActions();
   openedFiles.length = 0;
-  insertedTexts.length = 0;
   palette.ops = null;
   delete chatProps.left;
   delete chatProps.right;
@@ -361,51 +353,9 @@ test('the chat and editor in each pane read their own pane, and a file link open
   assert.equal(screen.getByTestId('editor-left').getAttribute('data-split'), 'false');
 });
 
-/** Animation frames the panes request, run by hand. */
-const captureFrames = () => {
-  const frames: FrameRequestCallback[] = [];
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
-    frames.push(callback);
-    return frames.length;
-  });
-  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
-  return () => frames.splice(0).forEach((callback) => callback(0));
-};
+// A palette action picked while the focused pane shows nothing is covered with the real layout hooks in paneContentlessActions.test.tsx.
 
 const draftTab = (key: string, project: Project): WorkspaceSessionTab => makeTab(key, project, { sessionId: null, session: null, title: '' });
-
-test('a focused pane that shows nothing opens a new chat for a palette action, then runs the action there', () => {
-  const runFrames = captureFrames();
-  // Split a moment ago: the right pane is empty and focused; the palette lists the fallback project's files.
-  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([]), focusedSide: 'right', splitRatio: 0.5 });
-  const view = render(regionElement());
-  const ops = () => palette.ops as NonNullable<typeof palette.ops>;
-
-  ops().openFile('README.md');
-  assert.deepEqual(vi.mocked(actions.openNewSession).mock.calls, [[ALPHA, { target: 'right', view: 'files' }]]);
-  assert.deepEqual(openedFiles, [], 'nothing to open it in yet');
-
-  // The new chat shows up in the right pane: the file opens in its editor, under its project.
-  // The new chat shows up in the same pane (same id).
-  setLayout({ left: makePane([makeTab('a1', ALPHA)]), right: makePane([draftTab('d1', ALPHA)], 'pane-empty'), focusedSide: 'right', splitRatio: 0.5 });
-  view.rerender(regionElement());
-  runFrames();
-  assert.deepEqual(openedFiles, ['alpha:README.md']);
-});
-
-test('a slash command picked while the focused pane is empty lands in the composer of the chat it opens', () => {
-  const runFrames = captureFrames();
-  setLayout({ left: makePane([]), right: null, focusedSide: 'left', splitRatio: 0.5 });
-  const view = render(regionElement());
-
-  (palette.ops as NonNullable<typeof palette.ops>).insertComposerText('/review ');
-  assert.deepEqual(vi.mocked(actions.openNewSession).mock.calls, [[ALPHA, { target: 'left', view: 'chat' }]]);
-
-  setLayout({ left: makePane([draftTab('d1', ALPHA)], 'pane-empty'), right: null, focusedSide: 'left', splitRatio: 0.5 });
-  view.rerender(regionElement());
-  runFrames();
-  assert.deepEqual(insertedTexts, ['alpha:/review ']);
-});
 
 test('a file opened from the chat, by a link or a tool result, keeps a preview tab open', () => {
   setLayout(splitLayout('right'));

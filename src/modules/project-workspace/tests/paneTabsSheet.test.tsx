@@ -206,7 +206,7 @@ test('a row switches to its tab on its side and closes the sheet; × closes that
   assert.equal(onOpenChange.mock.calls.length, 0);
 });
 
-test('the footer starts a new chat in the focused pane and closes every tab, the right pane first', () => {
+test('the footer starts a new chat in the focused pane and closes every tab of both panes in one change', () => {
   const onOpenChange = renderSheet();
 
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
@@ -214,8 +214,8 @@ test('the footer starts a new chat in the focused pane and closes every tab, the
   assert.deepEqual(onOpenChange.mock.calls, [[false]]);
 
   fireEvent.click(screen.getByRole('button', { name: 'Close all tabs' }));
-  // Emptying the left pane first would move the right pane's tabs into it, out of reach of the second close.
-  assert.deepEqual(vi.mocked(actions.closeAllTabs).mock.calls, [['right'], ['left']]);
+  // One change for both panes: a declined unsaved-edits question can never leave one side closed.
+  assert.deepEqual(vi.mocked(actions.closeAllTabs).mock.calls, [['both']]);
 });
 
 test('unsplit, the sheet lists the one pane without side headings', () => {
@@ -227,7 +227,7 @@ test('unsplit, the sheet lists the one pane without side headings', () => {
   assert.equal(screen.queryByRole('region', { name: 'Right pane' }) === null, true);
   assert.equal(screen.getAllByRole('button', { name: 'Close tab' }).length, 2);
   fireEvent.click(screen.getByRole('button', { name: 'Close all tabs' }));
-  assert.deepEqual(vi.mocked(actions.closeAllTabs).mock.calls, [['left']]);
+  assert.deepEqual(vi.mocked(actions.closeAllTabs).mock.calls, [['both']]);
 });
 
 test('on a phone the header offers Tabs once there is more than one tab or a right pane, and it opens the sheet', () => {

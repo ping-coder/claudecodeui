@@ -85,11 +85,9 @@ export default function PaneTabsSheet({
   };
 
   const closeAllTabs = () => {
-    // The right pane first: emptying the left one first would move the right pane's tabs into it.
-    if (isSplit) {
-      actions.closeAllTabs('right');
-    }
-    actions.closeAllTabs('left');
+    // One change for both panes, never half done. The pane on screen is the one left, so its chat and an
+    // unsaved edit in its editor stay, hidden, as after closing its own last tab.
+    actions.closeAllTabs('both');
     close();
   };
 

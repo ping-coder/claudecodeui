@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { act, fireEvent, render } from '@testing-library/react';
+import { useLayoutEffect, useState } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import { useWorkspaceShortcuts } from '@/modules/project-workspace/hooks/useWorkspaceShortcuts';
@@ -11,6 +12,7 @@ import type {
   WorkspacePaneState,
   WorkspaceSessionTab,
 } from '@/shared/types';
+import { Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 
 /**
  * The workspace shortcuts have one registration point: a window keydown listener in the capture
@@ -31,6 +33,7 @@ const actions = {
   toggleSplit: vi.fn<WorkspaceLayoutActions['toggleSplit']>(),
 };
 const toggleImmersive = vi.fn<() => void>();
+const closeSidebarPeek = vi.fn<() => void>();
 // Animation frames requested by the hook, run by hand to move DOM focus after a pane change.
 const frames: FrameRequestCallback[] = [];
 
@@ -70,7 +73,7 @@ const splitLayout = (rightView: AppTab | null, focusedSide: 'left' | 'right' = '
 
 // Pane roots as WorkspacePane renders them: not focusable until a shortcut lends them a tabindex.
 function ShortcutsHarness({ isMobile = false, canSplit = true, layout, hiddenRightComposer = false }: HarnessProps) {
-  useWorkspaceShortcuts({ isMobile, canSplit, layout, actions, toggleImmersive });
+  useWorkspaceShortcuts({ isMobile, canSplit, layout, actions, toggleImmersive, closeSidebarPeek });
   return (
     <div>
       <div data-workspace-pane="left" role="group">
@@ -149,6 +152,7 @@ beforeEach(() => {
   actions.split.mockReset();
   actions.toggleSplit.mockReset();
   toggleImmersive.mockReset();
+  closeSidebarPeek.mockReset();
   frames.length = 0;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     frames.push(callback);
@@ -424,7 +428,7 @@ test('Mod+2 lands on the pane itself when its composer cannot take focus (an edi
   assert.equal(focusedElement(), 'right pane', 'focus does not stay behind in the left composer');
 });
 
-test('a pane root is focusable only while a shortcut put focus there: a press inside or leaving gives the tabindex back', () => {
+test('a pane root borrows a tabindex for the focus a shortcut puts there: a press or focus inside gives it back, focus leaving keeps it', () => {
   renderShortcuts({ layout: splitLayout('files') });
   assert.equal(paneRoot('right').hasAttribute('tabindex'), false);
 
@@ -437,11 +441,78 @@ test('a pane root is focusable only while a shortcut put focus there: a press in
   fireEvent.pointerDown(paneRoot('right'));
   assert.equal(paneRoot('right').hasAttribute('tabindex'), false);
 
+  // Focus leaving the pane keeps the loan, so whatever took the focus can hand it back.
   press(MOD_2);
   runFrames();
-  assert.equal(paneRoot('right').getAttribute('tabindex'), '-1');
   composer('left').focus();
-  assert.equal(paneRoot('right').hasAttribute('tabindex'), false, 'focus moving on gives it back too');
+  assert.equal(paneRoot('right').getAttribute('tabindex'), '-1');
+  paneRoot('right').focus();
+  assert.equal(focusedElement(), 'right pane');
+
+  // Focus moving on inside the pane gives it back.
+  const fileRow = document.createElement('button');
+  fileRow.textContent = 'file row';
+  paneRoot('right').appendChild(fileRow);
+  fileRow.focus();
+  assert.equal(paneRoot('right').hasAttribute('tabindex'), false);
+  fileRow.remove();
+});
+
+// The command palette: a shared Dialog that a key opens, with no trigger element to return to.
+const palette: { setOpen: (open: boolean) => void } = { setOpen: () => undefined };
+function ShortcutsWithPalette({ layout }: { layout: WorkspaceLayout }) {
+  const [isOpen, setIsOpen] = useState(false);
+  useLayoutEffect(() => {
+    palette.setOpen = setIsOpen;
+  }, []);
+  return (
+    <>
+      <ShortcutsHarness layout={layout} />
+      <Dialog open={isOpen} onOpenChange={setIsOpen}>
+        <DialogContent>
+          <DialogTitle>Command palette</DialogTitle>
+          <input aria-label="palette search" />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+test('a dialog opened over a pane root a shortcut focused hands the focus back to it when it closes', () => {
+  render(<ShortcutsWithPalette layout={splitLayout('files')} />);
+  press(MOD_2);
+  runFrames();
+  assert.equal(focusedElement(), 'right pane');
+
+  act(() => palette.setOpen(true));
+  runFrames();
+  assert.equal(focusedElement(), 'palette search');
+
+  act(() => palette.setOpen(false));
+  assert.equal(focusedElement(), 'right pane', 'not dropped on the body, where Tab starts over from the top');
+});
+
+test('a pane key closes the immersive sidebar drawer once it has put DOM focus in the pane', () => {
+  renderShortcuts({ layout: splitLayout('chat') });
+  // Where focus is when the drawer is told to close: already in the pane, so the drawer does not hand
+  // it back to its "Show sidebar" button, and Mod+\ does not find it there and leave it.
+  const focusAtClose: string[] = [];
+  closeSidebarPeek.mockImplementation(() => {
+    focusAtClose.push(focusedElement());
+  });
+
+  press(MOD_1);
+  assert.equal(closeSidebarPeek.mock.calls.length, 0, 'not before the focus moved');
+  runFrames();
+  press(MOD_2);
+  runFrames();
+  press(MOD_BACKSLASH);
+  runFrames();
+  press(MOD_SHIFT_ENTER);
+  runFrames();
+
+  // Mod+1 on the pane already focused and the merge keep the focused tab, which alone does not close the drawer.
+  assert.deepEqual(focusAtClose, ['left composer', 'right composer', 'left composer']);
 });
 
 test('the immersive sidebar drawer (a non-modal dialog) owns Escape only: the workspace keys still work under it', () => {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 
-import { act, fireEvent, render, renderHook } from '@testing-library/react';
-import { useLayoutEffect } from 'react';
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { useLayoutEffect, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 
 import '@/modules/i18n';
@@ -9,9 +10,10 @@ import ChatInterface from '@/modules/chat/ChatInterface';
 import { useChatProviderState } from '@/modules/chat/hooks/useChatProviderState';
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { ChatInstancesProvider } from '@/modules/chat/context/ChatInstancesContext';
+import { ImageLightbox } from '@/modules/chat/transcript/ChatMessageImages';
 import { SessionProtectionProvider, useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
-import { ActionMenu } from '@/shared/ui';
+import { ActionMenu, Dialog, DialogContent } from '@/shared/ui';
 import type { ChatMessage, NormalizedMessage, Project, ProjectSession, WorkspacePaneSide } from '@/shared/types';
 
 /**
@@ -243,6 +245,91 @@ describe('Esc', () => {
     }
     fireEvent.keyDown(document, { key: 'Escape' });
     assert.deepEqual(page.aborts, ['session-a']);
+  });
+
+  describe('that closes a dialog or an image preview', () => {
+    // The command palette and the chat's modals are this shared dialog; a click on a
+    // screenshot in a reply opens this preview. Both listen for Escape on the document's
+    // capture phase, as the chat does.
+    function OpenDialog() {
+      // Open from the start; the dialog's own Escape handling closes it.
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent>
+            <button type="button">Search</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+
+    function OpenImagePreview() {
+      // Open from the start, as after a click on a thumbnail; the preview's Escape closes it.
+      const [open, setOpen] = useState(true);
+      return open ? <ImageLightbox src="data:image/png;base64,AA==" alt="Screenshot" onClose={() => setOpen(false)} /> : null;
+    }
+
+    const overlays = [
+      { name: 'a dialog', Overlay: OpenDialog },
+      { name: 'an image preview', Overlay: OpenImagePreview },
+    ];
+
+    /**
+     * A browser runs the microtasks between two listeners of a key press it dispatches, and
+     * React commits an update made in a keydown listener in one of them: a layer an earlier
+     * listener closed is gone from the page by the time a later one looks. jsdom runs none
+     * while a script dispatches, so this listener makes that commit. Registered once the
+     * overlay is open and before the run starts, it runs between the overlay's and the chat's.
+     */
+    const commitBetweenListeners = () => {
+      const commit = () => {
+        flushSync(() => undefined);
+      };
+      document.addEventListener('keydown', commit, true);
+      return () => document.removeEventListener('keydown', commit, true);
+    };
+
+    const openOverlayCount = () => screen.queryAllByRole('dialog').length;
+
+    for (const { name, Overlay } of overlays) {
+      it(`closes ${name} opened before the run started, and leaves the run going`, async () => {
+        await renderWorkspace({ focused: true }, { focused: false });
+        // Opened while nothing runs: its Escape listener is in place before the chat's.
+        render(<Overlay />);
+        const stopCommitting = commitBetweenListeners();
+        try {
+          // A queued message goes out, or another device starts a run: the chat starts listening.
+          act(() => {
+            sessionProtection.markSessionProcessing?.('session-a');
+          });
+
+          fireEvent.keyDown(document.body, { key: 'Escape' });
+
+          assert.equal(openOverlayCount(), 0, 'the overlay closed');
+          assert.deepEqual(page.aborts, []);
+
+          // With it closed, Escape is the run's again.
+          fireEvent.keyDown(document.body, { key: 'Escape' });
+          assert.deepEqual(page.aborts, ['session-a']);
+        } finally {
+          stopCommitting();
+        }
+      });
+
+      it(`closes ${name} opened while the run goes, and leaves the run going`, async () => {
+        await renderWorkspace({ focused: true }, { focused: false });
+        act(() => {
+          sessionProtection.markSessionProcessing?.('session-a');
+        });
+        // Opened during the run: the chat's listener runs first and finds it still open.
+        render(<Overlay />);
+
+        fireEvent.keyDown(document.body, { key: 'Escape' });
+
+        assert.equal(openOverlayCount(), 0, 'the overlay closed');
+        assert.deepEqual(page.aborts, []);
+      });
+    }
   });
 
   describe('in the workspace\'s fullscreen, which holds the key', () => {

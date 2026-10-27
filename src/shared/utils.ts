@@ -560,31 +560,51 @@ export const resolvePaneTabTitle = (
     : getSessionTitle(tab.session ?? { id: tab.sessionId, __provider: tab.provider });
 };
 
+/** The tabindex loans focusWithLentTabIndex has outstanding, by element, so a second call shares the first one. */
+const lentTabIndexReleases = new WeakMap<HTMLElement, () => void>();
+
 /**
- * Lends a pane root the tabindex programmatic focus needs, focuses it, and takes the tabindex back as
- * soon as focus leaves or a pointer presses inside: a root that stayed focusable would take the focus
- * of every click on plain text in the pane, and keyboard scrolling of the scroll area under it with it.
- * Private to `focusWorkspacePaneElement`.
+ * Focuses an element that is not focusable on its own (a workspace pane root, the immersive sidebar
+ * drawer) by lending it tabindex="-1". The loan is taken back once a pointer presses inside the element
+ * (capture phase, before the press's own focus step, so the click focuses what it would without it) or
+ * focus moves on to something inside it: an element that stayed focusable would take the focus of every
+ * click on plain text in it, and the keyboard scrolling of the scroll area under that text with it. Focus
+ * leaving for somewhere else keeps the loan, so a dialog opened from here (the command palette) can hand
+ * focus back when it closes, and so can the browser when its window is left and entered again. Returns a
+ * function that takes the loan back at once (a no-op for an element with a tabindex of its own). Used by
+ * focusWorkspacePaneElement and project-workspace's ProjectSidebarRegion (its drawer, while it is out).
  */
-const focusPaneRoot = (pane: HTMLElement): void => {
-  if (!pane.hasAttribute('tabindex')) {
-    pane.setAttribute('tabindex', '-1');
-    const release = () => {
-      pane.removeAttribute('tabindex');
-      pane.removeEventListener('blur', release);
-      pane.removeEventListener('pointerdown', release, true);
+export const focusWithLentTabIndex = (element: HTMLElement, options?: FocusOptions): (() => void) => {
+  let release = lentTabIndexReleases.get(element);
+  if (!release && !element.hasAttribute('tabindex')) {
+    const takeBack = () => {
+      if (lentTabIndexReleases.get(element) !== takeBack) {
+        return;
+      }
+      lentTabIndexReleases.delete(element);
+      element.removeAttribute('tabindex');
+      element.removeEventListener('pointerdown', takeBack, true);
+      element.removeEventListener('focusin', handleFocusIn);
     };
-    pane.addEventListener('blur', release);
-    // Capture, before the press's own focus step, so the click focuses what it would without the root.
-    pane.addEventListener('pointerdown', release, true);
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.target !== element) {
+        takeBack();
+      }
+    };
+    element.setAttribute('tabindex', '-1');
+    element.addEventListener('pointerdown', takeBack, true);
+    element.addEventListener('focusin', handleFocusIn);
+    lentTabIndexReleases.set(element, takeBack);
+    release = takeBack;
   }
-  pane.focus();
+  element.focus(options);
+  return release ?? (() => undefined);
 };
 
 /**
  * Puts DOM focus in a workspace pane: the composer on the Chat view, otherwise (or when the composer
- * cannot take focus, e.g. hidden behind an editor expanded over the chat) the pane root, which is only
- * made focusable for that moment (pane DOM contract: data-workspace-pane, data-slot="prompt-input-textarea").
+ * cannot take focus, e.g. hidden behind an editor expanded over the chat) the pane root, which borrows a
+ * tabindex for it (focusWithLentTabIndex; pane DOM contract: data-workspace-pane, data-slot="prompt-input-textarea").
  * Does nothing when the pane is not on the page; keepFocusInside also leaves focus alone when it is
  * already somewhere inside the pane. Callers run it once the layout change has rendered: project-workspace's
  * useWorkspaceShortcuts (Mod+1/2 always move; after Mod+\ focus already inside the pane stays) and
@@ -607,5 +627,5 @@ export const focusWorkspacePaneElement = (
       return;
     }
   }
-  focusPaneRoot(pane);
+  focusWithLentTabIndex(pane);
 };

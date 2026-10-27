@@ -52,12 +52,18 @@ function ProjectWorkspaceShell({
     toggleImmersive();
   }, [toggleImmersive]);
 
+  // A pane shortcut that put DOM focus in a pane takes the drawer covering the panes away.
+  const closeSidebarPeek = useCallback(() => {
+    setSidebarPeekOpen(false);
+  }, []);
+
   useWorkspaceShortcuts({
     isMobile,
     canSplit,
     layout,
     actions,
     toggleImmersive: toggleImmersiveWithClosedPeek,
+    closeSidebarPeek,
   });
 
   const isPeekShown = isSidebarPeekOpen && isImmersive && !isMobile;

@@ -24,17 +24,22 @@ const UNSPLIT: WorkspaceLayout = {
   splitRatio: 0.5,
 };
 
+const SPLIT: WorkspaceLayout = {
+  ...UNSPLIT,
+  right: { id: 'pane-right', tabs: [], activeTabKey: null, mru: [], draftActivation: 0, externalRevision: 0 },
+};
+
 const toggleSplit = vi.fn<() => void>();
 const setSidebarOpen = vi.fn<(open: boolean) => void>();
 // What the shell reports to the pane state about the room for two panes.
 const setCanShowBothPanes = vi.fn<(canShowBothPanes: boolean) => void>();
 const PANES_STATE = {
-  layout: UNSPLIT,
+  layout: UNSPLIT as WorkspaceLayout,
   actions: { toggleSplit, focusPane: vi.fn(), split: vi.fn() } as unknown as WorkspaceLayoutActions,
   setSidebarOpen,
   setCanShowBothPanes,
 };
-const COMMAND_STATE = { selectedProject: null, setActiveTab: () => undefined };
+const COMMAND_STATE = { selectedProject: null, setActiveTab: () => undefined, layout: UNSPLIT };
 
 vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
   useProjectPanesState: () => PANES_STATE,
@@ -135,6 +140,7 @@ const isSettingsOpen = () => screen.queryByRole('dialog', { name: 'Settings' }) 
 const pressModBackslash = () => fireEvent.keyDown(document.body, { code: 'Backslash', key: '\\', ctrlKey: true });
 
 beforeEach(() => {
+  PANES_STATE.layout = UNSPLIT;
   mainColumnWidth = 1200;
   resizeObserverCallbacks.length = 0;
   sidebarRegionLifecycle.mounts = 0;
@@ -313,4 +319,28 @@ test('the capsule fades to 40% after three seconds and a touch brings it back', 
     vi.advanceTimersByTime(1);
   });
   assert.equal(isFaded(), true);
+});
+
+test('a pane key that keeps the focused tab still closes the drawer once it has moved the focus', () => {
+  PANES_STATE.layout = SPLIT;
+  // The pane keys move DOM focus a frame later; the frames run by hand.
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  renderShell();
+  clickButton('Toggle full screen');
+  clickButton('Pane show sidebar');
+  assert.equal(isPeekOpen(), 'true');
+
+  // Mod+1 with the left pane focused already: the focused tab does not change.
+  fireEvent.keyDown(document.body, { code: 'Digit1', key: '1', ctrlKey: true });
+  assert.equal(isPeekOpen(), 'true', 'not before the focus moved');
+  act(() => {
+    frames.splice(0).forEach((callback) => callback(0));
+  });
+
+  assert.equal(isPeekOpen(), 'false');
 });

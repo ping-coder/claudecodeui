@@ -101,14 +101,14 @@ type Navigation = ReturnType<typeof useWorkspaceNavigation>;
 const harness: { navigation: Navigation | null } = { navigation: null };
 const nav = () => harness.navigation as Navigation;
 
-function Workspace() {
+function Workspace({ isMobile = false }: { isMobile?: boolean }) {
   const workspace = useWorkspaceLayout({});
   const navigation = useWorkspaceNavigation({
     workspace,
     navigate: vi.fn() as unknown as NavigateFunction,
     projects: PROJECTS,
     isLoadingProjects: false,
-    isMobile: false,
+    isMobile,
     setSidebarOpen: vi.fn(),
     registerEstablishedSession: (sessionId: string, context: SessionEstablishedContext) => ({ id: sessionId, __projectId: context.project.projectId }),
     clearSessionAttention: () => undefined,
@@ -144,7 +144,7 @@ function Workspace() {
           canSplit: true,
         }}
       >
-        <ProjectMainRegion isMobile={false} ws={null} sendMessage={() => undefined} navigate={vi.fn() as unknown as NavigateFunction} />
+        <ProjectMainRegion isMobile={isMobile} ws={null} sendMessage={() => undefined} navigate={vi.fn() as unknown as NavigateFunction} />
       </WorkspaceChromeProvider>
     </TestPanesProvider>
   );
@@ -318,5 +318,41 @@ test('closing the last tab of the right pane asks first; declining keeps the tab
 
   assert.equal(confirm.mock.calls.length, 1);
   assert.deepEqual(layout().right?.tabs.map((tab) => tab.sessionId), ['b1']);
+  assert.deepEqual(editorValues(), ['right edited']);
+});
+
+test('merging two empty panes keeps the left one, with the edits its hidden editor holds, and asks nothing', async () => {
+  render(<Workspace />);
+  run(() => nav().actions.openSession(rowOf(ALPHA, 'a1')));
+  await editFileIn('left', ALPHA);
+  run(() => nav().actions.closeAllTabs('left'));
+  run(() => nav().actions.split());
+  run(() => nav().actions.focusPane('left'));
+
+  run(() => nav().actions.toggleSplit());
+
+  assert.equal(confirm.mock.calls.length, 0, 'keeping the left pane loses nothing');
+  assert.equal(layout().right, null);
+  assert.deepEqual(editorValues(), ['left edited']);
+  assert.equal(chatLifecycle.unmounts, 0, 'the hidden chat keeps hearing its runs');
+});
+
+test('on a phone, "Close all tabs" closes both panes in one go and keeps the shown pane\'s unsaved edits, hidden', async () => {
+  const view = render(<Workspace />);
+  run(() => nav().actions.openSession(rowOf(ALPHA, 'a1')));
+  run(() => nav().actions.split());
+  run(() => nav().actions.openSession(rowOf(BETA, 'b1')));
+  await editFileIn('right', BETA);
+  const rightPaneId = layout().right?.id;
+  // A split brought over from a wider window: the phone shows the focused right pane only.
+  view.rerender(<Workspace isMobile />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Tabs (2)' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Close all tabs' }));
+
+  assert.equal(confirm.mock.calls.length, 0, 'the pane on screen stays, so nothing is lost');
+  assert.equal(layout().right, null);
+  assert.deepEqual(layout().left.tabs, []);
+  assert.equal(layout().left.id, rightPaneId);
   assert.deepEqual(editorValues(), ['right edited']);
 });

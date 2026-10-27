@@ -318,6 +318,14 @@ export const WORKSPACE_SPLIT_RATIO_MAX = 0.8;
 export const WORKSPACE_LAYOUT_STORAGE_KEY = 'workspace-layout';
 
 /**
+ * What a pane component registers with the command palette while the operations belong to someone else:
+ * project-workspace's WorkspacePane while it shows content (its WorkspaceMain and chat register them then)
+ * and its WorkspaceMain while the pane is unfocused (the focused pane's register them). No operations, and
+ * one object for every render, so the registration effects do not rerun.
+ */
+export const NO_PALETTE_OPS = Object.freeze({});
+
+/**
  * effectAllowed of a dragged pane tab, set by project-workspace's PaneTabBar. Drop targets (PaneTabBar's
  * strip, PaneDropOverlay's zones) read it during dragover, where the payload itself is unreadable, to
  * tell a tab (moves, Alt copies) from a sidebar row.

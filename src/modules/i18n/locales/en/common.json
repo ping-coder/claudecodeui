@@ -451,6 +451,8 @@
     "openTabsGroup": "Open tabs",
     "resizePanes": "Resize panes",
     "chooseProject": "Choose project",
-    "sidebarDrawer": "Sidebar"
+    "sidebarDrawer": "Sidebar",
+    "shortcutsHintUnsplit": "{{split}} split · {{fullscreen}} full screen",
+    "shortcutsHintFullscreen": "{{fullscreen}} full screen"
   }
 }

@@ -124,6 +124,11 @@ export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps
 
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === 'Escape') {
+          // Claimed as well as stopped: stopping leaves the other document capture listeners
+          // running, and chat's abort-on-Escape is one. When it runs after this one, the dialog
+          // may already be gone from the page (a browser commits the close between the two), so
+          // the claim is what tells it this Escape was taken.
+          e.preventDefault();
           e.stopPropagation();
           onEscapeKeyDown?.();
           onOpenChange(false);

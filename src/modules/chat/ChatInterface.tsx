@@ -397,6 +397,10 @@ function ChatInterface({
         return;
       }
       heldPressStartedAt = null;
+      // A layer that owns Escape takes this press whichever listener ran
+      // first. One whose listener came before this one has claimed it, and a
+      // browser may have committed its close in between, so it can be gone
+      // from the page by now; one whose listener comes after is still open.
       if (event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR)) {
         return;
       }
