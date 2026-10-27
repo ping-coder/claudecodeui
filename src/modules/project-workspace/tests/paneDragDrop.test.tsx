@@ -240,12 +240,20 @@ test('a drop clears the zones only after the next task, so a zone still gets the
   renderRegion();
   fireDrag(group(), 'dragEnter', rowTransfer(ROW_PAYLOAD));
 
-  // A browser runs the window's capture listener first, then microtasks (where React commits),
-  // then hands the drop to the zone. Dispatched outside act, as a browser does it.
-  window.dispatchEvent(new Event('drop'));
-  await act(async () => {
-    await Promise.resolve();
-  });
+  // A browser runs the window's capture listener first, then microtasks (where React commits a
+  // discrete event's update), then hands the drop to the zone. Dispatched outside act, as a browser
+  // does it. React takes an update's priority from window.event, which jsdom leaves at the previous
+  // event here, so the test sets it to the drop the way a browser does during dispatch.
+  const drop = new Event('drop', { bubbles: true });
+  Object.defineProperty(window, 'event', { configurable: true, get: () => drop });
+  try {
+    document.body.dispatchEvent(drop);
+  } finally {
+    Reflect.deleteProperty(window, 'event');
+  }
+  // Microtasks only, outside act: an async act also waits out a task, which is when the zones go.
+  await Promise.resolve();
+  await Promise.resolve();
   assert.equal(isOverlayShown(), true, 'the zones outlast the microtasks between listeners');
 
   await act(async () => {
