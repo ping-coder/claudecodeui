@@ -375,6 +375,15 @@
     "inserted": "插入",
     "insertedHint": "在 Claude 工作时发送，在它的下一步读到"
   },
+  "pinnedQuestion": {
+    "label": "本回合的问题",
+    "jump": "跳到这条消息",
+    "loadAndJump": "加载全部消息并跳到这条",
+    "reading": "正在读取本回合的问题…",
+    "notLoaded": "本回合的问题在更早的消息里",
+    "inserts_other": "+{{count}} 插入",
+    "attachments_other": "{{count}} 个附件"
+  },
   "composer": {
     "ultracode": "Ultracode",
     "ultracodeDescription": "在任意推理级别下编排工作流",

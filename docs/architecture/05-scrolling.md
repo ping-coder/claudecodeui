@@ -6,7 +6,7 @@ fighting the user. Paging and row mounting are covered in
 
 ## In one paragraph
 
-The transcript is one scrolling `div`, and five separate pieces of code write its
+The transcript is one scrolling `div`, and six separate pieces of code write its
 `scrollTop`. There is no scroll controller and no state machine: the writers are
 coordinated by a handful of refs that each one checks before acting. The shared truth is
 `isUserScrolledUp` — `false` means "the user is parked at the bottom, keep them there",
@@ -15,9 +15,9 @@ coordinated by a handful of refs that each one checks before acting. The shared 
 scroll re-reads that intent through `isUserScrolledUpRef` at the moment it fires, because
 the value it was armed with may be seconds stale. Everything else — the settle after
 opening a session, the position restore after older history is prepended, the jump to a
-search hit — stakes a temporary claim in a ref that tells the other writers to stand down
-until it is finished. The test file says it plainly: *"The transcript's scroll position is
-written from five places coordinated by refs and timers rather than by one owner"*
+search hit, the reveal of one row — stakes a temporary claim in a ref that tells the other
+writers to stand down until it is finished. The test file says it plainly: the position is
+*"coordinated by refs and timers rather than by one owner"*
 (`src/modules/chat/tests/transcriptScrollOwnership.test.tsx`).
 
 ## Mental model
@@ -50,7 +50,8 @@ written from five places coordinated by refs and timers rather than by one owner
 7. **A claim ref suppresses the other writers.** `pendingInitialScrollRef`,
    `pendingScrollRestoreRef`, `searchScrollActiveRef`, plus two latches at the top of the
    list, `topLoadLockRef` and `wasNearTopRef`. A session change clears or re-arms all five
-   in one effect.
+   in one effect. `revealMessage` claims by time instead: `revealUntilRef` holds a deadline
+   1.5 s ahead, which the same effect resets.
 8. **Row geometry does not change behind the user's back.** Lazy rows keep their measured
    height when their content unmounts, React keys are derived from intrinsic message fields
    rather than object identity, and `contain-intrinsic-size: auto` lets the browser
@@ -60,9 +61,10 @@ written from five places coordinated by refs and timers rather than by one owner
 
 | File | Role |
 | --- | --- |
-| `src/modules/chat/hooks/useChatSessionState.ts` | Owns the scroll position. All five writers, `isNearBottom`, `handleScroll`, every claim ref, the search jump. |
+| `src/modules/chat/hooks/useChatSessionState.ts` | Owns the scroll position. All six writers, `isNearBottom`, `handleScroll`, every claim ref, the search jump, `revealMessage`. |
 | `src/modules/chat/transcript/ChatMessagesPane.tsx` | Renders the one scrolling element, binds the ref and the wheel/touch handlers it is handed, mounts the newest `INITIAL_MOUNTED_TAIL_ROWS` rows eagerly. |
-| `src/modules/chat/ChatInterface.tsx` | Wires the hook to the pane, passes `handleScroll` as `onWheel`/`onTouchMove`, renders the jump-to-bottom button. |
+| `src/modules/chat/ChatInterface.tsx` | Wires the hook to the pane, passes `handleScroll` as `onWheel`/`onTouchMove`, renders the jump-to-bottom button. When the pinned question bar appears or goes, a following transcript is put back at the bottom before paint. |
+| `src/modules/chat/transcript/PinnedQuestionBar.tsx` | Calls `revealMessage` with `block: 'start'` and `exact` for the turn's question and its inserts; for a question the server named, only once `loadAllMessages` resolves true, at the time its loaded row carries. Writes no `scrollTop` itself. |
 | `src/modules/chat/hooks/useChatComposerState.ts` | `handleSubmit` clears `isUserScrolledUp` and scrolls to the bottom at +100 ms. |
 | `src/modules/chat/transcript/LoadAllMessagesOverlay.tsx` | The "load all" pill that appears when the user reaches the top. |
 | `src/modules/chat/transcript/LazyMessageRow.tsx` | Swaps a row's content for a placeholder of the same measured height, keeping an addressable wrapper. |
@@ -73,6 +75,8 @@ written from five places coordinated by refs and timers rather than by one owner
 | `src/modules/project-workspace/hooks/useVisualViewportKeyboardOffset.ts` | Publishes `--keyboard-height` so the shell shrinks above the iOS keyboard. |
 | `src/shared/ui/ScrollArea.tsx` | **Not used by chat.** `FileTree.tsx` and `SidebarContent.tsx` only. |
 | `src/modules/chat/tests/transcriptScrollOwnership.test.tsx` | Pins the two ownership bugs — the deferred scroll and the cross-session search jump. |
+| `src/modules/chat/tests/revealMessageRetries.test.tsx` | Pins the reveal: its retries, the start alignment and hold, the 1.5 s follow pause, a replaced reveal giving up, an exact reveal never settling. |
+| `src/modules/chat/tests/loadAllMessages.test.tsx` | Pins what `loadAllMessages` resolves: a call during a run sharing it, a failed read or a session change leaving the paging alone. |
 | `src/modules/chat/tests/lazyMessageRow.test.tsx` | Pins placeholder height and the hidden-tab zero-rect case. |
 | `src/modules/chat/tests/searchTargetLocator.test.ts` | Pins snippet-first resolution, the timestamp fallback and the window size. |
 
@@ -86,13 +90,14 @@ flowchart TD
   W3["Tab reactivation restore"] --> PANE
   W4["Initial settle rAF loop"] --> PANE
   W5["Search jump scrollIntoView"] --> PANE
+  W6["revealMessage scrollIntoView or start hold"] --> PANE
   PANE -->|"scroll, wheel, touchmove"| HS["handleScroll"]
   HS --> FLAG["isUserScrolledUp and isUserScrolledUpRef"]
   FLAG --> W1
   FLAG --> W3
 ```
 
-All five are in `useChatSessionState.ts`. A repo-wide grep for `scrollTop =`, `scrollTop +=`,
+All six are in `useChatSessionState.ts`. A repo-wide grep for `scrollTop =`, `scrollTop +=`,
 `scrollIntoView` and `scrollTo(` finds no other transcript writer — the remaining hits are
 the composer's textarea highlight overlay, the command menu and the workspace tab strip.
 
@@ -105,9 +110,10 @@ scroll state.**
 `onWheel={onWheel}`, `onTouchMove={onTouchMove}` and the classes
 `chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden`, then a
 `max-w-[54.25rem]` inner column of rows. The export menu inside it is
-`sticky right-4 top-3`, which is why it stays put while the list moves. The pane is
-`memo`ised, and neither it, `MessageComponent`, nor any tool view reads or writes a scroll
-offset.
+`sticky right-4 top-3`, which is why it stays put while the list moves; while the pinned
+question bar shows, the menu moves into the bar and its sticky row keeps its height. The
+pane is `memo`ised, and neither it, `MessageComponent`, nor any tool view reads or writes a
+scroll offset.
 
 Three row-level scrollers do exist — `BashCommandDisplay.tsx` (`max-h-80 overflow-auto`),
 `FileListContent.tsx` and `AskUserQuestionPanel.tsx` (`max-h-48 overflow-y-auto`). They are
@@ -236,6 +242,9 @@ anything.**
 | External-update refresh (same file, the `externalMessageUpdate` effect, driven by the pane's `externalRevision`) | 200 ms | yes — same guard, and only armed when `isNearBottom()` held before the refetch |
 | Composer send (`useChatComposerState.ts` → `handleSubmit`) | 100 ms | **no** — it sets the flag false itself, then calls `scrollToBottom()` unconditionally |
 
+The two guarded timers, and the follow effect before it arms one, also stand down until
+`revealUntilRef` has passed (see [Revealing one row](#revealing-one-row)).
+
 The first two used to fire unconditionally. Commit `a1a42774` describes the failure:
 scrolling up inside the delay was silently undone, and because a programmatic scroll itself
 emits a `scroll` event, the resulting `handleScroll` reset `isUserScrolledUp` to false and
@@ -292,7 +301,13 @@ flowchart TD
 
 `loadAllMessages` (the overlay's button) takes a different path: it fetches the whole
 transcript with `limit: null`, sets `visibleMessageCount` to `Infinity`, captures a scroll
-anchor first, and shows a green "all loaded" pill for 2500 ms.
+anchor first, and shows a green "all loaded" pill for 2500 ms. It resolves to whether the rows
+came in. A call while one runs gets that run's promise, so a caller that reveals a row afterwards
+waits for the rows. A failed read, which the store hands back as its slot marked `error`, leaves
+`hasMoreMessages` and the window as they were, and so does a read that lands after the chat has
+moved to another session. Switching sessions forgets the run in flight: back on the first
+session, a new call reads again, and the old read resolves to `false` without touching the
+transcript.
 
 ## Restoring position after a prepend
 
@@ -337,6 +352,7 @@ also beats the tab-reactivation restore in the same commit.
 | Returning to the Chat tab | `useLayoutEffect` reactivation branch | — |
 | Older page prepended | `useLayoutEffect` restore branch | `pendingScrollRestoreRef` |
 | Sidebar search hit | `scrollIntoView` retry chain | `searchScrollActiveRef` |
+| Background-task strip or pinned question bar | `revealMessage` retry chain | `revealUntilRef`, a deadline |
 | Expanding a tool view | nothing — pure layout change | — |
 
 ### Opening a session
@@ -430,6 +446,37 @@ Nothing scrolls. There is no `scrollIntoView` anywhere under
 browser's own scroll anchoring absorbs; if the row later unmounts, `LazyMessageRow` records
 the expanded height first.
 
+## Revealing one row
+
+**RULE: a reveal holds the transcript for 1.5 s, and only the latest reveal may move it.**
+
+`revealMessage(message, { block, highlight, exact })` brings one row into view. The
+background-task strip calls it with the defaults; the pinned question bar calls it with
+`block: 'start'`, `highlight: true` and `exact: true` for the turn's question and its inserts.
+It widens the render window to include the row (`visibleCountToReveal`), then looks the row up
+by `data-message-timestamp` once a frame, 11 attempts, the last one accepting the nearest row
+for the same reason as the search jump's `allowNearest`. `exact` turns that off: a user message
+has a row of its own, so the nearest row would be another message, and an exact reveal whose
+row never renders does nothing.
+
+- `center` scrolls the row to the middle with a smooth `scrollIntoView`.
+- `start` is `holdRowAtStart`: it sets `scrollTop` so the row's top sits 8 px under the
+  transcript's top edge, then corrects it once a frame while the rows above settle, because a
+  lazy row that mounts swaps its estimated height for its real one. It stops after 3 still
+  frames or 60 frames, when the transcript cannot move any further, or at the user's first
+  `wheel`, `touchstart`, `pointerdown` or `keydown` anywhere on the page.
+
+Two refs keep it from fighting the other writers:
+
+- **`revealUntilRef`** — every call sets it 1.5 s ahead (`REVEAL_FOLLOW_PAUSE_MS`). Until then
+  the append-follow effect, its 50 ms timer and the external-update timer leave the bottom
+  alone. The call also clears `pendingInitialScrollRef`, so an initial settle still running
+  stops.
+- **`revealCountRef`** — every call and every session change bumps it. The pending attempts of
+  an older reveal see the new number and give up, so a replaced reveal never scrolls later and
+  none follows the user into the next session. The session change also stops a running hold
+  and resets `revealUntilRef`.
+
 ## Lazy rows and height stability
 
 **RULE: unmounting a row's content must not change the scroll geometry.**
@@ -488,8 +535,9 @@ expanding or a code block finishing highlighting.
 | `--keyboard-height` from `visualViewport.resize` | `useVisualViewportKeyboardOffset.ts` | `ProjectWorkspaceShell.tsx` applies it as `style={{ bottom: 'var(--keyboard-height, 0px)' }}`, so the fixed shell shrinks above the iOS keyboard instead of being covered by it. |
 | `@media (prefers-reduced-motion: reduce) { scroll-behavior: auto !important; }` | `src/index.css` | The only `scroll-behavior` declaration in the repo. Nothing sets `smooth` in CSS. |
 
-`scrollToBottom` is an instant `scrollTop = scrollHeight` assignment. The only smooth scroll
-in the transcript is the search jump's explicit `behavior: 'smooth'`.
+`scrollToBottom` is an instant `scrollTop = scrollHeight` assignment. The only smooth scrolls
+in the transcript are the explicit `behavior: 'smooth'` of the search jump and of a centred
+`revealMessage`.
 
 The pane's bottom padding switches between `pb-12 sm:pb-14` and `pb-3 sm:pb-4` depending on
 `hasActivityIndicator` — the composer's floating activity/stop tab overlaps the pane, so the
@@ -568,9 +616,11 @@ a scroll event.
 | `getIntrinsicMessageKey` or the key map in `ChatMessagesPane` | The prepend restore needs the anchor element to survive; unstable keys remount rows and drop it to the height-delta fallback. |
 | `LazyMessageRow` placeholder height, the `.chat-message` class placement, or the 1200 px observer margin | Prepend anchor scan, search-jump row lookup, and `lazyMessageRow.test.tsx`. |
 | `SEARCH_SCROLL_RETRIES`, the retry delay, or `findRenderedMessageElement` | The cross-session cancellation test and `searchTargetLocator.test.ts`; `allowNearest` must stay on the final attempt only. |
+| `revealMessage`, its start hold or the 1.5 s pause | `revealMessageRetries.test.tsx`. The follow effect and both guarded timers read `revealUntilRef`; a session change must reset it and bump `revealCountRef`. |
+| `loadAllMessages` or what it resolves | `loadAllMessages.test.tsx` and `pinnedQuestionJump.test.tsx`: the pinned question bar reveals a question the server named only once it resolves true. |
 | `.chat-message` containment or `content-visibility` | The export override in `buildTranscriptHtml.tsx` mirrors these declarations. |
 | Session load or pagination in `useChatSessionState.ts` | `pendingScrollRestoreRef`, `pendingInitialScrollRef`, `searchScrollActiveRef`, `topLoadLockRef` and `wasNearTopRef` are all handled by the session-change effect — see [the message store](./04-message-store-and-lazy-loading.md). |
 | Composer send or the activity indicator | `handleSubmit` forces `isUserScrolledUp` false and scrolls unconditionally at +100 ms; the indicator changes the pane's padding without a scroll event. |
-| Tool card expand/collapse | Nothing scrolls today — see [tool views](./06-tool-view.md). Adding a `scrollIntoView` there adds a sixth writer with no claim ref. |
+| Tool card expand/collapse | Nothing scrolls today — see [tool views](./06-tool-view.md). Adding a `scrollIntoView` there adds a seventh writer with no claim ref. |
 
 Related: [the realtime stream](./02-realtime-stream.md) for how rows arrive.

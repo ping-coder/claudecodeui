@@ -140,6 +140,37 @@ function resolveProjectDisplayName(
 }
 
 /**
+ * Whether a history row opens a turn, making it the question the pinned
+ * question bar shows for every row up to the next one: user text with
+ * something to show, other than a message inserted into a running turn, a
+ * compaction row or its summary, or a `<task-notification>` the CLI injected.
+ *
+ * Mirrors the client, where a row opens a turn when `normalizedToChatMessages`
+ * (src/modules/chat/hooks/useChatMessages.ts) draws it as a user row and
+ * `isTurnOpener` (src/shared/utils.ts) accepts that row. The client looks for
+ * the question among the rows it has loaded and asks the server only when it
+ * is older than all of them, so a rule that differed here would change the
+ * question with how far the pane had paged back.
+ */
+function isTurnQuestion(message: NormalizedMessage): boolean {
+  if (message.kind !== 'text' || message.role !== 'user' || message.inserted) {
+    return false;
+  }
+  if (message.compact || message.isCompactSummary) {
+    return false;
+  }
+
+  const content = message.content || '';
+  if (content.trimStart().startsWith('<task-notification>')) {
+    return false;
+  }
+
+  const hasAttachments = (Array.isArray(message.images) && message.images.length > 0)
+    || (Array.isArray(message.files) && message.files.length > 0);
+  return content.trim().length > 0 || hasAttachments;
+}
+
+/**
  * Application service for provider-backed session message operations.
  *
  * Callers pass a provider id and this service resolves the concrete provider
@@ -586,6 +617,46 @@ export const sessionsService = {
         sessionId,
       })),
     };
+  },
+
+  /**
+   * Finds the question that opened the turn a history row belongs to: the
+   * nearest row before it that `isTurnQuestion` accepts, as `fetchHistory`
+   * returns it.
+   *
+   * Backs GET /api/providers/sessions/:sessionId/turn-question, which the
+   * pinned question bar calls when the oldest row a pane has loaded is in the
+   * middle of a turn whose question is on an older page. One read of the full
+   * history answers that without paging back to it, and for Claude and Codex
+   * that read is the cached transcript the history pages are sliced from.
+   *
+   * The row is named by `beforeId`. A row the provider keeps no id for (a
+   * Claude row without a `uuid`, most Codex rows) is given a fresh one on every
+   * parse, so once the transcript changes the id a client read earlier is gone.
+   * `at`, the row's timestamp in epoch milliseconds, stands in then: the first
+   * row stamped at or after it. Returns null when neither finds the row or no
+   * question comes before it.
+   */
+  async findTurnQuestion(
+    sessionId: string,
+    { beforeId, at }: { beforeId: string; at?: number },
+  ): Promise<NormalizedMessage | null> {
+    const { messages } = await sessionsService.fetchHistory(sessionId, { limit: null });
+
+    let anchorIndex = messages.findIndex((message) => message.id === beforeId);
+    if (anchorIndex === -1 && at !== undefined) {
+      anchorIndex = messages.findIndex((message) => Date.parse(message.timestamp) >= at);
+    }
+    if (anchorIndex === -1) {
+      return null;
+    }
+
+    for (let index = anchorIndex - 1; index >= 0; index -= 1) {
+      if (isTurnQuestion(messages[index])) {
+        return messages[index];
+      }
+    }
+    return null;
   },
 
   /**

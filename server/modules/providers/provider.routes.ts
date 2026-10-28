@@ -452,6 +452,44 @@ const parseBoundedIntegerQuery = <T extends number | null>(
   return parsed;
 };
 
+/** Far above any provider's row id, which is a uuid or a few joined together. */
+const MAX_TURN_QUESTION_ROW_ID_LENGTH = 300;
+
+/**
+ * Reads the `before` row id of a turn-question request. It is only compared
+ * for equality with the ids of history rows, so beyond being a short string of
+ * printable characters its shape is not checked, and it is used as sent.
+ */
+const parseTurnQuestionRowId = (value: unknown): string => {
+  const rowId = typeof value === 'string' ? value : '';
+  if (!rowId.trim() || rowId.length > MAX_TURN_QUESTION_ROW_ID_LENGTH || /\p{Cc}/u.test(rowId)) {
+    throw new AppError(
+      `before must be a row id of at most ${MAX_TURN_QUESTION_ROW_ID_LENGTH} printable characters.`,
+      {
+        code: 'INVALID_QUERY_PARAMETER',
+        statusCode: 400,
+      },
+    );
+  }
+
+  return rowId;
+};
+
+/**
+ * Reads the optional `at` timestamp of a turn-question request as epoch
+ * milliseconds. One that does not parse counts as not sent: `at` is only the
+ * fallback for a row id the history no longer has.
+ */
+const parseOptionalTimestampQuery = (value: unknown): number | undefined => {
+  const raw = readOptionalQueryString(value);
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? undefined : parsed;
+};
+
 const parseSessionModelPayload = (payload: unknown): string => {
   if (!payload || typeof payload !== 'object') {
     throw new AppError('Request body must be an object.', {
@@ -1065,6 +1103,24 @@ router.get(
       offset,
     });
     res.json(createApiSuccessResponse(result));
+  }),
+);
+
+/**
+ * The question that opened the turn a history row belongs to, for the pinned
+ * question bar when it is older than every page the pane has loaded. `before`
+ * names the row by id, and `at`, the row's timestamp, finds it once that id is
+ * gone (see `sessionsService.findTurnQuestion`). `question` is null when
+ * neither finds the row or no question comes before it.
+ */
+router.get(
+  '/sessions/:sessionId/turn-question',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const beforeId = parseTurnQuestionRowId(req.query.before);
+    const at = parseOptionalTimestampQuery(req.query.at);
+    const question = await sessionsService.findTurnQuestion(sessionId, { beforeId, at });
+    res.json(createApiSuccessResponse({ question }));
   }),
 );
 

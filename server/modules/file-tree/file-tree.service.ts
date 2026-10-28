@@ -2,9 +2,11 @@ import path from 'node:path';
 
 import ignore from 'ignore';
 
+import { createFileSearchScorer } from '@/modules/file-tree/file-search-score.service.js';
 import type {
   FileTreeDirectoryEntry,
   FileTreeNode,
+  FileTreeSearchMatch,
   FileTreeServiceDependencies,
   FileTreeServices,
   FileTreeUploadedFile,
@@ -53,6 +55,23 @@ const MAXIMUM_FILE_TREE_ENTRIES = 10_000;
 // can never make a project that lists today too large to open.
 const MAXIMUM_IGNORED_FILE_TREE_ENTRIES = 2_000;
 
+// How many levels below the root a project listing walks; the project file
+// search walks as deep, so it finds the files the listing would hold.
+const MAXIMUM_PROJECT_TREE_DEPTH = 10;
+
+// The project file search reads at most this many directory entries, hidden
+// ones included, and stops after this long. It keeps only the best matches
+// rather than the tree, so it can afford ten times the listing's entries.
+const MAXIMUM_FILE_SEARCH_ENTRIES = 100_000;
+const FILE_SEARCH_TIME_LIMIT_MS = 2_000;
+
+// How long the project file search works at a stretch before it lets the rest
+// of the server run, which is also when it hears that its request was aborted.
+const FILE_SEARCH_SLICE_MS = 10;
+
+// Most matches one search returns; the command palette renders at most 100.
+const MAXIMUM_FILE_SEARCH_RESULTS = 200;
+
 // `visible` entries are listed and walked, `ignored` ones are listed but never
 // walked, `hidden` ones are left out of the tree entirely.
 type FileTreeEntryVisibility = 'visible' | 'ignored' | 'hidden';
@@ -63,6 +82,36 @@ type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => FileTree
 // so the caps apply to the whole tree rather than per directory.
 type FileTreeEntryBudget = { visible: number; ignored: number };
 
+// One project file search in progress, shared by all of its directory reads:
+// what is left of its entry budget, when it has to stop, whether it has
+// stopped early, which makes its result incomplete, and when its current
+// slice of work ends (see waitForNextSlice).
+type FileSearchWalk = {
+  remainingEntries: number;
+  deadline: number;
+  signal?: AbortSignal;
+  stoppedEarly: boolean;
+  sliceEnd: number;
+  nextSlice: Promise<void> | null;
+};
+
+// A directory the search has yet to read, and its path from the project root.
+type FileSearchDirectory = { path: string; relativePath: string };
+
+// An entry of a directory the search read, as the listing would show it.
+type FileSearchEntry = { name: string; isDirectory: boolean; isIgnored: boolean };
+
+// A match and what ranks it: the score, then the order the palette breaks ties
+// in, which is its listing order: shallowest first, then by the position of
+// the directory in its level, then by the file's name, as a listing orders the
+// files of a directory.
+type RankedFileSearchMatch = {
+  match: FileTreeSearchMatch;
+  score: number;
+  depth: number;
+  directoryIndex: number;
+};
+
 function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): FileTreeEntryVisibility {
   return isDirectory && HARD_EXCLUDED_DIRECTORY_NAMES.has(path.basename(entryPath)) ? 'hidden' : 'visible';
 }
@@ -70,6 +119,38 @@ function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): 
 // IGNORED_DIRECTORY_NAMES includes the hard exclusions, so one lookup covers both.
 function includeEntryByFallbackDirectoryNames(entryPath: string, isDirectory: boolean): FileTreeEntryVisibility {
   return isDirectory && IGNORED_DIRECTORY_NAMES.has(path.basename(entryPath)) ? 'hidden' : 'visible';
+}
+
+// Pseudo-filesystems and other system-critical directories (e.g. /proc, /sys)
+// are never walked: they are never valid project roots, and /proc in particular
+// can contain thousands of virtual entries that make traversal from a broad
+// root (e.g. "/") pathologically slow.
+function isForbiddenSystemDirectory(directoryPath: string): boolean {
+  return FORBIDDEN_WORKSPACE_PATHS.includes(normalizeProjectPath(directoryPath));
+}
+
+// The order a listing shows a directory in: directories first, then by name.
+// The project file search ranks equal scores in this order too, because the
+// palette breaks ties in listing order.
+function compareListingOrder(
+  leftIsDirectory: boolean,
+  leftName: string,
+  rightIsDirectory: boolean,
+  rightName: string,
+): number {
+  if (leftIsDirectory !== rightIsDirectory) {
+    return leftIsDirectory ? -1 : 1;
+  }
+  return leftName.localeCompare(rightName);
+}
+
+// Matches are files only, so their names alone give their order in a
+// directory: the search never sorts a directory's files.
+function compareRankedMatches(left: RankedFileSearchMatch, right: RankedFileSearchMatch): number {
+  return right.score - left.score
+    || left.depth - right.depth
+    || left.directoryIndex - right.directoryIndex
+    || compareListingOrder(false, left.match.name, false, right.match.name);
 }
 
 function createFileTreeError(message: string, statusCode: number, code: string): AppError {
@@ -339,15 +420,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         // Metadata failures should not hide an otherwise readable tree entry.
       }
 
-      // Skip recursing into pseudo-filesystems and other system-critical
-      // directories (e.g. /proc, /sys) — they're never valid project roots,
-      // and /proc in particular can contain thousands of virtual entries
-      // that make traversal from a broad root (e.g. "/") pathologically slow.
-      const isForbiddenSystemDir = FORBIDDEN_WORKSPACE_PATHS.includes(normalizeProjectPath(itemPath));
-
       // An ignored directory is listed but never walked: its contents would
       // cost directory reads and budget for rows the explorer does not open.
-      if (entry.isDirectory() && !isIgnored && currentDepth < maximumDepth && !isForbiddenSystemDir) {
+      if (entry.isDirectory() && !isIgnored && currentDepth < maximumDepth && !isForbiddenSystemDirectory(itemPath)) {
         item.children = await buildFileTree(
           itemPath,
           maximumDepth,
@@ -360,12 +435,120 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       return item;
     }));
 
-    return items.sort((left, right) => {
-      if (left.type !== right.type) {
-        return left.type === 'directory' ? -1 : 1;
-      }
-      return left.name.localeCompare(right.name);
+    return items.sort((left, right) => compareListingOrder(
+      left.type === 'directory',
+      left.name,
+      right.type === 'directory',
+      right.name,
+    ));
+  }
+
+  // Whether the project file search has to stop: it already has, its time is
+  // up or its request was aborted.
+  function hasFileSearchRunOut(walk: FileSearchWalk): boolean {
+    return walk.stoppedEarly || walk.signal?.aborted === true || dependencies.now() >= walk.deadline;
+  }
+
+  /**
+   * The next slice of the project file search's time, which starts on a later
+   * turn of the event loop. The reads of one search share their slices: once
+   * one is used up they all wait for the same next one, and each checks the
+   * clock again before going on, so however many run at once, the search holds
+   * up the rest of the server for one slice of FILE_SEARCH_SLICE_MS at a time.
+   * Awaited directly by the code that does the work: returning from an async
+   * function in between would let every read pass that check first.
+   */
+  function waitForNextSlice(walk: FileSearchWalk): Promise<void> {
+    walk.nextSlice ??= new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    }).then(() => {
+      walk.nextSlice = null;
+      walk.sliceEnd = dependencies.now() + FILE_SEARCH_SLICE_MS;
     });
+    return walk.nextSlice;
+  }
+
+  /**
+   * Reads one directory for the project file search: yields the entries a
+   * listing would show, in the order the directory gives them, each flagged
+   * with whether it is gitignored.
+   *
+   * Every entry read is charged to the walk's budget, hidden ones included,
+   * since reading is the cost being capped. An entry that arrives once the
+   * budget is spent, the deadline has passed or the request was aborted stops
+   * the read and marks the walk as stopped early. Before each entry the read
+   * waits if the walk has used up its slice (see waitForNextSlice), so the
+   * time the caller takes over an entry counts against the slice and the time
+   * limit alike. A directory that cannot be read gives nothing, as in a
+   * listing; one that fails part way has given the entries before.
+   */
+  async function* readFileSearchEntries(
+    directoryPath: string,
+    includeEntry: FileTreeEntryFilter,
+    walk: FileSearchWalk,
+  ): AsyncGenerator<FileSearchEntry> {
+    await acquire();
+    try {
+      // Checked again once a slot is free: the walk may have run out while
+      // this read waited for one.
+      if (hasFileSearchRunOut(walk)) {
+        walk.stoppedEarly = true;
+        return;
+      }
+      for await (const entry of fileSystem.openDirectory(directoryPath)) {
+        while (dependencies.now() >= walk.sliceEnd) {
+          await waitForNextSlice(walk);
+        }
+        if (walk.remainingEntries <= 0 || hasFileSearchRunOut(walk)) {
+          walk.stoppedEarly = true;
+          break;
+        }
+        walk.remainingEntries -= 1;
+        const isDirectory = entry.isDirectory();
+        const visibility = includeEntry(path.join(directoryPath, entry.name), isDirectory);
+        if (visibility !== 'hidden') {
+          yield { name: entry.name, isDirectory, isIgnored: visibility === 'ignored' };
+        }
+      }
+    } catch (error) {
+      // What the caller throws over an entry ends the read without landing here.
+      const errorCode = readErrorCode(error);
+      if (errorCode !== 'EACCES' && errorCode !== 'EPERM') {
+        dependencies.logger.error(`Error reading directory "${directoryPath}"`, error);
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The entry filter of a listing that respects the project root's
+   * `.gitignore`, or undefined when there is none, which leaves the listing to
+   * the conventional build and cache folder names.
+   */
+  async function readGitignoreEntryFilter(
+    projectRoot: string,
+    markIgnored: boolean,
+  ): Promise<FileTreeEntryFilter | undefined> {
+    try {
+      const gitignoreContent = await fileSystem.readTextFile(path.join(projectRoot, '.gitignore'));
+      return createGitignoreEntryFilter(projectRoot, gitignoreContent, markIgnored);
+    } catch (error) {
+      if (readErrorCode(error) !== 'ENOENT') {
+        dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);
+      }
+      return undefined;
+    }
+  }
+
+  async function resolveExistingProjectRoot(projectId: string): Promise<string> {
+    const projectRoot = await resolveProjectRoot(projectId);
+    try {
+      await fileSystem.access(projectRoot);
+    } catch {
+      throw createFileTreeError(`Project path not found: ${projectRoot}`, 404, 'PROJECT_PATH_NOT_FOUND');
+    }
+    return projectRoot;
   }
 
   /**
@@ -559,26 +742,99 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     },
 
     async listProjectFiles(projectId, options) {
-      const projectRoot = await resolveProjectRoot(projectId);
-      try {
-        await fileSystem.access(projectRoot);
-      } catch {
-        throw createFileTreeError(`Project path not found: ${projectRoot}`, 404, 'PROJECT_PATH_NOT_FOUND');
-      }
+      const projectRoot = await resolveExistingProjectRoot(projectId);
+      const includeEntry = options?.respectGitignore
+        ? await readGitignoreEntryFilter(projectRoot, options.markIgnored === true)
+        : undefined;
 
-      let includeEntry: FileTreeEntryFilter | undefined;
-      if (options?.respectGitignore) {
-        try {
-          const gitignoreContent = await fileSystem.readTextFile(path.join(projectRoot, '.gitignore'));
-          includeEntry = createGitignoreEntryFilter(projectRoot, gitignoreContent, options.markIgnored === true);
-        } catch (error) {
-          if (readErrorCode(error) !== 'ENOENT') {
-            dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);
+      return buildFileTree(projectRoot, MAXIMUM_PROJECT_TREE_DEPTH, 0, includeEntry);
+    },
+
+    async searchProjectFiles(projectId, input) {
+      const projectRoot = await resolveExistingProjectRoot(projectId);
+      // The command palette's listing: gitignored entries marked, not hidden.
+      const includeEntry = await readGitignoreEntryFilter(projectRoot, true)
+        ?? includeEntryByFallbackDirectoryNames;
+      const limit = Number.isFinite(input.limit)
+        ? Math.min(Math.max(Math.floor(input.limit), 1), MAXIMUM_FILE_SEARCH_RESULTS)
+        : MAXIMUM_FILE_SEARCH_RESULTS;
+      const scoreRelativePath = createFileSearchScorer(projectRoot, input.query);
+      const startedAt = dependencies.now();
+      const walk: FileSearchWalk = {
+        remainingEntries: MAXIMUM_FILE_SEARCH_ENTRIES,
+        deadline: startedAt + FILE_SEARCH_TIME_LIMIT_MS,
+        signal: input.signal,
+        stoppedEarly: false,
+        sliceEnd: startedAt + FILE_SEARCH_SLICE_MS,
+        nextSlice: null,
+      };
+
+      let bestMatches: RankedFileSearchMatch[] = [];
+      let totalMatches = 0;
+      // One level at a time, so a walk that stops early has covered the
+      // shallow files, which the palette prefers on equal scores, first.
+      let level: FileSearchDirectory[] = [{ path: projectRoot, relativePath: '' }];
+      for (let depth = 0; level.length > 0 && !walk.stoppedEarly; depth += 1) {
+        const subdirectoriesByDirectory = await Promise.all(level.map(async (directory, directoryIndex) => {
+          const subdirectoryNames: string[] = [];
+          // Each file is scored as it is read, so scoring is timed with the walk.
+          for await (const entry of readFileSearchEntries(directory.path, includeEntry, walk)) {
+            const entryPath = path.join(directory.path, entry.name);
+            if (entry.isDirectory) {
+              // Walked as a listing walks them: an ignored directory is never
+              // opened, and neither is one past the depth or a system directory.
+              if (!entry.isIgnored && depth < MAXIMUM_PROJECT_TREE_DEPTH && !isForbiddenSystemDirectory(entryPath)) {
+                subdirectoryNames.push(entry.name);
+              }
+              continue;
+            }
+
+            // Checked again right before scoring, the costly part: the read checks
+            // before handing over an entry, but other reads of the walk may score
+            // theirs in between.
+            if (dependencies.now() >= walk.sliceEnd) {
+              do {
+                await waitForNextSlice(walk);
+              } while (dependencies.now() >= walk.sliceEnd);
+              if (hasFileSearchRunOut(walk)) {
+                walk.stoppedEarly = true;
+                break;
+              }
+            }
+            const relativePath = directory.relativePath ? `${directory.relativePath}/${entry.name}` : entry.name;
+            const score = scoreRelativePath(relativePath);
+            if (score <= 0) {
+              continue;
+            }
+            totalMatches += 1;
+            bestMatches.push({
+              match: { name: entry.name, path: entryPath, relativePath, isIgnored: entry.isIgnored },
+              score,
+              depth,
+              directoryIndex,
+            });
+            // Cut back to the best `limit` now and then rather than kept sorted.
+            if (bestMatches.length >= limit * 2) {
+              bestMatches = bestMatches.sort(compareRankedMatches).slice(0, limit);
+            }
           }
-        }
+          // In listing order, which ranks the files of the next level.
+          return subdirectoryNames
+            .sort((left, right) => compareListingOrder(true, left, true, right))
+            .map((name) => ({
+              path: path.join(directory.path, name),
+              relativePath: directory.relativePath ? `${directory.relativePath}/${name}` : name,
+            }));
+        }));
+        // Concatenated in level order, which is the next level's listing order.
+        level = subdirectoriesByDirectory.flat();
       }
 
-      return buildFileTree(projectRoot, 10, 0, includeEntry);
+      return {
+        files: bestMatches.sort(compareRankedMatches).slice(0, limit).map(({ match }) => match),
+        totalMatches,
+        incomplete: walk.stoppedEarly,
+      };
     },
 
     async createEntry(input) {

@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { useSetUiPreference, useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { Button } from '@/shared/ui';
 import { playChatCompletionSound } from '@/shared/utils';
-import type { NotificationPreferencesState, NotificationPreferencesStatus } from '@/shared/types';
+import type { NotificationPreferencesState, NotificationPreferencesStatus, PushSubscribeOutcome } from '@/shared/types';
 import SettingsToggle from '@/modules/settings/SettingsToggle';
 
 type NotificationsSettingsTabProps = {
@@ -17,6 +17,8 @@ type NotificationsSettingsTabProps = {
   pushPermission: NotificationPermission | 'unsupported';
   isPushSubscribed: boolean;
   isPushLoading: boolean;
+  /** Why the last attempt to turn push on failed, said under its button; null when it did not fail. */
+  pushSubscribeFailure?: Exclude<PushSubscribeOutcome, 'subscribed'> | null;
   onEnablePush: () => void;
   onDisablePush: () => void;
   /** Asks the browser for notification permission; must be the first async step of the click that calls it. */
@@ -67,6 +69,7 @@ export default function NotificationsSettingsTab({
   pushPermission,
   isPushSubscribed,
   isPushLoading,
+  pushSubscribeFailure = null,
   onEnablePush,
   onDisablePush,
   onRequestNotificationPermission,
@@ -93,6 +96,26 @@ export default function NotificationsSettingsTab({
     && notificationPreferences.channels.webPush
     && notificationPreferences.events.stop
     && notificationPreferences.events.error;
+
+  const pushDeniedNote = t('notifications.webPush.denied', {
+    defaultValue: "Push notifications are blocked for this site. Allow notifications in the browser's site settings, then reopen Settings.",
+  });
+  // A failed attempt leaves the button as it was, so the reason shows under it. A refused prompt
+  // also turns the permission to 'denied', which replaces the button with the same note.
+  let pushFailureNote: string | null = null;
+  if (pushSubscribeFailure === 'denied') {
+    pushFailureNote = pushDeniedNote;
+  } else if (pushSubscribeFailure === 'dismissed') {
+    pushFailureNote = t('notifications.webPush.dismissed', {
+      defaultValue: 'Notifications were not allowed. Click Enable notifications again and choose Allow when the browser asks.',
+    });
+  } else if (pushSubscribeFailure === 'unsupported') {
+    pushFailureNote = t('notifications.webPush.unsupported');
+  } else if (pushSubscribeFailure === 'failed') {
+    pushFailureNote = t('notifications.webPush.failed', {
+      defaultValue: "Couldn't turn on push notifications for this browser. Try again later.",
+    });
+  }
 
   const soundLabel = t('notifications.sound.title', { defaultValue: 'Sound' });
   const bannerLabel = t('notifications.page.banner.title', { defaultValue: 'Banner' });
@@ -296,42 +319,47 @@ export default function NotificationsSettingsTab({
           {!pushSupported ? (
             <p className="text-sm text-muted-foreground">{t('notifications.webPush.unsupported')}</p>
           ) : pushDenied ? (
-            <p className="text-sm text-muted-foreground">{t('notifications.webPush.denied')}</p>
+            <p className="text-sm text-muted-foreground">{pushDeniedNote}</p>
           ) : (
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                disabled={isPushLoading}
-                onClick={() => {
-                  if (isPushSubscribed) {
-                    onDisablePush();
-                  } else {
-                    onEnablePush();
-                  }
-                }}
-                className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                  isPushSubscribed
-                    ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50'
-                    : 'bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-                }`}
-              >
-                {isPushLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : isPushSubscribed ? (
-                  <BellOff className="h-4 w-4" />
-                ) : (
-                  <BellRing className="h-4 w-4" />
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={isPushLoading}
+                  onClick={() => {
+                    if (isPushSubscribed) {
+                      onDisablePush();
+                    } else {
+                      onEnablePush();
+                    }
+                  }}
+                  className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isPushSubscribed
+                      ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50'
+                      : 'bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
+                  }`}
+                >
+                  {isPushLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : isPushSubscribed ? (
+                    <BellOff className="h-4 w-4" />
+                  ) : (
+                    <BellRing className="h-4 w-4" />
+                  )}
+                  {isPushLoading
+                    ? t('notifications.webPush.loading')
+                    : isPushSubscribed
+                      ? t('notifications.webPush.disable')
+                      : t('notifications.webPush.enable')}
+                </button>
+                {isPushSubscribed && (
+                  <span className="text-sm text-green-600 dark:text-green-400">
+                    {t('notifications.webPush.enabled')}
+                  </span>
                 )}
-                {isPushLoading
-                  ? t('notifications.webPush.loading')
-                  : isPushSubscribed
-                    ? t('notifications.webPush.disable')
-                    : t('notifications.webPush.enable')}
-              </button>
-              {isPushSubscribed && (
-                <span className="text-sm text-green-600 dark:text-green-400">
-                  {t('notifications.webPush.enabled')}
-                </span>
+              </div>
+              {pushFailureNote && !isPushSubscribed && !isPushLoading && (
+                <p className="text-sm text-red-600 dark:text-red-400">{pushFailureNote}</p>
               )}
             </div>
           )}

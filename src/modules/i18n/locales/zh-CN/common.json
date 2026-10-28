@@ -381,7 +381,9 @@
     "switchTo": "切换到：{{name}}",
     "filesShownOf": "显示 {{total}} 个文件中的 {{shown}} 个，输入关键词查找其余文件。",
     "filesBestMatches": "只显示最相关的 {{shown}} 个结果，继续输入可缩小范围。",
-    "filesTooLarge": "项目超过 10,000 个条目，这里不列出文件。可以把更小的目录作为项目打开，或在根目录的 .gitignore 里忽略构建产物。"
+    "filesTooLarge": "项目超过 10,000 个条目，这里不列出文件。可以把更小的目录作为项目打开，或在根目录的 .gitignore 里忽略构建产物。",
+    "filesSearching": "正在搜索文件…",
+    "filesSearchIncomplete": "项目太大，只搜索了一部分，可能漏掉一些文件。可以把更小的目录作为项目打开，或在根目录的 .gitignore 里忽略构建产物。"
   },
   "misc": {
     "projectFallback": "项目",

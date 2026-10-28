@@ -184,3 +184,29 @@ test('a plan the runtime fails to make refuses the send rather than risk the wor
     assert.deepEqual(socket.frames.map((frame) => [frame.kind, frame.changes]), [['send_refused', ['lookup']]]);
   });
 });
+
+test('the refusal hands back the send\'s clientRequestId, and leaves out one that is missing or out of pattern', async () => {
+  const { runtime, runs } = createGateway(async () => ({ heldWork: true, canHandOver: false, changes: ['effort'], switches: [] }));
+  await withChat(runtime, async ({ socket }) => {
+    // Two panes of one page send over the same socket, then a send with no
+    // id (a page from before ids) and sends with ids the gateway will not echo.
+    const clientRequestIds: unknown[] = ['send_mf3k2_a1b2c3', 'send_mf3k2_d4e5f6', undefined, 'not an id', 'x'.repeat(129), 42];
+    for (const clientRequestId of clientRequestIds) {
+      socket.emit('message', JSON.stringify({
+        type: 'chat.send',
+        sessionId: SESSION_ID,
+        content: 'and now the docs',
+        options: { effort: 'max', keepBackgroundWork: true },
+        clientRequestId,
+      }));
+    }
+    await settle();
+
+    assert.deepEqual(runs, []);
+    const refusals = socket.frames.filter((frame) => frame.kind === 'send_refused');
+    assert.deepEqual(
+      refusals.map((frame) => ('clientRequestId' in frame ? frame.clientRequestId : 'none')),
+      ['send_mf3k2_a1b2c3', 'send_mf3k2_d4e5f6', 'none', 'none', 'none', 'none'],
+    );
+  });
+});

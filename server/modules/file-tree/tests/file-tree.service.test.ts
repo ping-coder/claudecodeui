@@ -11,6 +11,7 @@ import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js'
 import type {
   FileTreeDirectoryEntry,
   FileTreeFileSystem,
+  FileTreeNode,
   FileTreeServiceDependencies,
   FileTreeServices,
   FileTreeStats,
@@ -92,6 +93,8 @@ function createDependencies(
     resolveMimeType: () => 'text/plain',
     fileSystemConcurrency: 4,
     logger: { error: () => undefined },
+    // Time stands still unless a test moves it.
+    now: () => 0,
   };
 }
 
@@ -580,6 +583,7 @@ function createRealFileSystemService(projectRoot: string, workspaceRoot = projec
     resolveMimeType: () => 'text/plain',
     fileSystemConcurrency: 4,
     logger: { error: () => undefined },
+    now: () => performance.now(),
   });
 }
 
@@ -717,6 +721,570 @@ test('a file in another folder of the workspace can be read, but never written t
     );
   } finally {
     await fsPromises.rm(workspaceRoot, { recursive: true, force: true });
+    await fsPromises.rm(outsideDirectory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The files the command palette collects from a listing, as its files source
+ * does: one tree level at a time, each level in listing order.
+ */
+function collectPaletteFiles(tree: FileTreeNode[]): Array<[string, boolean]> {
+  const files: Array<[string, boolean]> = [];
+  let level = tree.map((node) => ({ node, relativePath: node.name }));
+  while (level.length > 0) {
+    const nextLevel: typeof level = [];
+    for (const { node, relativePath } of level) {
+      if (node.type === 'file') {
+        files.push([relativePath, node.isIgnored === true]);
+      } else {
+        for (const child of node.children ?? []) {
+          nextLevel.push({ node: child, relativePath: `${relativePath}/${child.name}` });
+        }
+      }
+    }
+    level = nextLevel;
+  }
+  return files;
+}
+
+/**
+ * A fake filesystem serving a tree described as `relative/path/` (directory)
+ * and `relative/path` (file) entries per directory, listed out of order on
+ * purpose, plus the given `.gitignore`.
+ */
+function createTreeFileSystem(
+  projectRoot: string,
+  directories: Record<string, string[]>,
+  gitignore: string | null,
+  overrides: Partial<FileTreeFileSystem> = {},
+): FileTreeFileSystem {
+  return createFakeFileSystem({
+    access: async () => undefined,
+    readTextFile: async (filePath) => {
+      assert.equal(filePath, path.join(projectRoot, '.gitignore'));
+      if (gitignore === null) {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      return gitignore;
+    },
+    openDirectory: createDirectoryReader((directoryPath) => {
+      const relativeDirectory = path.relative(projectRoot, directoryPath).split(path.sep).join('/');
+      return (directories[relativeDirectory] ?? []).map((name) => (
+        createDirectoryEntry(name.replace(/\/$/, ''), name.endsWith('/'))
+      ));
+    }),
+    lstat: async () => createStats(false, 0o644),
+    ...overrides,
+  });
+}
+
+// Every listing rule at once: always-hidden folders, gitignored files (listed,
+// marked) and folders (listed, never walked), gitignored build folders and OS
+// clutter (hidden), a negated pattern, and a chain deeper than a listing goes.
+const SEARCH_TREE: Record<string, string[]> = {
+  '': [
+    'zebra.md', 'src/', 'CLAUDE.md', '.git/', 'node_modules/', '.claude/', 'dist/',
+    'docs/', 'AGENTS.md', 'debug.log', 'keep.log', '.DS_Store', 'deep/',
+  ],
+  '.git': ['HEAD'],
+  node_modules: ['left-pad.js'],
+  '.claude': ['settings.json'],
+  dist: ['bundle.js'],
+  src: ['index.ts', 'components/', 'generated.ts'],
+  'src/components': ['Button.tsx', '.DS_Store', 'Alert.tsx'],
+  docs: ['guide.md'],
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, depth) => {
+    const directory = ['deep', ...Array.from({ length: depth }, (_unused, index) => `d${index + 1}`)].join('/');
+    return [directory, [`level-${depth + 1}.txt`, `d${depth + 1}/`]];
+  })),
+};
+
+const SEARCH_GITIGNORE = ['CLAUDE.md', '.claude/', 'dist/', '*.log', '!keep.log', 'src/generated.ts', '.DS_Store'].join('\n');
+
+test('searchProjectFiles finds the files the palette lists, in listing order on equal scores', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const readDirectories: string[] = [];
+  const fileSystem = createTreeFileSystem(projectRoot, SEARCH_TREE, SEARCH_GITIGNORE);
+  const listDirectory = fileSystem.openDirectory;
+  fileSystem.openDirectory = (directoryPath) => {
+    readDirectories.push(path.relative(projectRoot, directoryPath).split(path.sep).join('/'));
+    return listDirectory(directoryPath);
+  };
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const listed = collectPaletteFiles(
+    await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true }),
+  );
+  readDirectories.length = 0;
+  // The root itself, as a pasted path: read relative to the root it is empty, so every file
+  // matches alike and the order left is the listing's.
+  const found = await service.searchProjectFiles('project-1', { query: `${projectRoot}${path.sep}`, limit: 200 });
+
+  assert.deepEqual(found.files.map((file) => [file.relativePath, file.isIgnored]), listed);
+  assert.equal(found.totalMatches, listed.length);
+  assert.equal(found.incomplete, false);
+  // Spot checks of the rules both apply.
+  assert.deepEqual(listed.slice(0, 5), [
+    ['AGENTS.md', false], ['CLAUDE.md', true], ['debug.log', true], ['keep.log', false], ['zebra.md', false],
+  ]);
+  // Ten levels below the root, and no deeper.
+  assert.equal(listed.some(([relativePath]) => relativePath === 'deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/level-10.txt'), true);
+  assert.equal(listed.some(([relativePath]) => relativePath.includes('level-11')), false);
+  for (const closedDirectory of ['.git', 'node_modules', '.claude', 'dist', 'deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10']) {
+    assert.equal(readDirectories.includes(closedDirectory), false, `${closedDirectory} must not be read`);
+  }
+  // Every file comes with its absolute path, spelled as the listing spells it.
+  assert.equal(found.files[0]?.path, path.join(projectRoot, 'AGENTS.md'));
+  assert.equal(found.files[0]?.name, 'AGENTS.md');
+});
+
+test('searchProjectFiles hides the conventional build folders when the project has no gitignore', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': ['build/', 'docs/', 'debug.log', 'node_modules/'],
+    build: ['notes-generated.md'],
+    docs: ['notes.md'],
+    node_modules: ['notes.js'],
+  }, null);
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'notes', limit: 10 });
+
+  assert.deepEqual(found.files.map((file) => file.relativePath), ['docs/notes.md']);
+});
+
+test('searchProjectFiles ranks the best matches first, breaks ties in listing order and returns the best few', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': ['b/', 'a/', 'bx.md', 'x.md', 'ax.md'],
+    a: ['x.md', 'c/'],
+    b: ['x.md'],
+    'a/c': ['x.md'],
+  }, null);
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'x.md', limit: 5 });
+
+  // The exact name scores best. a/x.md, b/x.md and a/c/x.md tie: the shallower
+  // two first, a before b as listed. ax.md and bx.md tie lower down, in listing
+  // order, and the limit cuts bx.md.
+  assert.deepEqual(found.files.map((file) => file.relativePath), ['x.md', 'a/x.md', 'b/x.md', 'a/c/x.md', 'ax.md']);
+  assert.equal(found.totalMatches, 6);
+  assert.equal(found.incomplete, false);
+});
+
+test('searchProjectFiles returns at most 200 files whatever the limit asked for', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': Array.from({ length: 300 }, (_, index) => `file-${index}.txt`),
+  }, null);
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 1_000 });
+
+  assert.equal(found.files.length, 200);
+  assert.equal(found.totalMatches, 300);
+});
+
+test('searchProjectFiles stops at its entry limit, keeps what it found and says it is incomplete', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let streamedEntries = 0;
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    // More than the limit, but finite, so a walk that ignored the limit would
+    // finish with a complete result instead of hanging.
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath !== projectRoot) {
+        return;
+      }
+      for (let index = 0; index < 100_050; index += 1) {
+        streamedEntries += 1;
+        yield createDirectoryEntry(`file-${index}.txt`, false);
+      }
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 5 });
+
+  assert.equal(found.incomplete, true);
+  // The limit, plus the single entry that proves it was reached.
+  assert.equal(streamedEntries, 100_001);
+  assert.equal(found.totalMatches, 100_000);
+  // All score alike, so they come in listing order.
+  assert.deepEqual(found.files.map((file) => file.relativePath), [
+    'file-0.txt', 'file-1.txt', 'file-10.txt', 'file-100.txt', 'file-1000.txt',
+  ]);
+});
+
+test('searchProjectFiles shares its entry limit across directories', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let streamedEntries = 0;
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        streamedEntries += 2;
+        yield createDirectoryEntry('first', true);
+        yield createDirectoryEntry('second', true);
+        return;
+      }
+      for (let index = 0; index < 60_000; index += 1) {
+        streamedEntries += 1;
+        yield createDirectoryEntry(`${path.basename(directoryPath)}-${index}.txt`, false);
+      }
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'txt', limit: 5 });
+
+  assert.equal(found.incomplete, true);
+  // The limit, plus one entry for each of the two directories still being read.
+  assert.equal(streamedEntries <= 100_002, true, `${streamedEntries} entries read`);
+  assert.equal(found.totalMatches, 99_998);
+});
+
+test('searchProjectFiles reports a project that just fits its entry limit as complete', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': Array.from({ length: 100_000 }, (_, index) => `file-${index}.txt`),
+  }, null);
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'file-99999', limit: 1 });
+
+  assert.equal(found.incomplete, false);
+  assert.deepEqual(found.files.map((file) => file.relativePath), ['file-99999.txt']);
+});
+
+test('searchProjectFiles stops at its time limit and returns what it found', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let clock = 1_000_000;
+  let streamedEntries = 0;
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    // Every entry takes a millisecond to read.
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath !== projectRoot) {
+        return;
+      }
+      for (let index = 0; index < 5_000; index += 1) {
+        clock += 1;
+        streamedEntries += 1;
+        yield createDirectoryEntry(`file-${index}.txt`, false);
+      }
+    },
+  });
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => clock });
+
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 3 });
+
+  assert.equal(found.incomplete, true);
+  // Two seconds in, the entry that arrives stops the walk.
+  assert.equal(streamedEntries, 2_000);
+  assert.equal(found.totalMatches, 1_999);
+  assert.deepEqual(found.files.map((file) => file.relativePath), ['file-0.txt', 'file-1.txt', 'file-10.txt']);
+});
+
+test('searchProjectFiles says it is incomplete when its time runs out between reading a file and scoring it', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let clock = 0;
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath !== projectRoot) {
+        return;
+      }
+      // Telling what the first entry is takes the rest of the time, as other reads scoring their
+      // files would: the read has checked the clock and hands the file over, and only the check
+      // before scoring it sees that time is up. The last directory of the last level, so no
+      // other read is left to notice.
+      yield {
+        name: 'notes.txt',
+        isDirectory: () => {
+          clock += 5_000;
+          return false;
+        },
+      };
+      yield createDirectoryEntry('todo.txt', false);
+    },
+  });
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => clock });
+
+  const found = await service.searchProjectFiles('project-1', { query: 'txt', limit: 5 });
+
+  assert.equal(found.totalMatches, 0);
+  assert.equal(found.incomplete, true);
+});
+
+test('searchProjectFiles does not open the next level once its time is up', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let clock = 0;
+  const readDirectories: string[] = [];
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    openDirectory: createDirectoryReader((directoryPath) => {
+      readDirectories.push(directoryPath);
+      // Reading the root takes the whole time limit.
+      clock += 2_000;
+      return directoryPath === projectRoot
+        ? [createDirectoryEntry('src', true), createDirectoryEntry('README.md', false)]
+        : [createDirectoryEntry('index.ts', false)];
+    }),
+  });
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => clock });
+
+  const found = await service.searchProjectFiles('project-1', { query: 'e', limit: 10 });
+
+  assert.equal(found.incomplete, true);
+  assert.deepEqual(readDirectories, [projectRoot]);
+});
+
+test('searchProjectFiles stops as soon as its request is aborted', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const request = new AbortController();
+  let streamedEntries = 0;
+  const fileSystem = createTreeFileSystem(projectRoot, {}, null, {
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath !== projectRoot) {
+        return;
+      }
+      for (let index = 0; index < 1_000; index += 1) {
+        if (index === 10) {
+          request.abort();
+        }
+        streamedEntries += 1;
+        yield createDirectoryEntry(`file-${index}.txt`, false);
+      }
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 5, signal: request.signal });
+
+  assert.equal(found.incomplete, true);
+  assert.equal(streamedEntries, 11);
+  assert.equal(found.totalMatches, 10);
+});
+
+test('searchProjectFiles lets the rest of the server run while it works through a large directory', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': Array.from({ length: 5_000 }, (_, index) => `file-${index}.txt`),
+  }, null);
+  // A tenth of a millisecond passes every time the walk looks at the clock.
+  let clock = 0;
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => (clock += 0.1) });
+
+  let searchFinished = false;
+  let ranDuringSearch = false;
+  setImmediate(() => {
+    ranDuringSearch = !searchFinished;
+  });
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 5 });
+  searchFinished = true;
+
+  assert.equal(ranDuringSearch, true);
+  // Pausing costs the walk nothing it finds.
+  assert.equal(found.incomplete, false);
+  assert.equal(found.totalMatches, 5_000);
+});
+
+test('searchProjectFiles lets the rest of the server run while it reads entries it does not score', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  // Gitignored folders are listed but neither scored nor walked.
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': Array.from({ length: 5_000 }, (_, index) => `out-${index}/`),
+  }, 'out-*/');
+  let clock = 0;
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => (clock += 0.1) });
+
+  let searchFinished = false;
+  let ranDuringSearch = false;
+  setImmediate(() => {
+    ranDuringSearch = !searchFinished;
+  });
+  const found = await service.searchProjectFiles('project-1', { query: 'out', limit: 5 });
+  searchFinished = true;
+
+  assert.equal(ranDuringSearch, true);
+  assert.equal(found.incomplete, false);
+  assert.equal(found.totalMatches, 0);
+});
+
+test('searchProjectFiles scores no file once it hears that its request was aborted', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const request = new AbortController();
+  const directoryNames = Array.from({ length: 16 }, (_, index) => `d${index}`);
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': directoryNames.map((name) => `${name}/`),
+    ...Object.fromEntries(directoryNames.map((name) => [
+      name,
+      Array.from({ length: 100 }, (_, index) => `file-${index}.txt`),
+    ])),
+  }, null);
+  // A file counts as dealt with once the search asks for the next entry.
+  let filesDoneAfterAbort = 0;
+  const listDirectory = fileSystem.openDirectory;
+  fileSystem.openDirectory = async function* (directoryPath) {
+    for await (const entry of listDirectory(directoryPath)) {
+      yield entry;
+      if (!entry.isDirectory() && request.signal.aborted) {
+        filesDoneAfterAbort += 1;
+      }
+    }
+  };
+  let clock = 0;
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    fileSystemConcurrency: 16,
+    now: () => (clock += 0.1),
+  });
+
+  // Aborted a few turns in, while every directory's read waits for its next slice.
+  let turns = 0;
+  const abortLater = () => {
+    turns += 1;
+    if (turns === 5) {
+      request.abort();
+    } else {
+      setImmediate(abortLater);
+    }
+  };
+  setImmediate(abortLater);
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 5, signal: request.signal });
+
+  assert.equal(found.incomplete, true);
+  assert.equal(found.totalMatches > 0, true, 'the walk was under way');
+  assert.equal(filesDoneAfterAbort, 0);
+});
+
+test('searchProjectFiles scores for one slice at a time, however many directories it reads at once', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const directoryNames = Array.from({ length: 64 }, (_, index) => `d${index}`);
+  // Names that take the real scorer milliseconds each against the search below, though well
+  // under its step limit.
+  const costlyNames = [0, 1].map((index) => `e-${'e'.repeat(160)}-${index}.txt`);
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': directoryNames.map((name) => `${name}/`),
+    ...Object.fromEntries(directoryNames.map((name) => [name, costlyNames])),
+  }, null);
+  // A file counts as dealt with once the search asks for the next entry.
+  let filesDone = 0;
+  const listDirectory = fileSystem.openDirectory;
+  fileSystem.openDirectory = async function* (directoryPath) {
+    for await (const entry of listDirectory(directoryPath)) {
+      yield entry;
+      if (!entry.isDirectory()) {
+        filesDone += 1;
+      }
+    }
+  };
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    // All 64 directories are read at once.
+    fileSystemConcurrency: 64,
+    now: () => performance.now(),
+  });
+
+  // The most files the search deals with between two turns of the event loop.
+  let searching = true;
+  let doneByLastTurn = 0;
+  let mostDoneInOneTurn = 0;
+  const countTurn = () => {
+    mostDoneInOneTurn = Math.max(mostDoneInOneTurn, filesDone - doneByLastTurn);
+    doneByLastTurn = filesDone;
+    if (searching) {
+      setImmediate(countTurn);
+    }
+  };
+  setImmediate(countTurn);
+  const found = await service.searchProjectFiles('project-1', { query: 'eeeeeeeeee', limit: 5 });
+  searching = false;
+  // And since the last turn.
+  countTurn();
+
+  assert.equal(found.totalMatches > 0, true);
+  // A slice of 10ms fits a few of these files. Reads that all went on after a
+  // pause would deal with a file each, 64 in one turn.
+  assert.equal(mostDoneInOneTurn <= 32, true, `${mostDoneInOneTurn} files in one turn`);
+});
+
+test('searchProjectFiles stops when its request is aborted while it works through a large directory', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const request = new AbortController();
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': Array.from({ length: 5_000 }, (_, index) => `file-${index}.txt`),
+  }, null);
+  let clock = 0;
+  const service = createFileTreeService({ ...createDependencies(fileSystem, projectRoot), now: () => (clock += 0.1) });
+
+  // The browser gives up on the request; the server hears of it the next time it gets to run.
+  setImmediate(() => {
+    request.abort();
+  });
+  const found = await service.searchProjectFiles('project-1', { query: 'file', limit: 5, signal: request.signal });
+
+  assert.equal(found.incomplete, true);
+  // Neither the entry limit nor the time limit stops it before the 5,000 entries are read.
+  assert.equal(found.totalMatches < 1_000, true, `${found.totalMatches} matches`);
+});
+
+test('searchProjectFiles breaks ties between the files of a directory in listing order', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  // Listed out of order, and named so that sorting by code unit would order them differently.
+  const fileSystem = createTreeFileSystem(projectRoot, {
+    '': ['b.md', 'B.md', 'Ä.md', 'src/', 'a.md', '_x.md', '10.md', '9.md', 'é.md', 'e.md', 'Lib/', 'lib/'],
+    src: ['b.ts', 'A.ts', 'a.ts'],
+    Lib: ['z.md'],
+    lib: ['z.md'],
+  }, null);
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const listed = collectPaletteFiles(
+    await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true }),
+  );
+  // The root itself as the search: every file matches alike.
+  const found = await service.searchProjectFiles('project-1', { query: `${projectRoot}${path.sep}`, limit: 200 });
+
+  assert.deepEqual(found.files.map((file) => [file.relativePath, file.isIgnored]), listed);
+  assert.deepEqual(listed.slice(0, 3), [['_x.md', false], ['10.md', false], ['9.md', false]]);
+});
+
+test('searchProjectFiles answers a project it cannot find with a 404', async () => {
+  const fileSystem = createFakeFileSystem();
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, path.resolve('file-tree-test-project')),
+    projects: { getProjectPathById: async () => null },
+  });
+
+  await assert.rejects(
+    service.searchProjectFiles('missing', { query: 'readme', limit: 10 }),
+    (error: unknown) => error instanceof AppError
+      && error.code === 'PROJECT_NOT_FOUND'
+      && error.statusCode === 404,
+  );
+});
+
+test('searchProjectFiles stays inside the project and does not follow a symlink out of it', async () => {
+  // Both sit beside this file, outside every read-only root, as in the symlink tests above.
+  const projectRoot = await fsPromises.mkdtemp(path.join(testDirectory, 'file-tree-search-'));
+  const outsideDirectory = await fsPromises.mkdtemp(path.join(testDirectory, 'file-tree-outside-'));
+
+  try {
+    await fsPromises.mkdir(path.join(projectRoot, 'docs'));
+    await fsPromises.writeFile(path.join(projectRoot, 'docs', 'notes.md'), 'inside', 'utf8');
+    await fsPromises.writeFile(path.join(outsideDirectory, 'secret-notes.md'), 'outside', 'utf8');
+    await fsPromises.symlink(outsideDirectory, path.join(projectRoot, 'linked-notes'));
+
+    const service = createRealFileSystemService(projectRoot);
+    const found = await service.searchProjectFiles('project-1', { query: 'notes', limit: 10 });
+
+    // The link is a file to the palette, as in a listing; what it points to is not walked.
+    assert.deepEqual(found.files.map((file) => file.relativePath).sort(), ['docs/notes.md', 'linked-notes']);
+    for (const file of found.files) {
+      assert.equal(file.path.startsWith(`${projectRoot}${path.sep}`), true, file.path);
+    }
+    assert.equal(found.incomplete, false);
+  } finally {
+    await fsPromises.rm(projectRoot, { recursive: true, force: true });
     await fsPromises.rm(outsideDirectory, { recursive: true, force: true });
   }
 });

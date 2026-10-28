@@ -43,7 +43,18 @@ export interface IProviderRuntime {
    * next turn in that process instead of a new one, keeping the work going
    * (Claude); that call resolves once its own turn is over. Options that set
    * `inheritUnset: true` hand the turn over the way `planHandOver` plans it
-   * with that option (see `ProviderHandOverPlanOptions`).
+   * with that option (see `ProviderHandOverPlanOptions`). Options that set
+   * `restoreSwitchesAfterTurn: true` keep the model and permission mode such a
+   * turn switches the process to (see `HandOverSwitch`) for that turn alone:
+   * the process is switched back once the turn is over, completed or
+   * stopped, and a turn the CLI runs on its own meanwhile runs without them.
+   * Their `onSwitchesRestored`, a callback the chat gateway sets to put the
+   * session's recorded model back, hears `{ model, permissionMode }` once such
+   * a turn is over, however it ended (stopped before it switched anything
+   * included), and the CLI has answered the switches back: for each one the
+   * turn was to switch, what the process runs with then, null for the others;
+   * it is not called when the process lets go after the turn, nor for a turn
+   * that started a process of its own.
    */
   run(
     command: string,
@@ -51,6 +62,13 @@ export interface IProviderRuntime {
     writer: ProviderRuntimeWriter,
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
+  /**
+   * Stops the session's turn under way, and resolves false when there is none
+   * to stop. The caller sends the run's terminal `complete`. A turn the
+   * runtime ran in a process it held for the session's background work
+   * (Claude) is stopped alone: the work and the hold go on, and the session's
+   * next turn can go into the process.
+   */
   abort(sessionId: string): boolean | Promise<boolean>;
   permissions?: ProviderRuntimePermissionGateway;
   /**

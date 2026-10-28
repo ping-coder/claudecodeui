@@ -75,13 +75,19 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
     permission: pushPermission,
     isSubscribed: isPushSubscribed,
     isLoading: isPushLoading,
+    subscribeFailure: pushSubscribeFailure,
     subscribe: pushSubscribe,
     unsubscribe: pushUnsubscribe,
     requestPermission: requestNotificationPermission,
   } = useWebPush();
 
   const handleEnablePush = async () => {
-    await pushSubscribe();
+    // Only a subscription the server saved turns the channel on. A refused prompt, a browser
+    // without push or a failed subscription leaves the stored preference as it was, and the
+    // notifications tab says why.
+    if ((await pushSubscribe()) !== 'subscribed') {
+      return;
+    }
     // Server sets webPush: true in preferences on subscribe; sync local state
     updateNotificationPreferences((current) => ({
       ...current,
@@ -263,6 +269,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
                   pushPermission={pushPermission}
                   isPushSubscribed={isPushSubscribed}
                   isPushLoading={isPushLoading}
+                  pushSubscribeFailure={pushSubscribeFailure}
                   onEnablePush={handleEnablePush}
                   onDisablePush={handleDisablePush}
                   onRequestNotificationPermission={requestNotificationPermission}

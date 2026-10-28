@@ -50,6 +50,12 @@ test('a deferred-work tool holds the process open', () => {
   assert.equal(startsBackgroundWork(turn({ name: 'Monitor' })), true);
 });
 
+test('a ScheduleWakeup holds the process open for the wake-up it sets, but not one that ends the loop', () => {
+  assert.equal(startsBackgroundWork(turn({ name: 'ScheduleWakeup', input: { delaySeconds: 300, reason: 'polling', prompt: '/loop check' } })), true);
+  // `stop: true` cancels the pending wake-ups instead of setting one.
+  assert.equal(startsBackgroundWork(turn({ name: 'ScheduleWakeup', input: { stop: true } })), false);
+});
+
 test('a TaskCreate does not: it only adds an item to the to-do list', () => {
   // Nothing runs for it, so holding for it would keep an idle process up, and
   // a send that needs a new process would be refused over work that is not there.

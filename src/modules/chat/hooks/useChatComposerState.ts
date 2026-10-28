@@ -181,6 +181,27 @@ const withoutSubmittedText = (current: string, submittedText: string): string =>
 };
 
 /**
+ * A composer text without the first paragraph that is exactly `text` (set
+ * off by the text's ends or a blank line) and the blank line that set it
+ * apart; null when no such paragraph is left. `text` found only inside a
+ * longer paragraph does not count.
+ */
+const withoutParagraph = (current: string, text: string): string | null => {
+  if (!text) {
+    return null;
+  }
+  for (let at = current.indexOf(text); at >= 0; at = current.indexOf(text, at + 1)) {
+    const end = at + text.length;
+    const opens = at === 0 || (at >= 2 && current.startsWith('\n\n', at - 2));
+    const closes = end === current.length || current.startsWith('\n\n', end);
+    if (opens && closes) {
+      return at === 0 ? current.slice(end).replace(/^\n\n/, '') : current.slice(0, at - 2) + current.slice(end);
+    }
+  }
+  return null;
+};
+
+/**
  * Why a message cannot go into the running turn, or null when it can. The
  * provider must take messages mid-turn; the CLI never reads a slash command
  * mid-turn, and inserts carry text only for now; and the turn must be one
@@ -291,14 +312,29 @@ type KeepWorkSend = {
 };
 
 /**
- * The latest `chat.send` this page made to each session, while it was made
- * with keepBackgroundWork. A `send_refused` answers the socket every pane on
- * the page shares and names no request, so only the composer that made the
- * session's latest send undoes it. A send the server started is never refused
- * afterwards, so a record it leaves behind is never acted on; the next send to
- * the session replaces it.
+ * The `chat.send`s this page made with keepBackgroundWork, by the
+ * `clientRequestId` each carried. A `send_refused` comes on the socket every
+ * pane on the page shares and hands that id back, so only the composer that
+ * made the send undoes it, and two panes sending to one session at once each
+ * undo their own. A send the server started is never refused afterwards, so
+ * its record is never acted on; it goes with its composer's next send to the
+ * session, or with the composer.
  */
 const keepWorkSends = new Map<string, KeepWorkSend>();
+
+/**
+ * The `clientRequestId` of the latest `chat.send` or edit this page made to
+ * each session. A `send_refused` without an id, from a server older than ids
+ * (after a rollback), is matched as it was before them: it undoes the
+ * session's latest send, if that one was made with keepBackgroundWork.
+ */
+const latestSendIds = new Map<string, string>();
+
+/**
+ * A `clientRequestId` for a new send: unique on the page, which is all the
+ * server's `send_refused` needs to name the send it answers.
+ */
+const createClientRequestId = (): string => `send_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
@@ -1194,9 +1230,17 @@ export function useChatComposerState({
     const echoRowId = createLocalRowId();
     addMessage(userMessage, { rowId: echoRowId });
     const keepBackgroundWork = turn.keepBackgroundWork && !turn.anchorId;
-    keepWorkSends.delete(turn.sessionId);
+    const clientRequestId = createClientRequestId();
+    // This composer's earlier send to the session has had its answer: a
+    // composer submits once at a time, and its send marks the session busy.
+    for (const [requestId, send] of keepWorkSends) {
+      if (send.owner === composerToken && send.sessionId === turn.sessionId) {
+        keepWorkSends.delete(requestId);
+      }
+    }
+    latestSendIds.set(turn.sessionId, clientRequestId);
     if (keepBackgroundWork) {
-      keepWorkSends.set(turn.sessionId, {
+      keepWorkSends.set(clientRequestId, {
         owner: composerToken,
         sessionId: turn.sessionId,
         content: turn.content,
@@ -1227,7 +1271,8 @@ export function useChatComposerState({
       // report why it was refused.
       type: turn.anchorId ? 'chat.edit-send' : 'chat.send',
       sessionId: turn.sessionId,
-      ...(turn.anchorId ? { anchorId: turn.anchorId } : {}),
+      // A plain send names itself, so a refusal can say which one it answers.
+      ...(turn.anchorId ? { anchorId: turn.anchorId } : { clientRequestId }),
       content: turn.content,
       options: {
         ...turn.options,
@@ -1270,12 +1315,15 @@ export function useChatComposerState({
   }, [readSessionText, writeSessionText]);
 
   // Takes a message putTextBack gave back out again, as it is sent or queued
-  // after all: its text while it still opens the composer (or the session's
-  // draft) as put back, keeping what follows it, and its browser files.
+  // after all: its text while it is still a paragraph of its own in the
+  // composer (or the session's draft), keeping the rest, and its browser
+  // files. Not only at the top: two panes on one session can both have a
+  // refused send put back, the later one ahead of the earlier, and the user
+  // may answer the earlier one's dialog first.
   const takeTextBack = useCallback((sessionId: string, text: string, browserFiles: File[] = []) => {
-    const current = readSessionText(sessionId);
-    if (current === text || current.startsWith(`${text}\n\n`)) {
-      writeSessionText(sessionId, current.slice(text.length).replace(/^\n\n/, ''));
+    const remaining = withoutParagraph(readSessionText(sessionId), text);
+    if (remaining !== null) {
+      writeSessionText(sessionId, remaining);
     }
     if (browserFiles.length > 0 && sessionKeyRef.current === sessionId) {
       setAttachedFiles((attached) => attached.filter((file) => !browserFiles.includes(file)));
@@ -1467,20 +1515,22 @@ export function useChatComposerState({
   // The server did not start a send this composer made with
   // keepBackgroundWork: the turn could not run in the process the session's
   // background work runs in, and a new process would have stopped the work.
-  // Only the composer that made the session's latest send acts (see
-  // keepWorkSends). It undoes the optimistic turn (the echo, the session
-  // marked busy), puts the message back in the composer at once, so nothing
-  // is lost whatever happens next, and asks as it would have before sending,
-  // naming what keeps the turn out of that process: cancel leaves the message
-  // in the composer, queue and send anyway take it out again. Once the
-  // composer shows another session, the text goes back into that session's
-  // draft and nothing is asked.
+  // Only the composer that made the send acts, found by the refusal's
+  // clientRequestId, or, for a refusal without one, as the composer of the
+  // session's latest send (see keepWorkSends and latestSendIds). It undoes
+  // the optimistic turn (the echo, the session marked busy), puts the message
+  // back in the composer at once, so nothing is lost whatever happens next,
+  // and asks as it would have before sending, naming what keeps the turn out
+  // of that process: cancel leaves the message in the composer, queue and
+  // send anyway take it out again. Once the composer shows another session,
+  // the text goes back into that session's draft and nothing is asked.
   const handleSendRefused = useCallback((event: SendRefusedEvent) => {
-    const refused = keepWorkSends.get(event.sessionId);
-    if (!refused || refused.owner !== composerToken) {
+    const requestId = event.clientRequestId ?? latestSendIds.get(event.sessionId);
+    const refused = requestId ? keepWorkSends.get(requestId) : undefined;
+    if (!requestId || !refused || refused.owner !== composerToken || refused.sessionId !== event.sessionId) {
       return;
     }
-    keepWorkSends.delete(event.sessionId);
+    keepWorkSends.delete(requestId);
     removeMessage?.(refused.sessionId, refused.echoRowId);
     onSessionBackground?.(refused.sessionId, refused.tasks);
     putTextBack(refused.sessionId, refused.content, refused.browserFiles);
@@ -1517,9 +1567,9 @@ export function useChatComposerState({
 
   // A send this composer made can be refused only while it is mounted to undo it.
   useEffect(() => () => {
-    for (const [sessionId, send] of keepWorkSends) {
+    for (const [requestId, send] of keepWorkSends) {
       if (send.owner === composerToken) {
-        keepWorkSends.delete(sessionId);
+        keepWorkSends.delete(requestId);
       }
     }
   }, [composerToken]);

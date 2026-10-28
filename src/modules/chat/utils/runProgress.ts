@@ -13,7 +13,7 @@ import type {
   WorkflowAgentProgress,
   WorkflowAgentRow,
 } from '@/shared/types';
-import { ownBackgroundTasks } from '@/shared/utils';
+import { isTurnOpener, ownBackgroundTasks } from '@/shared/utils';
 import {
   describeWorkflowAgent,
   readBackgroundTaskStatus,
@@ -513,13 +513,14 @@ function readChecklistWindow(
 /**
  * Where the newest turn sits in the rows: the user message that opened it
  * (-1 when that message is above the loaded rows, so every loaded row is the
- * turn's) and the turn's newest checklist row (-1 when it has none).
+ * turn's) and the turn's newest checklist row (-1 when it has none). A message
+ * inserted while the turn ran is part of that turn, not the start of another.
  */
 function locateTurn(messages: ChatMessage[]): { turnOpenIndex: number; lastChecklistIndex: number } {
   let lastChecklistIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.type === 'user') {
+    if (isTurnOpener(message)) {
       return { turnOpenIndex: index, lastChecklistIndex };
     }
     if (lastChecklistIndex === -1 && isChecklistRow(message)) {
@@ -530,10 +531,11 @@ function locateTurn(messages: ChatMessage[]): { turnOpenIndex: number; lastCheck
 }
 
 /**
- * The checklist of the turn in flight, counted. The newest user message
- * opened that turn; a checklist above it belongs to a turn that is over and
- * says nothing about this one, so it is never borrowed — though the items it
- * had done, when the turn carries its list on, are left out of the turn's pace.
+ * The checklist of the turn in flight, counted. The newest user message not
+ * inserted mid-turn opened that turn; a checklist above it belongs to a turn
+ * that is over and says nothing about this one, so it is never borrowed —
+ * though the items it had done, when the turn carries its list on, are left
+ * out of the turn's pace.
  */
 function readTurnChecklistProgress(messages: ChatMessage[], turnStartedAt: number): ActivityProgress | null {
   const { turnOpenIndex, lastChecklistIndex } = locateTurn(messages);

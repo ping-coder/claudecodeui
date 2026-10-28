@@ -334,3 +334,64 @@ test('once they have arrived the switches work', () => {
   assert.equal(vi.mocked(props.onNotificationPreferencesChange).mock.calls.length, 1);
   assert.equal(hasText(LOAD_FAILED_NOTE), false);
 });
+
+const PUSH_DENIED_NOTE = "Push notifications are blocked for this site. Allow notifications in the browser's site settings, then reopen Settings.";
+const PUSH_FAILURE_NOTES = {
+  dismissed: 'Notifications were not allowed. Click Enable notifications again and choose Allow when the browser asks.',
+  unsupported: 'Push notifications are not supported in this browser.',
+  failed: "Couldn't turn on push notifications for this browser. Try again later.",
+} as const;
+
+test('blocked push says to allow notifications in the browser site settings', () => {
+  renderTab({ pushPermission: 'denied' });
+
+  assert.equal(hasText(PUSH_DENIED_NOTE), true);
+  assert.equal(hasButton('Enable notifications'), false);
+});
+
+test('a failed attempt to turn push on says why under the button, which reads off again', () => {
+  for (const [failure, note] of Object.entries(PUSH_FAILURE_NOTES)) {
+    renderTab({ pushPermission: 'default', pushSubscribeFailure: failure as keyof typeof PUSH_FAILURE_NOTES });
+    assert.equal(hasButton('Enable notifications'), true, failure);
+    assert.equal(hasText(note), true, failure);
+    cleanup();
+  }
+
+  // A refused prompt leaves the permission denied, whose note replaces the button.
+  renderTab({ pushPermission: 'denied', pushSubscribeFailure: 'denied' });
+  assert.equal(hasText(PUSH_DENIED_NOTE), true);
+});
+
+test('no failure note before an attempt, during one, or once subscribed', () => {
+  renderTab({ pushPermission: 'default' });
+  for (const note of Object.values(PUSH_FAILURE_NOTES)) {
+    assert.equal(hasText(note), false, note);
+  }
+  cleanup();
+
+  renderTab({ pushPermission: 'granted', pushSubscribeFailure: 'failed', isPushLoading: true });
+  assert.equal(hasText(PUSH_FAILURE_NOTES.failed), false, 'retrying');
+  cleanup();
+
+  renderTab({ pushPermission: 'granted', pushSubscribeFailure: 'failed', isPushSubscribed: true });
+  assert.equal(hasText(PUSH_FAILURE_NOTES.failed), false, 'subscribed');
+});
+
+test('in Chinese the push failure notes read correctly', async () => {
+  await i18n.changeLanguage('zh-CN');
+
+  renderTab({ pushPermission: 'denied' });
+  assert.equal(hasText('此网站的推送通知已被阻止。请在浏览器的网站设置中允许通知，然后重新打开设置。'), true);
+  cleanup();
+
+  const notes: Array<['dismissed' | 'unsupported' | 'failed', string]> = [
+    ['dismissed', '没有获得通知权限。请再次点击「启用通知」，并在浏览器询问时选择允许。'],
+    ['unsupported', '此浏览器不支持推送通知。'],
+    ['failed', '无法为此浏览器开启推送通知，请稍后重试。'],
+  ];
+  for (const [failure, note] of notes) {
+    renderTab({ pushPermission: 'default', pushSubscribeFailure: failure });
+    assert.equal(hasText(note), true, failure);
+    cleanup();
+  }
+});

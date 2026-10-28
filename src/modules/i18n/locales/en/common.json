@@ -333,7 +333,9 @@
     "switchTo": "Switch to: {{name}}",
     "filesShownOf": "Showing {{shown}} of {{total}} files. Type to find the rest.",
     "filesBestMatches": "Showing the {{shown}} best matches. Keep typing to narrow them down.",
-    "filesTooLarge": "Files are not listed for projects with more than 10,000 entries. Open a smaller folder as the project, or ignore build output in the root .gitignore."
+    "filesTooLarge": "Files are not listed for projects with more than 10,000 entries. Open a smaller folder as the project, or ignore build output in the root .gitignore.",
+    "filesSearching": "Searching files…",
+    "filesSearchIncomplete": "Only part of this large project was searched, so some files may be missing. Open a smaller folder as the project, or ignore build output in the root .gitignore."
   },
   "folderBrowser": {
     "title": "Select Folder",

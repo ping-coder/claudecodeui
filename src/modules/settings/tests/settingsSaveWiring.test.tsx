@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import Settings from '@/modules/settings/Settings';
 import { resetUserPreferences } from '@/shared/userSettings';
-import type { NotificationPreferencesState } from '@/shared/types';
+import type { NotificationPreferencesState, PushSubscribeOutcome } from '@/shared/types';
 
 /**
  * Settings hands each tab the controller's saving handlers. A tab wired to a plain state
@@ -67,14 +67,18 @@ vi.mock('@/modules/i18n', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   LanguageSelector: () => null,
 }));
-// Subscribing waits on the browser's permission prompt; the test decides when it answers.
-const push = vi.hoisted(() => ({ finishSubscribe: () => undefined as void }));
+// Subscribing waits on the browser's permission prompt; the test decides when it answers, and how.
+const push = vi.hoisted(() => ({
+  finishSubscribe: (_outcome: PushSubscribeOutcome) => undefined as void,
+  subscribeFailure: null as Exclude<PushSubscribeOutcome, 'subscribed'> | null,
+}));
 vi.mock('@/modules/settings/hooks/useWebPush', () => ({
   useWebPush: () => ({
     permission: 'default',
     isSubscribed: false,
     isLoading: false,
-    subscribe: () => new Promise<void>((resolve) => {
+    subscribeFailure: push.subscribeFailure,
+    subscribe: () => new Promise<PushSubscribeOutcome>((resolve) => {
       push.finishSubscribe = resolve;
     }),
     unsubscribe: () => Promise.resolve(),
@@ -107,7 +111,8 @@ const openSettings = (initialTab: string) => render(
 );
 
 const runStopped = () => screen.getByRole('checkbox', { name: 'Run stopped' }) as HTMLInputElement;
-const hasSavedMessage = () => screen.queryByText(SAVED_MESSAGE) !== null;
+const hasText = (text: string) => screen.queryByText(text) !== null;
+const hasSavedMessage = () => hasText(SAVED_MESSAGE);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -117,6 +122,7 @@ beforeEach(() => {
   server.getOk = true;
   server.notificationPuts = [];
   server.preferencePatches = [];
+  push.subscribeFailure = null;
 });
 
 afterEach(() => {
@@ -179,7 +185,7 @@ test('enabling push keeps an event switch flipped while the browser was asking',
   fireEvent.click(runStopped());
   await advance(600);
   await act(async () => {
-    push.finishSubscribe();
+    push.finishSubscribe('subscribed');
   });
   await advance(600);
 
@@ -188,4 +194,35 @@ test('enabling push keeps an event switch flipped while the browser was asking',
     channels: { ...STORED.channels, webPush: true },
     events: { ...STORED.events, stop: false },
   });
+});
+
+test('turning push on stores the Web Push channel only when the subscription succeeds', async () => {
+  const failures: PushSubscribeOutcome[] = ['denied', 'dismissed', 'unsupported', 'failed'];
+  for (const outcome of failures) {
+    server.stored = structuredClone(STORED);
+    server.notificationPuts = [];
+    openSettings('notifications');
+    await advance(100);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }));
+    await act(async () => {
+      push.finishSubscribe(outcome);
+    });
+    await advance(600);
+    assert.equal(server.notificationPuts.length, 0, `${outcome}: nothing is saved`);
+
+    // A later edit saves the channel as it was: the failed attempt never turned it on.
+    fireEvent.click(runStopped());
+    await advance(600);
+    assert.deepEqual(server.notificationPuts, [{ ...STORED, events: { ...STORED.events, stop: false } }], outcome);
+    cleanup();
+  }
+});
+
+test('the reason the last attempt to turn push on failed shows under its button', async () => {
+  push.subscribeFailure = 'failed';
+  openSettings('notifications');
+  await advance(100);
+
+  assert.equal(hasText("Couldn't turn on push notifications for this browser. Try again later."), true);
 });

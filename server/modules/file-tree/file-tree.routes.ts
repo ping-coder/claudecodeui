@@ -66,9 +66,29 @@ function readRelativePaths(value: unknown): string[] {
   }
 }
 
-function readRequestedFileCount(value: unknown, fallbackCount: number): number {
-  const parsedCount = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
-  return Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : fallbackCount;
+function readPositiveInteger(value: unknown, fallbackValue: number): number {
+  const parsedValue = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : fallbackValue;
+}
+
+// Matches a project file search returns when the request does not say; the
+// service caps what a request may ask for.
+const DEFAULT_FILE_SEARCH_LIMIT = 100;
+
+// Scoring time grows with the length of the search, and no path is this long.
+const MAXIMUM_FILE_SEARCH_QUERY_LENGTH = 512;
+
+// The search as typed, untrimmed: the palette scores the files the server
+// returns against the same text.
+function readFileSearchQuery(value: unknown): string {
+  const searchQuery = readRequiredString(value, 'q', 'Search query is required');
+  if (searchQuery.length > MAXIMUM_FILE_SEARCH_QUERY_LENGTH) {
+    throw new AppError('Search query is too long', {
+      code: 'INVALID_FILE_TREE_REQUEST',
+      statusCode: 400,
+    });
+  }
+  return searchQuery;
 }
 
 function normalizeUploadedFiles(request: UploadedRequest): FileTreeUploadedFile[] {
@@ -168,6 +188,27 @@ export function createFileTreeRouter(
     }));
   }, logger));
 
+  router.get('/projects/:projectId/files/search', createRouteHandler(async (request, response) => {
+    const query = readFileSearchQuery(request.query.q);
+    const limit = readPositiveInteger(request.query.limit, DEFAULT_FILE_SEARCH_LIMIT);
+    // The palette drops a search when the next keystroke replaces it; the walk
+    // stops with the request instead of running to its limits for no one.
+    const abortController = new AbortController();
+    response.on('close', () => {
+      if (!response.writableFinished) {
+        abortController.abort();
+      }
+    });
+    const result = await services.searchProjectFiles(readProjectId(request), {
+      query,
+      limit,
+      signal: abortController.signal,
+    });
+    if (!abortController.signal.aborted) {
+      response.json(result);
+    }
+  }, logger));
+
   router.post('/projects/:projectId/files/create', createRouteHandler(async (request, response) => {
     const body = readBody(request);
     if (!body.name || !body.type) {
@@ -219,7 +260,7 @@ export function createFileTreeRouter(
       projectId: readProjectId(request),
       targetPath: readOptionalString(body.targetPath) ?? '',
       relativePaths: readRelativePaths(body.relativePaths),
-      requestedFileCount: readRequestedFileCount(body.requestedFileCount, files.length),
+      requestedFileCount: readPositiveInteger(body.requestedFileCount, files.length),
       files,
     }));
   }, logger);

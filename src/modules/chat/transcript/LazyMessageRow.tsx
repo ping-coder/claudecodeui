@@ -34,6 +34,12 @@ type LazyMessageRowProps = {
    * placeholder and mounts when scrolled toward.
    */
   initiallyNearViewport: boolean;
+  /**
+   * A class for the always-mounted wrapper, for code that has to find the row
+   * while its content is unmounted (the pinned question's probe looks for the
+   * rows that open a turn by it).
+   */
+  wrapperClassName?: string;
   children: ReactNode;
 };
 
@@ -41,6 +47,7 @@ export default function LazyMessageRow({
   lazyRows,
   timestamp,
   initiallyNearViewport,
+  wrapperClassName,
   children,
 }: LazyMessageRowProps) {
   const [isNearViewport, setIsNearViewport] = useState(initiallyNearViewport);
@@ -77,6 +84,7 @@ export default function LazyMessageRow({
   return (
     <div
       ref={elementRef}
+      className={wrapperClassName}
       data-message-timestamp={timestamp || undefined}
       style={isMounted ? undefined : { height: measuredHeight ?? ESTIMATED_ROW_HEIGHT_PX }}
     >

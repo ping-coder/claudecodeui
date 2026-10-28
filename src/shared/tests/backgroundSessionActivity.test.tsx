@@ -76,6 +76,35 @@ test('the idle acknowledgement of a subscribe leaves background work alone', () 
   assert.equal(result.current.getSessionActivity('session-1'), undefined, 'no task left marks it idle');
 });
 
+test('a run that left background work running keeps the tasks its turn entry lists as background work', () => {
+  // What a tab that did not follow the run has to go on until the next poll.
+  const { result } = renderHook(() => useSessionProtection());
+  const running = task({ startedAt: Date.now() - 30_000 });
+
+  act(() => {
+    for (const sessionId of ['session-1', 'session-3']) {
+      result.current.markSessionBackground(sessionId, [running]);
+      result.current.markSessionProcessing(sessionId);
+    }
+    result.current.markSessionProcessing('session-2');
+  });
+  act(() => {
+    result.current.markSessionIdle('session-1', { backgroundWorkGoesOn: true });
+    result.current.markSessionIdle('session-2', { backgroundWorkGoesOn: true });
+    result.current.markSessionIdle('session-3', { backgroundWorkGoesOn: false });
+  });
+
+  const kept = result.current.getSessionActivity('session-1');
+  assert.equal(kept?.background, true);
+  assert.equal(kept?.canInterrupt, false);
+  assert.equal(kept?.statusText === null, true);
+  assert.equal(kept?.startedAt === running.startedAt, true, 'timed from the earliest task, as background work is');
+  assert.equal(kept?.tasks?.map((entry) => entry.taskId).join(','), running.taskId);
+  assert.equal(result.current.isSessionProcessing('session-1'), false);
+  assert.equal(result.current.getSessionActivity('session-2') === undefined, true, 'no task to keep: idle');
+  assert.equal(result.current.getSessionActivity('session-3') === undefined, true, 'the work went with the turn');
+});
+
 test('a new turn on a background session is processing again, with its own clock', () => {
   const { result } = renderHook(() => useSessionProtection());
   const earlier = task({ startedAt: Date.now() - 300_000 });

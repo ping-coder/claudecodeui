@@ -32,8 +32,10 @@ const FORMATS: Array<{ id: TranscriptExportFormat; icon: typeof FileText; labelK
 ];
 
 /**
- * Rendered by chat's ChatMessagesPane header so the open conversation can be
- * downloaded as a self-contained web page, as Markdown, or as JSON.
+ * Rendered by chat's ChatMessagesPane header, or by its PinnedQuestionBar
+ * while that bar shows (ChatInterface hands it over), so the open
+ * conversation can be downloaded as a self-contained web page, as Markdown,
+ * or as JSON.
  */
 export default function ChatExportMenu({
   messages,

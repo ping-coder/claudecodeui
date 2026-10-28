@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 
@@ -7,6 +8,7 @@ import express, { type RequestHandler } from 'express';
 
 import { createFileTreeRouter } from '@/modules/file-tree/file-tree.routes.js';
 import type { FileTreeServices } from '@/shared/types.js';
+import { AppError } from '@/shared/utils.js';
 
 function createFakeServices(overrides: Partial<FileTreeServices> = {}): FileTreeServices {
   const unexpectedOperation = async (): Promise<never> => {
@@ -20,6 +22,7 @@ function createFakeServices(overrides: Partial<FileTreeServices> = {}): FileTree
     openFile: unexpectedOperation,
     saveTextFile: unexpectedOperation,
     listProjectFiles: unexpectedOperation,
+    searchProjectFiles: unexpectedOperation,
     createEntry: unexpectedOperation,
     renameEntry: unexpectedOperation,
     deleteEntry: unexpectedOperation,
@@ -175,3 +178,132 @@ test('create route rejects invalid entry types without calling the service', asy
 
   assert.equal(createCalled, false);
 });
+
+test('file search route forwards the search as typed, the limit and the project id', async () => {
+  const inputs: Array<[string, { query: string; limit: number }]> = [];
+  const result = {
+    files: [{ name: 'README.md', path: '/workspace/project/README.md', relativePath: 'README.md', isIgnored: false }],
+    totalMatches: 1,
+    incomplete: false,
+  };
+  const services = createFakeServices({
+    searchProjectFiles: async (projectId, input) => {
+      inputs.push([projectId, { query: input.query, limit: input.limit }]);
+      return result;
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/file-tree/projects/project-1/files/search?q=${encodeURIComponent(' read me ')}&limit=25`,
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), result);
+  });
+
+  // Untrimmed: the palette scores what comes back against the same text.
+  assert.deepEqual(inputs, [['project-1', { query: ' read me ', limit: 25 }]]);
+});
+
+test('file search route falls back to 100 results without a usable limit', async () => {
+  const limits: number[] = [];
+  const services = createFakeServices({
+    searchProjectFiles: async (_projectId, input) => {
+      limits.push(input.limit);
+      return { files: [], totalMatches: 0, incomplete: false };
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    for (const limit of ['', '&limit=0', '&limit=-3', '&limit=many']) {
+      const response = await fetch(`${baseUrl}/api/file-tree/projects/project-1/files/search?q=readme${limit}`);
+      assert.equal(response.status, 200, limit);
+    }
+  });
+
+  assert.deepEqual(limits, [100, 100, 100, 100]);
+});
+
+test('file search route rejects a missing, blank or overlong search without calling the service', async () => {
+  let searchCalled = false;
+  const services = createFakeServices({
+    searchProjectFiles: async () => {
+      searchCalled = true;
+      throw new Error('searchProjectFiles should not run for invalid input');
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const searches: Array<[string, string]> = [
+      ['', 'Search query is required'],
+      ['?q=', 'Search query is required'],
+      ['?q=%20%20', 'Search query is required'],
+      [`?q=${'a'.repeat(513)}`, 'Search query is too long'],
+    ];
+    for (const [search, message] of searches) {
+      const response = await fetch(`${baseUrl}/api/file-tree/projects/project-1/files/search${search}`);
+      const payload = await response.json() as { error: string };
+
+      assert.equal(response.status, 400, search);
+      assert.equal(payload.error, message, search);
+    }
+  });
+
+  assert.equal(searchCalled, false);
+});
+
+test('file search route answers a service error with its status', async () => {
+  const services = createFakeServices({
+    searchProjectFiles: async () => {
+      throw new AppError('Project not found', { code: 'PROJECT_NOT_FOUND', statusCode: 404 });
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/file-tree/projects/missing/files/search?q=readme`);
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: 'Project not found' });
+  });
+});
+
+test('file search route stops the walk when the browser drops the request', async () => {
+  let signal: AbortSignal | undefined;
+  let markSearchStarted: () => void = () => undefined;
+  const searchStarted = new Promise<void>((resolve) => {
+    markSearchStarted = resolve;
+  });
+  let finishSearch: () => void = () => undefined;
+  const services = createFakeServices({
+    searchProjectFiles: (_projectId, input) => {
+      signal = input.signal;
+      markSearchStarted();
+      return new Promise((resolve) => {
+        finishSearch = () => resolve({ files: [], totalMatches: 0, incomplete: true });
+      });
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    // A plain request rather than fetch, whose connection pool would hold the
+    // server open for its keep-alive timeout after the abort.
+    const request = http.get(`${baseUrl}/api/file-tree/projects/project-1/files/search?q=readme`);
+    request.on('error', () => undefined);
+    await searchStarted;
+    assert.equal(signal?.aborted, false);
+
+    request.destroy();
+    await waitUntil(() => signal?.aborted === true);
+    // The walk returns what it found; nothing is written to the closed connection.
+    finishSearch();
+  });
+
+  assert.equal(signal?.aborted, true);
+});
+
+async function waitUntil(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

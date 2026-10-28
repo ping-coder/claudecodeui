@@ -10,7 +10,8 @@ import type { Project } from '@/shared/types';
  * Regression guard: the palette kept only the first 500 files of the tree, so a
  * deeper file could not be found, the files page claimed 499 files, and a
  * project the server refused (413) showed no files and no reason. The real
- * files source runs here; only the API is faked.
+ * files source runs here; only the API is faked. Searching a refused project on
+ * the server is covered in paletteLargeProjectSearch.test.tsx.
  */
 
 const ROOT = '/home/u/project';
@@ -50,7 +51,13 @@ const tree: TreeNode[] = [
 let response: { ok: boolean; status: number; json: () => Promise<unknown> };
 const openFile = vi.fn<(path: string) => void>();
 
-vi.mock('@/shared/api', () => ({ api: { getFiles: async () => response } }));
+// The file search, which the palette falls back on for a refused project, fails here.
+vi.mock('@/shared/api', () => ({
+  api: {
+    getFiles: async () => response,
+    searchFiles: async () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }),
+  },
+}));
 vi.mock('@/shared/context/ThemeContext', () => ({ useTheme: () => ({ toggleDarkMode: () => undefined }) }));
 vi.mock('@/modules/command-palette/context/PaletteOpsContext', () => ({
   usePaletteOps: () => ({ openFile: (path: string) => openFile(path) }),
@@ -154,13 +161,17 @@ test('the files page counts every file, renders 100 rows, and says it leaves the
   assert.equal(hasText(/best matches|Showing \d+ of/), false);
 });
 
-test('a project the server refuses as too large says why when searched', async () => {
+test('a project the server refuses as too large says why when searched and its file search fails', async () => {
   response = { ok: false, status: 413, json: async () => ({ error: 'Project file tree exceeds the 10,000 entry limit.' }) };
   await openPalette();
   // Not before anything is typed: the palette is often opened for its actions.
   assert.equal(hasText(/more than 10,000 entries/), false);
 
   search('README');
+  // Past the file search's debounce, and its failed answer.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  });
   assert.deepEqual(fileOptionTexts(), []);
   assert.equal(hasText(/more than 10,000 entries/), true);
 });

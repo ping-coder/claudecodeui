@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { MutableRefObject } from 'react';
 
 import { api } from '@/shared/api';
-import type { AddChatMessageOptions, MarkSessionIdle, SessionActivityMap,Project,ProjectSession,LLMProvider,NormalizedMessage,ChatMessage,DiffCalculator } from '@/shared/types';
+import type { AddChatMessageOptions, MarkSessionIdle, SessionActivityMap,Project,ProjectSession,LLMProvider,NormalizedMessage,ChatMessage,DiffCalculator,RevealMessageOptions } from '@/shared/types';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { resolveLatestRefreshLimit, SESSION_MESSAGES_PAGE_SIZE } from '@/modules/chat/utils/sessionMessagePagination';
 import { createMessageHistoryRefreshCoordinator } from '@/modules/chat/utils/messageHistoryRefreshCoordinator';
@@ -23,6 +23,94 @@ const SEARCH_TARGET_CONTEXT_MESSAGES = 20;
  */
 const SEARCH_SCROLL_RETRIES = 20;
 const SEARCH_SCROLL_RETRY_DELAY_MS = 150;
+
+/**
+ * How long after a revealMessage call the transcript does not follow new rows
+ * to the bottom: its retries, the scroll and the rows settling after it.
+ */
+const REVEAL_FOLLOW_PAUSE_MS = 1500;
+
+/** How far below the transcript's top edge a row revealed at the start lands. */
+const REVEAL_START_OFFSET_PX = 8;
+
+/**
+ * A row revealed at the start is held there for at most this many frames, and
+ * no longer once it has stayed put for the second number of frames in a row.
+ */
+const REVEAL_HOLD_MAX_FRAMES = 60;
+const REVEAL_HOLD_STILL_FRAMES = 3;
+
+/** The user's own input, which ends the hold on a revealed row at once. */
+const REVEAL_HOLD_CANCEL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+
+/** How long a revealed row flashes, as long as a search hit does. */
+const REVEAL_HIGHLIGHT_MS = 4000;
+
+/**
+ * Scrolls `container` so the top of `row` lands REVEAL_START_OFFSET_PX below
+ * its top edge, then keeps it there once a frame while the rows above settle:
+ * a lazy row that mounts trades its estimated height for its real one and
+ * moves everything after it, and a smooth scroll aimed before that would miss.
+ * Stops after a few still frames or REVEAL_HOLD_MAX_FRAMES, at the user's
+ * first wheel, touch, pointer or key press, and when the transcript cannot
+ * scroll that way any further. Returns what ends it early.
+ */
+function holdRowAtStart(container: HTMLElement, row: HTMLElement): () => void {
+  let frameId = 0;
+  let frames = 0;
+  let stillFrames = 0;
+  let isStopped = false;
+
+  const stop = () => {
+    isStopped = true;
+    cancelAnimationFrame(frameId);
+    for (const type of REVEAL_HOLD_CANCEL_EVENTS) {
+      window.removeEventListener(type, stop, true);
+    }
+  };
+
+  // Puts the row back in place; false when the scroll would not move.
+  const moveRowToStart = (): boolean => {
+    const drift = row.getBoundingClientRect().top
+      - container.getBoundingClientRect().top
+      - REVEAL_START_OFFSET_PX;
+    if (Math.abs(drift) <= 1) {
+      stillFrames += 1;
+      return true;
+    }
+    stillFrames = 0;
+    const previousTop = container.scrollTop;
+    container.scrollTop = previousTop + drift;
+    return container.scrollTop !== previousTop;
+  };
+
+  const tick = () => {
+    if (isStopped) {
+      return;
+    }
+    frames += 1;
+    if (
+      !row.isConnected
+      || !moveRowToStart()
+      || stillFrames >= REVEAL_HOLD_STILL_FRAMES
+      || frames >= REVEAL_HOLD_MAX_FRAMES
+    ) {
+      stop();
+      return;
+    }
+    frameId = requestAnimationFrame(tick);
+  };
+
+  for (const type of REVEAL_HOLD_CANCEL_EVENTS) {
+    window.addEventListener(type, stop, { capture: true, passive: true });
+  }
+  if (moveRowToStart()) {
+    frameId = requestAnimationFrame(tick);
+  } else {
+    stop();
+  }
+  return stop;
+}
 
 /**
  * Finds the rendered row for a resolved search target.
@@ -229,6 +317,31 @@ export function useChatSessionState({
   const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
   const searchScrollActiveRef = useRef(false);
   /**
+   * Until when (epoch ms) the follow-to-bottom stands down for a row
+   * revealMessage brings into view. Rows that arrive meanwhile (a page loaded
+   * just before, a streamed reply) would otherwise pull the view back down.
+   */
+  const revealUntilRef = useRef(0);
+  /** Ends the hold on the row the last start-aligned reveal brought into view, while it runs. */
+  const stopRevealHoldRef = useRef<(() => void) | null>(null);
+  /** Counts revealMessage calls, so the retries of one a later call replaced give up. */
+  const revealCountRef = useRef(0);
+  /**
+   * The load of every message in flight, with the session it is for: a call
+   * while it runs gets its promise, so a caller that looks for one of its rows
+   * afterwards (the pinned question bar's jump) waits for the rows. A ref
+   * rather than `isLoadingAllMessages`, so two calls in one frame share it.
+   * A reset of the transcript drops it, so a call after one reads afresh.
+   */
+  const loadAllInFlightRef = useRef<{ sessionId: string; promise: Promise<boolean> } | null>(null);
+  /**
+   * Counts the resets of the transcript (another session opened, or a draft).
+   * A load of every message that a reset overtook writes nothing when it
+   * lands: the reset took back the flags it set, `isLoadingMoreRef` among
+   * them, and a load started since owns them.
+   */
+  const loadAllGenerationRef = useRef(0);
+  /**
    * The pending step of the search-jump retry chain, so a session change can
    * cancel a jump that belongs to the transcript the user just left.
    */
@@ -302,6 +415,11 @@ export function useChatSessionState({
     setAllMessagesLoaded(false);
     allMessagesLoadedRef.current = false;
     setIsLoadingAllMessages(false);
+    // A load of every message still running was for the transcript left
+    // (see loadAllGenerationRef).
+    loadAllGenerationRef.current += 1;
+    loadAllInFlightRef.current = null;
+    isLoadingMoreRef.current = false;
     setLoadAllJustFinished(false);
     setShowLoadAllOverlay(false);
     setSearchTarget(null);
@@ -630,6 +748,12 @@ export function useChatSessionState({
     }
     searchScrollActiveRef.current = false;
     setSearchTarget(null);
+    // So does a reveal: its retries give up, and the session opened follows
+    // its newest rows from the start.
+    stopRevealHoldRef.current?.();
+    stopRevealHoldRef.current = null;
+    revealUntilRef.current = 0;
+    revealCountRef.current += 1;
 
     pendingInitialScrollRef.current = true;
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
@@ -762,6 +886,11 @@ export function useChatSessionState({
     setAllMessagesLoaded(false);
     allMessagesLoadedRef.current = false;
     setIsLoadingAllMessages(false);
+    // A load of every message still running was for the transcript this
+    // replaces, even when it is this session's (see loadAllGenerationRef).
+    loadAllGenerationRef.current += 1;
+    loadAllInFlightRef.current = null;
+    isLoadingMoreRef.current = false;
     setLoadAllJustFinished(false);
     setShowLoadAllOverlay(false);
     wasNearTopRef.current = false;
@@ -834,7 +963,7 @@ export function useChatSessionState({
 
           if (shouldStickToBottom) {
             setTimeout(() => {
-              if (!isUserScrolledUpRef.current) {
+              if (!isUserScrolledUpRef.current && Date.now() >= revealUntilRef.current) {
                 scrollToBottom();
               }
             }, 200);
@@ -1013,11 +1142,11 @@ export function useChatSessionState({
     if (!isActive) return;
     if (!scrollContainerRef.current || chatMessages.length === 0) return;
     if (isLoadingMoreRef.current || isLoadingMoreMessages || pendingScrollRestoreRef.current) return;
-    if (searchScrollActiveRef.current) return;
+    if (searchScrollActiveRef.current || Date.now() < revealUntilRef.current) return;
 
     if (!isUserScrolledUp) {
       setTimeout(() => {
-        if (!isUserScrolledUpRef.current) {
+        if (!isUserScrolledUpRef.current && Date.now() >= revealUntilRef.current) {
           scrollToBottom();
         }
       }, 50);
@@ -1034,36 +1163,61 @@ export function useChatSessionState({
   // "Load all" overlay visibility is driven by scroll-to-top in handleScroll;
   // timers are cleared on session change via the reset effect above.
 
-  const loadAllMessages = useCallback(async () => {
-    if (!isActive) return;
-    if (!selectedSession || !selectedProject) return;
-    if (isLoadingAllMessages) return;
+  // Resolves true once every message is in the store and the window shows
+  // them all; false when they did not come in (the read failed or was not
+  // made, or the chat has moved to another session since, even if it came
+  // back), leaving the transcript paged as it was. A call while a load for
+  // the transcript on screen runs gets that load's promise.
+  const loadAllMessages = useCallback((): Promise<boolean> => {
+    if (!isActive || !selectedSession || !selectedProject) {
+      return Promise.resolve(false);
+    }
     const requestSessionId = selectedSession.id;
-    allMessagesLoadedRef.current = true;
-    isLoadingMoreRef.current = true;
-    setIsLoadingAllMessages(true);
-    setShowLoadAllOverlay(true);
-    if (loadAllOverlayTimerRef.current) {
-      clearTimeout(loadAllOverlayTimerRef.current);
-      loadAllOverlayTimerRef.current = null;
+    const inFlight = loadAllInFlightRef.current;
+    if (inFlight?.sessionId === requestSessionId) {
+      return inFlight.promise;
     }
 
-    const container = scrollContainerRef.current;
-    const scrollRestoreState = container ? captureScrollRestoreState(container) : null;
+    const load = async (): Promise<boolean> => {
+      const generation = loadAllGenerationRef.current;
+      const isOvertaken = () => loadAllGenerationRef.current !== generation;
+      allMessagesLoadedRef.current = true;
+      isLoadingMoreRef.current = true;
+      setIsLoadingAllMessages(true);
+      setShowLoadAllOverlay(true);
+      if (loadAllOverlayTimerRef.current) {
+        clearTimeout(loadAllOverlayTimerRef.current);
+        loadAllOverlayTimerRef.current = null;
+      }
 
-    try {
-      const slot = await sessionStore.fetchFromServer(requestSessionId, {
-        limit: null,
-        offset: 0,
-        canRequest: () => (
-          isActiveRef.current
-          && activeSessionIdRef.current === requestSessionId
-        ),
-      });
+      const container = scrollContainerRef.current;
+      const scrollRestoreState = container ? captureScrollRestoreState(container) : null;
 
-      if (currentSessionId !== requestSessionId) return;
+      try {
+        const slot = await sessionStore.fetchFromServer(requestSessionId, {
+          limit: null,
+          offset: 0,
+          canRequest: () => (
+            isActiveRef.current
+            && activeSessionIdRef.current === requestSessionId
+          ),
+        });
 
-      if (slot) {
+        if (
+          isOvertaken()
+          || currentSessionId !== requestSessionId
+          || activeSessionIdRef.current !== requestSessionId
+        ) {
+          return false;
+        }
+
+        // A read that fails comes back as the slot it left, marked `error`.
+        if (!slot || slot.status === 'error') {
+          allMessagesLoadedRef.current = false;
+          setShowLoadAllOverlay(false);
+          return false;
+        }
+
         if (scrollRestoreState) {
           pendingScrollRestoreRef.current = scrollRestoreState;
         }
@@ -1081,19 +1235,31 @@ export function useChatSessionState({
           setShowLoadAllOverlay(false);
           loadAllFinishedTimerRef.current = null;
         }, 2500);
-      } else {
-        allMessagesLoadedRef.current = false;
-        setShowLoadAllOverlay(false);
+        return true;
+      } catch (error) {
+        console.error('Error loading all messages:', error);
+        if (!isOvertaken()) {
+          allMessagesLoadedRef.current = false;
+          setShowLoadAllOverlay(false);
+        }
+        return false;
+      } finally {
+        if (!isOvertaken()) {
+          isLoadingMoreRef.current = false;
+          setIsLoadingAllMessages(false);
+        }
       }
-    } catch (error) {
-      console.error('Error loading all messages:', error);
-      allMessagesLoadedRef.current = false;
-      setShowLoadAllOverlay(false);
-    } finally {
-      isLoadingMoreRef.current = false;
-      setIsLoadingAllMessages(false);
-    }
-  }, [isActive, selectedSession, selectedProject, isLoadingAllMessages, currentSessionId, sessionStore]);
+    };
+
+    const promise = load();
+    loadAllInFlightRef.current = { sessionId: requestSessionId, promise };
+    void promise.finally(() => {
+      if (loadAllInFlightRef.current?.promise === promise) {
+        loadAllInFlightRef.current = null;
+      }
+    });
+    return promise;
+  }, [isActive, selectedSession, selectedProject, currentSessionId, sessionStore]);
 
   /**
    * Fetches the whole transcript into the store and returns it, without
@@ -1125,23 +1291,48 @@ export function useChatSessionState({
   // Brings one row into view even when it is outside the visible window or
   // sits in a lazy row that has not mounted: widen the window to include it,
   // then scroll to the row's wrapper, which is in the DOM as soon as the row
-  // is inside the window, mounted or not.
-  const revealMessage = useCallback((message: ChatMessage) => {
+  // is inside the window, mounted or not. `center` (the default) scrolls there
+  // smoothly; `start` puts the row's top just under the transcript's top edge
+  // at once and holds it there while the rows above settle. `exact` takes the
+  // message's own row or none.
+  const revealMessage = useCallback((message: ChatMessage, options: RevealMessageOptions = {}) => {
+    const { block = 'center', highlight = false, exact = false } = options;
+    // The follow-to-bottom stands down meanwhile, and so does the initial
+    // settle if it still runs: either would pull the view back to the bottom.
+    revealUntilRef.current = Date.now() + REVEAL_FOLLOW_PAUSE_MS;
+    pendingInitialScrollRef.current = false;
+    stopRevealHoldRef.current?.();
+    stopRevealHoldRef.current = null;
+    revealCountRef.current += 1;
+    const revealId = revealCountRef.current;
+
     const index = chatMessages.indexOf(message);
     if (index >= 0) {
       setVisibleMessageCount((prev) => visibleCountToReveal(chatMessages.length, index, prev));
     }
 
     const attempt = (remaining: number) => {
+      if (revealId !== revealCountRef.current) {
+        return;
+      }
       const container = scrollContainerRef.current;
       // The widened window commits after this frame, so the row can be absent
       // on the first attempts; only the last one may settle for the nearest
       // row (a hit collapsed inside a tool group carries the group's
       // timestamp), or the first attempt scrolls to an unrelated row and the
-      // retries never run.
-      const element = container ? findRenderedMessageElement(container, message.timestamp, remaining === 0) : null;
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // retries never run. An exact reveal never settles: its message has a
+      // row of its own, so the nearest one would be another message.
+      const element = container ? findRenderedMessageElement(container, message.timestamp, !exact && remaining === 0) : null;
+      if (element && container) {
+        if (block === 'start') {
+          stopRevealHoldRef.current = holdRowAtStart(container, element);
+        } else {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        if (highlight) {
+          element.classList.add('search-highlight-flash');
+          setTimeout(() => element.classList.remove('search-highlight-flash'), REVEAL_HIGHLIGHT_MS);
+        }
         return;
       }
       if (remaining > 0) {
@@ -1150,6 +1341,11 @@ export function useChatSessionState({
     };
     requestAnimationFrame(() => attempt(10));
   }, [chatMessages]);
+
+  // A hold still running when the chat unmounts would scroll a detached transcript.
+  useEffect(() => () => {
+    stopRevealHoldRef.current?.();
+  }, []);
 
   return {
     chatMessages,

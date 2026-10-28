@@ -12,6 +12,7 @@ import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspa
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
 import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
+import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { buildModelRunOptions } from '@/shared/utils';
 import type {
   ChatMessage,
@@ -24,6 +25,7 @@ import type {
 import { useChatProviderState } from '@/modules/chat/hooks/useChatProviderState';
 import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessages';
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
+import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
@@ -32,6 +34,8 @@ import {
   useSessionProtectionActions,
 } from '@/shared/context/SessionProtectionContext';
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
+import ChatExportMenu from '@/modules/chat/transcript/ChatExportMenu';
+import PinnedQuestionBar from '@/modules/chat/transcript/PinnedQuestionBar';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
 import { deriveActivityDetails, deriveActivityProgress, isCliDrivenActivity } from '@/modules/chat/utils/runProgress';
@@ -74,6 +78,30 @@ const isEscapeHeldByFullscreen = (): boolean => (
   && window.isSecureContext
   && typeof (navigator as KeyboardLockNavigator).keyboard?.lock === 'function'
 );
+
+/**
+ * The chat column sizes the pinned question shows and hides at: a column (the
+ * transcript and the bar, not the composer) at least the first pair wide and
+ * tall gets it; one narrower or shorter than the second pair loses it; in
+ * between it stays as it was, so a column near a threshold does not flicker.
+ * A phone held upright is at most about 430px wide, and an iPad's on-screen
+ * keyboard leaves its column about 170px.
+ */
+const PINNED_QUESTION_SHOW_MIN_WIDTH_PX = 440;
+const PINNED_QUESTION_SHOW_MIN_HEIGHT_PX = 400;
+const PINNED_QUESTION_HIDE_BELOW_WIDTH_PX = 420;
+const PINNED_QUESTION_HIDE_BELOW_HEIGHT_PX = 360;
+
+/** Whether the chat column has room for the pinned question, given whether it had at the last measurement. */
+const selectFitsPinnedQuestion = (width: number, height: number, previous: boolean | undefined): boolean => {
+  if (width >= PINNED_QUESTION_SHOW_MIN_WIDTH_PX && height >= PINNED_QUESTION_SHOW_MIN_HEIGHT_PX) {
+    return true;
+  }
+  if (width < PINNED_QUESTION_HIDE_BELOW_WIDTH_PX || height < PINNED_QUESTION_HIDE_BELOW_HEIGHT_PX) {
+    return false;
+  }
+  return previous ?? false;
+};
 
 /**
  * Used by the project-workspace module (via the chat barrel) to render each
@@ -219,6 +247,76 @@ function ChatInterface({
     viewedSessionIdRef.current = selectedSession?.id || currentSessionId || null;
     isFocusedPaneRef.current = isFocusedPane;
   });
+
+  // The pinned question shows while the chat column has room for it, measured
+  // on the element that holds the bar and the transcript (so the bar coming and
+  // going does not change the measure), and once there is a message to pin.
+  // Without a project the column is not rendered; the key re-measures it once
+  // it is, and when the Chat view comes back into sight.
+  const chatColumnRef = useRef<HTMLDivElement>(null);
+  const fitsPinnedQuestion = useElementWidth(
+    chatColumnRef,
+    selectFitsPinnedQuestion,
+    `${Boolean(selectedProject)}:${isActive}`,
+  );
+  const showPinnedQuestion = fitsPinnedQuestion && chatMessages.length > 0;
+
+  // The bar coming or going changes the transcript's height by its own: a
+  // transcript that followed its newest rows is put back at the bottom before
+  // that frame paints.
+  const wasPinnedQuestionShownRef = useRef(showPinnedQuestion);
+  useLayoutEffect(() => {
+    if (wasPinnedQuestionShownRef.current === showPinnedQuestion) {
+      return;
+    }
+    wasPinnedQuestionShownRef.current = showPinnedQuestion;
+    if (!isUserScrolledUp) {
+      scrollToBottom();
+    }
+  }, [isUserScrolledUp, scrollToBottom, showPinnedQuestion]);
+
+  // The question of the turn the first loaded row is in, for the pinned bar
+  // when that question is older than every loaded page: the server names it
+  // from the earliest stored row this chat holds, so no page is fetched.
+  const readEarlierQuestion = useCallback(async (signal: AbortSignal): Promise<ChatMessage | null> => {
+    const sessionId = selectedSession?.id || currentSessionId;
+    const firstRow = sessionId ? sessionStore.getSessionSlot(sessionId)?.serverMessages[0] : undefined;
+    if (!sessionId || !firstRow) {
+      return null;
+    }
+    const response = await api.providers.sessionTurnQuestion(
+      sessionId,
+      { id: firstRow.id, timestamp: firstRow.timestamp },
+      { signal },
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    const question = payload?.data?.question;
+    if (!question) {
+      return null;
+    }
+    // Drawn the way the transcript would draw the row: a background task's
+    // report, for one, is not a question. Its row's id goes with it, for
+    // findLoadedQuestion.
+    const [message] = normalizedToChatMessages([question]);
+    return message?.type === 'user' ? { ...message, historyRowId: question.id } : null;
+  }, [currentSessionId, selectedSession?.id, sessionStore]);
+
+  // A question readEarlierQuestion got, once the pinned bar has loaded every
+  // message to jump to it: stamped as its loaded row is, found by that row's
+  // id, since Cursor stamps its rows from the time of each read. Left as it
+  // was when no loaded row has the id: Claude and Codex give a row without an
+  // id of its own a new one on every read, and keep its time.
+  const findLoadedQuestion = useCallback((question: ChatMessage): ChatMessage => {
+    const sessionId = selectedSession?.id || currentSessionId;
+    const rowId = question.historyRowId;
+    const row = sessionId && rowId
+      ? sessionStore.getMessages(sessionId).find((message) => message.id === rowId)
+      : undefined;
+    return row ? { ...question, timestamp: row.timestamp } : question;
+  }, [currentSessionId, selectedSession?.id, sessionStore]);
 
   // Which of the given message ids a session's transcript holds after its
   // latest page is re-read: how the composer tells whether an insert whose run
@@ -602,6 +700,19 @@ function ChatInterface({
     [chatMessages, sessionActivity],
   );
 
+  // Carried by the pinned question bar while it shows, and by the transcript's
+  // header otherwise; one element, so the memoized bar is not redrawn for it.
+  const exportMenu = useMemo(() => (
+    <ChatExportMenu
+      messages={chatMessages}
+      sessionTitle={selectedSession?.summary || selectedSession?.title}
+      provider={provider}
+      selectedProject={selectedProject}
+      createDiff={createDiff}
+      onLoadFullTranscript={loadFullTranscript}
+    />
+  ), [chatMessages, createDiff, loadFullTranscript, provider, selectedProject, selectedSession?.summary, selectedSession?.title]);
+
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
@@ -634,63 +745,82 @@ function ChatInterface({
       <div className="flex h-full min-h-0 flex-col">
         <MarkdownWorkspaceContext.Provider value={markdownWorkspaceValue}>
           <TranscriptSessionContext.Provider value={transcriptSessionValue}>
-            <ChatMessagesPane
-              scrollContainerRef={scrollContainerRef}
-              // Not redundant with the `scroll` listener. A first page is 20 rows,
-              // tool results fold into their calls, and the "load earlier" link is
-              // hidden while more pages exist — so a short transcript is often not
-              // scrollable at all and never emits `scroll`. Wheel and touch are
-              // then the only way to reach the top pager or the "load all" overlay.
-              onWheel={handleScroll}
-              onTouchMove={handleScroll}
-              isLoadingSessionMessages={isLoadingSessionMessages}
-              isProcessing={isProcessing}
-              hasActivityIndicator={hasActivityIndicator}
-              chatMessages={chatMessages}
-              selectedSession={selectedSession}
-              currentSessionId={currentSessionId}
-              provider={provider}
-              setProvider={setProvider}
-              textareaRef={textareaRef}
-              providerModels={providerModels}
-              setProviderModel={setStoredProviderModel}
-              providerModelCatalog={providerModelCatalog}
-              providerModelActions={providerModelActions}
-              providerModelsLoading={providerModelsLoading}
-              tasksEnabled={tasksEnabled}
-              isTaskMasterInstalled={isTaskMasterInstalled}
-              onShowAllTasks={onShowAllTasks}
-              setInput={setInput}
-              isLoadingMoreMessages={isLoadingMoreMessages}
-              hasMoreMessages={hasMoreMessages}
-              totalMessages={totalMessages}
-              sessionMessagesCount={chatMessages.length}
-              visibleMessageCount={visibleMessageCount}
-              visibleMessages={visibleMessages}
-              loadEarlierMessages={loadEarlierMessages}
-              revealMessage={revealMessage}
-              backgroundTasks={sessionActivity?.tasks}
-              canStopBackgroundTasks={canStopBackgroundTasks}
-              sendMessage={sendMessage}
-              loadAllMessages={loadAllMessages}
-              allMessagesLoaded={allMessagesLoaded}
-              isLoadingAllMessages={isLoadingAllMessages}
-              loadAllJustFinished={loadAllJustFinished}
-              showLoadAllOverlay={showLoadAllOverlay}
-              createDiff={createDiff}
-              onFileOpen={onFileOpen}
-              onShowSettings={onShowSettings}
-              onGrantToolPermission={handleGrantToolPermission}
-              showRawParameters={showRawParameters}
-              showThinking={showThinking}
-              selectedProject={selectedProject}
-              // Editing replaces the turn and everything after it, so it is only
-              // offered when the session is idle — a half-truncated transcript with
-              // a live stream writing into it is not recoverable.
-              onEditMessage={supportsMessageEditing && !isProcessing ? beginEditMessage : undefined}
-              onForkFromMessage={supportsSessionForking ? handleForkFromMessage : undefined}
-              onLoadFullTranscript={loadFullTranscript}
-            />
+            <div ref={chatColumnRef} data-chat-column="" className="flex min-h-0 flex-1 flex-col">
+              {showPinnedQuestion && (
+                <PinnedQuestionBar
+                  // A session's own: its cached answer and open panel go with it.
+                  key={activitySessionId ?? ''}
+                  scrollContainerRef={scrollContainerRef}
+                  chatMessages={chatMessages}
+                  renderedCount={visibleMessages.length}
+                  isUserScrolledUp={isUserScrolledUp}
+                  hasMoreMessages={hasMoreMessages}
+                  readEarlierQuestion={readEarlierQuestion}
+                  revealMessage={revealMessage}
+                  loadAllMessages={loadAllMessages}
+                  findLoadedQuestion={findLoadedQuestion}
+                  exportMenu={exportMenu}
+                />
+              )}
+              <ChatMessagesPane
+                scrollContainerRef={scrollContainerRef}
+                // Not redundant with the `scroll` listener. A first page is 20 rows,
+                // tool results fold into their calls, and the "load earlier" link is
+                // hidden while more pages exist — so a short transcript is often not
+                // scrollable at all and never emits `scroll`. Wheel and touch are
+                // then the only way to reach the top pager or the "load all" overlay.
+                onWheel={handleScroll}
+                onTouchMove={handleScroll}
+                isLoadingSessionMessages={isLoadingSessionMessages}
+                isProcessing={isProcessing}
+                hasActivityIndicator={hasActivityIndicator}
+                chatMessages={chatMessages}
+                selectedSession={selectedSession}
+                currentSessionId={currentSessionId}
+                provider={provider}
+                setProvider={setProvider}
+                textareaRef={textareaRef}
+                providerModels={providerModels}
+                setProviderModel={setStoredProviderModel}
+                providerModelCatalog={providerModelCatalog}
+                providerModelActions={providerModelActions}
+                providerModelsLoading={providerModelsLoading}
+                tasksEnabled={tasksEnabled}
+                isTaskMasterInstalled={isTaskMasterInstalled}
+                onShowAllTasks={onShowAllTasks}
+                setInput={setInput}
+                isLoadingMoreMessages={isLoadingMoreMessages}
+                hasMoreMessages={hasMoreMessages}
+                totalMessages={totalMessages}
+                sessionMessagesCount={chatMessages.length}
+                visibleMessageCount={visibleMessageCount}
+                visibleMessages={visibleMessages}
+                loadEarlierMessages={loadEarlierMessages}
+                revealMessage={revealMessage}
+                backgroundTasks={sessionActivity?.tasks}
+                canStopBackgroundTasks={canStopBackgroundTasks}
+                sendMessage={sendMessage}
+                loadAllMessages={loadAllMessages}
+                allMessagesLoaded={allMessagesLoaded}
+                isLoadingAllMessages={isLoadingAllMessages}
+                loadAllJustFinished={loadAllJustFinished}
+                showLoadAllOverlay={showLoadAllOverlay}
+                createDiff={createDiff}
+                onFileOpen={onFileOpen}
+                onShowSettings={onShowSettings}
+                onGrantToolPermission={handleGrantToolPermission}
+                showRawParameters={showRawParameters}
+                showThinking={showThinking}
+                selectedProject={selectedProject}
+                // Editing replaces the turn and everything after it, so it is only
+                // offered when the session is idle — a half-truncated transcript with
+                // a live stream writing into it is not recoverable.
+                onEditMessage={supportsMessageEditing && !isProcessing ? beginEditMessage : undefined}
+                onForkFromMessage={supportsSessionForking ? handleForkFromMessage : undefined}
+                onLoadFullTranscript={loadFullTranscript}
+                showExportMenu={!showPinnedQuestion}
+              />
+            </div>
           </TranscriptSessionContext.Provider>
         </MarkdownWorkspaceContext.Provider>
 

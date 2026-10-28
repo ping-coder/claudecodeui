@@ -31,9 +31,13 @@ type ChatRunStatus = 'running' | 'completed';
  *   still counts as this run's even though the next run holds the slot.
  * - `handedOver` / `settleHandedOver`: settles once this run's turn has
  *   completed and its process went on to another run (`handedOverTo`), and
- *   never for a run whose process is not handed over. The scheduled-messages
- *   dispatcher stops holding the session for a run it started from then on
+ *   never for a run whose process is not handed over. `runDetachedChatTurn`
+ *   settles then for a run it started, rather than once that process exits
  *   (see `whenHandedOver`).
+ * - `completed` / `settleCompleted`: settles once this run's turn has
+ *   completed, as `status` turns `completed`. `runDetachedChatTurn` tells its
+ *   caller then (see `whenCompleted`): the scheduled-messages dispatcher holds
+ *   a session until the turn it started is over, not until its run settles.
  * - `abortInFlight`: set by `abortRun` before it calls the runtime and
  *   cleared, settled, once it has sent the run's terminal `complete`. A
  *   runtime can let the run's promise settle before its abort returns, so
@@ -53,6 +57,8 @@ type ChatRun = {
   handedOverTo: ChatRun | null;
   handedOver: Promise<void>;
   settleHandedOver: () => void;
+  completed: Promise<void>;
+  settleCompleted: () => void;
   abortInFlight: Promise<void> | null;
 };
 
@@ -248,6 +254,12 @@ function recordRunEnded(run: ChatRun, outcome: RunEndOutcome, backgroundWork: bo
  * 3. Buffer the event for `chat.subscribe` replay.
  * 4. Flip the run to `completed` when the terminal `complete` event passes by,
  *    and record the run's end for every connected tab.
+ * 5. Mark an aborted `complete` with `backgroundWork: true` when the session
+ *    still has background work once the turn is stopped: the stop ended only
+ *    a turn that went into the process held for that work, which goes on.
+ *    The client then shows the session as background work rather than idle,
+ *    as it does after a turn that finished. A stop that takes the process
+ *    down has let go of the work by the time the abort sends the `complete`.
  */
 function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): NormalizedMessage | null {
   // Exactly-one-complete contract: when a run is aborted the chat handler
@@ -278,8 +290,13 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     // each turn ends exactly once. Background work is asked about now, as the
     // turn ends: the runtime has already counted the tasks this turn started.
     const outcome = readRunEndOutcome(message);
-    recordRunEnded(run, outcome, outcome === 'done' && retainCompletedRun(run.appSessionId));
+    const backgroundWork = (outcome === 'done' || outcome === 'aborted') && retainCompletedRun(run.appSessionId);
+    if (outcome === 'aborted' && backgroundWork) {
+      outbound.backgroundWork = true;
+    }
+    recordRunEnded(run, outcome, backgroundWork);
     settleHandedOverIfDone(run);
+    run.settleCompleted();
   }
 
   run.events.push(outbound);
@@ -363,6 +380,7 @@ export const chatRunRegistry = {
     }
 
     let settleHandedOver = () => {};
+    let settleCompleted = () => {};
     const run: ChatRun = {
       appSessionId: input.appSessionId,
       provider: input.provider,
@@ -376,6 +394,8 @@ export const chatRunRegistry = {
       handedOverTo: null,
       handedOver: new Promise<void>((resolve) => { settleHandedOver = resolve; }),
       settleHandedOver: () => settleHandedOver(),
+      completed: new Promise<void>((resolve) => { settleCompleted = resolve; }),
+      settleCompleted: () => settleCompleted(),
       abortInFlight: null,
     };
 
@@ -585,11 +605,22 @@ export const chatRunRegistry = {
    * to another run of the session instead of stopping it; never for a run
    * whose process is not handed over. `runDetachedChatTurn` races it with
    * the run's own promise, which settles only once that process exits, so
-   * the scheduled-messages dispatcher stops holding the session for a turn
-   * it started once the user's next turn has taken the process over.
+   * its caller stops waiting for a process the session's next turn has
+   * taken over.
    */
   whenHandedOver(run: ChatRun): Promise<void> {
     return run.handedOver;
+  },
+
+  /**
+   * Settles once `run`'s turn has completed: its terminal `complete` has gone
+   * out, however the turn ended (finished, failed, aborted, or completed by
+   * the safety net). Used by `runDetachedChatTurn` to tell its caller that
+   * the turn is over while the run itself may stay open for hours, holding
+   * its process for work the turn left going.
+   */
+  whenCompleted(run: ChatRun): Promise<void> {
+    return run.completed;
   },
 
   /**

@@ -454,11 +454,20 @@ test('an aborted run ends once, as aborted, however many completes follow', asyn
   });
 });
 
-test('a done turn that leaves background work running says so; other outcomes never do', async () => {
+test('a done or aborted turn that leaves background work running says so; a failed one never does', async () => {
   await withIsolatedDatabase(() => {
     chatRunRegistry.setRetentionGuard((sessionId) => sessionId.startsWith('app-held-'));
     try {
-      for (const [sessionId, exitCode] of [['app-held-done', 0], ['app-held-failed', 1], ['app-idle-done', 0]] as const) {
+      const cases = [
+        ['app-held-done', { exitCode: 0 }],
+        ['app-held-failed', { exitCode: 1 }],
+        // A stop that ended only a turn handed to the process held for the work.
+        ['app-held-aborted', { exitCode: 0, aborted: true }],
+        ['app-idle-done', { exitCode: 0 }],
+        // A stop that took the process, and its work, down.
+        ['app-idle-aborted', { exitCode: 0, aborted: true }],
+      ] as const;
+      for (const [sessionId, complete] of cases) {
         sessionsDb.createAppSession(sessionId, 'claude', '/workspace/demo');
         const run = chatRunRegistry.startRun({
           appSessionId: sessionId,
@@ -468,7 +477,7 @@ test('a done turn that leaves background work running says so; other outcomes ne
           userId: null,
         });
         assert.ok(run);
-        run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode });
+        run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', ...complete });
       }
 
       assert.deepEqual(
@@ -476,9 +485,49 @@ test('a done turn that leaves background work running says so; other outcomes ne
         [
           ['app-held-done', 'done', true],
           ['app-held-failed', 'failed', false],
+          ['app-held-aborted', 'aborted', true],
           ['app-idle-done', 'done', false],
+          ['app-idle-aborted', 'aborted', false],
         ],
       );
+    } finally {
+      chatRunRegistry.setRetentionGuard(() => false);
+    }
+  });
+});
+
+test('an aborted complete tells the run\'s listeners the session\'s background work goes on, and only then', async () => {
+  await withIsolatedDatabase(async () => {
+    chatRunRegistry.setRetentionGuard((sessionId) => sessionId.startsWith('app-held-'));
+    try {
+      const completeOf = (sessionId: string, complete: Record<string, unknown>) => {
+        sessionsDb.createAppSession(sessionId, 'claude', '/workspace/demo');
+        const tab = new FakeConnection();
+        const run = chatRunRegistry.startRun({
+          appSessionId: sessionId,
+          provider: 'claude',
+          providerSessionId: null,
+          connection: tab,
+          userId: null,
+        });
+        assert.ok(run);
+        run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', ...complete });
+        return tab.frames.find((frame) => frame.kind === 'complete');
+      };
+
+      // What chat.abort sends for a turn handed to the held process, stopped alone.
+      const stoppedTurnOnly = completeOf('app-held-stopped', { exitCode: 0, success: false, aborted: true });
+      assert.equal(stoppedTurnOnly?.aborted, true);
+      assert.equal(stoppedTurnOnly?.backgroundWork, true);
+
+      // A stop that let go of the process: nothing is held by the time the complete goes out.
+      const stoppedWhole = completeOf('app-idle-stopped', { exitCode: 0, success: false, aborted: true });
+      assert.equal(stoppedWhole?.aborted, true);
+      assert.equal('backgroundWork' in (stoppedWhole ?? {}), false);
+
+      // A finished turn's complete stays as it was: the client reads the work off the transcript.
+      const finished = completeOf('app-held-finished', { exitCode: 0, success: true });
+      assert.equal('backgroundWork' in (finished ?? {}), false);
     } finally {
       chatRunRegistry.setRetentionGuard(() => false);
     }
@@ -784,6 +833,51 @@ test('abortRun aborts a running run through the runtime and completes it as abor
   });
 });
 
+test('abortRun asks about background work once the runtime has stopped the turn: work a stop of the turn alone left going is reported, work the stop took down is not', async () => {
+  await withIsolatedDatabase(async () => {
+    // Each session holds work until its runtime's abort lets go of it.
+    const held = new Set(['app-abort-turn-only', 'app-abort-whole']);
+    chatRunRegistry.setRetentionGuard((sessionId) => held.has(sessionId));
+    const tab = connectTab();
+    try {
+      const abortOf = async (sessionId: string, abort: () => Promise<boolean>) => {
+        sessionsDb.createAppSession(sessionId, 'claude', '/workspace/demo');
+        const connection = new FakeConnection();
+        assert.ok(chatRunRegistry.startRun({
+          appSessionId: sessionId,
+          provider: 'claude',
+          providerSessionId: null,
+          connection,
+          userId: null,
+        }));
+        assert.equal(await chatRunRegistry.abortRun(sessionId, abort), true);
+        return connection.frames.find((frame) => frame.kind === 'complete');
+      };
+
+      // Claude stops a turn handed to the held process alone: the work stays tracked.
+      const turnOnly = await abortOf('app-abort-turn-only', async () => true);
+      // Any other stop releases the process, which clears the tracker before the abort returns.
+      const whole = await abortOf('app-abort-whole', async () => {
+        held.delete('app-abort-whole');
+        return true;
+      });
+      await flushMicrotasks();
+
+      assert.equal(turnOnly?.backgroundWork, true);
+      assert.equal('backgroundWork' in (whole ?? {}), false);
+      assert.deepEqual(
+        runEndedFrames(tab).map((frame) => [frame.sessionId, frame.outcome, frame.backgroundWork]),
+        [
+          ['app-abort-turn-only', 'aborted', true],
+          ['app-abort-whole', 'aborted', false],
+        ],
+      );
+    } finally {
+      chatRunRegistry.setRetentionGuard(() => false);
+    }
+  });
+});
+
 test('abortRun completes a run the runtime could not abort with exit code 1', async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('app-abort-failed', 'claude', '/workspace/demo');
@@ -1022,5 +1116,47 @@ test('whenHandedOver settles once the run\'s turn has completed and its process 
     assert.ok(third);
     await flushRegistry();
     assert.equal(secondHandedOver, false);
+  });
+});
+
+test('whenCompleted settles once the run\'s turn has completed, however it ended, and only then', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-turn-completed', 'claude', '/workspace/demo');
+    const start = () => {
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'app-turn-completed',
+        provider: 'claude',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+      let completed = false;
+      void chatRunRegistry.whenCompleted(run).then(() => { completed = true; });
+      return { run, completed: () => completed };
+    };
+
+    // The runtime's own `complete`.
+    const finished = start();
+    finished.run.writer.send({ kind: 'text', provider: 'claude', sessionId: 'native', content: 'working on it' });
+    await flushRegistry();
+    assert.equal(finished.completed(), false, 'a turn still streaming has not completed');
+    finished.run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    await flushRegistry();
+    assert.equal(finished.completed(), true);
+
+    // The abort's `complete`.
+    const aborted = start();
+    assert.equal(await chatRunRegistry.abortRun('app-turn-completed', async () => true), true);
+    await flushRegistry();
+    assert.equal(aborted.completed(), true);
+
+    // The safety net's, for a runtime that settled without one.
+    const crashed = start();
+    await flushRegistry();
+    assert.equal(crashed.completed(), false);
+    chatRunRegistry.completeRunIfCurrent(crashed.run, { exitCode: 1 });
+    await flushRegistry();
+    assert.equal(crashed.completed(), true);
   });
 });

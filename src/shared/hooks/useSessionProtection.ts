@@ -25,6 +25,15 @@ const sessionActivitiesMatch = (left: SessionActivity, right: SessionActivity): 
   && Boolean(left.background) === Boolean(right.background)
   && backgroundTasksKey(left.tasks) === backgroundTasksKey(right.tasks);
 
+/** A session's entry while the tasks it launched still run after its turn: busy, but no response. */
+const backgroundActivity = (tasks: BackgroundTaskSummary[]): SessionActivity => ({
+  statusText: null,
+  canInterrupt: false,
+  startedAt: Math.min(...tasks.map((task) => task.startedAt)),
+  background: true,
+  tasks,
+});
+
 const sessionActivityMapsMatch = (
   left: ReadonlyMap<string, SessionActivity>,
   right: ReadonlyMap<string, SessionActivity>,
@@ -120,7 +129,15 @@ export function useSessionProtection() {
       }
 
       const updated = new Map(prev);
-      updated.delete(sessionId);
+      // A run that left background work running keeps the tasks its entry
+      // lists as that work, for a tab that did not follow the run; one that
+      // did has settled the entry from the transcript by now, as background
+      // work or idle, which the check above leaves alone.
+      if (opts?.backgroundWorkGoesOn && existing.tasks?.length) {
+        updated.set(sessionId, backgroundActivity(existing.tasks));
+      } else {
+        updated.delete(sessionId);
+      }
       return updated;
     });
   }, []);
@@ -137,13 +154,7 @@ export function useSessionProtection() {
         return updated;
       }
 
-      const next: SessionActivity = {
-        statusText: null,
-        canInterrupt: false,
-        startedAt: Math.min(...tasks.map((task) => task.startedAt)),
-        background: true,
-        tasks,
-      };
+      const next = backgroundActivity(tasks);
       if (existing && sessionActivitiesMatch(existing, next)) {
         return prev;
       }

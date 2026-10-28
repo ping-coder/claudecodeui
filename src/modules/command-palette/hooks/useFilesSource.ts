@@ -1,17 +1,6 @@
 import { api } from '@/shared/api';
 import { useApiSource } from '@/modules/command-palette/hooks/useApiSource';
-import type { FileTreeNode } from '@/shared/types';
-
-export type FileResult = {
-  path: string;
-  name: string;
-  // Relative to the project root. The palette matches and shows this rather
-  // than `path`: a query that hits the prefix every absolute path shares (the
-  // project folder's name, say) would match all files alike.
-  relativePath: string;
-  // Matches the project's .gitignore: searchable, but not listed unprompted.
-  isIgnored: boolean;
-};
+import type { CommandPaletteFile, FileTreeNode } from '@/shared/types';
 
 // The file tree answers 413 (FILE_TREE_TOO_LARGE) for a project of more than 10,000 entries.
 const FILE_TREE_TOO_LARGE_STATUS = 413;
@@ -22,8 +11,8 @@ const FILE_TREE_TOO_LARGE_STATUS = 413;
  * win ties when a search scores files alike. The server's entry caps bound the
  * list, so it needs no cap of its own.
  */
-function collectFiles(tree: FileTreeNode[]): FileResult[] {
-  const files: FileResult[] = [];
+function collectFiles(tree: FileTreeNode[]): CommandPaletteFile[] {
+  const files: CommandPaletteFile[] = [];
   let level = tree.map((node) => ({ node, relativePath: node.name }));
 
   while (level.length > 0) {
@@ -45,7 +34,7 @@ function collectFiles(tree: FileTreeNode[]): FileResult[] {
 
 /** Every file of the project, and whether the server refused to list them because the project is too large. */
 export function useFilesSource(projectId: string | undefined, enabled: boolean) {
-  const { items, status } = useApiSource<FileResult, unknown>({
+  const { items, status } = useApiSource<CommandPaletteFile, unknown>({
     enabled: enabled && !!projectId,
     deps: [projectId],
     fetcher: (signal) => api.getFiles(projectId!, { markIgnored: true }, { signal }),

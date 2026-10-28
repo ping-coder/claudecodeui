@@ -326,14 +326,15 @@ feeds it. It is written in exactly four places:
 | The composer sends | `markSessionProcessing(sessionId, { statusText: null, canInterrupt: true })`, before the frame goes out |
 | `chat_subscribed` with `isProcessing` | Marks processing — this is the authoritative answer after a reload |
 | `chat_subscribed` idle | Deletes the entry, **unless** a newer local request started after the subscribe was sent. That guard is `ifStartedBefore`, compared against `startedAt` |
-| `complete` or `protocol_error` | Deletes the entry |
+| `complete` or `protocol_error` | Deletes the entry; a `complete` whose turn left tasks running makes it a background entry instead |
 
-The `complete` branch runs in a fixed order: flush and finalise streaming text, delete the
-busy entry, clear pending permissions for the viewed session, then branch on outcome.
+The `complete` branch runs in a fixed order: flush and finalise streaming text, settle the
+busy entry (idle, or background work while tasks the turn left are still running), clear
+pending permissions for the viewed session, then branch on outcome.
 
 | Outcome | Signal | What the client does |
 | --- | --- | --- |
-| Aborted | `msg.aborted` | Nothing further. Clearing the entry was the whole job |
+| Aborted | `msg.aborted` | Nothing further. Settling the entry was the whole job: idle, unless the frame carries `backgroundWork: true` (the stop ended only a turn that went into the process held for background work), which leaves the session as background work, as a finished turn does |
 | Failed | `msg.success === false` | No sound, no title indicator |
 | Succeeded | neither | Title indicator plus completion sound |
 

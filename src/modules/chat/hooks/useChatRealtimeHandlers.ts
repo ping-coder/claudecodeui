@@ -140,7 +140,8 @@ type UseChatRealtimeHandlersArgs = {
   /**
    * Hands over a `send_refused`: the server did not start a `chat.send` this
    * page sent with `keepBackgroundWork`, as it would have stopped the
-   * session's background work. Never a transcript row.
+   * session's background work, with the send's `clientRequestId` when the
+   * frame carries one. Never a transcript row.
    */
   onSendRefused?: (event: SendRefusedEvent) => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
@@ -322,12 +323,20 @@ export function useChatRealtimeHandlers({
     // store's records are what the transcript's cards fold their live status
     // from, so this reads the same answer they draw. Only the chat the page
     // elects writes it: each chat reads its own store, and of two that
-    // disagree the last writer would win.
-    const reportRemainingBackgroundWork = (sid: string) => {
+    // disagree the last writer would win. `workGoesOn` is the server's word
+    // that the session still has background work: when the store names none
+    // of it (its launch is not loaded, or only an agent's own tasks run), the
+    // tasks the session's entry already lists stand in, so it is not left
+    // idle until the running-sessions poll.
+    const reportRemainingBackgroundWork = (sid: string, { workGoesOn = false } = {}) => {
       if (!isBackgroundReporter(sid)) {
         return;
       }
-      onSessionBackground?.(sid, collectRunningBackgroundTasks(normalizedToChatMessages(sessionStore.getMessages(sid))));
+      const tasks = collectRunningBackgroundTasks(normalizedToChatMessages(sessionStore.getMessages(sid)));
+      onSessionBackground?.(
+        sid,
+        tasks.length === 0 && workGoesOn ? getSessionActivity?.(sid)?.tasks ?? [] : tasks,
+      );
     };
 
     // Writes a session's buffered text into the store and forgets the buffer;
@@ -546,7 +555,8 @@ export function useChatRealtimeHandlers({
 
         // The answer to this page's own `chat.send`, before any run began: no
         // seq, nothing to store, and the session is left as it was. Only the
-        // composer that sent the message acts on it.
+        // composer that sent the message acts on it, found by the send's
+        // `clientRequestId` when the server hands one back.
         case 'send_refused': {
           if (frameSessionId) {
             onSendRefused?.({
@@ -555,6 +565,9 @@ export function useChatRealtimeHandlers({
               changes: Array.isArray(msg.changes)
                 ? msg.changes.filter((change): change is string => typeof change === 'string')
                 : [],
+              ...(typeof msg.clientRequestId === 'string' && msg.clientRequestId
+                ? { clientRequestId: msg.clientRequestId }
+                : {}),
             });
           }
           return;
@@ -688,10 +701,13 @@ export function useChatRealtimeHandlers({
           // indicator derives from the processing map, so the entry changes
           // immediately and atomically: a turn that ended with tasks still
           // running leaves the session as background work — the CLI is held
-          // open for them — and any other leaves it idle. An abort releases
-          // the CLI and takes that work down with it.
-          if (sid && !msg.aborted) {
-            reportRemainingBackgroundWork(sid);
+          // open for them — and any other leaves it idle. An abort usually
+          // releases the CLI and takes that work down with it; the server
+          // says otherwise (`backgroundWork`) when the stop ended only a turn
+          // that went into the process held for the work, which goes on.
+          const workGoesOn = msg.aborted === true && msg.backgroundWork === true;
+          if (sid && (!msg.aborted || workGoesOn)) {
+            reportRemainingBackgroundWork(sid, { workGoesOn });
           } else {
             onSessionIdle?.(sid);
           }
@@ -707,7 +723,7 @@ export function useChatRealtimeHandlers({
 
           if (msg.aborted) {
             // Abort was requested — the complete event confirms it. No
-            // further UI action is needed beyond clearing the entry above.
+            // further UI action is needed beyond the entry above.
             break;
           }
 

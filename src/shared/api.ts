@@ -327,6 +327,17 @@ export const api = {
       `/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true, markIgnored })}`,
       options,
     ),
+  // The best `limit` matches of a search over the project's files, for the
+  // palette when the listing above refuses the project as too large (413):
+  // `{ files, totalMatches, incomplete }`. The search goes as typed, since the
+  // palette scores the files that come back against the same text.
+  searchFiles: (
+    projectId: string,
+    searchQuery: string,
+    limit: number,
+    options: ApiRequestOptions = {},
+  ) =>
+    get(`/api/file-tree/projects/${projectId}/files/search${query({ q: searchQuery, limit })}`, options),
 
   // File operations
   createFile: (
@@ -461,6 +472,19 @@ export const api = {
       pagination: { limit?: number | null; offset?: number } = {},
       options: ApiRequestOptions = {},
     ) => get(sessionMessagesUrl(sessionId, pagination), options),
+    // The user message that opened the turn a stored row belongs to, for
+    // chat's pinned question while that message is older than every loaded
+    // page: `{ question }`, null when no question comes before the row. `id`
+    // names the row; `timestamp` places it once the server no longer knows
+    // that id.
+    sessionTurnQuestion: (
+      sessionId: string,
+      row: { id: string; timestamp?: string },
+      options: ApiRequestOptions = {},
+    ) => get(
+      `/api/providers/sessions/${encodeURIComponent(sessionId)}/turn-question${query({ before: row.id, at: row.timestamp })}`,
+      options,
+    ),
     sessionTokenUsage: (sessionId: string) =>
       get(`/api/providers/sessions/${encodeURIComponent(sessionId)}/token-usage`),
     sessionActiveModel: (provider: string, sessionId: string) =>

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -66,6 +66,8 @@ type ScriptedBehaviour = {
   interrupt?: 'reply' | 'hang';
   /** False for an SDK whose query has no setModel or setPermissionMode. */
   switches?: boolean;
+  /** `keep`: the CLI answers every cancel_async_message that it kept the message. */
+  cancel?: 'confirm' | 'keep';
 };
 
 function createScriptedQuery(
@@ -91,9 +93,14 @@ function createScriptedQuery(
     setSwitchAnswer: (answer) => { switchAnswer = answer; },
   };
 
+  // The CLI answers a switch on a line of its own, which the SDK reads in a
+  // later turn of the event loop: never within the one that sent it.
   const answerSwitch = (call: string) => {
     calls.push(call);
-    return switchAnswer === 'ok' ? Promise.resolve() : Promise.reject(new Error(`refused ${call}`));
+    const answer = switchAnswer;
+    return new Promise<void>((resolve, reject) => {
+      setImmediate(() => (answer === 'ok' ? resolve() : reject(new Error(`refused ${call}`))));
+    });
   };
 
   const createQuery: NonNullable<ProviderRuntimeContext['createQuery']> = ({ prompt, options }) => {
@@ -142,7 +149,7 @@ function createScriptedQuery(
       stopTask: async (taskId: string) => { calls.push(`stop:${taskId}`); },
       cancelAsyncMessage: async (uuid: string) => {
         calls.push(`cancel:${uuid}`);
-        return true;
+        return behaviour.cancel !== 'keep';
       },
       close: () => {
         if (!closed) {
@@ -222,6 +229,9 @@ const taskStarted = (taskId: string, toolUseId: string, taskType: string) => ({
 const taskNotification = (taskId: string, toolUseId: string, status: string) => ({
   type: 'system', subtype: 'task_notification', session_id: NATIVE_ID, task_id: taskId, tool_use_id: toolUseId, status, summary: `Task ${taskId} ${status}`, output_file: '',
 });
+const taskUpdated = (taskId: string, status: string) => ({
+  type: 'system', subtype: 'task_updated', session_id: NATIVE_ID, task_id: taskId, patch: { status, end_time: Date.now() },
+});
 const assistantText = (text: string) => ({
   type: 'assistant', session_id: NATIVE_ID, parent_tool_use_id: null,
   message: { role: 'assistant', content: [{ type: 'text', text }] },
@@ -230,12 +240,17 @@ const echo = (uuid: string, content: string) => ({
   type: 'user', isReplay: true, uuid, session_id: NATIVE_ID, parent_tool_use_id: null,
   message: { role: 'user', content },
 });
-const lifecycle = (commandUuid: string, state: string) => ({
-  type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: commandUuid, state,
+const lifecycle = (commandUuid: string, state: string, extra: Record<string, unknown> = {}) => ({
+  type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: commandUuid, state, ...extra,
 });
 const result = () => ({ type: 'result', subtype: 'success', session_id: NATIVE_ID, result: 'done', duration_ms: 1, num_turns: 1 });
 // The `result` of a turn the CLI runs to relay a finished task.
 const relayResult = () => ({ ...result(), result: 'relayed', origin: { kind: 'task-notification' } });
+// The `result` that ends a prompt's turn the user interrupted, as CLI 2.1.312 writes it.
+const interruptedResultFor = (uuid: string) => ({
+  type: 'result', subtype: 'error_during_execution', is_error: true, session_id: NATIVE_ID, duration_ms: 1, num_turns: 1,
+  origin: { kind: 'human' }, user_message_uuid: uuid, user_message_uuids: [uuid],
+});
 
 const completes = (sent: NormalizedMessage[]) => sent.filter((message) => message.kind === 'complete').length;
 const userTexts = (sent: NormalizedMessage[]) => sent.filter((message) => message.kind === 'text' && message.role === 'user');
@@ -314,9 +329,32 @@ function launchWorkflow(script: Scripted): void {
   script.emit(toolResult('toolu_wf', 'Workflow launched in background. Task ID: wf1'));
 }
 
-function launchMonitor(script: Scripted): void {
+/**
+ * A Monitor as a CLI that reports no task for it starts one: only the launch
+ * rule holds the process for it, until the CLI runs a turn for it.
+ */
+function launchUntrackedMonitor(script: Scripted): void {
   script.emit(toolUse('toolu_monitor', 'Monitor', { command: 'tail -f x', description: 'watch', timeout_ms: 1000 }));
   script.emit(toolResult('toolu_monitor', 'Monitor started'));
+}
+
+/** A Monitor as CLI 2.1.312 starts it: a task (`local_bash`) for the call. */
+function launchMonitor(script: Scripted): void {
+  script.emit(toolUse('toolu_monitor', 'Monitor', { command: 'until test -f ready; do sleep 2; done', description: 'wait ready', timeout_ms: 60000 }));
+  script.emit(taskStarted('mon1', 'toolu_monitor', 'local_bash'));
+  script.emit(toolResult('toolu_monitor', 'Monitor started (task mon1, expires in 1m unless the source ends first)'));
+}
+
+/**
+ * The Monitor's source ends: CLI 2.1.312 settles its task and runs a turn for
+ * it, which echoes nothing.
+ */
+function endMonitor(script: Scripted): void {
+  script.emit(taskUpdated('mon1', 'completed'));
+  script.emit(taskNotification('mon1', 'toolu_monitor', 'completed'));
+  script.emit(init());
+  script.emit(assistantText('The Monitor saw READY.'));
+  script.emit(relayResult());
 }
 
 /** A self-paced loop's next wake-up: no task event, so only the launch rule holds the process for it. */
@@ -483,7 +521,7 @@ test('stopping the last task of the hold during the handed-over turn leaves the 
 });
 
 test('work the tracker cannot see still holds the process after the handed-over turn', async () => {
-  const held = await startHeldRun(launchMonitor);
+  const held = await startHeldRun(launchUntrackedMonitor);
   const next = sendNext(held, 'Anything new?');
   try {
     await waitUntil(() => held.script.prompts.length === 2);
@@ -499,7 +537,7 @@ test('work the tracker cannot see still holds the process after the handed-over 
 });
 
 test('the hold\'s silence countdown stops while the handed-over turn runs and starts again at its end', async (t) => {
-  const held = await startHeldRun(launchMonitor);
+  const held = await startHeldRun(launchUntrackedMonitor);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   // The countdown the first turn's end would have armed: a Monitor hold ends
   // after HOLD_IDLE of silence. Armed afresh here, under the mocked clock.
@@ -770,7 +808,7 @@ test('planning a turn reads the model the turn names before the one the session 
 });
 
 test('planning a turn counts a hold for work the tracker cannot see as held work, and one kept only for nested tasks as none', async () => {
-  const monitored = await startHeldRun(launchMonitor);
+  const monitored = await startHeldRun(launchUntrackedMonitor);
   try {
     assert.deepEqual(await claudeRuntime.planHandOver(monitored.sessionId, { cwd: monitored.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
   } finally {
@@ -1046,7 +1084,7 @@ test('an edited message replaces the held process without a word', async () => {
   }
 });
 
-test('an abort before the handed-over prompt has started takes it back before interrupting', async () => {
+test('stopping a handed-over turn whose prompt has not started takes the prompt back, and leaves the CLI\'s own turn and the work running', async () => {
   const held = await startHeldRun();
   // The CLI is relaying something else, so the message waits in its queue.
   held.script.emit(assistantText('Relaying.'));
@@ -1057,16 +1095,26 @@ test('an abort before the handed-over prompt has started takes it back before in
     assert.equal(await abortClaudeSDKSession(held.sessionId), true);
     await flush();
     const calls = held.script.calls.filter((call) => !call.startsWith('prompt:'));
-    assert.deepEqual(calls, [`cancel:${promptUuid(held, 1)}`, 'interrupt', 'stop:wf1', 'release'], 'the CLI would run a queued prompt after the interrupt');
+    assert.deepEqual(calls, [`cancel:${promptUuid(held, 1)}`], 'taken back; the relaying turn is not interrupted, and nothing is stopped or released');
     assert.equal(next.settled(), true);
     assert.equal(completes(next.writer.sent), 0, 'the abort\'s caller sends the terminal complete');
+    assert.deepEqual(listedTaskIds(held.sessionId), ['wf1']);
+
+    // The relaying turn ends with the workflow still going: the process is
+    // held for it, and the session's next message goes into it.
+    held.script.emit(relayResult());
+    await flush();
+    assert.equal(held.script.released(), false);
+    const after = sendNext(held, 'Now this', {}, createWriter(3));
+    await waitUntil(() => held.script.prompts.length === 3);
+    assert.equal(after.later.script.created(), false, 'no second CLI is started');
   } finally {
     await finish(held, [next.run]);
   }
 });
 
-test('a turn the CLI ends ahead of the handed-over prompt while the user stops it reports no work finished', async (t) => {
-  const held = await startHeldRun(launchWorkflow, {}, { behaviour: { interrupt: 'hang' } });
+test('a handed-over turn stopped while the CLI relays the finished work ahead of it leaves that relay to report the work done', async () => {
+  const held = await startHeldRun();
   // The workflow finishes, and the CLI starts relaying it.
   held.script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
   held.script.emit(assistantText('The workflow is done.'));
@@ -1074,22 +1122,18 @@ test('a turn the CLI ends ahead of the handed-over prompt while the user stops i
   const next = sendNext(held, 'Never mind');
   try {
     await waitUntil(() => held.script.prompts.length === 2);
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    const aborting = abortClaudeSDKSession(held.sessionId);
-    await flush();
-    // The interrupt is not answered yet; the relaying turn ends meanwhile.
+    assert.equal(await abortClaudeSDKSession(held.sessionId), true);
+    assert.equal(completes(next.writer.sent), 0, 'the abort\'s caller sends the terminal complete');
     held.script.emit(relayResult());
     await flush();
-    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0], 'the session is being stopped, work and all');
-    t.mock.timers.tick(5 * 1000);
-    assert.equal(await aborting, true);
-    assert.equal(completes(next.writer.sent), 0, 'the abort\'s caller sends the terminal complete');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [`cancel:${promptUuid(held, 1)}`, 'release'], 'let go once nothing is left');
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [1, 0], 'the work is reported done, to the run that left it running');
   } finally {
     await finish(held, [next.run]);
   }
 });
 
-test('an abort once the handed-over turn has started interrupts it like any turn', async () => {
+test('stopping a handed-over turn once it has started interrupts that turn alone: the work and the hold go on, and the next message goes into the process', async () => {
   const held = await startHeldRun();
   const next = sendNext(held, 'Go');
   try {
@@ -1097,10 +1141,32 @@ test('an abort once the handed-over turn has started interrupts it like any turn
     held.script.emit(echo(promptUuid(held, 1), 'Go'));
     held.script.emit(assistantText('Going.'));
     await flush();
-    assert.equal(await abortClaudeSDKSession(held.sessionId), true);
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    const stopSettled = track(aborting);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
     await flush();
-    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), ['interrupt', 'stop:wf1', 'release']);
+    assert.equal(stopSettled(), false, 'the stop waits for the interrupted turn to end, so the next send finds the process held again');
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+    await flush();
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), ['interrupt'], 'no task is stopped, and the input stays open');
     assert.equal(next.settled(), true);
+    assert.equal(completes(next.writer.sent), 0, 'the abort\'s caller sends the terminal complete');
+    assert.deepEqual(listedTaskIds(held.sessionId), ['wf1']);
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+
+    const third = sendNext(held, 'Again', {}, createWriter(3));
+    await waitUntil(() => held.script.prompts.length === 3);
+    assert.equal(third.later.script.created(), false, 'no second CLI is started');
+    held.script.emit(echo(promptUuid(held, 2), 'Again'));
+    held.script.emit(result());
+    await waitUntil(() => third.settled());
+    assert.equal(completes(third.writer.sent), 1);
+    held.script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
+    held.script.emit(relayResult());
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports(), third.writer.finishedReports()], [0, 0, 1]);
   } finally {
     await finish(held, [next.run]);
   }
@@ -1340,7 +1406,7 @@ test('work a relaying turn starts before the hand-over still holds the process a
   const held = await startHeldRun();
   // The workflow finishes, and the turn that relays it starts a Monitor.
   held.script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
-  launchMonitor(held.script);
+  launchUntrackedMonitor(held.script);
   await flush();
   const next = sendNext(held, 'And then?');
   try {
@@ -1623,7 +1689,7 @@ test('two turns relayed ahead of the handed-over turn report the work done once'
 });
 
 test('a hold for work the tracker cannot see ends once that work reports back ahead of the handed-over turn', async () => {
-  const held = await startHeldRun(launchMonitor);
+  const held = await startHeldRun(launchUntrackedMonitor);
   // The Monitor fires, and the CLI runs a turn for it.
   held.script.emit(assistantText('The log changed.'));
   await flush();
@@ -1654,6 +1720,1554 @@ test('a newer run that takes the session over lets the handed-over turn\'s calle
     await newer.run;
   } finally {
     await finish(held, [next.run]);
+  }
+});
+
+/** A backgrounded command the tracker follows (`bg1` by default). */
+function launchBackgroundCommand(script: Scripted, taskId = 'bg1', toolUseId = 'toolu_bash'): void {
+  script.emit(toolUse(toolUseId, 'Bash', { command: 'make', run_in_background: true }));
+  script.emit(taskStarted(taskId, toolUseId, 'local_bash'));
+  script.emit(toolResult(toolUseId, `Command running in background with ID: ${taskId}`));
+}
+
+/** The CLI feeding a finished task's notification into the turn that relays it, as CLI 2.1.312 echoes it. */
+const notificationEcho = (taskId: string, toolUseId: string) => ({
+  type: 'user', isReplay: true, uuid: randomUUID(), session_id: NATIVE_ID, parent_tool_use_id: null,
+  origin: { kind: 'task-notification', producer: 'session-task' },
+  message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n</task-notification>` },
+});
+
+/** A task finishing and the CLI relaying it in a turn of its own. */
+function relayFinishedTask(script: Scripted, taskId: string, toolUseId: string): void {
+  script.emit(taskNotification(taskId, toolUseId, 'completed'));
+  script.emit(notificationEcho(taskId, toolUseId));
+  script.emit(assistantText(`${taskId} is done.`));
+  script.emit(relayResult());
+}
+
+/** A scheduled wake-up firing: the CLI's own turn, whose result names neither an origin nor a prompt. */
+function fireWakeup(script: Scripted, scheduleNext = false): void {
+  script.emit(lifecycle(randomUUID(), 'started'));
+  script.emit(assistantText('Checking again.'));
+  if (scheduleNext) {
+    scheduleWakeup(script, `toolu_wakeup_${randomUUID()}`);
+  }
+  script.emit(result());
+}
+
+const HELD_WORK_IN_TURN = { heldWork: true, canHandOver: false, changes: [], switches: [] };
+
+test('stopping a handed-over turn withdraws its unread inserts and reports them cancelled, through its own run', async () => {
+  const held = await startHeldRun();
+  const next = sendNext(held, 'Look at the tests');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(lifecycle(promptUuid(held, 1), 'started'));
+    const insertId = randomUUID();
+    assert.deepEqual(await claudeRuntime.insert(held.sessionId, { insertId, content: 'Only the unit tests' }), { accepted: true });
+    await waitUntil(() => held.script.prompts.length === 3);
+
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [`cancel:${insertId}`, 'interrupt']);
+    const statuses = next.writer.sent
+      .filter((message) => message.kind === 'insert_status')
+      .map((message) => [message.insertStatus, message.insertReason ?? null]);
+    assert.deepEqual(statuses, [['pending', null], ['cancelled', 'ABORTED']]);
+    assert.equal(held.script.released(), false, 'the workflow still holds the process');
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a handed-over prompt the CLI does not give back is taken to have started, and its turn is interrupted', async () => {
+  const held = await startHeldRun(launchWorkflow, {}, { behaviour: { cancel: 'keep' } });
+  const next = sendNext(held, 'Never mind');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [`cancel:${promptUuid(held, 1)}`, 'interrupt']);
+    assert.equal(held.script.released(), false);
+    assert.deepEqual(listedTaskIds(held.sessionId), ['wf1']);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a handed-over turn whose stop the CLI never answers is stopped whole: the process is closed after 5 s', async (t) => {
+  const held = await startHeldRun(launchWorkflow, {}, { behaviour: { interrupt: 'hang' } });
+  const next = sendNext(held, 'Go');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Go'));
+    await flush();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    t.mock.timers.tick(5 * 1000);
+    assert.equal(await aborting, true);
+    await waitUntil(() => held.script.calls.includes('close'));
+    assert.equal(next.settled(), true);
+    assert.equal(completes(next.writer.sent), 0, 'the abort\'s caller sends the terminal complete');
+    // A closed process makes the session's next run wait 8 s.
+    t.mock.timers.tick(8 * 1000);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a turn that started a wake-up before it was stopped leaves the process held for that wake-up', async () => {
+  const held = await startHeldRun();
+  const next = sendNext(held, 'Keep checking every five minutes');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Keep checking every five minutes'));
+    scheduleWakeup(held.script);
+    held.script.emit(toolUse('toolu_fg', 'Bash', { command: 'npm test' }));
+    await flush();
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+
+    // The workflow finishes and is relayed; the wake-up is still to come.
+    relayFinishedTask(held.script, 'wf1', 'toolu_wf');
+    await flush();
+    assert.equal(held.script.released(), false, 'held for the wake-up');
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+    fireWakeup(held.script);
+    await flush();
+    assert.equal(held.script.released(), true, 'the wake-up has run and set no other');
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a first turn that sets up a wake-up or a Monitor and goes on working counts as held work while it runs', async () => {
+  for (const setUp of [scheduleWakeup, launchUntrackedMonitor, launchMonitor]) {
+    const sessionId = `app-held-turn-${randomUUID()}`;
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-held-turn-'));
+    const { createQuery, script } = createScriptedQuery();
+    const firstRun = queryClaudeSDK('/loop 5m check CI', { sessionId, cwd }, createWriter(1).writer as never, { ...createContext(), createQuery });
+    try {
+      await waitUntil(() => script.prompts.length === 1);
+      script.emit(init());
+      script.emit(echo(String(script.prompts[0]?.uuid), '/loop 5m check CI'));
+      await flush();
+      assert.deepEqual(await claudeRuntime.planHandOver(sessionId, { cwd }), NOTHING_HELD, `${setUp.name}: nothing yet`);
+      setUp(script);
+      script.emit(toolUse('toolu_long', 'Bash', { command: 'npm test' }));
+      await flush();
+      assert.deepEqual(await claudeRuntime.planHandOver(sessionId, { cwd }), HELD_WORK_IN_TURN, setUp.name);
+    } finally {
+      script.end();
+      await firstRun;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a /loop turn that also backgrounded a command keeps its process held for the next wake-up once the command is done and relayed', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchBackgroundCommand(script);
+    scheduleWakeup(script);
+  }));
+  try {
+    relayFinishedTask(held.script, 'bg1', 'toolu_bash');
+    await flush();
+    assert.equal(held.script.released(), false, 'the loop\'s next wake-up still needs the process');
+    assert.equal(held.first.finishedReports(), 0, 'the loop goes on');
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+
+    // A wake-up that sets the next keeps it held, and nothing is reported finished.
+    fireWakeup(held.script, true);
+    await flush();
+    assert.equal(held.script.released(), false);
+    assert.equal(held.first.finishedReports(), 0);
+
+    // One that sets none ends the loop.
+    fireWakeup(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a relay of the loop\'s command that the CLI does not echo still counts as the command reporting back, not the wake-up', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchBackgroundCommand(script);
+    scheduleWakeup(script);
+  }));
+  try {
+    held.script.emit(taskNotification('bg1', 'toolu_bash', 'completed'));
+    held.script.emit(assistantText('bg1 is done.'));
+    held.script.emit(relayResult());
+    await flush();
+    assert.equal(held.script.released(), false, 'the wake-up is still to come');
+    fireWakeup(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('stopping the loop\'s command, in its own turn or in one handed to its process, leaves the process held for the next wake-up', async () => {
+  const loopWithCommand = announcingPrompt((script) => {
+    launchBackgroundCommand(script);
+    scheduleWakeup(script);
+  });
+
+  // Stopped while the process is held: no follow-up turn comes for a stopped task.
+  const idle = await startHeldRun(loopWithCommand);
+  try {
+    assert.equal(await stopClaudeSDKTask(idle.sessionId, 'bg1'), true);
+    idle.script.emit(taskNotification('bg1', 'toolu_bash', 'stopped'));
+    await flush();
+    assert.equal(idle.script.released(), false, 'the wake-up is still to come');
+  } finally {
+    await finish(idle);
+  }
+
+  // Stopped during the user's turn that went into the process.
+  const held = await startHeldRun(loopWithCommand);
+  const next = sendNext(held, 'Stop the build, then tell me the status');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Stop the build, then tell me the status'));
+    held.script.emit(taskNotification('bg1', 'toolu_bash', 'stopped'));
+    held.script.emit(assistantText('Stopped the build.'));
+    await flush();
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }, INHERIT_UNSET), HELD_WORK_IN_TURN);
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    assert.equal(held.script.released(), false);
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a wake-up set in a turn whose long foreground command the CLI reports as a task still holds the process', async () => {
+  // CLI 2.1.312 reports a foreground command that runs for a while as a task.
+  const held = await startHeldRun((script) => {
+    script.emit(toolUse('toolu_fg', 'Bash', { command: 'npm test' }));
+    script.emit(taskStarted('fg1', 'toolu_fg', 'local_bash'));
+    script.emit(taskNotification('fg1', 'toolu_fg', 'completed'));
+    script.emit(toolResult('toolu_fg', 'ok'));
+    scheduleWakeup(script);
+  });
+  try {
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a turn the CLI runs ahead of the handed-over prompt that starts a command and a wake-up keeps the process held for the wake-up', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup));
+  // The wake-up fires: its turn backgrounds a command and sets the next wake-up.
+  held.script.emit(assistantText('Checking the build again.'));
+  launchBackgroundCommand(held.script);
+  scheduleWakeup(held.script, 'toolu_wakeup_2');
+  await flush();
+  const next = sendNext(held, 'What is the status?');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(result());
+    held.script.emit(echo(promptUuid(held, 1), 'What is the status?'));
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    relayFinishedTask(held.script, 'bg1', 'toolu_bash');
+    await flush();
+    assert.equal(held.script.released(), false, 'the next wake-up still needs the process');
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('the loop\'s command relayed ahead of the handed-over turn reports nothing finished while the wake-up is still to come', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchBackgroundCommand(script);
+    scheduleWakeup(script);
+  }));
+  // The command finishes, and the CLI starts relaying it.
+  held.script.emit(taskNotification('bg1', 'toolu_bash', 'completed'));
+  held.script.emit(notificationEcho('bg1', 'toolu_bash'));
+  held.script.emit(assistantText('The build is done.'));
+  await flush();
+  const next = sendNext(held, 'What is the status?');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(relayResult());
+    await flush();
+    assert.equal(held.first.finishedReports(), 0, 'the loop goes on');
+    held.script.emit(echo(promptUuid(held, 1), 'What is the status?'));
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    assert.equal(held.script.released(), false, 'the wake-up still needs the process');
+    fireWakeup(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 1]);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a turn whose ScheduleWakeup ends the loop lets its process go', async () => {
+  const sessionId = `app-held-turn-${randomUUID()}`;
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-held-turn-'));
+  const { createQuery, script } = createScriptedQuery();
+  const first = createWriter(1);
+  const firstRun = queryClaudeSDK('stop the loop', { sessionId, cwd }, first.writer as never, { ...createContext(), createQuery });
+  try {
+    await waitUntil(() => script.prompts.length === 1);
+    script.emit(init());
+    script.emit(toolUse('toolu_stop', 'ScheduleWakeup', { stop: true }));
+    script.emit(toolResult('toolu_stop', 'Loop stopped'));
+    script.emit(result());
+    await waitUntil(() => completes(first.sent) === 1);
+    await flush();
+    assert.equal(script.released(), true, 'no wake-up is left to wait for');
+  } finally {
+    script.end();
+    await firstRun;
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Runs a test with Claude's user settings file under a directory of its own
+ * (CLAUDE_CONFIG_DIR, which the CLI reads too): `write` puts a settings file
+ * there, given its settings or its bytes, or removes it given null.
+ */
+async function withUserSettings(runTest: (write: (settings: Record<string, unknown> | Buffer | null) => Promise<void>) => Promise<void>): Promise<void> {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-held-turn-config-'));
+  process.env.CLAUDE_CONFIG_DIR = directory;
+  const write = async (settings: Record<string, unknown> | Buffer | null) => {
+    await rm(path.join(directory, 'settings.json'), { force: true });
+    if (settings) {
+      await writeFile(path.join(directory, 'settings.json'), Buffer.isBuffer(settings) ? settings : JSON.stringify(settings));
+    }
+  };
+  try {
+    await runTest(write);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/** Writes, or with null removes, one of a project's own Claude settings files: its settings, its text or its bytes. */
+async function writeProjectSettings(cwd: string, file: 'settings.json' | 'settings.local.json', content: Record<string, unknown> | string | Buffer | null): Promise<void> {
+  await mkdir(path.join(cwd, '.claude'), { recursive: true });
+  await rm(path.join(cwd, '.claude', file), { force: true });
+  if (content !== null) {
+    await writeFile(path.join(cwd, '.claude', file), typeof content === 'string' || Buffer.isBuffer(content) ? content : JSON.stringify(content));
+  }
+}
+
+test('a process launched with no ultracode choice runs with the settings file\'s: switching it to a model with ultracode off is a change', async () => {
+  await withUserSettings(async (write) => {
+    await write({ ultracode: true });
+    // The default model gets no ultracode choice, so the process runs with the file's.
+    const held = await startHeldRun(launchWorkflow, { model: 'default', effort: 'high' });
+    const laterRuns: Array<Promise<unknown>> = [];
+    try {
+      const plan = (options: Record<string, unknown>) => claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'high', ...options });
+      assert.deepEqual(await plan({ model: 'opus', ultracode: false }), { heldWork: true, canHandOver: false, changes: ['ultracode'], switches: ['model'] });
+      assert.deepEqual(await plan({ model: 'opus', ultracode: true }), { heldWork: true, canHandOver: true, changes: [], switches: ['model'] });
+
+      const next = sendNext(held, 'With ultracode off', { model: 'opus', effort: 'high', ultracode: false });
+      laterRuns.push(next.run);
+      await waitUntil(() => held.script.released());
+      assert.deepEqual(workStoppedNotices(next.writer.sent).map((notice) => notice.slice(0, 2)), [['BACKGROUND_WORK_STOPPED', ['ultracode']]]);
+      assert.equal(held.script.prompts.length, 1, 'nothing goes into the process');
+      held.script.end();
+      await waitUntil(() => next.later.script.created());
+    } finally {
+      await finish(held, laterRuns);
+    }
+  });
+});
+
+test('a turn that makes no ultracode choice is weighed against what a new process would read from the settings files', async () => {
+  await withUserSettings(async (write) => {
+    await write(null);
+    const held = await startHeldRun(launchWorkflow, { model: 'opus', effort: 'high', ultracode: true });
+    try {
+      const plan = () => claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, model: 'default', effort: 'high' });
+      assert.deepEqual(await plan(), { heldWork: true, canHandOver: false, changes: ['ultracode'], switches: ['model'] }, 'a new process would run with it off');
+      await write({ ultracode: true });
+      assert.deepEqual(await plan(), { heldWork: true, canHandOver: true, changes: [], switches: ['model'] }, 'as the process does');
+    } finally {
+      await finish(held);
+    }
+  });
+});
+
+test('the settings files are read in Claude Code\'s order, the project\'s over the user\'s and its local file over both, and a file that does not parse is skipped', async () => {
+  await withUserSettings(async (write) => {
+    await write(null);
+    const held = await startHeldRun(launchWorkflow, { model: 'opus', effort: 'high', ultracode: false });
+    try {
+      const fileValueKeepsTheTurnOut = async () => (await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, model: 'default', effort: 'high' })).changes.includes('ultracode');
+      await write({ ultracode: true });
+      assert.equal(await fileValueKeepsTheTurnOut(), true, 'the user\'s file turns it on');
+      await writeProjectSettings(held.cwd, 'settings.json', { ultracode: false });
+      assert.equal(await fileValueKeepsTheTurnOut(), false, 'the project\'s turns it off again');
+      await writeProjectSettings(held.cwd, 'settings.local.json', { ultracode: true });
+      assert.equal(await fileValueKeepsTheTurnOut(), true, 'the local file wins over both');
+      await writeProjectSettings(held.cwd, 'settings.local.json', '{ not json');
+      assert.equal(await fileValueKeepsTheTurnOut(), false, 'a broken local file is skipped');
+      await writeProjectSettings(held.cwd, 'settings.json', { ultracode: 'false' });
+      assert.equal(await fileValueKeepsTheTurnOut(), true, 'and so is a value that is not a boolean');
+    } finally {
+      await finish(held);
+    }
+  });
+});
+
+test('a plan or a turn that inherits unset settings takes ultracode from the live process', async () => {
+  await withUserSettings(async (write) => {
+    await write(null);
+    const held = await startHeldRun(announcingPrompt(scheduleWakeup), { ...SCHEDULED_OPTIONS, model: 'opus', ultracode: true });
+    const laterRuns: Array<Promise<unknown>> = [];
+    try {
+      const options = { sessionId: held.sessionId, cwd: held.cwd, ...SCHEDULED_OPTIONS, model: 'opus' };
+      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, options, INHERIT_UNSET), { heldWork: true, canHandOver: true, changes: [], switches: [] });
+      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, options), { heldWork: true, canHandOver: false, changes: ['ultracode'], switches: [] }, 'read as it is, a new process would run it off');
+      const next = sendNext(held, 'Post a summary', { ...SCHEDULED_OPTIONS, model: 'opus', inheritUnset: true });
+      laterRuns.push(next.run);
+      await waitUntil(() => held.script.prompts.length === 2);
+      assert.equal(next.later.script.created(), false, 'no second CLI is started');
+    } finally {
+      await finish(held, laterRuns);
+    }
+  });
+});
+
+const RESTORE = { restoreSwitchesAfterTurn: true };
+
+/** The model and permission mode switches the CLI got, in order. */
+const switchCalls = (held: HeldRun) => held.script.calls.filter((call) => call.startsWith('set'));
+
+test('a turn handed over with restoreSwitchesAfterTurn runs with its own model and permission mode, and the process is switched back once its result is in', async () => {
+  // A loop launched with permissions skipped, in bypassPermissions.
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), { ...SCHEDULED_OPTIONS, ...toolsSettings([], [], true) });
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  const next = sendNext(held, 'Summarise with Opus, asking first', { ...SCHEDULED_OPTIONS, model: 'opus', permissionMode: 'default', toolsSettings: { skipPermissions: false }, ...INHERIT_UNSET, ...RESTORE });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    const calls = held.script.calls.filter((call) => call !== `prompt:${promptUuid(held, 0)}`);
+    assert.deepEqual(calls, ['setModel:opus', 'setPermissionMode:default', `prompt:${promptUuid(held, 1)}`], 'the CLI is idle: switched, then the prompt');
+    await flush();
+    held.script.emit(echo(promptUuid(held, 1), 'Summarise with Opus, asking first'));
+    void canUseTool('Bash', { command: 'rm -rf build' }, {});
+    await flush();
+    const requests = next.writer.sent.filter((message) => message.kind === 'permission_request');
+    assert.equal(requests.length, 1, 'the turn asks, in its own permission mode');
+    claudeRuntime.permissions.resolve(String(requests[0]?.requestId), { allow: false });
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.deepEqual(switchCalls(held), ['setModel:opus', 'setPermissionMode:default', 'setModel:sonnet', 'setPermissionMode:bypassPermissions']);
+    assert.equal(held.script.released(), false, 'the loop still holds the process');
+    assert.equal((await canUseTool('Bash', { command: 'kubectl get pods' }, {})).behavior, 'allow', 'the loop runs as before');
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...SCHEDULED_OPTIONS }, INHERIT_UNSET),
+      { heldWork: true, canHandOver: true, changes: [], switches: [] },
+      'the process runs with what it had',
+    );
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a turn handed over with restoreSwitchesAfterTurn while the CLI runs a turn of its own switches and writes nothing until that turn is over', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  // The wake-up fires: the CLI runs a turn of its own.
+  held.script.emit(lifecycle(randomUUID(), 'started'));
+  held.script.emit(assistantText('Checking the build again.'));
+  await flush();
+  const next = sendNext(held, 'Post a summary', { ...SCHEDULED_OPTIONS, model: 'opus', ...INHERIT_UNSET, ...RESTORE });
+  try {
+    await waitUntil(() => held.first.handOverReports() === 1);
+    assert.equal(next.later.script.created(), false, 'it goes into the held process');
+    assert.deepEqual(switchCalls(held), [], 'the wake-up runs with the loop\'s model');
+    assert.equal(held.script.prompts.length, 1);
+
+    scheduleWakeup(held.script, 'toolu_wakeup_2');
+    held.script.emit(result());
+    await waitUntil(() => held.script.prompts.length === 2);
+    const calls = held.script.calls.filter((call) => call !== `prompt:${promptUuid(held, 0)}`);
+    assert.deepEqual(calls, ['setModel:opus', `prompt:${promptUuid(held, 1)}`]);
+    assert.equal(completes(next.writer.sent), 0, 'the wake-up\'s turn is not the handed-over one');
+
+    held.script.emit(echo(promptUuid(held, 1), 'Post a summary'));
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.deepEqual(switchCalls(held), ['setModel:opus', 'setModel:sonnet']);
+    assert.equal(held.script.released(), false, 'the next wake-up still holds the process');
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a turn handed over with restoreSwitchesAfterTurn that the user stops is switched back too, and one stopped before it was written sends nothing', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  const restored: unknown[] = [];
+  const next = sendNext(held, 'Post a summary', {
+    ...SCHEDULED_OPTIONS, model: 'opus', ...INHERIT_UNSET, ...RESTORE,
+    onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+  });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Post a summary'));
+    await flush();
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+    await flush();
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), ['setModel:opus', 'interrupt', 'setModel:sonnet']);
+    assert.deepEqual(restored, [{ model: 'sonnet', permissionMode: null }], 'its onSwitchesRestored hears it');
+    assert.equal(held.script.released(), false);
+  } finally {
+    await finish(held, [next.run]);
+  }
+
+  const waiting = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  // The wake-up fires, and the message waits for its turn to end.
+  waiting.script.emit(lifecycle(randomUUID(), 'started'));
+  await flush();
+  const stopped = sendNext(waiting, 'Post a summary', { ...SCHEDULED_OPTIONS, model: 'opus', ...INHERIT_UNSET, ...RESTORE });
+  try {
+    await waitUntil(() => waiting.first.handOverReports() === 1);
+    assert.equal(await abortClaudeSDKSession(waiting.sessionId), true);
+    await waitUntil(() => stopped.settled());
+    assert.deepEqual(waiting.script.calls.filter((call) => call !== `prompt:${promptUuid(waiting, 0)}`), [], 'no switch, no prompt, no interrupt of the wake-up');
+    waiting.script.emit(result());
+    await flush();
+    assert.equal(waiting.script.released(), true, 'the wake-up has run and set no other');
+  } finally {
+    await finish(waiting, [stopped.run]);
+  }
+});
+
+test('a turn handed over with restoreSwitchesAfterTurn whose process lets go at its end is not switched back', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  const next = sendNext(held, 'Post a summary', { ...SCHEDULED_OPTIONS, model: 'opus', ...INHERIT_UNSET, ...RESTORE });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    // The wake-up runs ahead of the message and sets no other.
+    held.script.emit(lifecycle(randomUUID(), 'started'));
+    held.script.emit(result());
+    held.script.emit(echo(promptUuid(held, 1), 'Post a summary'));
+    held.script.emit(result());
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.equal(held.script.released(), true, 'nothing is left to hold the process for');
+    assert.deepEqual(switchCalls(held), ['setModel:opus']);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a turn with restoreSwitchesAfterTurn that needs a process of its own never calls its onSwitchesRestored', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  const restored: unknown[] = [];
+  const next = sendNext(held, 'Post a summary', {
+    ...SCHEDULED_OPTIONS, model: 'opus', effort: 'max', ...INHERIT_UNSET, ...RESTORE,
+    onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+  });
+  try {
+    await waitUntil(() => held.script.released());
+    held.script.end();
+    await waitUntil(() => next.later.script.prompts.length === 1);
+    next.later.script.emit(init());
+    next.later.script.emit(result());
+    await waitUntil(() => completes(next.writer.sent) === 1);
+    await flush();
+    assert.deepEqual(switchCalls(held), []);
+    assert.deepEqual(restored, []);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('the hand-over plan reads a turn handed over with restoreSwitchesAfterTurn as any other', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  try {
+    const options = { sessionId: held.sessionId, cwd: held.cwd, ...SCHEDULED_OPTIONS, ...RESTORE };
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { ...options, model: 'opus', permissionMode: 'acceptEdits' }, INHERIT_UNSET), { heldWork: true, canHandOver: true, changes: [], switches: ['model', 'permissionMode'] });
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { ...options, effort: 'max' }, INHERIT_UNSET), { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] });
+    assert.deepEqual(held.script.calls, [`prompt:${promptUuid(held, 0)}`], 'nothing was written or switched');
+  } finally {
+    await finish(held);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Work no task event reports, and a Monitor, as CLI 2.1.312 reports them.
+// ---------------------------------------------------------------------------
+
+/**
+ * A ScheduleWakeup and its result as CLI 2.1.312 writes it: the time the
+ * wake-up fires (`scheduledFor`, rounded up to the minute) in the output it
+ * adds to the result's message.
+ */
+function armWakeup(script: Scripted, scheduledFor: number, delaySeconds: number, id = `toolu_wakeup_${randomUUID()}`): void {
+  script.emit(toolUse(id, 'ScheduleWakeup', { delaySeconds, prompt: '/loop check the build', reason: 'polling' }));
+  script.emit({
+    ...toolResult(id, `Next wakeup scheduled (in ${Math.round((scheduledFor - Date.now()) / 1000)}s).`),
+    tool_use_result: { scheduledFor, clampedDelaySeconds: delaySeconds, wasClamped: false },
+  });
+}
+
+/** A ScheduleWakeup that ends the loop, and its result. */
+function stopLoop(script: Scripted, id = `toolu_stop_${randomUUID()}`): void {
+  script.emit(toolUse(id, 'ScheduleWakeup', { stop: true }));
+  script.emit({
+    ...toolResult(id, 'Loop stopped — cancelled 1 pending wakeup(s); no further dynamic-loop wakeups scheduled.'),
+    tool_use_result: { scheduledFor: 0, clampedDelaySeconds: 0, wasClamped: false, stopped: true, cancelledWakeups: 1 },
+  });
+}
+
+/** CLI 2.1.312 fires the wake-up set for `scheduledFor` (`loop_wakeup`) and runs its turn. */
+function fireLoopWakeup(script: Scripted, scheduledFor: number, turn: () => void = () => {}): void {
+  script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'loop_wakeup', scheduled_for: scheduledFor }));
+  script.emit(init());
+  script.emit(assistantText('Checking again.'));
+  turn();
+  script.emit(result());
+}
+
+/**
+ * A CronCreate and its result as CLI 2.1.312 writes them; `output: false`
+ * leaves out the output it adds to the result's message, as an older CLI
+ * may. `omitRecurring` leaves the call's choice out: a job recurs by default.
+ * `nextFireAt` is when the job fires next (five minutes from now by default).
+ */
+function createCronJob(
+  script: Scripted,
+  jobId: string,
+  { recurring = true, omitRecurring = false, output = true, nextFireAt = Date.now() + 5 * MINUTE }: { recurring?: boolean; omitRecurring?: boolean; output?: boolean; nextFireAt?: number } = {},
+): void {
+  const id = `toolu_cron_${jobId}`;
+  const recurs = omitRecurring || recurring;
+  script.emit(toolUse(id, 'CronCreate', { cron: '*/5 * * * *', prompt: 'check the deploy', ...(omitRecurring ? {} : { recurring }) }));
+  const text = recurs
+    ? `Scheduled recurring job ${jobId} (Every 5 minutes). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.`
+    : `Scheduled one-shot task ${jobId} (at 2:30pm). Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete.`;
+  script.emit({
+    ...toolResult(id, text),
+    ...(output ? { tool_use_result: { id: jobId, humanSchedule: 'Every 5 minutes', recurring: recurs, durable: false, nextFireAt } } : {}),
+  });
+}
+
+/** A CronDelete of a job, and its result. */
+function deleteCronJob(script: Scripted, jobId: string): void {
+  const id = `toolu_cron_delete_${randomUUID()}`;
+  script.emit(toolUse(id, 'CronDelete', { id: jobId }));
+  script.emit({ ...toolResult(id, `Cancelled job ${jobId}.`), tool_use_result: { id: jobId } });
+}
+
+/** CLI 2.1.312 fires a cron job (`schedule_wakeup`) and runs its turn, whose result names no prompt. */
+function fireCronJob(script: Scripted, turn: () => void = () => {}): void {
+  script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+  script.emit(init());
+  script.emit(assistantText('The deploy is healthy.'));
+  turn();
+  script.emit(result());
+}
+
+/** Sends the session's next message and runs its turn in the held process, which `turn` fills in. */
+async function runHandedOverTurn(held: HeldRun, text: string, turn: () => void, runOptions: Record<string, unknown> = {}) {
+  const next = sendNext(held, text, runOptions);
+  const index = held.script.prompts.length;
+  await waitUntil(() => held.script.prompts.length === index + 1);
+  held.script.emit(echo(promptUuid(held, index), text));
+  turn();
+  held.script.emit(resultFor([promptUuid(held, index)]));
+  await waitUntil(() => next.settled());
+  await flush();
+  return next;
+}
+
+const STILL_HELD = { heldWork: true, canHandOver: true, changes: [], switches: [] };
+
+test('a Monitor the CLI reports as a task lets its process go, and reports the work done, once its source ends and the CLI runs a turn for it', async () => {
+  const held = await startHeldRun(announcingPrompt(launchMonitor));
+  try {
+    assert.deepEqual(listedTaskIds(held.sessionId), ['mon1']);
+    endMonitor(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'max' }), NOTHING_HELD);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a Monitor that fired an event keeps its process held until its source ends', async () => {
+  const held = await startHeldRun(announcingPrompt(launchMonitor));
+  try {
+    // An event while it runs: a turn of its own, with no task event and no echo.
+    held.script.emit(init());
+    held.script.emit(assistantText('First event.'));
+    held.script.emit(relayResult());
+    await flush();
+    assert.equal(held.script.released(), false);
+    assert.equal(held.first.finishedReports(), 0);
+    endMonitor(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a Monitor the user stops, or a handed-over turn stops with TaskStop, lets its process go', async () => {
+  const idle = await startHeldRun(announcingPrompt(launchMonitor));
+  try {
+    assert.equal(await stopClaudeSDKTask(idle.sessionId, 'mon1'), true);
+    idle.script.emit(taskUpdated('mon1', 'killed'));
+    idle.script.emit(taskNotification('mon1', 'toolu_monitor', 'stopped'));
+    await flush();
+    assert.equal(idle.script.released(), true, 'no turn follows a stop, so the stop lets the process go');
+  } finally {
+    await finish(idle);
+  }
+
+  const held = await startHeldRun(announcingPrompt(launchMonitor));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    const next = await runHandedOverTurn(held, 'Stop watching', () => {
+      held.script.emit(toolUse('toolu_stop', 'TaskStop', { task_id: 'mon1' }));
+      held.script.emit(taskUpdated('mon1', 'killed'));
+      held.script.emit(taskNotification('mon1', 'toolu_monitor', 'stopped'));
+      held.script.emit(toolResult('toolu_stop', 'Stopped task mon1'));
+    });
+    runs.push(next.run);
+    assert.equal(held.script.released(), true, 'nothing is left to hold the process for');
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a Monitor that has ended holds nothing more: a command a later turn backgrounded lets the process go once it is relayed', async () => {
+  const held = await startHeldRun(announcingPrompt(launchMonitor));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    const next = await runHandedOverTurn(held, 'Build it in the background', () => launchBackgroundCommand(held.script));
+    runs.push(next.run);
+    endMonitor(held.script);
+    await flush();
+    assert.equal(held.script.released(), false, 'the command still runs');
+    relayFinishedTask(held.script, 'bg1', 'toolu_bash');
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 1]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a Monitor\'s turns leave a pending wake-up held: only its own fire takes it', async () => {
+  const scheduledFor = Date.now() + 20 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchMonitor(script);
+    armWakeup(script, scheduledFor, 1200);
+  }));
+  try {
+    // An event of the Monitor's, then its end: turns the CLI runs for it.
+    held.script.emit(init());
+    held.script.emit(assistantText('First event.'));
+    held.script.emit(relayResult());
+    endMonitor(held.script);
+    await flush();
+    assert.equal(held.script.released(), false, 'the wake-up is still to come');
+    assert.equal(held.first.finishedReports(), 0);
+    fireLoopWakeup(held.script, scheduledFor);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a recurring CronCreate job keeps its process held through its fires, and nothing is reported finished', async () => {
+  const cases: Array<[string, { omitRecurring?: boolean; output?: boolean }]> = [
+    ['recurring', {}],
+    ['recurring by default', { omitRecurring: true }],
+    ['recurring by default, from a result with no output', { omitRecurring: true, output: false }],
+  ];
+  for (const [label, job] of cases) {
+    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1', job)));
+    try {
+      fireCronJob(held.script);
+      await flush();
+      assert.equal(held.script.released(), false, `${label}: after the first fire`);
+      fireCronJob(held.script);
+      await flush();
+      assert.equal(held.script.released(), false, `${label}: after the second fire`);
+      assert.equal(held.first.finishedReports(), 0, label);
+      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD, label);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a one-shot CronCreate job lets its process go once it has fired, and the work is reported done once', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  for (const output of [true, false]) {
+    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, output })));
+    try {
+      // It fires five minutes on, as its result said.
+      t.mock.timers.tick(5 * MINUTE);
+      fireCronJob(held.script);
+      await flush();
+      assert.equal(held.script.released(), true, `output ${output}`);
+      assert.equal(held.first.finishedReports(), 1, `output ${output}`);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a cron fire with no one-shot job due takes none: a recurring job\'s fire, then its deletion, leave the process held for a one-shot job still to come', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const held = await startHeldRun(announcingPrompt((script) => {
+    createCronJob(script, 'rec1', { nextFireAt: Date.now() + MINUTE });
+    createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + 30 * MINUTE });
+  }));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    t.mock.timers.tick(MINUTE);
+    fireCronJob(held.script);
+    await flush();
+    const next = await runHandedOverTurn(held, 'Stop the loop, keep the reminder', () => deleteCronJob(held.script, 'rec1'));
+    runs.push(next.run);
+    assert.equal(held.script.released(), false, 'the reminder is still to come');
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+    // The reminder fires at its time.
+    t.mock.timers.tick(29 * MINUTE);
+    fireCronJob(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 1]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a one-shot job that comes due while a recurring job\'s fire runs is not taken for that fire, even one that deletes the recurring job', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const held = await startHeldRun(announcingPrompt((script) => {
+    createCronJob(script, 'rec1', { nextFireAt: Date.now() + MINUTE });
+    createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + 3 * MINUTE });
+  }));
+  try {
+    t.mock.timers.tick(MINUTE);
+    held.script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+    held.script.emit(init());
+    held.script.emit(assistantText('The deploy is done: the loop can stop.'));
+    await flush();
+    // The fire's turn runs past the reminder's time, which the CLI fires once it is over.
+    t.mock.timers.tick(5 * MINUTE);
+    deleteCronJob(held.script, 'rec1');
+    held.script.emit(result());
+    await flush();
+    assert.equal(held.script.released(), false, 'the reminder\'s fire is still to come');
+    assert.equal(held.first.finishedReports(), 0);
+    fireCronJob(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a fire takes only a one-shot job due by the time it started: one of a job the run did not see created, or one ahead of the job\'s time, takes none and reports nothing finished', async () => {
+  const later = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + 30 * MINUTE })));
+  try {
+    // A job an earlier process saved, or the CLI's notice of missed jobs.
+    fireCronJob(later.script);
+    await flush();
+    assert.equal(later.script.released(), false);
+    assert.equal(later.first.finishedReports(), 0);
+    assert.deepEqual(await claudeRuntime.planHandOver(later.sessionId, { cwd: later.cwd }), STILL_HELD);
+  } finally {
+    await finish(later);
+  }
+
+  // The CLI never fires a one-shot job ahead of its time: a fire a minute
+  // before it, such as a recurring job's, is another job's.
+  const ahead = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + 50 * 1000 })));
+  try {
+    fireCronJob(ahead.script);
+    await flush();
+    assert.equal(ahead.script.released(), false);
+    assert.equal(ahead.first.finishedReports(), 0);
+  } finally {
+    await finish(ahead);
+  }
+
+  const due = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() - 1000 })));
+  try {
+    fireCronJob(due.script);
+    await flush();
+    assert.equal(due.script.released(), true);
+    assert.equal(due.first.finishedReports(), 1);
+  } finally {
+    await finish(due);
+  }
+});
+
+test('from a CLI that names no fire, a turn of its own takes only the one-shot jobs due by then', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + 30 * MINUTE })));
+  const ownTurn = () => {
+    held.script.emit(init());
+    held.script.emit(assistantText('The deploy is healthy.'));
+    held.script.emit(result());
+  };
+  try {
+    ownTurn();
+    await flush();
+    assert.equal(held.script.released(), false, 'the job is still to come');
+    assert.equal(held.first.finishedReports(), 0);
+    t.mock.timers.tick(30 * MINUTE);
+    ownTurn();
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a CronDelete of the last job lets the process go: in a fire\'s turn the work is reported done, in a handed-over turn nothing is', async () => {
+  const firing = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1')));
+  try {
+    fireCronJob(firing.script, () => deleteCronJob(firing.script, 'job1'));
+    await flush();
+    assert.equal(firing.script.released(), true);
+    assert.equal(firing.first.finishedReports(), 1);
+  } finally {
+    await finish(firing);
+  }
+
+  const held = await startHeldRun(announcingPrompt((script) => {
+    createCronJob(script, 'job1');
+    createCronJob(script, 'job2');
+  }));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    const first = await runHandedOverTurn(held, 'Cancel the first job', () => deleteCronJob(held.script, 'job1'));
+    runs.push(first.run);
+    assert.equal(held.script.released(), false, 'the other job still needs the process');
+    const last = await runHandedOverTurn(held, 'And the other one', () => deleteCronJob(held.script, 'job2'));
+    runs.push(last.run);
+    assert.equal(held.script.released(), true);
+    assert.deepEqual([held.first.finishedReports(), first.writer.finishedReports(), last.writer.finishedReports()], [0, 0, 0]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a recurring job firing ahead of a handed-over prompt still holds the process after that turn, and nothing is reported finished', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1')));
+  const next = sendNext(held, 'What changed?');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    fireCronJob(held.script);
+    held.script.emit(echo(promptUuid(held, 1), 'What changed?'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.equal(completes(next.writer.sent), 1);
+    assert.equal(held.script.released(), false, 'the job fires again');
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('a CronCreate the CLI refused holds nothing', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchWorkflow(script);
+    script.emit(toolUse('toolu_cron', 'CronCreate', { cron: 'every day', prompt: 'check the deploy' }));
+    const refusal = toolResult('toolu_cron', 'Invalid cron expression');
+    script.emit({ ...refusal, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_cron', content: 'Invalid cron expression', is_error: true }] } });
+  }));
+  try {
+    relayFinishedTask(held.script, 'wf1', 'toolu_wf');
+    await flush();
+    assert.equal(held.script.released(), true, 'the workflow was all there was');
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a recurring job keeps its process through HOLD_IDLE of silence between fires, and HOLD_MAX still lets it go', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  // A one-shot job whose result named no time is held the same way.
+  const jobs: Array<[string, { recurring?: boolean; output?: boolean }]> = [
+    ['a recurring job', {}],
+    ['a one-shot job with no time', { recurring: false, output: false }],
+  ];
+  for (const [label, job] of jobs) {
+    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1', job)));
+    try {
+      t.mock.timers.tick(HOLD_IDLE_MS + MINUTE);
+      await flush();
+      assert.equal(held.script.released(), false, `${label}: silence says nothing about it`);
+      t.mock.timers.tick(12 * 60 * MINUTE);
+      await flush();
+      assert.equal(held.script.released(), true, label);
+      assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), ['release'], `${label}: there is no task to stop`);
+      assert.equal(held.first.finishedReports(), 0, label);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a one-shot job due past HOLD_IDLE keeps its process held until it fires, and one that never fires lets it go past its time, reporting nothing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  for (const fires of [true, false]) {
+    let nextFireAt = 0;
+    const held = await startHeldRun(announcingPrompt((script) => {
+      nextFireAt = Date.now() + 2 * 60 * MINUTE;
+      createCronJob(script, 'once1', { recurring: false, nextFireAt });
+    }));
+    try {
+      t.mock.timers.tick(HOLD_IDLE_MS + MINUTE);
+      await flush();
+      assert.equal(held.script.released(), false, `fires ${fires}: the job is still to come`);
+      if (fires) {
+        t.mock.timers.tick(nextFireAt - Date.now());
+        fireCronJob(held.script);
+        await flush();
+        assert.equal(held.script.released(), true);
+        assert.equal(held.first.finishedReports(), 1);
+        continue;
+      }
+      // The CLI sends nothing for a fire that never starts.
+      t.mock.timers.tick(nextFireAt + 5 * MINUTE - Date.now() - 1);
+      await flush();
+      assert.equal(held.script.released(), false);
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(held.script.released(), true);
+      assert.equal(held.first.finishedReports(), 0);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a wake-up or a one-shot job that never fired does not cut short the hold for a one-shot job due later', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const earlier: Array<[string, (script: Scripted) => void]> = [
+    ['a wake-up', (script) => armWakeup(script, Date.now() + 10 * MINUTE, 600)],
+    ['a one-shot job', (script) => createCronJob(script, 'once0', { recurring: false, nextFireAt: Date.now() + 10 * MINUTE })],
+  ];
+  for (const [label, arm] of earlier) {
+    let nextFireAt = 0;
+    const held = await startHeldRun(announcingPrompt((script) => {
+      arm(script);
+      nextFireAt = Date.now() + 2 * 60 * MINUTE;
+      createCronJob(script, 'once1', { recurring: false, nextFireAt });
+    }));
+    try {
+      // The CLI sends nothing for the earlier fire, which never starts.
+      t.mock.timers.tick(HOLD_IDLE_MS + MINUTE);
+      await flush();
+      assert.equal(held.script.released(), false, `${label}: the later job is still to come`);
+      t.mock.timers.tick(nextFireAt + 5 * MINUTE - Date.now() - 1);
+      await flush();
+      assert.equal(held.script.released(), false, label);
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(held.script.released(), true, label);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a one-shot job due after HOLD_MAX runs out holds its process through HOLD_IDLE of silence and no longer', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const HOLD_MAX_MS = 12 * 60 * MINUTE;
+  for (const dueIn of [20 * 60 * MINUTE, HOLD_MAX_MS + 10 * MINUTE]) {
+    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + dueIn })));
+    try {
+      t.mock.timers.tick(HOLD_IDLE_MS - 1);
+      await flush();
+      assert.equal(held.script.released(), false, `due in ${dueIn} ms`);
+      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD, `due in ${dueIn} ms`);
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(held.script.released(), true, `due in ${dueIn} ms: it would not fire before HOLD_MAX anyway`);
+      assert.equal(held.first.finishedReports(), 0, `due in ${dueIn} ms`);
+      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'max' }), NOTHING_HELD, `due in ${dueIn} ms`);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a wake-up due past HOLD_IDLE keeps its process held until it fires, and its turn that sets no other lets the process go', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  // delaySeconds 1800, which the CLI rounds up to the next minute.
+  let scheduledFor = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    scheduledFor = Date.now() + 1804 * 1000;
+    armWakeup(script, scheduledFor, 1800);
+  }));
+  try {
+    t.mock.timers.tick(HOLD_IDLE_MS);
+    await flush();
+    assert.equal(held.script.released(), false, 'the wake-up is still to come');
+    t.mock.timers.tick(4 * 1000);
+    fireLoopWakeup(held.script, scheduledFor);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a wake-up an hour away still holds its process at 59 minutes, and one that never fires lets it go past its time, reporting nothing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let scheduledFor = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    scheduledFor = Math.ceil((Date.now() + 3600 * 1000) / MINUTE) * MINUTE;
+    armWakeup(script, scheduledFor, 3600);
+  }));
+  try {
+    t.mock.timers.tick(30 * MINUTE);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(29 * MINUTE);
+    await flush();
+    assert.equal(held.script.released(), false);
+    // The CLI sends nothing for a fire that never starts.
+    t.mock.timers.tick(scheduledFor + 5 * MINUTE - Date.now() - 1);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 0);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a wake-up whose result names no time is held for its delaySeconds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let dueBy = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    script.emit(toolUse('toolu_wakeup', 'ScheduleWakeup', { delaySeconds: 2400, prompt: '/loop check the build', reason: 'idle' }));
+    script.emit(toolResult('toolu_wakeup', 'Next wakeup scheduled (in 2400s).'));
+    // Clamped, rounded up to the minute, then five minutes of grace.
+    dueBy = Math.ceil((Date.now() + 2400 * 1000) / MINUTE) * MINUTE + 5 * MINUTE;
+  }));
+  try {
+    t.mock.timers.tick(HOLD_IDLE_MS);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(dueBy - Date.now() - 1);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(held.script.released(), true);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a fire for a wake-up a later call replaced leaves the newer one held', async () => {
+  const first = Date.now() + 10 * MINUTE;
+  const second = Date.now() + 20 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => armWakeup(script, first, 600)));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    // The user's turn sets another; the first's fire had already been queued.
+    const next = await runHandedOverTurn(held, 'Check again in twenty minutes', () => armWakeup(held.script, second, 1200));
+    runs.push(next.run);
+    fireLoopWakeup(held.script, first);
+    await flush();
+    assert.equal(held.script.released(), false, 'the newer wake-up is still to come');
+    fireLoopWakeup(held.script, second);
+    await flush();
+    assert.equal(held.script.released(), true);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a handed-over turn that ends the loop with stop: true lets the process go, reporting nothing', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD);
+    const next = await runHandedOverTurn(held, 'Stop the loop', () => stopLoop(held.script));
+    runs.push(next.run);
+    assert.equal(held.script.released(), true);
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'max' }), NOTHING_HELD);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a handed-over turn that ends the loop and then sets a wake-up keeps the process held', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    const next = await runHandedOverTurn(held, 'Restart the loop', () => {
+      stopLoop(held.script);
+      armWakeup(held.script, Date.now() + 5 * MINUTE, 300);
+    });
+    runs.push(next.run);
+    assert.equal(held.script.released(), false);
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('stop: true leaves the process held for a Monitor, a cron job or a task still going', async () => {
+  const others: Array<[string, (script: Scripted) => void]> = [
+    ['a Monitor', launchMonitor],
+    ['a cron job', (script) => createCronJob(script, 'job1')],
+    ['a backgrounded command', (script) => launchBackgroundCommand(script)],
+  ];
+  for (const [label, launch] of others) {
+    const held = await startHeldRun(announcingPrompt((script) => {
+      scheduleWakeup(script);
+      launch(script);
+    }));
+    const runs: Array<Promise<unknown>> = [];
+    try {
+      const next = await runHandedOverTurn(held, 'Stop the loop', () => stopLoop(held.script));
+      runs.push(next.run);
+      assert.equal(held.script.released(), false, label);
+      assert.equal((await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd })).heldWork, true, label);
+      if (label === 'a backgrounded command') {
+        relayFinishedTask(held.script, 'bg1', 'toolu_bash');
+        await flush();
+        assert.equal(held.script.released(), true, 'once the command is relayed, nothing is left');
+      }
+    } finally {
+      await finish(held, runs);
+    }
+  }
+});
+
+test('a wake-up turn that ends the loop ahead of a handed-over prompt lets the process go after that turn', async () => {
+  const scheduledFor = Date.now() + 5 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => armWakeup(script, scheduledFor, 300)));
+  const next = sendNext(held, 'How is it going?');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    fireLoopWakeup(held.script, scheduledFor, () => stopLoop(held.script));
+    await flush();
+    assert.equal(held.first.finishedReports(), 1, 'the loop has ended, in a turn of the CLI\'s own');
+    held.script.emit(echo(promptUuid(held, 1), 'How is it going?'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(next.writer.finishedReports(), 0);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+/** A Claude settings file's bytes: UTF-8 with its byte order mark. */
+const utf8WithBom = (text: string) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, 'utf8')]);
+/** UTF-16LE with its byte order mark (PowerShell 5's default). */
+const utf16leWithBom = (text: string) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+/** UTF-16BE with its byte order mark, which Claude Code does not read. */
+const utf16beWithBom = (text: string) => Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, 'utf16le').swap16()]);
+
+test('a settings file saved with a byte order mark counts as Claude Code reads it', async () => {
+  await withUserSettings(async (write) => {
+    await write(utf8WithBom('{"ultracode": true}'));
+    // The default model gets no ultracode choice, so the process runs with the file's.
+    const held = await startHeldRun(launchWorkflow, { model: 'default', effort: 'high' });
+    const laterRuns: Array<Promise<unknown>> = [];
+    try {
+      const plan = (options: Record<string, unknown>) => claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'high', ...options });
+      assert.deepEqual(await plan({ model: 'opus', ultracode: false }), { heldWork: true, canHandOver: false, changes: ['ultracode'], switches: ['model'] });
+      assert.deepEqual(await plan({ model: 'opus', ultracode: true }), { heldWork: true, canHandOver: true, changes: [], switches: ['model'] });
+
+      const next = sendNext(held, 'With ultracode off', { model: 'opus', effort: 'high', ultracode: false });
+      laterRuns.push(next.run);
+      await waitUntil(() => held.script.released());
+      assert.deepEqual(workStoppedNotices(next.writer.sent).map((notice) => notice.slice(0, 2)), [['BACKGROUND_WORK_STOPPED', ['ultracode']]]);
+      assert.equal(held.script.prompts.length, 1, 'nothing goes into the process');
+      assert.deepEqual(switchCalls(held), []);
+      held.script.end();
+      await waitUntil(() => next.later.script.created());
+    } finally {
+      await finish(held, laterRuns);
+    }
+  });
+});
+
+test('a settings file saved as UTF-16LE with its byte order mark counts, and a UTF-16BE one is skipped, as Claude Code does', async () => {
+  await withUserSettings(async (write) => {
+    await write(null);
+    const held = await startHeldRun(launchWorkflow, { model: 'opus', effort: 'high', ultracode: false });
+    try {
+      const fileValueKeepsTheTurnOut = async () => (await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, model: 'default', effort: 'high' })).changes.includes('ultracode');
+      await write({ ultracode: true });
+      assert.equal(await fileValueKeepsTheTurnOut(), true, 'the user\'s file turns it on');
+      await writeProjectSettings(held.cwd, 'settings.json', utf16leWithBom('{"ultracode": false}'));
+      assert.equal(await fileValueKeepsTheTurnOut(), false, 'the project\'s UTF-16LE file turns it off again');
+      await writeProjectSettings(held.cwd, 'settings.local.json', utf16beWithBom('{"ultracode": true}'));
+      assert.equal(await fileValueKeepsTheTurnOut(), false, 'a UTF-16BE local file is skipped');
+    } finally {
+      await finish(held);
+    }
+  });
+});
+
+/** The model and the permission mode the CLI runs the prompt at `index` with, and those it is left with, read off what reached it in order. */
+function replaySwitches(held: HeldRun, launch: { model: string; permissionMode: string }, index: number) {
+  let model = launch.model;
+  let permissionMode = launch.permissionMode;
+  let prompt: { model: string; permissionMode: string } | null = null;
+  for (const call of held.script.calls) {
+    if (call.startsWith('setModel:')) {
+      model = call.slice('setModel:'.length);
+    } else if (call.startsWith('setPermissionMode:')) {
+      permissionMode = call.slice('setPermissionMode:'.length);
+    } else if (call === `prompt:${promptUuid(held, index)}`) {
+      prompt = { model, permissionMode };
+    }
+  }
+  return { prompt, final: { model, permissionMode } };
+}
+
+test('a turn handed over the moment the one before it ends, before the CLI answers its switches back, runs with its own settings and leaves the process with its own', async () => {
+  const launch = { model: 'sonnet', permissionMode: 'default' };
+  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, { model: string; permissionMode: string }]> = [
+    ['B names the process\'s own', { model: 'opus', permissionMode: 'acceptEdits' }, { model: 'sonnet', permissionMode: 'default' }, { model: 'sonnet', permissionMode: 'default' }],
+    ['B names what A switched to', { model: 'opus', permissionMode: 'acceptEdits' }, { model: 'opus', permissionMode: 'acceptEdits' }, { model: 'opus', permissionMode: 'acceptEdits' }],
+  ];
+  for (const [label, a, b, bRunsWith] of cases) {
+    const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+    const first = sendNext(held, 'A', { ...SCHEDULED_OPTIONS, ...a, ...INHERIT_UNSET, ...RESTORE });
+    // B goes in once A's turn is over, within the same turn of the event
+    // loop, as the scheduled-messages dispatcher sends a session's next due
+    // message: the CLI has not answered A's switches back yet.
+    const second = first.run.then(() => sendNext(held, 'B', { ...SCHEDULED_OPTIONS, ...b, ...INHERIT_UNSET, ...RESTORE }));
+    try {
+      await waitUntil(() => held.script.prompts.length === 2);
+      await flush();
+      held.script.emit(echo(promptUuid(held, 1), 'A'));
+      held.script.emit(resultFor([promptUuid(held, 1)]));
+      await waitUntil(() => held.script.prompts.length === 3);
+      const { run } = await second;
+      held.script.emit(echo(promptUuid(held, 2), 'B'));
+      held.script.emit(resultFor([promptUuid(held, 2)]));
+      await run;
+      await flush();
+      const { prompt, final } = replaySwitches(held, launch, 2);
+      assert.deepEqual(prompt, bRunsWith, `${label}: B's turn`);
+      assert.deepEqual(final, launch, `${label}: the loop is left with its own`);
+      assert.equal(held.script.released(), false, label);
+      assert.deepEqual(
+        await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...SCHEDULED_OPTIONS }, INHERIT_UNSET),
+        STILL_HELD,
+        `${label}: the process runs with what it had`,
+      );
+    } finally {
+      held.script.end();
+      const { run, later } = await second;
+      later.script.end();
+      await finish(held, [first.run, run]);
+    }
+  }
+});
+
+test('a switch back the CLI refuses leaves the next turn weighed against what the process runs with', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+  const first = sendNext(held, 'A', { ...SCHEDULED_OPTIONS, permissionMode: 'acceptEdits', ...INHERIT_UNSET, ...RESTORE });
+  const runs: Array<Promise<unknown>> = [first.run];
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    await flush();
+    held.script.setSwitchAnswer('refuse');
+    held.script.emit(echo(promptUuid(held, 1), 'A'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => first.settled());
+    await flush();
+    held.script.setSwitchAnswer('ok');
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...SCHEDULED_OPTIONS }, INHERIT_UNSET),
+      { heldWork: true, canHandOver: true, changes: [], switches: ['permissionMode'] },
+      'the process still runs in acceptEdits',
+    );
+    const second = sendNext(held, 'B', { ...SCHEDULED_OPTIONS, ...INHERIT_UNSET });
+    runs.push(second.run);
+    await waitUntil(() => held.script.prompts.length === 3);
+    assert.deepEqual(replaySwitches(held, { model: 'sonnet', permissionMode: 'default' }, 2).prompt, { model: 'sonnet', permissionMode: 'default' });
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a turn handed over with restoreSwitchesAfterTurn tells its onSwitchesRestored what the process runs with once it is over, after the CLI has answered the switches back', async () => {
+  const run = async (
+    restoring: Record<string, unknown>,
+    before: (held: HeldRun) => void = () => {},
+    endTurn: (held: HeldRun) => void = (held) => held.script.emit(resultFor([promptUuid(held, 1)])),
+  ) => {
+    const restored: unknown[] = [];
+    const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+    const next = sendNext(held, 'Post a summary', {
+      ...SCHEDULED_OPTIONS, ...restoring, ...INHERIT_UNSET, ...RESTORE,
+      onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+    });
+    try {
+      await waitUntil(() => held.script.prompts.length === 2);
+      await flush();
+      before(held);
+      held.script.emit(echo(promptUuid(held, 1), 'Post a summary'));
+      endTurn(held);
+      await waitUntil(() => next.settled());
+      const heardAtTheEnd = restored.length;
+      await flush();
+      return { heardAtTheEnd, restored };
+    } finally {
+      await finish(held, [next.run]);
+    }
+  };
+
+  const switchedBoth = await run({ model: 'opus', permissionMode: 'acceptEdits' });
+  assert.equal(switchedBoth.heardAtTheEnd, 0, 'not before the CLI answers');
+  assert.deepEqual(switchedBoth.restored, [{ model: 'sonnet', permissionMode: 'default' }]);
+  assert.deepEqual((await run({ model: 'opus' })).restored, [{ model: 'sonnet', permissionMode: null }]);
+  // A turn that ends in an error is over all the same.
+  assert.deepEqual(
+    (await run({ model: 'opus' }, () => {}, (held) => held.script.emit({ ...resultFor([promptUuid(held, 1)]), subtype: 'error_during_execution', is_error: true }))).restored,
+    [{ model: 'sonnet', permissionMode: null }],
+  );
+  assert.deepEqual(
+    (await run({ model: 'opus' }, (held) => held.script.setSwitchAnswer('refuse'))).restored,
+    [{ model: 'opus', permissionMode: null }],
+    'a switch back the CLI refuses leaves the process on the turn\'s model',
+  );
+  assert.deepEqual((await run({})).restored, [{ model: null, permissionMode: null }], 'a turn that switches nothing hears it too');
+  // The wake-up fires ahead of the message and sets no other: the process lets go after the turn.
+  assert.deepEqual((await run({ model: 'opus' }, (held) => {
+    held.script.emit(lifecycle(randomUUID(), 'started'));
+    held.script.emit(result());
+  })).restored, [], 'a process that lets go is not switched back, nor reported');
+});
+
+test('a turn handed over with restoreSwitchesAfterTurn whose prompt the user takes back still tells its onSwitchesRestored what the process runs with, switched back or never switched', async () => {
+  const cases: Array<[string, Record<string, unknown>, boolean, string[], Record<string, unknown>]> = [
+    ['waiting for the CLI\'s own turn', { model: 'opus' }, true, [], { model: 'sonnet', permissionMode: null }],
+    ['waiting for the CLI\'s own turn, both switched', { model: 'opus', permissionMode: 'acceptEdits' }, true, [], { model: 'sonnet', permissionMode: 'default' }],
+    ['written, not started', { model: 'opus' }, false, ['setModel:opus', 'setModel:sonnet'], { model: 'sonnet', permissionMode: null }],
+  ];
+  for (const [label, restoring, waitsForCliTurn, switches, expected] of cases) {
+    const restored: unknown[] = [];
+    const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+    if (waitsForCliTurn) {
+      // The wake-up fires: the message waits for its turn to end.
+      held.script.emit(lifecycle(randomUUID(), 'started'));
+      held.script.emit(assistantText('Checking the build again.'));
+      await flush();
+    }
+    const next = sendNext(held, 'Post a summary', {
+      ...SCHEDULED_OPTIONS, ...restoring, ...INHERIT_UNSET, ...RESTORE,
+      onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+    });
+    try {
+      await waitUntil(() => held.first.handOverReports() === 1);
+      await flush();
+      assert.equal(held.script.prompts.length, waitsForCliTurn ? 1 : 2, label);
+      assert.equal(await abortClaudeSDKSession(held.sessionId), true, label);
+      await waitUntil(() => next.settled());
+      await flush();
+      assert.deepEqual(switchCalls(held), switches, label);
+      assert.deepEqual(restored, [expected], label);
+      if (waitsForCliTurn) {
+        // The wake-up's turn sets the next one and ends: the loop keeps its process.
+        scheduleWakeup(held.script, 'toolu_wakeup_2');
+        held.script.emit(result());
+        await flush();
+      }
+      assert.equal(held.script.released(), false, label);
+      assert.deepEqual(restored, [expected], `${label}: heard once`);
+    } finally {
+      await finish(held, [next.run]);
+    }
+  }
+});
+
+test('a turn with restoreSwitchesAfterTurn stopped while its hand-over makes its lookups tells its onSwitchesRestored once that nothing was switched', async () => {
+  for (const lookupFails of [false, true]) {
+    const label = lookupFails ? 'a lookup then fails' : 'the lookups then finish';
+    const restored: unknown[] = [];
+    const held = await startHeldRun(announcingPrompt(scheduleWakeup), SCHEDULED_OPTIONS);
+    let settleLookup: () => void = () => {};
+    const modelLookup = new Promise<undefined>((resolve, reject) => {
+      settleLookup = () => (lookupFails ? reject(new Error('database is locked')) : resolve(undefined));
+    });
+    const next = sendNext(held, 'Post a summary', {
+      ...SCHEDULED_OPTIONS, model: 'opus', ...INHERIT_UNSET, ...RESTORE,
+      onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+    }, createWriter(2), { ...held.context, resolveResumeModel: () => modelLookup });
+    try {
+      await flush();
+      assert.equal(await abortClaudeSDKSession(held.sessionId), true, label);
+      settleLookup();
+      await waitUntil(() => next.settled());
+      await flush();
+      assert.deepEqual(switchCalls(held), [], `${label}: the held process is not switched`);
+      assert.equal(held.script.prompts.length, 1, `${label}: the turn never goes in`);
+      assert.deepEqual(restored, [{ model: null, permissionMode: null }], label);
+      assert.equal(held.script.released(), false, label);
+    } finally {
+      await finish(held, [next.run]);
+    }
   }
 });
 
@@ -1839,6 +3453,126 @@ for (const reportsAhead of [false, true]) {
         script.end();
         later.script.end();
         await firstQuery;
+        await rm(cwd, { recursive: true, force: true });
+      }
+    });
+  });
+}
+
+test('a stopped handed-over turn leaves the work\'s end to the run that left it, which hears of each later hand-over too', async () => {
+  const held = await startHeldRun();
+  const stopped = sendNext(held, 'Look at the logs');
+  const runs: Array<Promise<unknown>> = [stopped.run];
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Look at the logs'));
+    const aborting = abortClaudeSDKSession(held.sessionId);
+    await waitUntil(() => held.script.calls.includes('interrupt'));
+    held.script.emit(interruptedResultFor(promptUuid(held, 1)));
+    assert.equal(await aborting, true);
+    assert.equal(held.first.handOverReports(), 1);
+
+    const next = await runHandedOverTurn(held, 'Now the docs', () => held.script.emit(assistantText('Done.')));
+    runs.push(next.run);
+    assert.deepEqual([held.first.handOverReports(), stopped.writer.handOverReports()], [2, 1], 'the first run hears of the second hand-over too');
+    relayFinishedTask(held.script, 'wf1', 'toolu_wf');
+    await flush();
+    assert.deepEqual([held.first.finishedReports(), stopped.writer.finishedReports(), next.writer.finishedReports()], [0, 0, 1]);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+for (const variant of ['a later turn queued behind the relay', 'every later turn stopped too'] as const) {
+  test(`through the run registry, the work a stopped handed-over turn did not leave still ends as the first run's (${variant})`, async () => {
+    await withRegistry(async (tab) => {
+      const sessionId = `app-held-turn-${randomUUID()}`;
+      const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-held-turn-'));
+      sessionsDb.createAppSession(sessionId, 'claude', cwd);
+      const { createQuery, script } = createScriptedQuery();
+      const laterQueries: Array<ReturnType<typeof createScriptedQuery>> = [];
+      const context = createContext();
+      const queries: Array<Promise<unknown>> = [];
+      const start = async () => {
+        // Runs that start in the same millisecond would share their run-end key.
+        await new Promise<void>((resolve) => { setTimeout(resolve, 3); });
+        const run = chatRunRegistry.startRun({ appSessionId: sessionId, provider: 'claude', providerSessionId: null, connection: null, userId: null });
+        assert.ok(run);
+        return run;
+      };
+      const send = async (text: string) => {
+        const run = await start();
+        const later = createScriptedQuery();
+        laterQueries.push(later);
+        const index = script.prompts.length;
+        queries.push(queryClaudeSDK(text, { sessionId, cwd }, run.writer, { ...context, createQuery: later.createQuery }));
+        await waitUntil(() => script.prompts.length === index + 1);
+        return { run, uuid: String(script.prompts[index]?.uuid) };
+      };
+      const stop = async (uuid: string) => {
+        const interrupts = script.calls.filter((call) => call === 'interrupt').length;
+        const aborting = chatRunRegistry.abortRun(sessionId, (_provider, id) => abortClaudeSDKSession(id));
+        await waitUntil(() => script.calls.filter((call) => call === 'interrupt').length === interrupts + 1);
+        script.emit(interruptedResultFor(uuid));
+        assert.equal(await aborting, true);
+        await flush();
+      };
+
+      const firstRun = await start();
+      queries.push(queryClaudeSDK('Start', { sessionId, cwd }, firstRun.writer, { ...context, createQuery }));
+      try {
+        await waitUntil(() => script.prompts.length === 1);
+        script.emit(init());
+        launchWorkflow(script);
+        script.emit(result());
+        await waitUntil(() => !chatRunRegistry.isProcessing(sessionId));
+
+        const second = await send('Look at the logs');
+        script.emit(echo(second.uuid, 'Look at the logs'));
+        await stop(second.uuid);
+
+        let third: Awaited<ReturnType<typeof send>>;
+        if (variant === 'a later turn queued behind the relay') {
+          // The workflow finishes and the CLI starts relaying it; the next
+          // message waits behind that turn.
+          script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
+          script.emit(notificationEcho('wf1', 'toolu_wf'));
+          script.emit(assistantText('wf1 is done.'));
+          third = await send('Now the docs');
+          script.emit(relayResult());
+          script.emit(echo(third.uuid, 'Now the docs'));
+          script.emit(resultFor([third.uuid]));
+        } else {
+          third = await send('Now the docs');
+          script.emit(echo(third.uuid, 'Now the docs'));
+          await stop(third.uuid);
+          relayFinishedTask(script, 'wf1', 'toolu_wf');
+        }
+        await waitUntil(() => runEnds(tab).length === 4);
+        await flush();
+
+        // A stopped turn's end says the work goes on (`backgroundWork`).
+        assert.deepEqual(runEnds(tab), variant === 'a later turn queued behind the relay'
+          ? [
+            [firstRun.startedAt, 'done', true],
+            [second.run.startedAt, 'aborted', true],
+            [firstRun.startedAt, 'backgroundDone', false],
+            [third.run.startedAt, 'done', false],
+          ]
+          : [
+            [firstRun.startedAt, 'done', true],
+            [second.run.startedAt, 'aborted', true],
+            [third.run.startedAt, 'aborted', true],
+            [firstRun.startedAt, 'backgroundDone', false],
+          ]);
+        assert.equal(chatRunRegistry.listRecentRunEnds().filter((end) => end.outcome === 'backgroundDone').length, 1);
+        assert.equal(laterQueries.some((later) => later.script.created()), false, 'every turn went into the held process');
+      } finally {
+        script.end();
+        for (const later of laterQueries) {
+          later.script.end();
+        }
+        await Promise.all(queries);
         await rm(cwd, { recursive: true, force: true });
       }
     });

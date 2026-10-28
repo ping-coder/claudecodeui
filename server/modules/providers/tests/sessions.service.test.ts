@@ -9,7 +9,7 @@ import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
-import type { BackgroundTaskSummary, WorkflowInfo } from '@/shared/types.js';
+import type { BackgroundTaskSummary, NormalizedMessage, WorkflowInfo } from '@/shared/types.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -588,5 +588,185 @@ test('a cached Claude history follows a CLI-driven workflow through its journal 
     });
   } finally {
     await rm(projectDirectory, { recursive: true, force: true });
+  }
+});
+
+/** One row of a hand-written history, stamped `second` seconds into 2026. */
+function historyRow(id: string, second: number, fields: Partial<NormalizedMessage>): NormalizedMessage {
+  return {
+    id,
+    sessionId: 'cursor-native-turn-question',
+    timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString(),
+    provider: 'cursor',
+    kind: 'text',
+    ...fields,
+  };
+}
+
+/**
+ * Four turns: two opened by text, with every kind of user row that opens no
+ * turn between the second question and its answer, and two opened by
+ * attachments alone.
+ */
+const TURN_HISTORY: NormalizedMessage[] = [
+  historyRow('q1', 0, { role: 'user', content: 'First question' }),
+  historyRow('a1', 1, { role: 'assistant', content: 'First answer' }),
+  historyRow('q2', 2, { role: 'user', content: 'Second question' }),
+  historyRow('insert', 3, { role: 'user', content: 'Also update the README', inserted: true }),
+  historyRow('notification', 4, {
+    role: 'user',
+    content: '\n<task-notification><status>completed</status><summary>Agent done</summary></task-notification>',
+  }),
+  historyRow('blank', 5, { role: 'user', content: ' \n ', images: [], files: [] }),
+  historyRow('summary', 6, { role: 'user', content: 'Summary of the conversation so far', isCompactSummary: true }),
+  // A compaction row never draws as a user bubble, whatever its role.
+  historyRow('boundary', 7, { role: 'user', content: 'Compacted', compact: { phase: 'done' } }),
+  historyRow('tool', 8, { kind: 'tool_use', toolName: 'Bash', toolId: 'toolu_1' }),
+  // A tool result is a user turn in the provider's own transcript.
+  historyRow('tool-result', 9, { kind: 'tool_result', role: 'user', content: 'exit 0', toolId: 'toolu_1' }),
+  historyRow('a2', 10, { role: 'assistant', content: 'Second answer' }),
+  historyRow('images-only', 11, { role: 'user', content: '', images: [{ name: 'screen.png', data: 'iVBORw0KGgo=' }] }),
+  historyRow('a3', 12, { role: 'assistant', content: 'Third answer' }),
+  historyRow('files-only', 13, { role: 'user', content: '', files: [{ name: 'notes.txt', path: '/tmp/notes.txt' }] }),
+  historyRow('a4', 14, { role: 'assistant', content: 'Fourth answer' }),
+];
+
+const TURN_QUESTION_SESSION_ID = 'turn-question-session';
+
+/**
+ * Runs `runTest` against a Cursor session whose history is `TURN_HISTORY`.
+ * Cursor history is read from the provider on every request, never through
+ * the transcript cache, so the rows reach `findTurnQuestion` exactly as given.
+ */
+async function withTurnHistory(runTest: () => Promise<void>): Promise<void> {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession(TURN_QUESTION_SESSION_ID, 'cursor', '/tmp/turn-question-project');
+    sessionsDb.assignProviderSessionId(TURN_QUESTION_SESSION_ID, 'cursor-native-turn-question');
+
+    const cursorSessions = providerRegistry.resolveProvider('cursor').sessions;
+    const realFetchHistory = cursorSessions.fetchHistory;
+    cursorSessions.fetchHistory = async () => ({
+      messages: TURN_HISTORY,
+      total: TURN_HISTORY.length,
+      hasMore: false,
+      offset: 0,
+      limit: null,
+    });
+    try {
+      await runTest();
+    } finally {
+      cursorSessions.fetchHistory = realFetchHistory;
+    }
+  });
+}
+
+/** The id of the turn question `findTurnQuestion` returns, or null. */
+async function findTurnQuestionId(beforeId: string, at?: number): Promise<string | null> {
+  const question = await sessionsService.findTurnQuestion(TURN_QUESTION_SESSION_ID, { beforeId, at });
+  return question?.id ?? null;
+}
+
+const turnHistoryTime = (id: string): number =>
+  Date.parse(TURN_HISTORY.find((row) => row.id === id)?.timestamp ?? '');
+
+test('the turn question is the nearest question before the row, past user rows that open no turn', { concurrency: false }, async () => {
+  await withTurnHistory(async () => {
+    assert.equal(await findTurnQuestionId('a1'), 'q1');
+    assert.equal(
+      await findTurnQuestionId('a2'),
+      'q2',
+      'an insert, a task notification, a blank row, compaction rows and a tool result sit in between',
+    );
+    assert.equal(await findTurnQuestionId('q2'), 'q1', 'a question row asks for the turn before its own');
+
+    // The row as the history route serves it, under the app session id.
+    const question = await sessionsService.findTurnQuestion(TURN_QUESTION_SESSION_ID, { beforeId: 'a2' });
+    const { messages } = await sessionsService.fetchHistory(TURN_QUESTION_SESSION_ID);
+    assert.equal(question?.sessionId, TURN_QUESTION_SESSION_ID);
+    assert.deepEqual(question, messages.find((message) => message.id === 'q2'));
+  });
+});
+
+test('a user row with only attachments is a turn question', { concurrency: false }, async () => {
+  await withTurnHistory(async () => {
+    assert.equal(await findTurnQuestionId('a3'), 'images-only');
+    assert.equal(await findTurnQuestionId('a4'), 'files-only');
+  });
+});
+
+test('no turn question comes before the first row', { concurrency: false }, async () => {
+  await withTurnHistory(async () => {
+    assert.equal(await findTurnQuestionId('q1'), null);
+  });
+});
+
+test('a row id the history does not have is found by at, and without at finds nothing', { concurrency: false }, async () => {
+  await withTurnHistory(async () => {
+    // The first row stamped at or after `at` is the row itself, so its own
+    // question is the one before it.
+    assert.equal(await findTurnQuestionId('gone', turnHistoryTime('images-only')), 'q2');
+    assert.equal(await findTurnQuestionId('gone', turnHistoryTime('images-only') - 500), 'q2');
+    assert.equal(await findTurnQuestionId('gone', turnHistoryTime('a4') + 1), null, 'no row is that recent');
+    assert.equal(await findTurnQuestionId('gone'), null);
+    assert.equal(await findTurnQuestionId('a1', turnHistoryTime('a4')), 'q1', 'a known id wins over at');
+  });
+});
+
+test('a Claude row without a uuid gets a new id on every parse, and at finds it once the transcript changes', { concurrency: false }, async () => {
+  const transcriptDirectory = await mkdtemp(path.join(os.tmpdir(), 'sessions-service-turn-question-'));
+  const sessionId = 'claude-turn-question-session';
+  const transcriptPath = path.join(transcriptDirectory, `${sessionId}.jsonl`);
+  // Rows written without a `uuid`, which the reader gives a random id instead.
+  const unanchoredRow = (role: 'user' | 'assistant', text: string, second: number) => JSON.stringify({
+    type: role,
+    timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString(),
+    sessionId,
+    message: { role, content: [{ type: 'text', text }] },
+  });
+
+  try {
+    await withClaudeCliRegistry([], async () => await withIsolatedDatabase(async () => {
+      const rows = [
+        unanchoredRow('user', 'First question', 0),
+        unanchoredRow('assistant', 'First answer', 1),
+        unanchoredRow('user', 'Second question', 2),
+        unanchoredRow('assistant', 'Working on it', 3),
+        unanchoredRow('assistant', 'Still going', 4),
+      ];
+      await writeFile(transcriptPath, `${rows.join('\n')}\n`, 'utf8');
+      sessionsDb.createSession(
+        sessionId,
+        'claude',
+        '/tmp/turn-question-project',
+        'Turn question conversation',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:04.000Z',
+        transcriptPath,
+      );
+
+      // The pane opened on the last two rows, the middle of the second turn.
+      const page = await sessionsService.fetchHistory(sessionId, { limit: 2, offset: 0 });
+      const oldestLoaded = page.messages[0];
+      assert.equal(oldestLoaded?.content, 'Working on it');
+      const findContent = async (anchor: { beforeId: string; at?: number }) =>
+        (await sessionsService.findTurnQuestion(sessionId, anchor))?.content ?? null;
+
+      // While the file is unchanged, the cached parse keeps the ids it gave.
+      assert.equal(await findContent({ beforeId: oldestLoaded.id }), 'Second question');
+
+      // The turn goes on, and the next read parses the transcript again.
+      await appendFile(transcriptPath, `${unanchoredRow('assistant', 'Done', 5)}\n`, 'utf8');
+      const reparsed = await sessionsService.fetchHistory(sessionId);
+      assert.equal(reparsed.messages.length, 6);
+      assert.equal(reparsed.messages.some((message) => message.id === oldestLoaded.id), false);
+
+      assert.equal(await findContent({ beforeId: oldestLoaded.id }), null);
+      assert.equal(
+        await findContent({ beforeId: oldestLoaded.id, at: Date.parse(oldestLoaded.timestamp) }),
+        'Second question',
+      );
+    }));
+  } finally {
+    await rm(transcriptDirectory, { recursive: true, force: true });
   }
 });

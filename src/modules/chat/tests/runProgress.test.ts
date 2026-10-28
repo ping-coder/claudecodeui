@@ -222,6 +222,23 @@ describe('the progress of a busy session', () => {
     expect(progress).toEqual({ unit: 'tasks', done: 3, total: 7, running: 1, startedAt: TURN_STARTED_AT });
   });
 
+  it('keeps counting the turn\'s checklist past a message inserted into the turn, which opens no turn of its own', () => {
+    const inserted: ChatMessage = {
+      type: 'user',
+      content: 'Also update the README',
+      timestamp: '2026-10-26T10:00:20.000Z',
+      inserted: true,
+    };
+    const progress = deriveActivityProgress([
+      userTurn(),
+      checklist([{ content: 'Read', status: 'completed' }, { content: 'Write', status: 'in_progress' }]),
+      inserted,
+    ], runningTurn);
+
+    expect(progress === null).toBe(false);
+    expect(`${progress?.unit} ${progress?.done}/${progress?.total}`).toBe('tasks 1/2');
+  });
+
   it('never borrows a checklist from an earlier turn', () => {
     const earlier = checklist([{ content: 'Read', status: 'completed' }, { content: 'Write', status: 'pending' }]);
 

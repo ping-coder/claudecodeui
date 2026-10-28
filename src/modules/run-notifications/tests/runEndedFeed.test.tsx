@@ -199,6 +199,68 @@ test('a turn\'s end idles its turn entry, aborted or not, and leaves background 
   assert.equal(activity.map.get('session-c')?.background, true);
 });
 
+test('a turn\'s end with background work still running leaves the tasks its entry lists as background work', async () => {
+  await renderFeed();
+  const workflow = { taskId: 'w1', toolUseId: 'toolu_1', taskType: 'local_workflow', description: 'Audit', startedAt: 1 };
+  act(() => {
+    // A session the running-sessions poll lists for its work alone, timed from when its run started.
+    activity.actions?.syncProcessingSessions([
+      { sessionId: 'session-e', startedAt: 5, canInterrupt: true, background: true, tasks: [workflow] },
+    ]);
+    // Turns that went into the process held for each session's work: their entries are responses again, still
+    // listing the work.
+    for (const sessionId of ['session-a', 'session-b', 'session-c']) {
+      activity.actions?.markSessionBackground(sessionId, [workflow]);
+      activity.actions?.markSessionProcessing(sessionId);
+    }
+    activity.actions?.markSessionProcessing('session-d');
+  });
+
+  // Stopped alone, or finished, with the work going on.
+  dispatch(runEnd({ sessionId: 'session-a', outcome: 'aborted', backgroundWork: true }));
+  dispatch(runEnd({ sessionId: 'session-b', backgroundWork: true }));
+  // The stop took the work down.
+  dispatch(runEnd({ sessionId: 'session-c', outcome: 'aborted' }));
+  // No task to list: the running-sessions poll brings the work.
+  dispatch(runEnd({ sessionId: 'session-d', outcome: 'aborted', backgroundWork: true }));
+  // Already background work: left as the poll wrote it.
+  dispatch(runEnd({ sessionId: 'session-e', backgroundWork: true }));
+
+  assert.equal(activity.map.get('session-a')?.background, true);
+  assert.equal(activity.map.get('session-a')?.tasks?.map((task) => task.taskId).join(','), 'w1');
+  assert.equal(activity.map.get('session-b')?.background, true);
+  assert.equal(activity.map.get('session-b')?.tasks?.map((task) => task.taskId).join(','), 'w1');
+  assert.equal(activity.map.has('session-c'), false);
+  assert.equal(activity.map.has('session-d'), false);
+  assert.equal(activity.map.get('session-e')?.startedAt === 5, true);
+  assert.equal(activity.map.get('session-e')?.canInterrupt, true);
+});
+
+test('in a tab that follows the run, its end leaves the entry as the chat settled it from the complete before it', async () => {
+  await renderFeed();
+  const agent = (taskId: string) => ({ taskId, toolUseId: `toolu_${taskId}`, taskType: 'local_agent', description: taskId, startedAt: 1 });
+  act(() => {
+    for (const sessionId of ['session-a', 'session-b']) {
+      activity.actions?.markSessionBackground(sessionId, [agent('w1')]);
+      activity.actions?.markSessionProcessing(sessionId);
+    }
+  });
+
+  // The `complete` and the `run_ended` right after it, both handled before React renders again.
+  act(() => {
+    // By the transcript, w1 finished during the turn and w2 started; in session-b nothing runs any more.
+    activity.actions?.markSessionBackground('session-a', [agent('w2')]);
+    activity.actions?.markSessionBackground('session-b', []);
+    for (const listener of page.listeners) {
+      listener(runEnd({ sessionId: 'session-a', backgroundWork: true }));
+      listener(runEnd({ sessionId: 'session-b', backgroundWork: true }));
+    }
+  });
+
+  assert.equal(activity.map.get('session-a')?.tasks?.map((task) => task.taskId).join(','), 'w2');
+  assert.equal(activity.map.has('session-b'), false);
+});
+
 test('finished background work clears the session\'s background entry, but not a turn started since', async () => {
   await renderFeed();
   act(() => {

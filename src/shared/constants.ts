@@ -353,3 +353,15 @@ export const EDITOR_DIVIDER_WIDTH_PX = 4;
 
 /** The file tree's share of the pane beside a docked editor in the Files view: before the first drag, for a stored value that does not parse, and after Home or a double-click on the divider. */
 export const FILES_TREE_RATIO_DEFAULT = 0.4;
+
+// ---------------------------
+
+//----------------- CHAT TRANSCRIPT ROWS ------------
+
+/**
+ * Class on the always-mounted wrapper of every transcript row that opens a turn (a user message that was
+ * not inserted mid-turn; see isTurnOpener). Set by chat's ChatMessagesPane through LazyMessageRow, read by
+ * chat's usePinnedQuestion, which finds these wrappers in document order to tell which turn sits at the top
+ * of the transcript. Kept off `.chat-message`, so the scroll restore never takes a wrapper for a row.
+ */
+export const TURN_OPENER_ROW_CLASS = 'chat-turn-opener-row';

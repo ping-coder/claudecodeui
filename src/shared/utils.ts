@@ -5,6 +5,7 @@ import { twMerge } from 'tailwind-merge';
 import type {
   AppTab,
   BackgroundTaskSummary,
+  ChatMessage,
   DocumentTitleStatus,
   LLMProvider,
   Project,
@@ -43,13 +44,16 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Copies text with `document.execCommand`, the only path that works in browsers or
- * contexts where the async Clipboard API is unavailable. Private to `copyTextToClipboard`.
+ * contexts where the async Clipboard API is unavailable. Focus goes back where it was
+ * (the copy button, say), which the hidden textarea would otherwise leave on the page's
+ * body. Private to `copyTextToClipboard`.
  */
 function fallbackCopyToClipboard(text: string): boolean {
   if (!text || typeof document === 'undefined') {
     return false;
   }
 
+  const previouslyFocused = document.activeElement;
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.setAttribute('readonly', '');
@@ -68,6 +72,9 @@ function fallbackCopyToClipboard(text: string): boolean {
     copied = false;
   } finally {
     document.body.removeChild(textarea);
+    if (previouslyFocused instanceof HTMLElement && previouslyFocused !== document.body && previouslyFocused.isConnected) {
+      previouslyFocused.focus({ preventScroll: true });
+    }
   }
 
   return copied;
@@ -858,3 +865,46 @@ export const focusWorkspacePaneElement = (
   }
   focusWithLentTabIndex(pane);
 };
+
+// ---------------------------
+
+//----------------- CHAT MESSAGE TEXT ------------
+
+/**
+ * Turns markdown into readable plain text: fenced code keeps its code, while inline code marks, images,
+ * links, quotes, headings, list markers, emphasis and HTML tags are dropped. Used by chat's
+ * MessageCopyControl ("Copy as text") and usePinnedQuestion (the one-line preview of a turn's question).
+ */
+export const convertMarkdownToPlainText = (markdown: string): string => {
+  let plainText = markdown.replace(/\r\n/g, '\n');
+  const codeBlocks: string[] = [];
+  plainText = plainText.replace(/```[\w-]*\n([\s\S]*?)```/g, (_match, code: string) => {
+    const placeholder = `@@CODEBLOCK${codeBlocks.length}@@`;
+    codeBlocks.push(code.replace(/\n$/, ''));
+    return placeholder;
+  });
+  plainText = plainText.replace(/`([^`]+)`/g, '$1');
+  plainText = plainText.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1');
+  plainText = plainText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+  plainText = plainText.replace(/^>\s?/gm, '');
+  plainText = plainText.replace(/^#{1,6}\s+/gm, '');
+  plainText = plainText.replace(/^[-*+]\s+/gm, '');
+  plainText = plainText.replace(/^\d+\.\s+/gm, '');
+  plainText = plainText.replace(/(\*\*|__)(.*?)\1/g, '$2');
+  plainText = plainText.replace(/(\*|_)(.*?)\1/g, '$2');
+  plainText = plainText.replace(/~~(.*?)~~/g, '$1');
+  plainText = plainText.replace(/<\/?[^>]+(>|$)/g, '');
+  plainText = plainText.replace(/\n{3,}/g, '\n\n');
+  plainText = plainText.replace(/@@CODEBLOCK(\d+)@@/g, (_match, index: string) => codeBlocks[Number(index)] ?? '');
+  return plainText.trim();
+};
+
+/**
+ * Whether a transcript row opens a turn: a user message that was not inserted into a running turn. The
+ * user-role entries the transcript draws as the assistant's (a background task's report, a compaction
+ * summary, a local command's output) are assistant rows by the time normalizedToChatMessages hands them
+ * over. The server's isTurnQuestion (server/modules/providers/services/sessions.service.ts) applies the
+ * same rule to stored rows; change the two together. Read by chat's usePinnedQuestion and ChatMessagesPane
+ * (which question a turn is pinned under) and runProgress (where the turn in flight starts).
+ */
+export const isTurnOpener = (message: ChatMessage): boolean => message.type === 'user' && !message.inserted;

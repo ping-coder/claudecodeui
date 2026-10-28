@@ -815,3 +815,99 @@ test('the hand-over plan route answers whether a send with these options keeps t
     providerRegistry.resolveProvider = realResolveProvider;
   }
 });
+
+test('the turn-question route answers with the question of the turn a row belongs to', async () => {
+  await withIsolatedHome(() => withProviderServer(async (baseUrl, workspacePath) => {
+    const sessionId = 'claude-turn-question-route-session';
+    const transcriptPath = path.join(workspacePath, `${sessionId}.jsonl`);
+    const transcriptRow = (uuid: string, parentUuid: string | null, role: 'user' | 'assistant', text: string, second: number) => ({
+      type: role,
+      uuid,
+      parentUuid,
+      sessionId,
+      timestamp: new Date(Date.UTC(2026, 7, 21, 10, 0, second)).toISOString(),
+      message: role === 'user' ? { role, content: text } : { role, content: [{ type: 'text', text }] },
+    });
+    const rows = [
+      transcriptRow('u1', null, 'user', 'First question', 0),
+      transcriptRow('a1', 'u1', 'assistant', 'First answer', 1),
+      transcriptRow('u2', 'a1', 'user', 'Second question', 2),
+      transcriptRow('a2', 'u2', 'assistant', 'Working on it', 3),
+      transcriptRow('a3', 'a2', 'assistant', 'Done', 4),
+    ];
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+    const now = new Date().toISOString();
+    sessionsDb.createSession(sessionId, 'claude', workspacePath, 'Turn question', now, now, transcriptPath);
+
+    const historyResponse = await fetch(`${baseUrl}/api/providers/sessions/${sessionId}/messages`);
+    const history = (await historyResponse.json() as { data: { messages: Array<Record<string, unknown>> } }).data.messages;
+    const rowWithContent = (content: string) => history.find((message) => message.content === content);
+    const midTurnRow = rowWithContent('Working on it');
+    assert.ok(midTurnRow);
+
+    const ask = async (query: string) => {
+      const response = await fetch(`${baseUrl}/api/providers/sessions/${sessionId}/turn-question?${query}`);
+      return { status: response.status, payload: await response.json() as Record<string, unknown> };
+    };
+    const at = encodeURIComponent(String(midTurnRow.timestamp));
+
+    // The question is the same row the history route serves.
+    const answered = await ask(`before=${encodeURIComponent(String(midTurnRow.id))}`);
+    assert.equal(answered.status, 200);
+    assert.deepEqual(answered.payload, { success: true, data: { question: rowWithContent('Second question') } });
+
+    const byTime = await ask(`before=row-from-an-older-parse&at=${at}`);
+    assert.equal(byTime.status, 200);
+    assert.deepEqual(byTime.payload, answered.payload);
+
+    // An `at` that does not parse counts as not sent rather than failing the request.
+    const garbledTime = await ask(`before=${encodeURIComponent(String(midTurnRow.id))}&at=yesterday-ish`);
+    assert.equal(garbledTime.status, 200);
+    assert.deepEqual(garbledTime.payload, answered.payload);
+    const lost = await ask('before=row-from-an-older-parse&at=yesterday-ish');
+    assert.equal(lost.status, 200);
+    assert.deepEqual(lost.payload, { success: true, data: { question: null } });
+
+    const firstRow = await ask(`before=${encodeURIComponent(String(rowWithContent('First question')?.id))}`);
+    assert.equal(firstRow.status, 200);
+    assert.deepEqual(firstRow.payload, { success: true, data: { question: null } });
+  }));
+});
+
+test('the turn-question route refuses a missing, empty, oversized or unprintable row id', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    // A session that has not run yet: an empty history, so nothing to find.
+    sessionsDb.createAppSession('fresh-turn-question-session', 'claude', workspacePath);
+    const ask = async (sessionId: string, query: string) => {
+      const response = await fetch(`${baseUrl}/api/providers/sessions/${sessionId}/turn-question?${query}`);
+      return {
+        status: response.status,
+        payload: await response.json() as { data?: { question: unknown }; error?: { code: string } },
+      };
+    };
+
+    for (const query of [
+      '',
+      'at=2026-08-21T10%3A00%3A03.000Z',
+      'before=',
+      'before=%20%20',
+      `before=${'r'.repeat(301)}`,
+      'before=row%0A',
+      'before=row%00id',
+      'before=row-1&before=row-2',
+    ]) {
+      const rejected = await ask('fresh-turn-question-session', query);
+      assert.equal(rejected.status, 400, query);
+      assert.equal(rejected.payload.error?.code, 'INVALID_QUERY_PARAMETER', query);
+    }
+
+    const longest = await ask('fresh-turn-question-session', `before=${'r'.repeat(300)}`);
+    assert.equal(longest.status, 200);
+    assert.equal(longest.payload.data?.question, null);
+
+    const unknown = await ask('no-such-session', 'before=row-1');
+    assert.equal(unknown.status, 404);
+    assert.equal(unknown.payload.error?.code, 'SESSION_NOT_FOUND');
+  });
+});

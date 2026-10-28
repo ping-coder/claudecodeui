@@ -12,6 +12,7 @@
  * - WebSocket message streaming
  */
 
+import { spawn } from 'child_process';
 import crypto from 'crypto';
 import { promises as fs } from 'fs';
 import os from 'os';
@@ -134,14 +135,22 @@ function resolveHoldDurations(env) {
 //
 // HOLD_IDLE_MS: released after this much silence on the stream, unless the
 // session's own tasks (not nested ones) are still outstanding: a backgrounded
-// command emits nothing until it ends, so silence proves nothing about it. A
-// hold kept only for nested tasks, or for Monitor, ScheduleWakeup or
-// CronCreate, ends here.
+// command emits nothing until it ends, so silence proves nothing about it.
+// Nor does it about a recurring CronCreate job between its fires, or a
+// ScheduleWakeup (/loop) wake-up or a one-shot CronCreate job before it is
+// due: a hold for a wake-up lasts until its time plus WAKEUP_GRACE_MS, and so
+// does one for a one-shot job due before HOLD_MAX would run out (one due
+// later would not fire in this process anyway). A hold kept only for nested
+// tasks, or for a Monitor the CLI reported no task for, ends here.
 //
 // HOLD_MAX_MS: the backstop for tasks that never report. Pushed back by every
 // `result` and every main-thread assistant message during the hold; when it
 // runs out the outstanding tasks are stopped and stdin is closed.
 const { idleMs: HOLD_IDLE_MS, maxMs: HOLD_MAX_MS } = resolveHoldDurations(process.env);
+// How long past its time a held process still waits for a ScheduleWakeup
+// wake-up, or a one-shot CronCreate job, to fire. The CLI sends nothing for a
+// fire that never starts, and the fire itself can come a little early or late.
+const WAKEUP_GRACE_MS = 5 * 60 * 1000;
 // A process still up this long after its input was released, whatever the
 // reason, is closed: the CLI's own ceiling plus a minute. The CLI does not
 // always keep to that ceiling: a backgrounded shell's own timeout can push it
@@ -153,11 +162,13 @@ const ABANDONED_PROCESS_CLOSE_MS = CLI_BG_WAIT_GRACE_MS + 60 * 1000;
 // exitingSessions) to end, then closes it and waits RETIRED_CLOSE_WAIT_MS more
 // before starting its own. A closed query's loop ends at once, before its
 // process has gone: the SDK sends SIGTERM 2 s after closing and SIGKILL 5 s
-// after that. So the second wait is a plain timer (see closeRun) that outlasts
-// that schedule.
+// after that. So the second wait lasts until the process has exited, as far
+// as the run sees it (`processGone`), or is a plain timer that outlasts that
+// schedule (see closeRun).
 const RETIRED_EXIT_WAIT_MS = 15 * 1000;
 const RETIRED_CLOSE_WAIT_MS = 8 * 1000;
-// How long abort waits for the CLI to answer an interrupt before closing it.
+// How long abort waits for the CLI to answer an interrupt before closing it;
+// a stop of a handed-over turn waits as long for that turn's `result` too.
 const INTERRUPT_REPLY_TIMEOUT_MS = 5 * 1000;
 // How long a stop request waits for its reply. The task's `stopped`
 // notification is the real outcome either way.
@@ -231,6 +242,64 @@ function applyClaudeEffortSelection(sdkOptions, { effort, ultracode }) {
     ultracode,
     ...(ultracode ? { enableWorkflows: true } : {})
   };
+}
+
+// Claude Code refuses to load a settings file larger than this (2 MB).
+const MAX_SETTINGS_FILE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The `ultracode` value one Claude settings file sets, or undefined when it
+ * sets none, cannot be read, is over MAX_SETTINGS_FILE_BYTES or does not
+ * parse: Claude Code skips such a file and takes the value from the files
+ * below it, and ignores a value that is not a boolean. The file is decoded as
+ * Claude Code decodes it (and as claude-settings-permissions.service.ts
+ * does): UTF-16LE when it starts with that byte order mark, UTF-8 otherwise,
+ * without the leading BOM. Windows editors and PowerShell often write one,
+ * and Claude Code still applies such a file.
+ * @param {string} file - Absolute path of the settings file
+ * @returns {Promise<boolean|undefined>}
+ */
+async function readSettingsFileUltracode(file) {
+  try {
+    const bytes = await fs.readFile(file);
+    if (bytes.length > MAX_SETTINGS_FILE_BYTES) {
+      return undefined;
+    }
+    const isUtf16LittleEndian = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+    const settings = JSON.parse(bytes.toString(isUtf16LittleEndian ? 'utf16le' : 'utf8').replace(/^\uFEFF/, ''));
+    return typeof settings?.ultracode === 'boolean' ? settings.ultracode : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The ultracode setting a CLI started with these SDK options runs with, as
+ * Claude Code 2.1.312 reports it (get_settings): the `ultracode` of the
+ * `settings` option, which the SDK passes as --settings and which beats every
+ * settings file, when it names one. Otherwise the value of the settings files
+ * the run loads (`settingSources`), whatever order they are listed in: the
+ * user's settings.json (under CLAUDE_CONFIG_DIR, else ~/.claude), then the
+ * project's .claude/settings.json, then its .claude/settings.local.json, each
+ * over the one before. The project files are read in the working directory
+ * itself, not above it, as the CLI reads them. Off when none sets it.
+ * @param {Object} sdkOptions - SDK options built by mapCliOptionsToSDK
+ * @returns {Promise<boolean>}
+ */
+async function resolveEffectiveUltracode(sdkOptions) {
+  const flag = sdkOptions.settings?.ultracode;
+  if (typeof flag === 'boolean') {
+    return flag;
+  }
+  const sources = new Set(sdkOptions.settingSources ?? []);
+  const projectDirectory = sdkOptions.cwd || process.cwd();
+  const files = [
+    sources.has('user') && path.join(sdkOptions.env?.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude'), 'settings.json'),
+    sources.has('project') && path.join(projectDirectory, '.claude', 'settings.json'),
+    sources.has('local') && path.join(projectDirectory, '.claude', 'settings.local.json'),
+  ].filter(Boolean);
+  const values = await Promise.all(files.map(readSettingsFileUltracode));
+  return values.reduce((effective, value) => value ?? effective, false);
 }
 
 function createRequestId() {
@@ -372,6 +441,62 @@ export function buildClaudeSdkEnv(hostEnv = process.env) {
     CLAUDE_CODE_ENTRYPOINT: CLOUDCLI_CLAUDE_ENTRYPOINT,
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(CLI_BG_WAIT_GRACE_MS),
   };
+}
+
+/**
+ * Adds `perTaskStopAffordance: true` to the SDK's `initialize` control
+ * request: the host has a stop control for each background task (the chat's
+ * stop-task), so an interrupt only has to stop the turn under way. Without
+ * it, Claude Code (2.1.312, checked against a real process) also kills every
+ * background agent and workflow, with their own commands, on an interrupt;
+ * backgrounded commands and pending wake-ups outlive it either way. The SDK
+ * this server uses has no option for it, so the field is added to the
+ * request's line on its way to the CLI. Any other line, and one that does not
+ * parse, goes out as it came.
+ * @param {string} line - One line the SDK writes to the CLI's stdin
+ * @returns {string}
+ */
+function declarePerTaskStopAffordance(line) {
+  if (!line.includes('"initialize"')) {
+    return line;
+  }
+  try {
+    const message = JSON.parse(line);
+    if (message?.type !== 'control_request' || message.request?.subtype !== 'initialize') {
+      return line;
+    }
+    message.request.perTaskStopAffordance = true;
+    return `${JSON.stringify(message)}\n`;
+  } catch {
+    return line;
+  }
+}
+
+/**
+ * Starts the CLI for the SDK (its `spawnClaudeCodeProcess` option) as the
+ * SDK's own spawn does, the CLI's stderr going to `onStderr`, except that the
+ * first `initialize` request it writes declares the per-task stop control
+ * (declarePerTaskStopAffordance). The CLI reads the declaration only from the
+ * first initialize, and the SDK sends one per process.
+ * @param {{ command: string, args: Array<string>, cwd?: string, env: Record<string, string | undefined>, signal: AbortSignal }} spawnOptions
+ * @param {(data: string) => void} onStderr
+ * @returns {import('child_process').ChildProcess}
+ */
+function spawnClaudeCli({ command, args, cwd, env, signal }, onStderr) {
+  const child = spawn(command, args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  child.stderr.on('data', (chunk) => onStderr(chunk.toString()));
+  const write = child.stdin.write;
+  child.stdin.write = function writeDeclaringStopAffordance(chunk, ...rest) {
+    if (typeof chunk !== 'string') {
+      return write.call(this, chunk, ...rest);
+    }
+    const declared = declarePerTaskStopAffordance(chunk);
+    if (declared !== chunk) {
+      child.stdin.write = write;
+    }
+    return write.call(this, declared, ...rest);
+  };
+  return child;
 }
 
 function mapCliOptionsToSDK(options = {}) {
@@ -526,7 +651,9 @@ function sendStopTask(instance, taskId) {
  * `result` yet) and to stop its outstanding tasks, and only then is the input
  * released: the SDK drops control requests written after stdin has ended, and
  * the CLI's wind-down would otherwise keep those tasks, and the process
- * appending to the same transcript, alive for up to CLI_BG_WAIT_GRACE_MS.
+ * appending to the same transcript, alive for up to CLI_BG_WAIT_GRACE_MS. A
+ * turn the process starts after that is closed with it (see the silenced
+ * branch of queryClaudeSDK's loop).
  * Nothing is awaited; each request is written before this returns. A process
  * whose input is already released is sent nothing, as the requests would be
  * dropped. Inserts the run still had pending are reported failed first, as
@@ -592,15 +719,17 @@ function closeQuery(instance, sessionKey) {
  * once, so its `exited` settles while the SDK has yet to kill the process.
  * @param {Object} entry - The run's entry (see `runEntry` in queryClaudeSDK)
  * @param {string|null} sessionKey - Session key, for the log
- * @returns {Promise<void>} The entry's `closed`: settles RETIRED_CLOSE_WAIT_MS
- *   after the first close
+ * @returns {Promise<void>} The entry's `closed`: settles once the process has
+ *   exited (`processGone`, for a process the run started itself), and at the
+ *   latest RETIRED_CLOSE_WAIT_MS after the first close
  */
 function closeRun(entry, sessionKey) {
   if (!entry.closed) {
     closeQuery(entry.instance, sessionKey);
-    entry.closed = new Promise((resolve) => {
+    const waitedOut = new Promise((resolve) => {
       setTimeout(resolve, RETIRED_CLOSE_WAIT_MS).unref?.();
     });
+    entry.closed = entry.processGone ? Promise.race([entry.processGone, waitedOut]) : waitedOut;
   }
   return entry.closed;
 }
@@ -918,6 +1047,50 @@ function extractCumulativeTokenBudget(sdkMessage, reportedContextWindow) {
 // that needs a new process was refused over work that never existed.
 const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 'Workflow']);
 
+// The deferred-work tools whose work no task event ever reports: the wake-up
+// a ScheduleWakeup (/loop) sets, and a CronCreate job. The run follows that
+// work by the calls and what their results say (see `heldWakeup` and
+// `heldCronJobs` in queryClaudeSDK), and holds its process for it whatever
+// the tracker says. A Monitor is not one of them: Claude Code (2.1.165 and
+// later) reports it as a task, which the tracker follows; one it reports no
+// task for is held until the CLI runs a turn for it (`untrackedMonitorHeld`).
+const SCHEDULING_TOOLS = new Set(['ScheduleWakeup', 'CronCreate']);
+
+/**
+ * Whether a tool call is a ScheduleWakeup that ends a loop: `stop: true`
+ * cancels the pending wake-ups instead of setting one, so nothing is left.
+ * @param {Object} block - A `tool_use` content block
+ * @returns {boolean}
+ */
+function endsLoop(block) {
+  return block.name === 'ScheduleWakeup' && block.input?.stop === true;
+}
+
+/**
+ * Whether one content block is a tool call that keeps working after the
+ * turn's `result` arrives (see startsBackgroundWork).
+ * @param {Object} block - A content block
+ * @returns {boolean}
+ */
+function launchesBackgroundWork(block) {
+  if (block?.type !== 'tool_use') {
+    return false;
+  }
+  if (block.name === 'Bash') {
+    return block.input?.run_in_background === true;
+  }
+  // A backgrounded subagent outlives the turn exactly like a backgrounded
+  // Bash does, so the process has to be held open for it to report back.
+  // Agents background by default — `run_in_background` is optional and only
+  // an explicit `false` opts out — hence `!== false` rather than `=== true`.
+  // A foreground agent must stay out of DEFERRED_WORK_TOOLS: it never pushes
+  // a follow-up turn, so it would pin the process for the full ceiling.
+  if (block.name === 'Agent') {
+    return block.input?.run_in_background !== false;
+  }
+  return DEFERRED_WORK_TOOLS.has(block.name) && !endsLoop(block);
+}
+
 /**
  * Detects tool calls that keep working after the turn's `result` arrives.
  *
@@ -933,28 +1106,80 @@ const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 
  */
 export function startsBackgroundWork(sdkMessage) {
   const content = sdkMessage?.message?.content;
-  if (!Array.isArray(content)) {
-    return false;
-  }
+  return Array.isArray(content) && content.some(launchesBackgroundWork);
+}
 
-  return content.some((block) => {
-    if (block?.type !== 'tool_use') {
-      return false;
-    }
-    if (block.name === 'Bash') {
-      return block.input?.run_in_background === true;
-    }
-    // A backgrounded subagent outlives the turn exactly like a backgrounded
-    // Bash does, so the process has to be held open for it to report back.
-    // Agents background by default — `run_in_background` is optional and only
-    // an explicit `false` opts out — hence `!== false` rather than `=== true`.
-    // A foreground agent must stay out of DEFERRED_WORK_TOOLS: it never pushes
-    // a follow-up turn, so it would pin the process for the full ceiling.
-    if (block.name === 'Agent') {
-      return block.input?.run_in_background !== false;
-    }
-    return DEFERRED_WORK_TOOLS.has(block.name);
-  });
+/**
+ * Detects tool calls that start a background task: what startsBackgroundWork
+ * finds, but for the calls whose work no task event ever reports
+ * (SCHEDULING_TOOLS), which the run follows by their results instead. A turn
+ * that reports no task at all is held for what this finds (see
+ * `backgroundWorkPending` in queryClaudeSDK).
+ * @param {Object} sdkMessage - SDK stream message
+ * @returns {boolean}
+ */
+function startsBackgroundTasks(sdkMessage) {
+  const content = sdkMessage?.message?.content;
+  return Array.isArray(content)
+    && content.some((block) => launchesBackgroundWork(block) && !SCHEDULING_TOOLS.has(block.name));
+}
+
+// The shortest and the longest wait a ScheduleWakeup sets: the CLI clamps
+// `delaySeconds` to them.
+const WAKEUP_MIN_DELAY_S = 60;
+const WAKEUP_MAX_DELAY_S = 3600;
+
+/**
+ * When the wake-up a ScheduleWakeup call set fires, in epoch ms: the
+ * `scheduledFor` its result carries (`tool_use_result`), else worked out from
+ * its `delaySeconds` as the CLI does (clamped, then rounded up to the
+ * minute). `exact` when the result said: the fire names the time it was set
+ * for (`scheduled_for`), which then has to match it.
+ * @param {Object|null} output - The call's `tool_use_result`
+ * @param {Object} input - The call's input
+ * @param {number} calledAt - When the call came, in epoch ms
+ * @returns {{ at: number, exact: boolean }}
+ */
+function readWakeupTime(output, input, calledAt) {
+  if (Number.isFinite(output?.scheduledFor) && output.scheduledFor > 0) {
+    return { at: output.scheduledFor, exact: true };
+  }
+  const requested = Math.round(Number(input?.delaySeconds));
+  const delaySeconds = Number.isNaN(requested)
+    ? WAKEUP_MIN_DELAY_S
+    : Math.min(WAKEUP_MAX_DELAY_S, Math.max(WAKEUP_MIN_DELAY_S, requested));
+  return { at: Math.ceil((calledAt + delaySeconds * 1000) / 60000) * 60000, exact: false };
+}
+
+/**
+ * The text of a `tool_result` block, whether its content is a string or a
+ * list of parts.
+ * @param {unknown} content - The block's `content`
+ * @returns {string}
+ */
+function readToolResultText(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+  return Array.isArray(content)
+    ? content.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text).join('\n')
+    : '';
+}
+
+/**
+ * The id of the job a CronCreate call scheduled: its result's `id`, else as
+ * its text names it ("Scheduled recurring job <id> (…)", "Scheduled one-shot
+ * task <id> (…)"); null when neither says.
+ * @param {Object|null} output - The call's `tool_use_result`
+ * @param {string} text - The call's result text
+ * @returns {string|null}
+ */
+function readCronJobId(output, text) {
+  if (typeof output?.id === 'string' && output.id !== '') {
+    return output.id;
+  }
+  const match = /Scheduled (?:recurring job|one-shot task) ([^\s().,]+)/.exec(text);
+  return match ? match[1] : null;
 }
 
 // `task_updated` patch statuses after which a task is gone for good. `pending`,
@@ -1234,6 +1459,24 @@ function isTaskNotificationEcho(message) {
 }
 
 /**
+ * The task an echoed task notification is about, as its text names it
+ * (`<task-id>…</task-id>`); null for any other message.
+ * @param {Object} message - SDK stream message
+ * @returns {string|null}
+ */
+function readNotifiedTaskId(message) {
+  if (message.isReplay !== true || !isTaskNotificationEcho(message)) {
+    return null;
+  }
+  const content = message.message?.content;
+  const text = Array.isArray(content)
+    ? content.find((part) => part?.type === 'text')?.text
+    : content;
+  const match = typeof text === 'string' ? /<task-id>\s*([^<\s]+)\s*<\/task-id>/.exec(text) : null;
+  return match ? match[1] : null;
+}
+
+/**
  * The uuids of the prompts a turn consumed, as the CLI names them on the
  * turn's `result`: `user_message_uuids` (every prompt it took, the turn's own
  * and any folded in), and `user_message_uuid` (the one that started it, the
@@ -1342,6 +1585,9 @@ function createInsertController({
   let promptTurnStarted = false;
   // Set while the current prompt is one a later send handed to the process.
   let promptHandedOver = false;
+  // Whether that prompt has been written to the CLI: a hand-over that waits
+  // for the CLI's own turn to end writes it then (see handOverTurn).
+  let promptWritten = true;
   // Set once the CLI has been seen reporting a prompt the run wrote as it
   // takes it (an echo, or a `started`): such a CLI reports a handed-over
   // prompt before that prompt's turn can end (isAheadOfHandedOverPrompt).
@@ -1699,15 +1945,24 @@ function createInsertController({
      * Makes a prompt a later send handed to the process the current one (see
      * handTurnToHeldProcess): inserts wait for its turn to start, and its
      * echo is dropped. Called just before the prompt is written, with no
-     * insert pending: the turn before it has completed.
+     * insert pending: the turn before it has completed. A prompt that waits
+     * for the CLI's own turn to end is written later (`written` false), and
+     * noteHandedOverPromptWritten says when.
      * @param {string} promptUuid - The uuid the handed-over prompt goes out with
+     * @param {{ written?: boolean }} [state]
      */
-    beginHandedOverTurn(promptUuid) {
+    beginHandedOverTurn(promptUuid, { written = true } = {}) {
       promptUuids.add(promptUuid);
       currentPromptUuid = promptUuid;
       promptTurnStarted = false;
       promptHandedOver = true;
+      promptWritten = written;
       turnEnded = false;
+    },
+
+    /** The handed-over prompt that waited for the CLI's own turn is written now. */
+    noteHandedOverPromptWritten() {
+      promptWritten = true;
     },
 
     /**
@@ -1724,13 +1979,17 @@ function createInsertController({
      * when this CLI has been seen reporting the prompts it takes, as it would
      * have reported this one first. A CLI that does neither leaves only the
      * `origin`: a task notification's turn is ahead, any other is taken for
-     * the prompt's, so that the turn cannot hang.
+     * the prompt's, so that the turn cannot hang. Every result before the
+     * prompt is written is ahead of it.
      * @param {Object} result - The `result` message
      * @returns {boolean}
      */
     isAheadOfHandedOverPrompt(result) {
       if (!promptHandedOver || promptTurnStarted) {
         return false;
+      }
+      if (!promptWritten) {
+        return true;
       }
       const consumed = readConsumedPromptUuids(result);
       if (consumed) {
@@ -1740,6 +1999,18 @@ function createInsertController({
         return true;
       }
       return result.origin?.kind === 'task-notification';
+    },
+
+    /**
+     * Whether a `result` names, among the prompts its turn consumed
+     * (readConsumedPromptUuids), one the run wrote: its own prompt, a
+     * handed-over one or an insert. A turn the CLI starts on its own names
+     * none.
+     * @param {Object} result - A `result` message
+     * @returns {boolean}
+     */
+    namesWrittenPrompt(result) {
+      return (readConsumedPromptUuids(result) ?? []).some((uuid) => promptUuids.has(uuid) || inserts.has(uuid));
     },
 
     /**
@@ -1757,17 +2028,24 @@ function createInsertController({
      * whose withdrawal the CLI did not confirm, or one that starts the next
      * turn meanwhile (see receive), so the client puts the text back rather
      * than lose it. Any held result is dropped: the abort ends the turn.
-     * @returns {Promise<void>}
+     * @returns {Promise<{ promptWithdrawn: boolean }>} `promptWithdrawn` when
+     *   a handed-over prompt whose turn had not started will run no turn: the
+     *   CLI confirmed taking it back, or it was never written
      */
     async cancelAllForAbort() {
       endDeferral();
       for (const entry of [...waiting]) {
         settle(entry, 'cancelled', 'ABORTED');
       }
-      const withdrawals = [];
-      if (promptHandedOver && !promptTurnStarted && inputOpen()) {
-        withdrawals.push(sendCancel(currentPromptUuid, INSERT_ABORT_CANCEL_WAIT_MS));
+      let promptWithdrawal = Promise.resolve(false);
+      if (promptHandedOver && !promptTurnStarted) {
+        if (!promptWritten) {
+          promptWithdrawal = Promise.resolve(true);
+        } else if (inputOpen()) {
+          promptWithdrawal = sendCancel(currentPromptUuid, INSERT_ABORT_CANCEL_WAIT_MS);
+        }
       }
+      const withdrawals = [promptWithdrawal];
       const target = written;
       if (target) {
         target.cancelRequested = true;
@@ -1776,11 +2054,17 @@ function createInsertController({
           withdrawals.push(sendCancel(target.insertId, INSERT_ABORT_CANCEL_WAIT_MS));
         }
       }
-      await Promise.all(withdrawals);
+      const [promptWithdrawn] = await Promise.all(withdrawals);
       // A receipt may have come in meanwhile.
       if (target?.state === 'written') {
         settle(target, 'cancelled', 'ABORTED');
       }
+      if (promptWithdrawn && !promptTurnStarted) {
+        // Nothing waits for its turn any more.
+        promptHandedOver = false;
+        return { promptWithdrawn: true };
+      }
+      return { promptWithdrawn: false };
     },
 
     /**
@@ -1884,6 +2168,51 @@ function haveSameEntries(first, second) {
 }
 
 /**
+ * Follows the switches of one setting of a live process, its model or its
+ * permission mode. The CLI applies switches in the order they come, ahead of
+ * any prompt written after them, so the next prompt runs with the target of
+ * the last switch sent that the CLI has not refused, else with the value it
+ * confirmed last. `current` says which before the CLI has answered: a turn
+ * planned or handed over meanwhile, such as a due message sent right behind
+ * one whose switch back is on its way, weighs what its prompt will run with.
+ * @param {string} initial - The value the process was launched with
+ * @returns {{
+ *   current: () => string,
+ *   confirmed: () => string,
+ *   send: (value: string) => { confirm: () => void, refuse: () => void }
+ * }}
+ */
+function createSwitchTracker(initial) {
+  let confirmed = initial;
+  // Switches sent and not answered yet, oldest first.
+  const unanswered = [];
+  return {
+    current: () => (unanswered.length > 0 ? unanswered[unanswered.length - 1].value : confirmed),
+    confirmed: () => confirmed,
+    send(value) {
+      const entry = { value };
+      unanswered.push(entry);
+      return {
+        // Every switch sent before it is behind it now, whatever its answer.
+        confirm() {
+          const index = unanswered.indexOf(entry);
+          if (index !== -1) {
+            confirmed = value;
+            unanswered.splice(0, index + 1);
+          }
+        },
+        refuse() {
+          const index = unanswered.indexOf(entry);
+          if (index !== -1) {
+            unanswered.splice(index, 1);
+          }
+        },
+      };
+    },
+  };
+}
+
+/**
  * What it takes to run a new turn in a live process rather than a new one:
  * the switches to send first, and what only a new process can apply.
  *
@@ -1895,20 +2224,24 @@ function haveSameEntries(first, second) {
  * with, as the run's canUseTool grants them (entering plan mode adds some);
  * one that allows fewer, or denies others, needs a new process.
  *
- * Ultracode counts only when the turn makes a choice: a model that cannot
- * run it, such as the catalog's default, gets none (resolveClaudeEffortSelection),
- * and a process launched without one runs with it off. A plain model switch
- * to or from such a model therefore changes nothing here.
+ * Ultracode is compared as each process runs with it (resolveEffectiveUltracode):
+ * the turn's own choice, or, for a turn that makes none (a model that cannot
+ * run it, such as the catalog's default, gets none; see
+ * resolveClaudeEffortSelection), the value of the Claude settings files,
+ * which a new process would run with. The live process keeps the value it
+ * was launched with, whatever model it switches to.
  *
  * @param {Object} launched - The live process's configuration (see `launched` in queryClaudeSDK)
  * @param {Object} next - SDK options a new process would get for the turn (mapCliOptionsToSDK)
  * @param {Object|null} instance - The live SDK query
+ * @param {boolean} nextUltracode - The ultracode setting a new process would
+ *   run the turn with (resolveEffectiveUltracode of `next`)
  * @returns {{ changes: Array<Exclude<import('@/shared/types.js').HandOverChange, 'lookup'>>, switches: Array<import('@/shared/types.js').HandOverSwitch>, model: string|null, permissionMode: string|null }}
  *   `changes` is empty when the turn can go in; `model` and `permissionMode`
  *   are the switches to make before its prompt, if any, and `switches` names
  *   the ones the process can make, whatever else `changes` holds
  */
-function planTurnHandOver(launched, next, instance) {
+function planTurnHandOver(launched, next, instance, nextUltracode) {
   const changes = [];
   const switches = [];
   if ((next.cwd ?? null) !== launched.cwd) {
@@ -1917,8 +2250,7 @@ function planTurnHandOver(launched, next, instance) {
   if ((next.effort ?? null) !== launched.effort) {
     changes.push('effort');
   }
-  const nextUltracode = next.settings?.ultracode;
-  if (typeof nextUltracode === 'boolean' && nextUltracode !== launched.ultracode) {
+  if (nextUltracode !== launched.ultracode) {
     changes.push('ultracode');
   }
   const nextAllowedTools = new Set(next.allowedTools ?? []);
@@ -1960,13 +2292,14 @@ function namesSetting(value) {
  * `toolsSettings`' `allowedTools`, `disallowedTools` and `skipPermissions`
  * the options do not carry. What the options carry is kept, so a
  * `permissionMode` they name still meets the live `skipPermissions`, as
- * mapCliOptionsToSDK combines the two. Ultracode is left as is: a turn that
- * makes no ultracode choice already changes nothing.
+ * mapCliOptionsToSDK combines the two. `ultracode` is the live one when the
+ * options make no choice (no boolean, nor the legacy `ultracode` effort); a
+ * model that cannot run it still gets none.
  *
  * Used by a run's planHandOver, and through the run's entry by
  * handTurnToHeldProcess, for a plan or a run that inherits unset settings.
  * @param {Object} turnOptions - The turn's run options
- * @param {{ cwd: string|null, model: string, effort: string|null, permissionMode: string, allowedTools: Array<string>, disallowedTools: Array<string>, skipPermissions: boolean }} live
+ * @param {{ cwd: string|null, model: string, effort: string|null, ultracode: boolean, permissionMode: string, allowedTools: Array<string>, disallowedTools: Array<string>, skipPermissions: boolean }} live
  *   The live process's own settings (see `liveSettings` in queryClaudeSDK)
  * @returns {Object}
  */
@@ -1974,11 +2307,13 @@ function inheritUnsetSettings(turnOptions, live) {
   const given = turnOptions.toolsSettings && typeof turnOptions.toolsSettings === 'object'
     ? turnOptions.toolsSettings
     : {};
+  const choosesUltracode = typeof turnOptions.ultracode === 'boolean' || turnOptions.effort === 'ultracode';
   return {
     ...turnOptions,
     cwd: namesSetting(turnOptions.cwd) ? turnOptions.cwd : live.cwd ?? undefined,
     model: namesSetting(turnOptions.model) ? turnOptions.model : live.model,
     effort: namesSetting(turnOptions.effort) ? turnOptions.effort : live.effort ?? undefined,
+    ultracode: choosesUltracode ? turnOptions.ultracode : live.ultracode,
     permissionMode: namesSetting(turnOptions.permissionMode) ? turnOptions.permissionMode : live.permissionMode,
     toolsSettings: {
       ...given,
@@ -2056,6 +2391,16 @@ function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
  * runs. Only for the hand-over: a turn that starts a process of its own runs
  * with its options as they are.
  *
+ * Options that set `restoreSwitchesAfterTurn: true` (a message the
+ * scheduled-messages dispatcher sends) keep the model and permission mode the
+ * turn switches to for that turn alone: the process is switched back once
+ * the turn is over (see handOverTurn in queryClaudeSDK), so work that runs on
+ * after it, such as a /loop's next wake-up, keeps its own. Their
+ * `onSwitchesRestored({ model, permissionMode })`, if any, hears what the
+ * process runs with once the turn is over, however it ended, unless the
+ * process lets go then (see restoreTurnSwitches); a turn that starts a
+ * process of its own never calls it.
+ *
  * @param {string} command - The turn's prompt
  * @param {Object} options - The turn's run options; `sessionId` names the session
  * @param {Object} writer - The writer of the turn's run
@@ -2065,6 +2410,28 @@ function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
  *   queryClaudeSDK); null when the turn starts a process of its own. Wrapped,
  *   as an async function would wait out a promise it returned.
  */
+/**
+ * Tells a turn sent with `restoreSwitchesAfterTurn` that it switched nothing,
+ * when it is stopped while its hand-over is still under way (see
+ * pendingHandOvers): it never reached the held process, which runs on with
+ * what it had. Its `onSwitchesRestored` hears null for both, on a later
+ * microtask, as restoreTurnSwitches reports a plan that switches nothing.
+ * @param {Object} options - The turn's run options
+ * @param {string} key - The session's id
+ */
+function reportNothingSwitched(options, key) {
+  if (options.restoreSwitchesAfterTurn !== true || typeof options.onSwitchesRestored !== 'function') {
+    return;
+  }
+  void Promise.resolve().then(() => {
+    try {
+      options.onSwitchesRestored({ model: null, permissionMode: null });
+    } catch (error) {
+      console.warn(`[Claude SDK] Session ${key}: onSwitchesRestored failed:`, error?.message || error);
+    }
+  });
+}
+
 async function handTurnToHeldProcess(command, options, writer, context) {
   const key = options.sessionId;
   // An edited message resumes the conversation partway, which only a new
@@ -2108,10 +2475,12 @@ async function handTurnToHeldProcess(command, options, writer, context) {
       model: resolvedModel || turnOptions.model,
       effortModels: await loadEffortModels(context),
     });
+    const ultracode = await resolveEffectiveUltracode(sdkOptions);
     const [promptMessage] = await buildPromptMessages(command, options.images, options.files, turnOptions.cwd, crypto.randomUUID());
 
     if (pending.aborted) {
       // The abort reported the stop, and its caller sends the `complete`.
+      reportNothingSwitched(options, key);
       return { settled: Promise.resolve() };
     }
     // The process may have let go, or ended, meanwhile: handOverTurn checks.
@@ -2119,11 +2488,15 @@ async function handTurnToHeldProcess(command, options, writer, context) {
       writer,
       sessionName: options.sessionSummary,
       sdkOptions,
+      ultracode,
       skipPermissions: Boolean(turnOptions.toolsSettings?.skipPermissions),
+      restoreSwitches: options.restoreSwitchesAfterTurn === true,
+      onSwitchesRestored: options.restoreSwitchesAfterTurn === true ? options.onSwitchesRestored : null,
       promptMessage,
     }) ?? { taken: false, changes: [] };
   } catch (error) {
     if (pending.aborted) {
+      reportNothingSwitched(options, key);
       return { settled: Promise.resolve() };
     }
     // A new run makes the same lookups, and reports what fails; it retires
@@ -2160,7 +2533,8 @@ async function handTurnToHeldProcess(command, options, writer, context) {
  * and names no change. A session with no such process, or whose process is
  * starting or has let go, has nothing held. One whose process is in a turn
  * takes no other: `heldWork` then says whether that process has work of the
- * session's own, which interrupting the turn would stop.
+ * session's own (holdsOwnWorkInTurn), which stopping a first turn would stop
+ * with it.
  *
  * The lookups are the held run's, with its provider-scoped context, except
  * that a model the turn names comes first: the chat gateway records it for
@@ -2236,20 +2610,45 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   let backgroundReport = null;
   // Set while a handed-over turn runs (handOverTurn): what of the hold it
   // ended its own end has to keep. `untracked`: the process was held for work
-  // the tracker cannot see (Monitor, ScheduleWakeup, ...), cleared once that
-  // work has reported back. `taskIds`: the tasks outstanding at the hand-over.
-  // `relayPending`: one of those finished after the hand-over, so the CLI
-  // relays it in a turn after this one, which needs stdin open.
+  // neither the tracker nor the run's own records (untrackedWorkHeld) can
+  // see, such as a backgrounded command of an SDK that reports no task,
+  // cleared once that work has reported back. `taskIds`: the tasks
+  // outstanding at the hand-over. `relayPending`: one of those finished after
+  // the hand-over, so the CLI relays it in a turn after this one, which needs
+  // stdin open.
   let handedOverHold = null;
   // What the process was launched with (cwd, tool rules, effort, ultracode),
-  // and the model and permission mode it runs with now, which control
-  // requests may have switched since, with the `skipPermissions` of the tool
-  // settings its current turn came with. Set once the query exists; a turn
-  // handed over later is compared with it (planTurnHandOver).
+  // and the model and permission mode its next prompt runs with, with the
+  // `skipPermissions` of the tool settings its current turn came with. Set
+  // once the query exists; a turn handed over later is compared with it
+  // (planTurnHandOver). The model and permission mode follow the switches
+  // sent since, before the CLI answers them (switchProcess).
   let launched = null;
+  // The switches of the model and of the permission mode sent to the
+  // process (createSwitchTracker), set with `launched`.
+  let switchTrackers = null;
   // The SDK options the run's canUseTool reads. A handed-over turn's tool
   // rules and permission mode are written here.
   let liveSdkOptions = null;
+  // Set while the user stops a handed-over turn, and only that turn
+  // (stopHandedOverTurn). A `result` meanwhile is the stopped turn's: it
+  // completes nothing, and resolves the stop's wait for it (settleStoppedTurn).
+  let stoppingHandedOverTurn = false;
+  let settleStoppedTurn = null;
+  // A hand-over whose prompt waits for the turn the CLI runs on its own to
+  // end before the process is switched for it and the prompt is written
+  // (handOverTurn); written by writeDeferredHandOver.
+  let deferredHandOver = null;
+  // What the process is switched back to once a turn handed over with
+  // `restoreSwitches` is over (restoreTurnSwitches): the model and permission
+  // mode it ran with before, when the turn switched them, and its tool rules.
+  // Set once the turn's switches are made (writeHandedOverPrompt).
+  let switchesToRestore = null;
+  // Who hears what the process runs with once such a turn is over
+  // (restoreTurnSwitches): the turn's `onSwitchesRestored`, with whether its
+  // plan switches the model and the permission mode, made or not. Set at the
+  // hand-over (handOverTurn).
+  let switchesReport = null;
 
   const emitNotification = (event) => {
     notifyUserIfEnabled({
@@ -2276,9 +2675,11 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // under it and echoes the prompt back with it (see createInsertController).
   const firstPromptUuid = crypto.randomUUID();
   // The post-turn hold's silence countdown (HOLD_IDLE_MS) and its backstop
-  // (HOLD_MAX_MS). Both run only while the process is held for background work.
+  // (HOLD_MAX_MS), with when the backstop runs out. Both run only while the
+  // process is held for background work.
   let holdIdleTimer = null;
   let holdMaxTimer = null;
+  let holdMaxAt = null;
   // Closes the process if it is still up ABANDONED_PROCESS_CLOSE_MS after its
   // input was released.
   let abandonedCloseTimer = null;
@@ -2291,15 +2692,56 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // task-notification `result` before it ends a batch the CLI ran ahead of the
   // prompt; one after it is background work reporting back.
   let promptResultSeen = false;
-  // Set when a turn starts background work, cleared when the next `result`
-  // arrives — only turns with work still outstanding hold their process open.
+  // Set when a turn starts a background task (startsBackgroundTasks),
+  // cleared when the next `result` arrives — only turns with work still
+  // outstanding hold their process open.
   let backgroundWorkPending = false;
   // Set when the stream reports a task starting during this turn. Task events
   // are the exact word on what is still running, so when the turn produced
-  // any, the tracker decides the hold; `startsBackgroundWork` is the fallback
-  // for tools that emit none (Monitor, ScheduleWakeup, CronCreate) and for an
-  // SDK that does not report tasks at all.
+  // any, the tracker decides the hold for tasks; `backgroundWorkPending` is
+  // the fallback for an SDK that does not report tasks at all.
   let sawTaskEventThisTurn = false;
+  // Work no task event reports, which the process is held for whatever the
+  // tracker says (untrackedWorkHeld), as the calls and their results tell:
+  // - `heldWakeup`: the wake-up a ScheduleWakeup (/loop) set, as
+  //   readWakeupTime has it, until it fires and its turn ends, a later call
+  //   sets another, or one with `stop: true` cancels it.
+  // - `heldCronJobs`: the jobs CronCreate scheduled in this process, by id,
+  //   with `recurring` and `nextFireAt` (null when its result did not say):
+  //   a recurring one until a CronDelete cancels it, a one-shot one until it
+  //   has fired. They die with the process, as the CLI keeps them in memory.
+  // - `untrackedMonitorHeld`: a Monitor the CLI reported no task for, until
+  //   the CLI runs a turn for it.
+  let heldWakeup = null;
+  const heldCronJobs = new Map();
+  let untrackedMonitorHeld = false;
+  const untrackedWorkHeld = () => heldWakeup !== null || heldCronJobs.size > 0 || untrackedMonitorHeld;
+  // The turn's main-thread ScheduleWakeup, CronCreate and CronDelete calls,
+  // by tool_use id, until their results say what they did.
+  const schedulingCalls = new Map();
+  // The turn's Monitor calls the CLI has reported no task for yet.
+  const monitorCallsAwaitingTask = new Set();
+  // Set once the turn has made a ScheduleWakeup call: what it called, not a
+  // wake-up it ran for, then decides whether a wake-up is still to come.
+  let wakeupCallThisTurn = false;
+  // The commands the CLI started for the turn (`command_lifecycle`
+  // `started`): `source` is the scheduler fire's `wakeup_source`
+  // (`loop_wakeup` for a ScheduleWakeup's, `schedule_wakeup` for a cron
+  // job's), null for any other command or from a CLI that does not say,
+  // `scheduledFor` the time a wake-up was set for, and `startedAt` when the
+  // run heard it start.
+  let turnCommands = [];
+  // Tasks of the session's own that finished (not stopped), until the CLI
+  // feeds their notification into a turn: their relay. A `result` of a turn
+  // that relayed one (ownTaskRelayedThisTurn) is that task reporting back,
+  // not untracked work. The CLI echoes each notification it feeds a turn
+  // (taskNotificationEchoedThisTurn), which names the task.
+  const finishedOwnTaskIds = new Set();
+  let ownTaskRelayedThisTurn = false;
+  let taskNotificationEchoedThisTurn = false;
+  // Whether the CLI is in a turn, as far as the stream tells: from the first
+  // sign of one until its `result`.
+  let cliTurnActive = true;
   // True while the process is being held open for background work, so a later
   // `result` can be recognised as that work reporting back.
   let heldForBackgroundWork = false;
@@ -2349,6 +2791,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // Set by closeRun when the query is closed; settles once the process can
     // be taken to be gone.
     closed: null,
+    // Settles once the CLI process this run started (spawnClaudeCli) has
+    // exited; null until it starts one, and for a query that starts none of
+    // its own (a test's scripted one).
+    processGone: null,
     // The run's mid-run inserts (createInsertController), set right below.
     inserts: null,
     releaseInput: (reason) => releaseInput(reason),
@@ -2364,6 +2810,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     planHandOver: (turnOptions, planOptions) => planHandOver(turnOptions, planOptions),
     // Releases the caller of a handed-over turn the run will not finish.
     settleTurn: () => settleTurn(),
+    // Whether an abort stops only the turn under way, and stops it so
+    // (abortClaudeSDKSession; see stopHandedOverTurn).
+    stopsTurnOnly: () => stopsTurnOnly(),
+    stopHandedOverTurn: () => stopHandedOverTurn(),
   };
   // The key runEntry is registered under. A session key never changes once known.
   let registeredKey = null;
@@ -2372,14 +2822,15 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     firstPromptUuid,
     push: (message) => pushPrompt(message),
     inputOpen: () => Boolean(runEntry.instance) && !runEntry.inputReleased,
-    stopping: () => runEntry.abortRequested || runEntry.silenced,
+    stopping: () => runEntry.abortRequested || runEntry.silenced || stoppingHandedOverTurn,
     // A turn under way: the CLI is up, the turn has not completed, and the run
     // is neither being stopped nor letting its process go.
     acceptsInserts: () => Boolean(runEntry.instance)
       && !turnCompleteSent
       && !runEntry.inputReleased
       && !runEntry.abortRequested
-      && !runEntry.silenced,
+      && !runEntry.silenced
+      && !stoppingHandedOverTurn,
     getInstance: () => runEntry.instance,
     send: (message) => writer.send(message),
     normalize: (raw) => context.normalizeMessage(raw, capturedSessionId || sessionId || null),
@@ -2422,6 +2873,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       clearTimeout(holdMaxTimer);
       holdMaxTimer = null;
     }
+    holdMaxAt = null;
   };
 
   // Closes the held prompt stream so the CLI can wind down, once, and logs why.
@@ -2429,6 +2881,15 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // exit on its own; one still up ABANDONED_PROCESS_CLOSE_MS later is closed.
   const releaseInput = (reason) => {
     clearHoldTimers();
+    heldWakeup = null;
+    heldCronJobs.clear();
+    untrackedMonitorHeld = false;
+    finishedOwnTaskIds.clear();
+    // No prompt, switch or restore reaches the CLI from here on, and a turn
+    // whose process lets go is not reported switched back.
+    deferredHandOver = null;
+    switchesToRestore = null;
+    switchesReport = null;
     if (runEntry.inputReleased) {
       return;
     }
@@ -2460,19 +2921,40 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   const onHoldIdle = () => {
     holdIdleTimer = null;
     // Silence says nothing about the session's own tasks: a backgrounded
-    // command emits nothing until it ends. HOLD_MAX bounds those.
-    if (backgroundWork.hasOwnOutstanding(sessionKey())) {
+    // command emits nothing until it ends. Nor about a recurring cron job
+    // between its fires, or a one-shot one whose result named no time.
+    // HOLD_MAX bounds those.
+    if (
+      backgroundWork.hasOwnOutstanding(sessionKey())
+      || [...heldCronJobs.values()].some((job) => job.recurring || job.nextFireAt === null)
+    ) {
       armHoldIdleTimer();
+      return;
+    }
+    // Nor about a wake-up or a one-shot cron job still to come: the hold
+    // waits for the last of them, with WAKEUP_GRACE_MS to spare, as a fire
+    // that never starts sends nothing. A one-shot job due after HOLD_MAX runs
+    // out is not waited for: it would not fire in this process anyway.
+    const holdEndsAt = holdMaxAt ?? Date.now() + HOLD_MAX_MS;
+    let dueAt = heldWakeup ? heldWakeup.at : -Infinity;
+    for (const job of heldCronJobs.values()) {
+      if (job.nextFireAt <= holdEndsAt) {
+        dueAt = Math.max(dueAt, job.nextFireAt);
+      }
+    }
+    const wait = dueAt + WAKEUP_GRACE_MS - Date.now();
+    if (wait > 0) {
+      armHoldIdleTimer(wait);
       return;
     }
     heldForBackgroundWork = false;
     releaseInput('idle');
   };
-  const armHoldIdleTimer = () => {
+  const armHoldIdleTimer = (delay = HOLD_IDLE_MS) => {
     if (holdIdleTimer) {
       clearTimeout(holdIdleTimer);
     }
-    holdIdleTimer = setTimeout(onHoldIdle, HOLD_IDLE_MS);
+    holdIdleTimer = setTimeout(onHoldIdle, Math.min(delay, MAX_TIMER_DELAY_MS));
     holdIdleTimer.unref?.();
   };
 
@@ -2493,6 +2975,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     if (holdMaxTimer) {
       clearTimeout(holdMaxTimer);
     }
+    holdMaxAt = Date.now() + HOLD_MAX_MS;
     holdMaxTimer = setTimeout(onHoldMax, HOLD_MAX_MS);
     holdMaxTimer.unref?.();
   };
@@ -2512,26 +2995,233 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     report.writer.reportBackgroundWorkFinished?.();
   };
 
+  // Notes a task of the session's own that finished on its own, not stopped:
+  // the CLI relays it in a turn (finishedOwnTaskIds). Read at its first
+  // terminal event, before the tracker forgets it.
+  const noteOwnTaskFinished = (message) => {
+    if (message.type !== 'system' || typeof message.task_id !== 'string') {
+      return;
+    }
+    const finished = (message.subtype === 'task_notification' && message.status !== 'stopped')
+      || (message.subtype === 'task_updated' && (message.patch?.status === 'completed' || message.patch?.status === 'failed'));
+    if (finished && backgroundWork.outstanding(sessionKey()).some((task) => task.taskId === message.task_id && !task.nested)) {
+      finishedOwnTaskIds.add(message.task_id);
+    }
+  };
+
+  // Whether a `result` that comes once the run's turn is over ends a turn the
+  // CLI ran on its own (a wake-up's, a cron job's, a Monitor event's), which
+  // reports back work the tracker cannot see (noteTurnUntrackedWork): a turn
+  // for no prompt the run wrote, and not one relaying a task of the
+  // session's own (ownTaskRelayedThisTurn).
+  const reportsUntrackedWork = (result) => result.origin?.kind !== 'human'
+    && !runEntry.inserts.namesWrittenPrompt(result)
+    && !ownTaskRelayedThisTurn;
+
+  // Work the turn has started that would hold the process if it ended now:
+  // a Monitor the CLI has reported no task for yet, or anything lasting from
+  // an SDK that reports no task at all. A wake-up or a cron job holds from
+  // its call's result on (untrackedWorkHeld).
+  const turnStartedWorkToHold = () => monitorCallsAwaitingTask.size > 0
+    || (!sawTaskEventThisTurn && backgroundWorkPending);
+
+  // A `result` ends a turn: what the next turn starts counts afresh.
+  const resetTurnWork = () => {
+    backgroundWorkPending = false;
+    sawTaskEventThisTurn = false;
+    ownTaskRelayedThisTurn = false;
+    taskNotificationEchoedThisTurn = false;
+    wakeupCallThisTurn = false;
+    turnCommands = [];
+    schedulingCalls.clear();
+    monitorCallsAwaitingTask.clear();
+  };
+
+  // Notes the main-thread calls that leave work no task event reports. A
+  // Monitor waits for its task (monitorCallsAwaitingTask); a ScheduleWakeup,
+  // CronCreate or CronDelete for its result (noteSchedulingResults).
+  const noteUntrackedWorkCalls = (message) => {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) {
+      return;
+    }
+    for (const block of content) {
+      if (block?.type !== 'tool_use' || typeof block.id !== 'string') {
+        continue;
+      }
+      if (block.name === 'Monitor') {
+        monitorCallsAwaitingTask.add(block.id);
+      } else if (block.name === 'ScheduleWakeup' || block.name === 'CronCreate' || block.name === 'CronDelete') {
+        schedulingCalls.set(block.id, { name: block.name, input: block.input ?? {}, calledAt: Date.now() });
+      }
+    }
+  };
+
+  // Reads what the turn's ScheduleWakeup, CronCreate and CronDelete calls
+  // did off their results: the output the CLI adds to a message that carries
+  // one result (`tool_use_result`), else the result's text and the call's
+  // input. A call that failed did nothing. A wake-up set replaces the one
+  // pending, as the CLI cancels that; `stop: true` cancels every pending
+  // wake-up, but no cron job.
+  const noteSchedulingResults = (message) => {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) {
+      return;
+    }
+    const results = content.filter((block) => block?.type === 'tool_result');
+    for (const block of results) {
+      const call = schedulingCalls.get(block.tool_use_id);
+      if (!call) {
+        continue;
+      }
+      schedulingCalls.delete(block.tool_use_id);
+      if (block.is_error === true) {
+        continue;
+      }
+      const output = results.length === 1 && message.tool_use_result && typeof message.tool_use_result === 'object'
+        ? message.tool_use_result
+        : null;
+      if (call.name === 'ScheduleWakeup') {
+        wakeupCallThisTurn = true;
+        heldWakeup = call.input.stop === true || output?.stopped === true
+          ? null
+          : readWakeupTime(output, call.input, call.calledAt);
+      } else if (call.name === 'CronCreate') {
+        heldCronJobs.set(readCronJobId(output, readToolResultText(block.content)) ?? `call:${block.tool_use_id}`, {
+          // A job is recurring unless the call says otherwise.
+          recurring: typeof output?.recurring === 'boolean' ? output.recurring : call.input.recurring !== false,
+          nextFireAt: Number.isFinite(output?.nextFireAt) ? output.nextFireAt : null,
+        });
+      } else {
+        heldCronJobs.delete(typeof output?.id === 'string' ? output.id : call.input.id);
+      }
+    }
+  };
+
+  // Notes a command the CLI starts for the turn it runs (`command_lifecycle`
+  // `started`), as `turnCommands` keeps them.
+  const noteCommandStarted = (message) => {
+    turnCommands.push({
+      source: message.wakeup_source === 'loop_wakeup' || message.wakeup_source === 'schedule_wakeup'
+        ? message.wakeup_source
+        : null,
+      scheduledFor: Number.isFinite(message.scheduled_for) ? message.scheduled_for : null,
+      startedAt: Date.now(),
+    });
+  };
+
+  // A cron job fired, starting at `firedAt`. The fire names no job (CLI
+  // 2.1.312), but the CLI fires a one-shot job only once the time its
+  // CronCreate result named has come, and the fire is seen after that: the
+  // one-shot job due first by then is the one, and is gone, else the first
+  // one whose result named no time. A fire with no one-shot job due, a
+  // recurring job's or that of a job the run did not see created (one an
+  // earlier process saved, the CLI's notice of missed jobs), takes none.
+  const dropFiredOneShotJob = (firedAt) => {
+    let fired = null;
+    let untimed = null;
+    for (const [jobId, job] of heldCronJobs) {
+      if (job.recurring) {
+        continue;
+      }
+      if (job.nextFireAt === null) {
+        untimed = untimed ?? jobId;
+      } else if (
+        job.nextFireAt <= firedAt
+        && (fired === null || job.nextFireAt < heldCronJobs.get(fired).nextFireAt)
+      ) {
+        fired = jobId;
+      }
+    }
+    const jobId = fired ?? untimed;
+    if (jobId !== null) {
+      heldCronJobs.delete(jobId);
+    }
+  };
+
+  // What a turn's `result` tells of the work no task reports, its calls read
+  // (noteSchedulingResults):
+  // - A scheduler fire the turn ran for has reported back. A ScheduleWakeup's
+  //   (`loop_wakeup`) takes the held wake-up with it, unless the turn made a
+  //   ScheduleWakeup call of its own, or the held one was set while the fire
+  //   waited: the CLI names the time a fire was set for, and the held one
+  //   then has another. A cron job's (`schedule_wakeup`) takes the one-shot
+  //   job it fired for, if any (dropFiredOneShotJob); a recurring one stays.
+  // - A turn the CLI ran on its own (`cliOwnTurn`: reportsUntrackedWork) to
+  //   relay a task notification is a Monitor's the CLI reported no task for.
+  //   One for no fire the CLI named, from a CLI that does not name them, is
+  //   taken for any work that ends by reporting back: the wake-up, every
+  //   one-shot job due by then, as dropFiredOneShotJob reads a job's time,
+  //   and the Monitor.
+  // - A Monitor called during the turn that the CLI reported no task for is
+  //   held from now on.
+  const noteTurnUntrackedWork = (result, cliOwnTurn) => {
+    const fires = turnCommands.filter((command) => command.source !== null);
+    for (const fire of fires) {
+      if (fire.source === 'schedule_wakeup') {
+        dropFiredOneShotJob(fire.startedAt);
+      } else if (
+        heldWakeup
+        && !wakeupCallThisTurn
+        && (!heldWakeup.exact || fire.scheduledFor === null || fire.scheduledFor === heldWakeup.at)
+      ) {
+        heldWakeup = null;
+      }
+    }
+    if (cliOwnTurn && result.origin?.kind === 'task-notification') {
+      untrackedMonitorHeld = false;
+    } else if (cliOwnTurn && fires.length === 0) {
+      if (!wakeupCallThisTurn) {
+        heldWakeup = null;
+      }
+      const dueBy = Date.now();
+      for (const [jobId, job] of heldCronJobs) {
+        if (!job.recurring && (job.nextFireAt === null || job.nextFireAt <= dueBy)) {
+          heldCronJobs.delete(jobId);
+        }
+      }
+      untrackedMonitorHeld = false;
+    }
+    if (monitorCallsAwaitingTask.size > 0) {
+      untrackedMonitorHeld = true;
+      monitorCallsAwaitingTask.clear();
+    }
+  };
+
+  // A task-notification turn from a CLI that echoed none of the
+  // notifications it fed the turn relays a task of the session's own when
+  // one waits for its relay: the oldest is taken to be the one.
+  const noteUnechoedRelay = (result) => {
+    if (result.origin?.kind !== 'task-notification' || taskNotificationEchoedThisTurn || ownTaskRelayedThisTurn) {
+      return;
+    }
+    const [taskId] = finishedOwnTaskIds;
+    if (taskId !== undefined) {
+      finishedOwnTaskIds.delete(taskId);
+      ownTaskRelayedThisTurn = true;
+    }
+  };
+
   // A `result` of a turn the CLI ran ahead of a handed-over prompt (see
   // isAheadOfHandedOverPrompt): one relaying background work that finished
   // before the hand-over, or one it started on its own (a wake-up that
   // ScheduleWakeup or /loop set, a CronCreate task firing). The handed-over
   // turn goes on. What the earlier turn started is carried into the hold the
-  // handed-over turn's end decides on: tasks by the tracker, and work the
-  // tracker cannot see (the loop's next wake-up, a Monitor) by `untracked`;
+  // handed-over turn's end decides on: tasks by the tracker, work the tracker
+  // cannot see (the loop's next wake-up, a cron job) by untrackedWorkHeld,
+  // and anything lasting from an SDK without task events by `untracked`;
   // then nothing has finished. Otherwise, when it relayed the last of the
   // work (none outstanding, none still to be relayed after the handed-over
-  // turn), that work is done.
-  const onWorkReportedAheadOfTurn = () => {
-    // Read like finishTurn's hold rule: with task events, the tracker decides.
-    const startedUntrackedWork = !sawTaskEventThisTurn && backgroundWorkPending;
-    backgroundWorkPending = false;
-    sawTaskEventThisTurn = false;
-    if (startedUntrackedWork) {
+  // turn, no untracked work still to report back), that work is done.
+  const onWorkReportedAheadOfTurn = (message) => {
+    noteTurnUntrackedWork(message, reportsUntrackedWork(message));
+    const startedWork = turnStartedWorkToHold();
+    resetTurnWork();
+    if (startedWork) {
       handedOverHold.untracked = true;
       return;
     }
-    if (backgroundWork.hasOutstanding(sessionKey()) || handedOverHold.relayPending) {
+    if (backgroundWork.hasOutstanding(sessionKey()) || handedOverHold.relayPending || untrackedWorkHeld()) {
       return;
     }
     handedOverHold.untracked = false;
@@ -2544,14 +3234,52 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // first, the turn is over as far as the client is concerned, unless the
   // user is aborting it (then it is the interrupted turn's). Called by the
   // loop, or by the insert controller for a result it held back. A turn
-  // handed to the process later (handOverTurn) completes here the same way.
+  // handed to the process later (handOverTurn) completes here the same way,
+  // and one the user stopped alone (stopHandedOverTurn) ends here without
+  // completing: the stop reports it.
   const finishTurn = (message) => {
     const abortPending = runEntry.abortRequested;
+    // The stopped turn's own result is the first while the stop is under
+    // way; any later one is a turn the CLI runs on its own.
+    const stopped = stoppingHandedOverTurn && !abortPending && Boolean(handedOverHold);
     const stillOutstanding = backgroundWork.hasOutstanding(sessionKey());
     let releaseReason = 'background-done';
-    const completesTurn = !turnCompleteSent && !abortPending;
+    const completesTurn = !turnCompleteSent && !abortPending && !stoppingHandedOverTurn;
     // What a handed-over turn keeps of the hold it ended.
-    const inheritedHold = completesTurn ? handedOverHold : null;
+    const inheritedHold = completesTurn || stopped ? handedOverHold : null;
+    // What the turn did to the work no task reports, and, for a turn the CLI
+    // ran on its own after the run's turn, what of it has reported back.
+    noteTurnUntrackedWork(message, !completesTurn && !stopped && !abortPending && reportsUntrackedWork(message));
+    // Work started during this turn, or work from an earlier turn that
+    // has not settled yet (a follow-up turn reports one task in while
+    // another is still going), is still running. Hold the process open
+    // so it can finish and report back in a follow-up turn; the hold
+    // timers are only a backstop for work that never reports.
+    //
+    // The release when the last task settles is this same branch on the
+    // follow-up turn the CLI pushes for it, not the settling event
+    // itself: closing stdin at that moment would cut the turn that
+    // relays the task's result.
+    //
+    // When the turn reported its tasks, the tracker is the whole truth about
+    // tasks: an Agent call without `run_in_background` is scored as
+    // background by `startsBackgroundWork`, but the CLI runs it in the
+    // foreground and it has settled before this `result` — holding for it
+    // kept a process alive for the full ceiling with nothing outstanding.
+    // Work no task reports (untrackedWorkHeld) holds whatever the tracker
+    // says: a /loop turn that also backgrounded a command still has its next
+    // wake-up to come once the command is done.
+    //
+    // An input already released (the hold ran out, or an abort) is never
+    // held again.
+    //
+    // A handed-over turn also keeps what the hold it ended was for: work the
+    // tracker cannot see that has not reported back, or a task of that hold
+    // the CLI has yet to relay.
+    const holdForTurn = stillOutstanding
+      || turnStartedWorkToHold()
+      || untrackedWorkHeld()
+      || Boolean(inheritedHold && (inheritedHold.untracked || inheritedHold.relayPending));
     if (completesTurn) {
       turnCompleteSent = true;
       handedOverHold = null;
@@ -2572,39 +3300,17 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         stopReason: 'completed',
         runStartedAt: writer?.runStartedAt ?? null
       });
-    } else if (heldForBackgroundWork && !abortPending && !stillOutstanding) {
+    } else if (stopped) {
+      handedOverHold = null;
+      releaseReason = 'turn-stopped';
+    } else if (heldForBackgroundWork && !abortPending && !holdForTurn) {
       // A result after the turn already reported complete means the work we
       // held the process open for has finished and pushed a follow-up turn
-      // — the last of it, when nothing else is still running.
+      // — the last of it, when nothing else is still running and the
+      // follow-up turn started nothing new (a loop's next wake-up).
       reportBackgroundWorkDone();
     }
-    // Work started during this turn, or work from an earlier turn that
-    // has not settled yet (a follow-up turn reports one task in while
-    // another is still going), is still running. Hold the process open
-    // so it can finish and report back in a follow-up turn; the hold
-    // timers are only a backstop for work that never reports.
-    //
-    // The release when the last task settles is this same branch on the
-    // follow-up turn the CLI pushes for it, not the settling event
-    // itself: closing stdin at that moment would cut the turn that
-    // relays the task's result.
-    //
-    // When the turn reported its tasks, the tracker is the whole truth: an
-    // Agent call without `run_in_background` is scored as background by
-    // `startsBackgroundWork`, but the CLI runs it in the foreground and
-    // it has settled before this `result` — holding for it kept a process
-    // alive for the full ceiling with nothing outstanding.
-    //
-    // An input already released (the hold ran out, or an abort) is never
-    // held again.
-    //
-    // A handed-over turn also keeps what the hold it ended was for: work the
-    // tracker cannot see that has not reported back, or a task of that hold
-    // the CLI has yet to relay.
-    const holdForTurn = (sawTaskEventThisTurn ? stillOutstanding : backgroundWorkPending || stillOutstanding)
-      || Boolean(inheritedHold && (inheritedHold.untracked || inheritedHold.relayPending));
-    backgroundWorkPending = false;
-    sawTaskEventThisTurn = false;
+    resetTurnWork();
     if (holdForTurn && !runEntry.inputReleased) {
       heldForBackgroundWork = true;
       // A turn that completes with work outstanding is the one to hear when
@@ -2614,6 +3320,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       }
       armHoldIdleTimer();
       armHoldMaxTimer();
+      if (completesTurn || stopped) {
+        restoreTurnSwitches();
+      }
     } else {
       // Either nothing was backgrounded, or the background work just
       // reported in — let the CLI exit now, as it always has.
@@ -2622,6 +3331,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }
     if (completesTurn) {
       settleTurn();
+    }
+    if (stopped) {
+      settleStoppedTurn?.();
     }
   };
 
@@ -2636,36 +3348,43 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
   // Whether the process is held, its turn over, for work of the session's
   // own: a task one of its turns started that is still outstanding, or work
-  // the tracker cannot see (a Monitor, a wake-up, a relay still to come),
+  // the tracker cannot see (a wake-up, a cron job, a relay still to come),
   // which is all a hold with no task outstanding can be for. A hold kept
-  // only for nested tasks is not.
+  // only for nested tasks is not, unless untracked work is held as well.
   const holdsOwnWork = () => takesHandedOverTurn()
     && heldForBackgroundWork
-    && (backgroundWork.hasOwnOutstanding(sessionKey()) || !backgroundWork.hasOutstanding(sessionKey()));
+    && (untrackedWorkHeld()
+      || backgroundWork.hasOwnOutstanding(sessionKey())
+      || !backgroundWork.hasOutstanding(sessionKey()));
 
-  // Whether a turn is under way in a process with work of the session's own
-  // that interrupting the turn would stop, as an abort stops every task and
-  // lets the process go (abortClaudeSDKSession): a task of the session's own
-  // still outstanding, or, for a turn handed over while the process was held,
-  // work of that hold the tracker cannot see or a task of it the CLI has yet
-  // to relay (handedOverHold).
+  // Whether a turn is under way in a process with work of the session's own:
+  // a task of the session's own still outstanding, work no task reports (a
+  // /loop wake-up, a cron job; untrackedWorkHeld) or that the turn has
+  // started (turnStartedWorkToHold), or, for a turn handed over while the
+  // process was held, the untracked work of that hold or a task of it the
+  // CLI has yet to relay. Stopping a first turn stops that work with its
+  // process (abortClaudeSDKSession); a handed-over turn is stopped alone
+  // (stopHandedOverTurn).
   const holdsOwnWorkInTurn = () => !turnCompleteSent
     && Boolean(runEntry.instance)
     && !runEntry.inputReleased
     && !runEntry.abortRequested
     && !runEntry.silenced
     && (backgroundWork.hasOwnOutstanding(sessionKey())
+      || turnStartedWorkToHold()
+      || untrackedWorkHeld()
       || Boolean(handedOverHold && (handedOverHold.untracked || handedOverHold.relayPending)));
 
   // The live process's own settings, which a later send's turn that leaves
   // one out inherits (inheritUnsetSettings): its working directory, model,
-  // effort and permission mode, the tools canUseTool allows now (what the
-  // user allowed for good included), the tools it was launched denying, and
-  // the `skipPermissions` its current turn came with.
+  // effort, ultracode and permission mode, the tools canUseTool allows now
+  // (what the user allowed for good included), the tools it was launched
+  // denying, and the `skipPermissions` its current turn came with.
   const liveSettings = () => ({
     cwd: launched.cwd,
     model: launched.model,
     effort: launched.effort,
+    ultracode: launched.ultracode,
     permissionMode: launched.permissionMode,
     allowedTools: liveSdkOptions.allowedTools,
     disallowedTools: launched.disallowedTools,
@@ -2681,8 +3400,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // leave out is this process's own (inheritUnsetSettings), the model
   // included, so there is no model to look up.
   const planHandOver = async (turnOptions, planOptions = {}) => {
-    // A turn under way takes no other; whether interrupting it would stop
-    // work is all there is to say.
+    // A turn under way takes no other; whether its process has work of the
+    // session's own is all there is to say.
     const inTurn = () => ({ heldWork: holdsOwnWorkInTurn(), canHandOver: false, changes: [], switches: [] });
     if (!takesHandedOverTurn()) {
       return inTurn();
@@ -2695,6 +3414,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       ? inheritUnsetSettings(turnOptions, liveSettings())
       : turnOptions;
     let next = null;
+    let nextUltracode = false;
     try {
       const requestedModel = namesSetting(planned.model) ? planned.model.trim() : '';
       const model = requestedModel || await context.resolveResumeModel(sessionKey(), planned.model);
@@ -2703,7 +3423,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         model: model || planned.model,
         effortModels: await loadEffortModels(context),
       });
+      nextUltracode = await resolveEffectiveUltracode(next);
     } catch (error) {
+      next = null;
       console.warn(`[Claude SDK] Session ${sessionKey()}: could not work out whether a new turn goes into the process held for background work:`, error?.message || error);
     }
     // The process may have let go, or taken another turn, meanwhile.
@@ -2713,62 +3435,189 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     if (!next) {
       return { heldWork: holdsOwnWork(), canHandOver: false, changes: ['lookup'], switches: [] };
     }
-    const { changes, switches } = planTurnHandOver(launched, next, runEntry.instance);
+    const { changes, switches } = planTurnHandOver(launched, next, runEntry.instance, nextUltracode);
     return { heldWork: holdsOwnWork(), canHandOver: changes.length === 0, changes, switches };
   };
 
-  // Sends one switch to the live process; `onSwitched` runs once the CLI has
-  // confirmed it. A switch the CLI refuses leaves the process as it was, and
-  // is logged: the turn runs on what the process had.
-  const sendSwitch = (send, onSwitched, description) => {
-    const logRefusal = (error) => {
+  // Sends one switch of the model or the permission mode (`setting`) to the
+  // live process. From then on `launched` names its target, which the CLI
+  // applies ahead of any prompt written after it, so a turn planned or handed
+  // over before the CLI answers is weighed against what its prompt will run
+  // with (createSwitchTracker). A switch the CLI refuses leaves the process
+  // as it was: `launched` goes back to what it runs with, and the refusal is
+  // logged. canUseTool follows a permission mode once the CLI confirms it,
+  // which it does ahead of any tool request of the turn.
+  // @returns {Promise<boolean>} Settles once the CLI has answered: true when
+  //   it switched
+  const switchProcess = (setting, value, description) => {
+    const tracker = switchTrackers[setting];
+    const answer = tracker.send(value);
+    launched[setting] = tracker.current();
+    const refused = (error) => {
       console.warn(`[Claude SDK] Session ${sessionKey()}: could not switch ${description}: ${error?.message || error}`);
+      answer.refuse();
+      launched[setting] = tracker.current();
+      return false;
     };
     try {
-      Promise.resolve(send()).then(onSwitched, logRefusal);
+      const reply = setting === 'model'
+        ? runEntry.instance.setModel(value)
+        : runEntry.instance.setPermissionMode(value);
+      return Promise.resolve(reply).then(() => {
+        answer.confirm();
+        launched[setting] = tracker.current();
+        if (setting === 'permissionMode') {
+          liveSdkOptions.permissionMode = tracker.confirmed();
+        }
+        return true;
+      }, refused);
     } catch (error) {
-      logRefusal(error);
+      return Promise.resolve(refused(error));
     }
+  };
+
+  // Switches the model and permission mode a hand-over's plan names, ahead
+  // of its prompt, which the CLI reads after them, and sets the turn's own
+  // tool rules; the remembered ones of earlier turns go. `skipPermissions` is
+  // that of the tool settings the turn came with, which a later turn that
+  // brings none inherits.
+  const applyTurnSettings = ({ plan, allowedTools, skipPermissions }) => {
+    if (plan.model) {
+      switchProcess('model', plan.model, `the model to ${plan.model}`);
+    }
+    if (plan.permissionMode) {
+      switchProcess('permissionMode', plan.permissionMode, `the permission mode to ${plan.permissionMode}`);
+    }
+    liveSdkOptions.allowedTools = [...allowedTools];
+    launched.skipPermissions = skipPermissions;
+  };
+
+  // Switches the process for a hand-over and writes its prompt (handOverTurn).
+  // A turn that keeps its switches to itself has what they replace noted
+  // first, for restoreTurnSwitches. False when the prompt could not be
+  // written.
+  const writeHandedOverPrompt = (turn) => {
+    const restore = turn.restoreSwitches ? {
+      model: turn.plan.model ? launched.model : null,
+      permissionMode: turn.plan.permissionMode ? launched.permissionMode : null,
+      allowedTools: [...liveSdkOptions.allowedTools],
+      skipPermissions: launched.skipPermissions,
+    } : null;
+    applyTurnSettings(turn);
+    if (!pushPrompt({ ...turn.promptMessage, priority: 'later' })) {
+      return false;
+    }
+    switchesToRestore = restore;
+    return true;
+  };
+
+  // Writes the prompt of a hand-over that waited for the CLI's own turn to
+  // end (handOverTurn), once that turn's `result` is in.
+  const writeDeferredHandOver = () => {
+    const turn = deferredHandOver;
+    if (!turn || cliTurnActive || runEntry.inputReleased) {
+      return;
+    }
+    deferredHandOver = null;
+    if (writeHandedOverPrompt(turn)) {
+      runEntry.inserts.noteHandedOverPromptWritten();
+    }
+  };
+
+  // Switches the process back once a turn handed over with `restoreSwitches`
+  // is over (completed, failed or stopped, its prompt taken back included), so
+  // the work it is still held for runs on with its own model, permission mode
+  // and tool rules. Nothing is sent to a process that lets go after the turn,
+  // and nobody hears of it. Otherwise, once the CLI has answered every switch
+  // back, the turn's `onSwitchesRestored` hears what the process runs with:
+  // for the model and the permission mode, when the turn's plan switches it
+  // (made or not), the value it was switched back to, else what the process
+  // has (the CLI refused to switch it back, or the prompt was taken back
+  // before the switches were made); null when the plan does not switch it.
+  const restoreTurnSwitches = () => {
+    const restore = switchesToRestore;
+    const report = switchesReport;
+    switchesToRestore = null;
+    switchesReport = null;
+    const answers = [];
+    if (restore) {
+      if (restore.model) {
+        const model = restore.model;
+        answers.push(switchProcess('model', model, `the model back to ${model}`).then((switched) => (switched ? { model } : {})));
+      }
+      if (restore.permissionMode) {
+        const permissionMode = restore.permissionMode;
+        answers.push(switchProcess('permissionMode', permissionMode, `the permission mode back to ${permissionMode}`)
+          .then((switched) => (switched ? { permissionMode } : {})));
+      }
+      liveSdkOptions.allowedTools = [...restore.allowedTools];
+      launched.skipPermissions = restore.skipPermissions;
+    }
+    if (!report) {
+      return;
+    }
+    void Promise.all(answers).then((switchedBack) => {
+      const restored = Object.assign({}, ...switchedBack);
+      try {
+        report.onSwitchesRestored({
+          model: report.switchesModel ? restored.model ?? launched.model : null,
+          permissionMode: report.switchesPermissionMode ? restored.permissionMode ?? launched.permissionMode : null,
+        });
+      } catch (error) {
+        console.warn(`[Claude SDK] Session ${sessionKey()}: onSwitchesRestored failed:`, error?.message || error);
+      }
+    });
   };
 
   // Runs a later send's turn in this process as its next turn (see
   // handTurnToHeldProcess), when its options allow (planTurnHandOver):
-  // the model and permission mode are switched first, and the prompt goes
-  // out with priority `later`, so the CLI runs it as a turn of its own once
-  // it is idle, after any turn it runs first: one relaying background work,
-  // or one it starts on its own (a wake-up, a CronCreate task). Those turns'
-  // results are not this turn's (isAheadOfHandedOverPrompt). From then on
-  // the turn reports through its own writer and completes once, like any
-  // turn; the work the process was held for keeps running and reports back.
-  // The hold ends: HOLD_IDLE stops, as a long tool call is silent, and
-  // HOLD_MAX stays the backstop. `skipPermissions` is that of the tool
-  // settings the turn came with, which a later turn that brings none inherits.
-  const handOverTurn = ({ writer: turnWriter, sessionName, sdkOptions: next, skipPermissions, promptMessage }) => {
+  // the model and permission mode are switched first (writeHandedOverPrompt),
+  // and the prompt goes out with priority `later`, so the CLI runs it as a
+  // turn of its own once it is idle, after any turn it runs first: one
+  // relaying background work, or one it starts on its own (a wake-up, a
+  // CronCreate task). Those turns' results are not this turn's
+  // (isAheadOfHandedOverPrompt). From then on the turn reports through its
+  // own writer and completes once, like any turn; the work the process was
+  // held for keeps running and reports back. The hold ends: HOLD_IDLE stops,
+  // as a long tool call is silent, and HOLD_MAX stays the backstop.
+  //
+  // `restoreSwitches` (`restoreSwitchesAfterTurn` in the run options) keeps
+  // what the turn switches to its own: the process is switched back once the
+  // turn is over (restoreTurnSwitches), and `onSwitchesRestored` hears what
+  // it runs with then, unless it lets go. Such a turn that switches anything
+  // while the CLI runs a turn of its own waits for that turn's `result`
+  // before it switches the process and writes its prompt
+  // (writeDeferredHandOver), so the CLI's turn, a /loop wake-up say, runs
+  // with the process's own settings; stopped before then, it switches
+  // nothing, and `onSwitchesRestored` still hears what the process runs with.
+  const handOverTurn = ({ writer: turnWriter, sessionName, sdkOptions: next, ultracode, skipPermissions, restoreSwitches, onSwitchesRestored, promptMessage }) => {
     if (!takesHandedOverTurn()) {
       return { taken: false, changes: [] };
     }
-    const plan = planTurnHandOver(launched, next, runEntry.instance);
+    const plan = planTurnHandOver(launched, next, runEntry.instance, ultracode);
     if (plan.changes.length > 0) {
       return { taken: false, changes: plan.changes };
     }
 
-    // Written ahead of the prompt, which the CLI reads after them.
-    if (plan.model) {
-      const model = plan.model;
-      sendSwitch(() => runEntry.instance.setModel(model), () => { launched.model = model; }, `the model to ${model}`);
-    }
-    if (plan.permissionMode) {
-      const mode = plan.permissionMode;
-      // canUseTool follows once the CLI confirms, which it does ahead of
-      // any tool request of the turn.
-      sendSwitch(() => runEntry.instance.setPermissionMode(mode), () => {
-        launched.permissionMode = mode;
-        liveSdkOptions.permissionMode = mode;
-      }, `the permission mode to ${mode}`);
-    }
-    if (!pushPrompt({ ...promptMessage, priority: 'later' })) {
+    const turn = {
+      plan,
+      allowedTools: next.allowedTools ?? [],
+      skipPermissions: skipPermissions === true,
+      restoreSwitches: restoreSwitches === true,
+      onSwitchesRestored: typeof onSwitchesRestored === 'function' ? onSwitchesRestored : null,
+      promptMessage,
+    };
+    const waitsForCliTurn = turn.restoreSwitches && Boolean(plan.model || plan.permissionMode) && cliTurnActive;
+    if (waitsForCliTurn) {
+      deferredHandOver = turn;
+    } else if (!writeHandedOverPrompt(turn)) {
       return { taken: false, changes: [] };
     }
+    switchesReport = turn.restoreSwitches && turn.onSwitchesRestored ? {
+      switchesModel: Boolean(plan.model),
+      switchesPermissionMode: Boolean(plan.permissionMode),
+      onSwitchesRestored: turn.onSwitchesRestored,
+    } : null;
 
     // What a turn the CLI runs ahead of the prompt has started so far stays
     // counted (backgroundWorkPending, sawTaskEventThisTurn) until that turn's
@@ -2780,24 +3629,106 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }
     heldForBackgroundWork = false;
     handedOverHold = {
-      untracked: outstanding.length === 0,
+      // Work no task reports that the run follows (untrackedWorkHeld) is
+      // still held after the turn as long as it lasts.
+      untracked: outstanding.length === 0 && !untrackedWorkHeld(),
       taskIds: new Set(outstanding.map((task) => task.taskId)),
       relayPending: false,
     };
-    // The turn's own tool rules; the remembered ones of earlier turns go.
-    liveSdkOptions.allowedTools = [...(next.allowedTools ?? [])];
-    launched.skipPermissions = skipPermissions === true;
 
-    // The previous turn's run hears that its process, and its work, go on.
+    // The previous turn's run hears that its process, and its work, go on,
+    // and so does the run of the turn that left the work running, when that
+    // is an earlier one (the previous turn was stopped, and left none): the
+    // work's end is still that run's (backgroundReport).
     writer.reportProcessHandedOver?.();
+    if (backgroundReport && backgroundReport.writer !== writer) {
+      backgroundReport.writer.reportProcessHandedOver?.();
+    }
     writer = turnWriter;
     runEntry.writer = turnWriter;
     turnSessionName = sessionName;
     turnCompleteSent = false;
-    runEntry.inserts.beginHandedOverTurn(promptMessage.uuid);
+    runEntry.inserts.beginHandedOverTurn(promptMessage.uuid, { written: !waitsForCliTurn });
     const settled = new Promise((resolve) => { settleHandedOverTurn = resolve; });
-    console.log(`[Claude SDK] Session ${sessionKey()}: a new turn goes into the process held for background work (${outstanding.length} task(s) outstanding)`);
+    console.log(`[Claude SDK] Session ${sessionKey()}: a new turn goes into the process held for background work (${outstanding.length} task(s) outstanding${waitsForCliTurn ? '; after the CLI\'s own turn' : ''})`);
     return { taken: true, settled };
+  };
+
+  // Whether an abort stops only the turn under way (stopHandedOverTurn): a
+  // turn handed to the process while it was held for background work, with
+  // its input still open and no other stop under way.
+  const stopsTurnOnly = () => Boolean(handedOverHold)
+    && !turnCompleteSent
+    && Boolean(runEntry.instance)
+    && !runEntry.inputReleased
+    && !runEntry.abortRequested
+    && !runEntry.silenced
+    && !stoppingHandedOverTurn;
+
+  // Ends a stopped handed-over turn that leaves no `result`: its prompt was
+  // taken back before its turn started, or its result did not come in time.
+  // The process is held for what it was held for before the hand-over;
+  // what a turn of the CLI's own still running has started stays counted for
+  // that turn's `result`.
+  const endStoppedTurnWithoutResult = () => {
+    const hold = handedOverHold;
+    handedOverHold = null;
+    const holdNow = backgroundWork.hasOutstanding(sessionKey())
+      || turnStartedWorkToHold()
+      || untrackedWorkHeld()
+      || Boolean(hold && (hold.untracked || hold.relayPending));
+    if (holdNow && !runEntry.inputReleased) {
+      heldForBackgroundWork = true;
+      armHoldIdleTimer();
+      armHoldMaxTimer();
+      restoreTurnSwitches();
+    } else {
+      heldForBackgroundWork = false;
+      releaseInput('turn-stopped');
+    }
+  };
+
+  // Stops a turn handed to the process while it was held for background work
+  // (abortClaudeSDKSession), and only that turn: the work and the hold go
+  // on, and a later send goes into the process as before. Unread inserts are
+  // withdrawn first, and so is the turn's prompt when its turn has not
+  // started (it waits behind a turn the CLI runs on its own, which goes on);
+  // otherwise the turn is interrupted, which, with the per-task stop control
+  // declared (declarePerTaskStopAffordance), stops nothing else. The
+  // interrupted turn's `result` ends it without completing it (finishTurn),
+  // and the stop waits up to INTERRUPT_REPLY_TIMEOUT_MS for it, so the next
+  // send finds the process held again; then the turn is reported stopped
+  // (reportAborted), and the abort's caller sends the terminal `complete`.
+  // @returns {Promise<'stopped' | 'unanswered'>} `unanswered` when the CLI
+  //   did not answer the interrupt in time: the caller stops the run whole
+  const stopHandedOverTurn = async () => {
+    stoppingHandedOverTurn = true;
+    const stoppedTurnEnded = new Promise((resolve) => { settleStoppedTurn = resolve; });
+    // A prompt that waited for the CLI's turn is never written, nor its
+    // switches made.
+    deferredHandOver = null;
+    try {
+      const { promptWithdrawn } = await runEntry.inserts.cancelAllForAbort();
+      // A turn whose `result` came meanwhile has ended: an interrupt now
+      // could only stop a turn the CLI runs on its own.
+      if (!promptWithdrawn && handedOverHold && !runEntry.inputReleased) {
+        let replied = false;
+        const interruptReply = Promise.resolve(runEntry.instance.interrupt()).then(() => { replied = true; });
+        await resolvesWithin(Promise.all([interruptReply, stoppedTurnEnded]), INTERRUPT_REPLY_TIMEOUT_MS);
+        if (!replied) {
+          return 'unanswered';
+        }
+      }
+      if (handedOverHold) {
+        endStoppedTurnWithoutResult();
+      }
+      stoppingHandedOverTurn = false;
+      reportAborted();
+      return 'stopped';
+    } finally {
+      stoppingHandedOverTurn = false;
+      settleStoppedTurn = null;
+    }
   };
 
   // Hoisted above the try so the catch's cleanup can tell whether this run
@@ -2828,6 +3759,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     if (mcpServers) {
       sdkOptions.mcpServers = mcpServers;
     }
+    // What the CLI will run with, settings files included (see `launched`).
+    const launchUltracode = await resolveEffectiveUltracode(sdkOptions);
 
     // Every turn uses streaming input so stdin stays open past the turn's
     // `result`. The message list is reusable, but each query attempt needs its
@@ -2856,6 +3789,20 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     };
 
     sdkOptions.stderr = (data) => logCliStderr(sessionKey(), data);
+    // Started as the SDK would, declaring the per-task stop control, so that
+    // stopping a turn handed to a held process leaves its background agents
+    // and workflows running (declarePerTaskStopAffordance).
+    sdkOptions.spawnClaudeCodeProcess = (spawnOptions) => {
+      const child = spawnClaudeCli(spawnOptions, sdkOptions.stderr);
+      runEntry.processGone = new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+        } else {
+          child.once('exit', () => resolve());
+        }
+      });
+      return child;
+    };
 
     // Caveat: in 'auto' and 'bypassPermissions' modes the SDK resolves approval
     // at the permission-mode step and skips this callback, so interactive tools
@@ -2994,13 +3941,18 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       allowedTools: [...sdkOptions.allowedTools],
       disallowedTools: [...sdkOptions.disallowedTools],
       effort: sdkOptions.effort ?? null,
-      // Off unless the launch turned it on (see planTurnHandOver).
-      ultracode: sdkOptions.settings?.ultracode === true,
+      // What the CLI runs with: the launch's own choice, else the settings
+      // files' (resolveEffectiveUltracode). A model switch keeps it.
+      ultracode: launchUltracode,
       canBypass: sdkOptions.permissionMode === 'bypassPermissions',
       model: sdkOptions.model,
       permissionMode: sdkOptions.permissionMode ?? 'default',
       // As mapCliOptionsToSDK reads it.
       skipPermissions: Boolean(options.toolsSettings?.skipPermissions),
+    };
+    switchTrackers = {
+      model: createSwitchTracker(launched.model),
+      permissionMode: createSwitchTracker(launched.permissionMode),
     };
     liveSdkOptions = sdkOptions;
 
@@ -3021,6 +3973,21 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
           if (typeof writer.setSessionId === 'function') {
             writer.setSessionId(capturedSessionId);
           }
+        }
+        // A turn the CLI starts once let go of (a task notification it had
+        // queued, an agent the stops reached reporting back, a prompt it did
+        // not give back) is closed with the process: nobody hears it, and
+        // with the per-task stop control declared, an agent the stops missed
+        // would keep the CLI up until its own ceiling. The interrupted turn's
+        // own `result` and lifecycle end start nothing.
+        if (
+          runEntry.inputReleased
+          && !runEntry.closed
+          && ((message.type === 'system' && message.subtype === 'init')
+            || (message.type === 'command_lifecycle' && message.state === 'started'))
+        ) {
+          console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: the CLI started a turn after it was let go of; closing it`);
+          closeRun(runEntry, sessionKey());
         }
         continue;
       }
@@ -3047,6 +4014,31 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         }
       } else {
         // session_id already captured
+      }
+
+      // The CLI runs one turn at a time, from its first sign (its init, a
+      // command it starts, a main-thread message) to its `result`.
+      if (message.type === 'result') {
+        cliTurnActive = false;
+      } else if (
+        (message.type === 'system' && message.subtype === 'init')
+        || (message.type === 'command_lifecycle' && message.state === 'started')
+        || ((message.type === 'assistant' || message.type === 'user') && !message.parent_tool_use_id)
+      ) {
+        cliTurnActive = true;
+      }
+      if (message.type === 'command_lifecycle' && message.state === 'started') {
+        noteCommandStarted(message);
+      }
+      // The CLI feeds a finished task's notification into a turn, which
+      // relays it (see finishedOwnTaskIds).
+      if (message.type === 'user' && message.isReplay === true && isTaskNotificationEcho(message)) {
+        taskNotificationEchoedThisTurn = true;
+        if (finishedOwnTaskIds.delete(readNotifiedTaskId(message))) {
+          ownTaskRelayedThisTurn = true;
+        }
+      } else if (message.type === 'result') {
+        noteUnechoedRelay(message);
       }
 
       // The CLI echoes back the prompts it takes (--replay-user-messages).
@@ -3135,32 +4127,41 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         writer.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: tokenBudgetData, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
       }
 
-      if (startsBackgroundWork(message)) {
+      if (startsBackgroundTasks(message)) {
         backgroundWorkPending = true;
+      }
+      if (message.type === 'assistant' && !message.parent_tool_use_id) {
+        noteUntrackedWorkCalls(message);
+      } else if (message.type === 'user' && !message.parent_tool_use_id) {
+        noteSchedulingResults(message);
       }
       // Only tasks the tracker follows count. A housekeeping task the CLI
       // starts on its own has no tool_use_id, and would otherwise hand the hold
-      // decision to a tracker with nothing in it, dropping the hold a Monitor
-      // started in the same turn needs.
+      // decision to a tracker with nothing in it.
       if (message.type === 'system' && message.subtype === 'task_started' && typeof message.tool_use_id === 'string') {
         sawTaskEventThisTurn = true;
+        monitorCallsAwaitingTask.delete(message.tool_use_id);
       }
       // Only the run that owns the session key feeds its tracker: its tasks
       // must never land among those of another run on the session, where an
       // own task would keep that run's process held through every silence.
       // (A superseded or aborted run is silenced before it gets here.)
       if (!registeredKey || getSession(registeredKey) === runEntry) {
+        noteOwnTaskFinished(message);
         backgroundWork.apply(sessionKey(), message);
       }
 
       // A task the user stopped gets no follow-up turn from the CLI — only its
       // `stopped` notification — so when that was the last outstanding task
       // nothing will ever push the `result` the release below waits for, and
-      // the process would sit until the idle ceiling. Release it here. A
-      // completed task is different: the CLI relays its result in a turn of
-      // its own, which closing stdin now would cut short.
+      // the process would sit until the idle ceiling. Release it here, unless
+      // the process is still held for work no task reports (a loop's next
+      // wake-up, a cron job). A completed task is different: the CLI relays
+      // its result in a turn of its own, which closing stdin now would cut
+      // short.
       if (
         heldForBackgroundWork
+        && !untrackedWorkHeld()
         && message.type === 'system'
         && message.subtype === 'task_notification'
         && message.status === 'stopped'
@@ -3193,19 +4194,21 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
           // Ahead of a handed-over prompt, the CLI ran a turn of its own:
           // relaying background work that finished before the hand-over, or
           // a wake-up or scheduled task firing. Not the handed-over turn,
-          // which neither completes nor takes inserts on it.
-          onWorkReportedAheadOfTurn();
+          // which neither completes nor takes inserts on it. A prompt that
+          // waited for that turn to end goes out now.
+          onWorkReportedAheadOfTurn(message);
+          writeDeferredHandOver();
           continue;
         }
         promptResultSeen = true;
         // Inserts the CLI has not read yet run as the next turn of this same
         // process, so the turn goes on: no `complete`, no release, and the
         // background work this turn started still counts at the end. While
-        // an abort is under way nothing is held back, but an insert read
-        // from now on started the next turn all the same.
+        // an abort or a stop is under way nothing is held back, but an
+        // insert read from now on started the next turn all the same.
         let heldBack = false;
         if (!turnCompleteSent) {
-          if (runEntry.abortRequested) {
+          if (runEntry.abortRequested || stoppingHandedOverTurn) {
             runEntry.inserts.noteTurnEnded();
           } else {
             heldBack = runEntry.inserts.deferTurnEnd(message);
@@ -3345,8 +4348,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         leaveExitingSessions();
       }
     }
-    // A handed-over turn the loop ended under is over too.
+    // A handed-over turn the loop ended under is over too, and a stop of it
+    // waits no longer for its `result`.
     settleTurn();
+    settleStoppedTurn?.();
     markExited();
   }
 }
@@ -3357,7 +4362,11 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
  * A run still starting (waiting for an exiting process, or loading its
  * settings) is only marked: it stands down before spawning its CLI. So is a
  * turn still on its way into a held process (pendingHandOvers), which leaves
- * that process and its background work alone. A live process first has its
+ * that process and its background work alone. A turn that went into a
+ * process held for background work is stopped alone (stopHandedOverTurn):
+ * the work and the hold go on, unless the CLI does not answer the interrupt
+ * within INTERRUPT_REPLY_TIMEOUT_MS, which closes the process. Any other
+ * live process first has its
  * unread inserts, and a handed-over prompt it has not started, withdrawn,
  * waiting up to INSERT_ABORT_CANCEL_WAIT_MS for the CLI to confirm, and every
  * insert is reported cancelled. It is then interrupted and told to stop its
@@ -3367,10 +4376,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
  * and the requests could be dropped. From then
  * on its loop is silenced, and the entry stays in exitingSessions until the
  * process is gone (see exitingSessions), so the session's next run waits for
- * it. Once stdin has closed the CLI usually exits at once; a turn it starts
- * after the interrupt (a queued task notification, a Monitor event) can keep
- * it up longer, until the session's next run or ABANDONED_PROCESS_CLOSE_MS
- * closes it.
+ * it. Once stdin has closed the CLI usually exits at once; one that starts a
+ * turn after the interrupt (a queued task notification, an agent the stops
+ * reached reporting back) is closed as that turn starts (see the silenced
+ * branch of queryClaudeSDK's loop): with the per-task stop control declared,
+ * the interrupt spares background agents and workflows, so one that started
+ * too late to be in the stops would otherwise keep it running.
  *
  * The run's one stop report (`aborted`) goes out from here; the caller sends
  * the terminal `complete`.
@@ -3398,6 +4409,25 @@ async function abortClaudeSDKSession(sessionId) {
     session.status = 'aborted';
     removeSession(sessionId);
     session.reportAborted();
+    return true;
+  }
+
+  if (session.stopsTurnOnly()) {
+    try {
+      console.log(`Stopping the turn handed to the held process of session ${sessionId}; its background work goes on`);
+      if (await session.stopHandedOverTurn() === 'stopped') {
+        return true;
+      }
+    } catch (error) {
+      console.error(`Error stopping the handed-over turn of session ${sessionId}:`, error);
+      // The turn goes on and completes on its own.
+      return false;
+    }
+    // A CLI that does not answer the interrupt is stopped whole.
+    console.warn(`[Claude SDK] Session ${sessionId}: no reply to the interrupt within ${INTERRUPT_REPLY_TIMEOUT_MS} ms; closing the process`);
+    session.abortRequested = true;
+    closeRun(session, sessionId);
+    letGoOfAbortedRun(session, sessionId);
     return true;
   }
 
@@ -3436,21 +4466,7 @@ async function abortClaudeSDKSession(sessionId) {
       }
     }
 
-    // Release the held stdin stream; without this the CLI stays up for the rest
-    // of the post-turn hold even though the user cancelled.
-    session.releaseInput('aborted');
-    session.status = 'aborted';
-    session.silenced = true;
-
-    // The process is on its way out, unless its loop has ended while the
-    // interrupt was pending, or a newer run took the key (and put the entry
-    // in exitingSessions itself).
-    if (getSession(sessionId) === session) {
-      removeSession(sessionId);
-      exitingSessions.set(sessionId, session);
-    }
-
-    session.reportAborted();
+    letGoOfAbortedRun(session, sessionId);
     return true;
   } catch (error) {
     console.error(`Error aborting session ${sessionId}:`, error);
@@ -3458,6 +4474,31 @@ async function abortClaudeSDKSession(sessionId) {
     session.abortRequested = false;
     return false;
   }
+}
+
+/**
+ * The end of an abort that stops a run whole (abortClaudeSDKSession), once
+ * its process has been told to stop or closed: its input is released, as
+ * without it the CLI stays up for the rest of the post-turn hold, its loop is
+ * silenced, it leaves the session for exitingSessions until its process is
+ * gone, and it reports the stop.
+ * @param {Object} session - The run's entry (see `runEntry` in queryClaudeSDK)
+ * @param {string} sessionId - Session key
+ */
+function letGoOfAbortedRun(session, sessionId) {
+  session.releaseInput('aborted');
+  session.status = 'aborted';
+  session.silenced = true;
+
+  // The process is on its way out, unless its loop has ended while the
+  // interrupt was pending, or a newer run took the key (and put the entry
+  // in exitingSessions itself).
+  if (getSession(sessionId) === session) {
+    removeSession(sessionId);
+    exitingSessions.set(sessionId, session);
+  }
+
+  session.reportAborted();
 }
 
 /**

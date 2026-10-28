@@ -1464,12 +1464,13 @@ test('a run aborted before its CLI starts reports the stop at once, not when its
   });
 });
 
-test('a brand-new session the user stops before its CLI reports the session id still records that id', async () => {
+test('a brand-new session the user stops before its CLI reports the session id still records that id', async (t) => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
   const { createQuery, script } = createScriptedQuery();
   const { writer, sent } = createWriter();
   const announced: string[] = [];
   const announcing = { ...writer, setSessionId: (id: string) => { announced.push(id); } };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const run = queryClaudeSDK('Hi', { sessionId: SESSION_ID, cwd }, announcing as never, { ...createContext(), createQuery });
 
   try {
@@ -1477,16 +1478,148 @@ test('a brand-new session the user stops before its CLI reports the session id s
     assert.equal(await settledNow(abortClaudeSDKSession(SESSION_ID)), true);
     const forwarded = sent.length;
 
-    // The CLI still writes the prompt to the session it then reports, so the
-    // app session has to keep pointing at it.
+    // The CLI still starts the prompt's turn in the session it then reports,
+    // so the app session has to keep pointing at it; the process is closed
+    // as that turn starts.
     script.emit(init());
     script.emit(interruptedResult());
     await flush();
     assert.deepEqual(announced, [NATIVE_ID]);
     assert.equal(sent.length, forwarded, 'nothing else reaches the client');
+    assert.equal(script.closed(), true);
   } finally {
     script.end();
     await run;
+    // A closed process makes the session's next run wait 8 s, and the next
+    // test runs on this session too.
+    t.mock.timers.tick(8 * 1000);
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+// With the per-task stop control declared, an interrupt spares background
+// agents and workflows. A process let go of that starts another turn (a
+// notification it had queued, an agent the stop reached reporting back) is
+// closed as that turn starts: an agent the stops missed would otherwise keep
+// it up, and the session's next run would wait 15 s before closing it.
+
+test('an aborted process that starts another turn is closed then, and the next run waits only for its kill', async (t) => {
+  const sessionId = 'app-hold-abort-late-turn';
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const first = createScriptedQuery();
+  const second = createScriptedQuery();
+  const { writer, sent } = createWriter();
+  const context = createContext();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  try {
+    const firstRun = queryClaudeSDK('start an agent', { sessionId, cwd }, writer as never, { ...context, createQuery: first.createQuery });
+    await waitUntil(() => first.script.created());
+    first.script.emit(init());
+    launchAgent(first.script);
+    first.script.emit(assistantText('Working on it'));
+    await flush();
+    assert.equal(await settledNow(abortClaudeSDKSession(sessionId)), true);
+    assert.deepEqual(first.script.calls, ['interrupt', 'stop:a1', 'release']);
+
+    // The interrupted turn's own end starts nothing.
+    first.script.emit(interruptedResult());
+    first.script.emit({ type: 'command_lifecycle', uuid: 'lc-1', session_id: NATIVE_ID, command_uuid: 'prompt-1', state: 'cancelled' });
+    await flush();
+    assert.equal(first.script.closed(), false);
+
+    // The CLI starts a turn for the agent the stop reached.
+    first.script.emit(init());
+    await flush();
+    assert.equal(first.script.closed(), true);
+    await firstRun;
+
+    const next = probeStart(context);
+    const secondRun = queryClaudeSDK('Next', { sessionId, cwd }, writer as never, { ...next.context, createQuery: second.createQuery });
+    await flush();
+    assert.equal(next.started(), false, 'the next run waits out the kill');
+    t.mock.timers.tick(8 * 1000);
+    await waitUntil(() => second.script.created());
+    second.script.emit(init());
+    second.script.emit(result());
+    second.script.end();
+    await secondRun;
+    assert.equal(completes(sent), 1, 'the aborted run\'s complete is its caller\'s to send');
+  } finally {
+    first.script.end();
+    second.script.end();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a held process a newer run takes over that starts another turn is closed then, and the new run starts after its kill', async (t) => {
+  const sessionId = 'app-hold-supersede-late-turn';
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const first = createScriptedQuery();
+  const second = createScriptedQuery();
+  const { writer, sent } = createWriter();
+  const context = createContext();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  try {
+    const firstRun = queryClaudeSDK('start an agent', { sessionId, cwd }, writer as never, { ...context, createQuery: first.createQuery });
+    await waitUntil(() => first.script.created());
+    first.script.emit(init());
+    launchAgent(first.script);
+    first.script.emit(result());
+    await waitUntil(() => completes(sent) === 1);
+
+    const next = probeStart(context);
+    const secondRun = queryClaudeSDK('Continue', { sessionId, cwd, ...EDITED_TURN }, writer as never, { ...next.context, createQuery: second.createQuery });
+    await flush();
+    assert.deepEqual(first.script.calls, ['interrupt', 'stop:a1', 'release']);
+    first.script.emit(init());
+    await waitUntil(() => first.script.closed());
+    await firstRun;
+    await flush();
+    assert.equal(next.started(), false);
+    t.mock.timers.tick(8 * 1000);
+    await waitUntil(() => second.script.created());
+
+    second.script.emit(init());
+    second.script.emit(result());
+    second.script.end();
+    await secondRun;
+    assert.equal(completes(sent), 2);
+  } finally {
+    first.script.end();
+    second.script.end();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('letting go of a held session for the Shell closes a process that starts another turn, and resolves once it is killed', async (t) => {
+  const sessionId = 'app-hold-release-late-turn';
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const { createQuery, script } = createScriptedQuery();
+  const { writer, sent } = createWriter();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  try {
+    const run = queryClaudeSDK('start an agent', { sessionId, cwd }, writer as never, { ...createContext(), createQuery });
+    await waitUntil(() => script.created());
+    script.emit(init());
+    launchAgent(script);
+    script.emit(result());
+    await waitUntil(() => completes(sent) === 1);
+
+    const release = claudeRuntime.release(sessionId);
+    await flush();
+    assert.deepEqual(script.calls, ['interrupt', 'stop:a1', 'release']);
+    script.emit(init());
+    await waitUntil(() => script.closed());
+    await run;
+    assert.equal(await settledNow(release), 'pending', 'the kill is still to come');
+    t.mock.timers.tick(8 * 1000);
+    await release;
+    assert.equal(claudeRuntime.processState(sessionId), null);
+  } finally {
+    script.end();
     await rm(cwd, { recursive: true, force: true });
   }
 });

@@ -19,8 +19,8 @@ import type { ProviderRuntimeContext } from '@/shared/types.js';
  * the real Claude runtime, with only the SDK query scripted: a turn that
  * leaves a workflow running keeps its process, and the session's next turn
  * runs in it. Stopping that turn ends it as aborted, as stopping any turn
- * does, and the dispatch of the turn that left the work going is let go once
- * its process has gone on to the next turn.
+ * does, while the work goes on, and the dispatch of the turn that left the
+ * work going is let go once its process has gone on to the next turn.
  */
 
 type Message = Record<string, unknown>;
@@ -33,12 +33,21 @@ function createScriptedQuery() {
   let created = false;
   const prompts: Message[] = [];
   const calls: string[] = [];
+  // The prompts (`prompt:<text>`) and the switches the CLI got, in order.
+  const switchesAndPrompts: string[] = [];
+  // The CLI answers a switch on a line of its own, which the SDK reads in a
+  // later turn of the event loop than the one that sent it.
+  const answerSwitch = (entry: string) => {
+    switchesAndPrompts.push(entry);
+    return new Promise<void>((resolve) => { setImmediate(resolve); });
+  };
 
   const createQuery: NonNullable<ProviderRuntimeContext['createQuery']> = ({ prompt }) => {
     created = true;
     void (async () => {
       for await (const message of prompt) {
         prompts.push(message as Message);
+        switchesAndPrompts.push(`prompt:${String((message as { message?: { content?: unknown } }).message?.content)}`);
       }
       calls.push('release');
     })();
@@ -63,8 +72,8 @@ function createScriptedQuery() {
       interrupt: async () => { calls.push('interrupt'); },
       stopTask: async (taskId: string) => { calls.push(`stop:${taskId}`); },
       cancelAsyncMessage: async () => true,
-      setModel: async () => {},
-      setPermissionMode: async () => {},
+      setModel: (model?: string) => answerSwitch(`setModel:${String(model)}`),
+      setPermissionMode: (mode: string) => answerSwitch(`setPermissionMode:${mode}`),
       close: () => {
         if (!closed) {
           closed = true;
@@ -79,6 +88,7 @@ function createScriptedQuery() {
     createQuery,
     prompts,
     calls,
+    switchesAndPrompts,
     /** Whether the run built its query, which is when it starts a CLI of its own. */
     created: () => created,
     emit: (message: Message) => { queue.push(message); wake?.(); },
@@ -103,6 +113,11 @@ async function waitUntil(condition: () => boolean): Promise<void> {
 const NATIVE_ID = 'native-held-turn-gateway';
 const init = () => ({ type: 'system', subtype: 'init', session_id: NATIVE_ID });
 const result = () => ({ type: 'result', subtype: 'success', session_id: NATIVE_ID, result: 'done', duration_ms: 1, num_turns: 1 });
+// The `result` that ends a prompt's turn the user interrupted, as CLI 2.1.312 writes it.
+const interruptedResult = (uuid: unknown) => ({
+  type: 'result', subtype: 'error_during_execution', is_error: true, session_id: NATIVE_ID, duration_ms: 1, num_turns: 1,
+  origin: { kind: 'human' }, user_message_uuid: uuid, user_message_uuids: [uuid],
+});
 const echo = (uuid: unknown, content: string) => ({
   type: 'user', isReplay: true, uuid, session_id: NATIVE_ID, parent_tool_use_id: null,
   message: { role: 'user', content },
@@ -197,7 +212,7 @@ async function withGateway(runTest: (gateway: Gateway) => Promise<void>): Promis
   }
 }
 
-test('stopping a turn that went into the held process ends it as aborted, once, and the first turn\'s dispatch is let go at the hand-over', async () => {
+test('stopping a turn that went into the held process ends it as aborted, once, leaves the workflow running, and the first turn\'s dispatch is let go at the hand-over', async () => {
   await withGateway(async ({ service, queries, sessionId, userId, cwd }) => {
     const firstDispatch = runDetachedChatTurn({ sessionId, userId, content: 'Start the workflow', options: { cwd } }, { runtime: service });
     let firstLetGo = false;
@@ -223,7 +238,11 @@ test('stopping a turn that went into the held process ends it as aborted, once, 
     held.emit(assistantText('Writing the docs'));
     await flush();
 
-    assert.equal(await chatRunRegistry.abortRun(sessionId, (provider, id) => service.abort(provider, id)), true);
+    const aborting = chatRunRegistry.abortRun(sessionId, (provider, id) => service.abort(provider, id));
+    await waitUntil(() => held.calls.includes('interrupt'));
+    // The CLI ends the interrupted turn, as CLI 2.1.312 does.
+    held.emit(interruptedResult(held.prompts[1]?.uuid));
+    assert.equal(await aborting, true);
     await secondDispatch;
     await flush();
 
@@ -232,6 +251,12 @@ test('stopping a turn that went into the held process ends it as aborted, once, 
     assert.equal(secondCompletes[0]?.aborted, true);
     assert.equal(secondCompletes[0]?.exitCode, 0);
     assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.outcome), ['done', 'aborted']);
+    assert.deepEqual(held.calls, ['interrupt'], 'the workflow is not stopped, and the process keeps its input');
+    assert.deepEqual(
+      listClaudeSDKBackgroundWork().filter((entry) => entry.sessionId === sessionId).flatMap((entry) => entry.tasks.map((task) => task.taskId)),
+      ['wf1'],
+    );
+    assert.equal(chatRunRegistry.isProcessing(sessionId), false, 'the session takes the next send');
   });
 });
 
@@ -251,5 +276,137 @@ test('the hand-over plan of a session reads the send as its run would: same opti
     assert.equal(withAnotherEffort.canHandOver, false);
     assert.ok(withAnotherEffort.changes.includes('effort'));
     assert.equal(queries[0]?.prompts.length, 1, 'planning wrote nothing to the process');
+  });
+});
+
+test('two messages sent into a held /loop back to back, as the scheduled-messages dispatcher sends due ones, run with their own model and permission mode, and leave the loop with its own', async () => {
+  await withGateway(async ({ service, queries, sessionId, userId, cwd }) => {
+    // The /loop, sent from the composer: sonnet, default permissions.
+    const composer = { model: 'sonnet', effort: 'high', permissionMode: 'default', toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false } };
+    void runDetachedChatTurn({ sessionId, userId, content: '/loop check the deploy', options: { cwd, ...composer } }, { runtime: service });
+    await waitUntil(() => queries[0]?.prompts.length === 1);
+    const held = queries[0];
+    held.emit(init());
+    held.emit(echo(held.prompts[0]?.uuid, '/loop check the deploy'));
+    held.emit({
+      type: 'assistant', session_id: NATIVE_ID, parent_tool_use_id: null,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_wakeup', name: 'ScheduleWakeup', input: { delaySeconds: 300, prompt: '/loop check the deploy', reason: 'polling' } }] },
+    });
+    held.emit({
+      type: 'user', uuid: randomUUID(), session_id: NATIVE_ID, parent_tool_use_id: null,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_wakeup', content: 'Next wakeup scheduled (in 300s).' }] },
+      tool_use_result: { scheduledFor: Date.now() + 5 * 60 * 1000, clampedDelaySeconds: 300, wasClamped: false },
+    });
+    held.emit(result());
+    await waitUntil(() => !chatRunRegistry.isProcessing(sessionId));
+    await flush();
+
+    // Two due messages, with the options the dispatcher gives them: A
+    // switches both for its turn, B names the loop's own and goes as soon as
+    // A's turn is over, before the CLI has answered A's switches back.
+    const dispatched = (options: Message) => ({ ...options, inheritUnset: true, restoreSwitchesAfterTurn: true });
+    const sendB = () => runDetachedChatTurn(
+      { sessionId, userId, content: 'B', options: dispatched({ model: 'sonnet', effort: 'high', permissionMode: 'default' }) },
+      { runtime: service },
+    );
+    let b: ReturnType<typeof sendB> | null = null;
+    const a = runDetachedChatTurn(
+      { sessionId, userId, content: 'A', options: dispatched({ model: 'opus', effort: 'high', permissionMode: 'acceptEdits' }), onTurnEnded: () => { b = sendB(); } },
+      { runtime: service },
+    );
+    await waitUntil(() => held.prompts.length === 2);
+    await flush();
+    held.emit(echo(held.prompts[1]?.uuid, 'A'));
+    held.emit(result());
+    await waitUntil(() => held.prompts.length === 3);
+    held.emit(echo(held.prompts[2]?.uuid, 'B'));
+    held.emit(result());
+    assert.deepEqual(await a, { started: true, error: null });
+    assert.ok(b);
+    assert.deepEqual(await b, { started: true, error: null });
+    await flush(30);
+
+    // What each prompt ran with, as the CLI applied the switches in order.
+    let model = 'sonnet';
+    let permissionMode = 'default';
+    const ranWith: Record<string, string> = {};
+    for (const entry of held.switchesAndPrompts) {
+      if (entry.startsWith('setModel:')) {
+        model = entry.slice('setModel:'.length);
+      } else if (entry.startsWith('setPermissionMode:')) {
+        permissionMode = entry.slice('setPermissionMode:'.length);
+      } else {
+        ranWith[entry] = `${model} ${permissionMode}`;
+      }
+    }
+    assert.deepEqual(ranWith, {
+      'prompt:/loop check the deploy': 'sonnet default',
+      'prompt:A': 'opus acceptEdits',
+      'prompt:B': 'sonnet default',
+    });
+    assert.equal(`${model} ${permissionMode}`, 'sonnet default', 'the loop is left with its own');
+    assert.equal(queries.filter((query) => query.created()).length, 1, 'both went into the held process');
+  });
+});
+
+test('a message sent into a held /loop while the loop runs a turn of its own, and stopped before it goes in, leaves the session\'s model as the user had it', async () => {
+  await withGateway(async ({ service, queries, sessionId, userId, cwd }) => {
+    const recordedModel = () => sessionsDb.getSessionById(sessionId)?.model ?? null;
+    const scheduleWakeup = (query: ReturnType<typeof createScriptedQuery>, id: string) => {
+      query.emit({
+        type: 'assistant', session_id: NATIVE_ID, parent_tool_use_id: null,
+        message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'ScheduleWakeup', input: { delaySeconds: 300, prompt: '/loop check the deploy', reason: 'polling' } }] },
+      });
+      query.emit({
+        type: 'user', uuid: randomUUID(), session_id: NATIVE_ID, parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'Next wakeup scheduled (in 300s).' }] },
+        tool_use_result: { scheduledFor: Date.now() + 5 * 60 * 1000, clampedDelaySeconds: 300, wasClamped: false },
+      });
+    };
+    // The /loop, sent from the composer with sonnet.
+    const loopDispatch = runDetachedChatTurn(
+      { sessionId, userId, content: '/loop check the deploy', options: { cwd, model: 'sonnet', effort: 'high', permissionMode: 'default' } },
+      { runtime: service },
+    );
+    let loopLetGo = false;
+    void loopDispatch.then(() => { loopLetGo = true; });
+    await waitUntil(() => queries[0]?.prompts.length === 1);
+    const held = queries[0];
+    held.emit(init());
+    held.emit(echo(held.prompts[0]?.uuid, '/loop check the deploy'));
+    scheduleWakeup(held, 'toolu_wakeup');
+    held.emit(result());
+    await waitUntil(() => !chatRunRegistry.isProcessing(sessionId));
+    await flush();
+    assert.equal(recordedModel(), 'sonnet');
+
+    // The wake-up fires: the loop runs a turn of its own.
+    held.emit({ type: 'command_lifecycle', uuid: randomUUID(), command_uuid: randomUUID(), state: 'started', wakeup_source: 'loop_wakeup', session_id: NATIVE_ID });
+    held.emit(init());
+    held.emit(assistantText('Checking the deploy'));
+    await flush();
+
+    // A due message with another model, with the options the dispatcher gives it.
+    const message = runDetachedChatTurn(
+      { sessionId, userId, content: 'Summarise with Opus', options: { model: 'opus', effort: 'high', permissionMode: 'default', inheritUnset: true, restoreSwitchesAfterTurn: true } },
+      { runtime: service },
+    );
+    await waitUntil(() => loopLetGo);
+    assert.equal(recordedModel(), 'opus', 'the message runs with its own model');
+    assert.equal(held.prompts.length, 1, 'it waits for the loop\'s turn to end');
+
+    assert.equal(await chatRunRegistry.abortRun(sessionId, (provider, id) => service.abort(provider, id)), true);
+    assert.deepEqual(await message, { started: true, error: null });
+    await flush();
+    assert.equal(recordedModel(), 'sonnet', 'the session\'s model is the user\'s again');
+
+    // The loop's turn sets the next wake-up and ends: the loop keeps its process, never switched.
+    scheduleWakeup(held, 'toolu_wakeup_2');
+    held.emit(result());
+    await flush();
+    assert.deepEqual(held.switchesAndPrompts.filter((entry) => entry.startsWith('set')), []);
+    assert.equal(held.calls.includes('release'), false);
+    assert.equal(recordedModel(), 'sonnet');
+    assert.equal(queries.filter((query) => query.created()).length, 1);
   });
 });

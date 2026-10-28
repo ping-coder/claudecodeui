@@ -354,7 +354,11 @@ export type RunEndedEvent = {
    * is 'done', as the chat client has always read it.
    */
   outcome: RunEndOutcome;
-  /** 'done' only: the runtime still held background work for the session when the turn completed. */
+  /**
+   * 'done' and 'aborted' only: the runtime still held background work for the session when the turn
+   * completed. An aborted turn has it when the stop ended only a turn that went into the process held
+   * for that work; its `complete` then carries `backgroundWork: true` too.
+   */
   backgroundWork: boolean;
   /**
    * sessions.custom_name, so a tab that has not loaded the session can still name it. Trimmed;
@@ -794,9 +798,10 @@ export type ProviderRuntimeWriter = {
    * The session's next run took over the process this writer's turn ran in, with the background work it
    * is held for, instead of stopping that work. Optional: SSE writers leave it out.
    *
-   * The Claude runtime calls it on the writer of the turn that left the work running when it runs a new
-   * turn in that process. The chat gateway's writer records the next run as this run's successor, so the
-   * work's later `reportBackgroundWorkFinished` on this writer still counts.
+   * The Claude runtime calls it when it runs a new turn in that process, on the writer of the turn that ran
+   * in it last, and on the writer of the turn that left the work running when that is an earlier one (the
+   * user stopped the turns after it, which left none). The chat gateway's writer records the next run as
+   * this run's successor, so the work's later `reportBackgroundWorkFinished` on this writer still counts.
    */
   reportProcessHandedOver?(): void;
   /**
@@ -986,10 +991,12 @@ export type HandOverChange = 'model' | 'effort' | 'ultracode' | 'permissionMode'
 /**
  * What a turn handed to the held process would switch in that process before
  * its prompt: its `model` or its `permissionMode`, when the turn's differ and
- * the live process can switch to them. The switch outlasts the turn: the
- * background work runs on with it, which is why the scheduled-messages
- * dispatcher keeps a message that would switch anything out of the process.
- * A difference the process cannot switch is a `HandOverChange` instead.
+ * the live process can switch to them. The switch outlasts the turn, and the
+ * background work runs on with it, unless the turn's run options set
+ * `restoreSwitchesAfterTurn: true`, as the scheduled-messages dispatcher's
+ * do: the process is then switched back once the turn is over (see
+ * `IProviderRuntime.run`). A difference the process cannot switch is a
+ * `HandOverChange` instead.
  */
 export type HandOverSwitch = Extract<HandOverChange, 'model' | 'permissionMode'>;
 
@@ -1006,7 +1013,8 @@ export type HandOverSwitch = Extract<HandOverChange, 'model' | 'permissionMode'>
  *   scheduled one stores no tool rules. A run whose options set
  *   `inheritUnset: true` hands its turn over the same way, so a caller that
  *   plans with it sends the turn with it too; without it the run judges the
- *   turn as its options say, which the plan would not have predicted.
+ *   turn as its options say, which the plan would not have predicted. An
+ *   `ultracode` the options leave out is the live process's too.
  */
 export type ProviderHandOverPlanOptions = {
   inheritUnset?: boolean;
@@ -1029,7 +1037,8 @@ export type ProviderHandOverPlanOptions = {
  *   while a turn runs in a process with such work: tasks of the session's own
  *   still outstanding, or, for a turn handed to the process while it was
  *   held, work of that hold the runtime cannot track or has yet to relay.
- *   Interrupting that turn would stop the work.
+ *   Interrupting a turn the process was started for would stop the work; a
+ *   turn handed to the held process is stopped alone (Claude).
  * - `canHandOver`: a `chat.send` with these options would run as that
  *   process's next turn, so the work keeps running. Never while a turn runs.
  * - `changes`: what would keep it out (see `HandOverChange`); empty when it
@@ -1791,6 +1800,32 @@ export type FileTreeServiceDependencies = {
   resolveMimeType(filePath: string): string;
   fileSystemConcurrency: number;
   logger: FileTreeLogger;
+  /** Milliseconds on a clock that never goes back; times the project file search and its pauses. */
+  now(): number;
+};
+
+/**
+ * One file found by `searchProjectFiles`, in the shape the command palette lists files.
+ *
+ * `path` is absolute, spelled as the File Tree listing spells it; `relativePath` joins the names
+ * from the project root with `/`, which is what the search scores.
+ */
+export type FileTreeSearchMatch = {
+  name: string;
+  path: string;
+  relativePath: string;
+  isIgnored: boolean;
+};
+
+/**
+ * What `searchProjectFiles` found: the best matches, best first, and how many files matched in
+ * all. `incomplete` is true when the walk stopped at its entry or time limit before reaching
+ * every file, so a better match may have been missed.
+ */
+export type FileTreeSearchResult = {
+  files: FileTreeSearchMatch[];
+  totalMatches: number;
+  incomplete: boolean;
 };
 
 /**
@@ -1836,6 +1871,21 @@ export type FileTreeServices = {
     projectId: string,
     options?: { respectGitignore: boolean; markIgnored?: boolean },
   ): Promise<FileTreeNode[]>;
+  /**
+   * Finds the project's files that match `query`, for the command palette when the project is
+   * too large to list (see `listProjectFiles`). Returns at most `limit` files, capped at 200,
+   * ranked as the palette ranks files: by how well their path relative to the project root
+   * matches, ties broken shallowest first in listing order.
+   *
+   * The walk applies the palette's listing rules: `listProjectFiles` with `respectGitignore` and
+   * `markIgnored`, the same depth, and no symlink is followed. It reads at most 100,000 entries
+   * and runs for at most 2 seconds; past either it returns what it found with `incomplete` set.
+   * An aborted `signal` (the browser gave up on the request) stops it the same way.
+   */
+  searchProjectFiles(
+    projectId: string,
+    input: { query: string; limit: number; signal?: AbortSignal },
+  ): Promise<FileTreeSearchResult>;
   createEntry(input: {
     projectId: string;
     parentPath: string;

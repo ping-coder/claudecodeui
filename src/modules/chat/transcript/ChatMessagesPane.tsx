@@ -8,7 +8,10 @@ import type { BackgroundTaskSummary,
   ProjectSession,
   LLMProvider,
   ProviderModelActions,
-  ProviderModelsDefinition } from '@/shared/types';
+  ProviderModelsDefinition,
+  RevealMessageOptions } from '@/shared/types';
+import { TURN_OPENER_ROW_CLASS } from '@/shared/constants';
+import { isTurnOpener } from '@/shared/utils';
 import { getIntrinsicMessageKey } from '@/modules/chat/utils/messageKeys';
 import { groupConsecutiveTools, isToolGroupItem } from '@/modules/chat/utils/toolGrouping';
 import { useLazyRowObserver } from '@/modules/chat/hooks/useLazyRowObserver';
@@ -58,7 +61,7 @@ type ChatMessagesPaneProps = {
   visibleMessageCount: number;
   visibleMessages: ChatMessage[];
   loadEarlierMessages: () => void;
-  revealMessage: (message: ChatMessage) => void;
+  revealMessage: (message: ChatMessage, options?: RevealMessageOptions) => void;
   /** The session's running background tasks from the activity map, for the strip to list ones whose rows are not loaded. */
   backgroundTasks?: BackgroundTaskSummary[];
   /**
@@ -87,6 +90,8 @@ type ChatMessagesPaneProps = {
   onForkFromMessage?: (message: ChatMessage) => void;
   /** Fetches the whole transcript for an export, which otherwise only sees the loaded page. */
   onLoadFullTranscript?: () => Promise<ChatMessage[]>;
+  /** False while the pinned question bar above the transcript carries the export menu instead. */
+  showExportMenu?: boolean;
 };
 
 /**
@@ -101,8 +106,8 @@ const getGroupedMessageKey = (message: ChatMessage): string =>
 
 /**
  * Rendered by chat's ChatInterface as the scrolling transcript: the message
- * list and tool groups, the export menu, the provider empty state and the
- * load-all-history overlay.
+ * list and tool groups, the export menu (unless the pinned question bar above
+ * carries it), the provider empty state and the load-all-history overlay.
  */
 function ChatMessagesPane({
   scrollContainerRef,
@@ -146,6 +151,7 @@ function ChatMessagesPane({
   onEditMessage,
   onForkFromMessage,
   onLoadFullTranscript,
+  showExportMenu = true,
   onFileOpen,
   onShowSettings,
   onGrantToolPermission,
@@ -202,7 +208,9 @@ function ChatMessagesPane({
       }`}
     >
       {chatMessages.length > 0 && (
-        <div className="pointer-events-none sticky right-4 top-3 z-10 mb-2 flex items-start justify-between gap-2 sm:px-4">
+        // As tall as the export button whether or not it is here (the pinned
+        // question bar takes it), so the rows below never move with it.
+        <div className="pointer-events-none sticky right-4 top-3 z-10 mb-2 flex min-h-8 items-start justify-between gap-2 sm:px-4">
           {/* Running background work stays in view while the transcript scrolls under it. */}
           <div className="pointer-events-auto min-w-0 pl-4 sm:pl-0">
             <BackgroundTasksStrip
@@ -215,16 +223,18 @@ function ChatMessagesPane({
               onLoadAll={loadAllMessages}
             />
           </div>
-          <div className="pointer-events-auto">
-            <ChatExportMenu
-              messages={chatMessages}
-              sessionTitle={selectedSession?.summary || selectedSession?.title}
-              provider={provider}
-              selectedProject={selectedProject}
-              createDiff={createDiff}
-              onLoadFullTranscript={onLoadFullTranscript}
-            />
-          </div>
+          {showExportMenu && (
+            <div className="pointer-events-auto">
+              <ChatExportMenu
+                messages={chatMessages}
+                sessionTitle={selectedSession?.summary || selectedSession?.title}
+                provider={provider}
+                selectedProject={selectedProject}
+                createDiff={createDiff}
+                onLoadFullTranscript={onLoadFullTranscript}
+              />
+            </div>
+          )}
         </div>
       )}
       <div className="mx-auto w-full max-w-[54.25rem] space-y-3 px-4 sm:space-y-4">
@@ -348,6 +358,9 @@ function ChatMessagesPane({
                   lazyRows={lazyRows}
                   timestamp={item.timestamp}
                   initiallyNearViewport={initiallyNearViewport}
+                  // How the pinned question finds the rows that open a turn,
+                  // mounted or not.
+                  wrapperClassName={isTurnOpener(item) ? TURN_OPENER_ROW_CLASS : undefined}
                 >
                   <MessageComponent
                     message={item}

@@ -87,6 +87,8 @@ const fileTreeServices = createFileTreeService({
   resolveMimeType: (filePath) => mime.lookup(filePath) || 'application/octet-stream',
   fileSystemConcurrency: readFileSystemConcurrency(),
   logger: fileTreeLogger,
+  // Monotonic: a wall clock set back mid-search would hold off its time limit and its pauses.
+  now: () => performance.now(),
 });
 
 const fileUploadMiddleware = multer({

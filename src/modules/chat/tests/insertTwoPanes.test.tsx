@@ -20,7 +20,9 @@ import type { BackgroundSendPrompt, OwnInsert, PendingInsert, Project, ProjectSe
  * a reload, the composer adopts the tab's unsettled insert, and once the server
  * says the run is over, the transcript decides whether its text comes back. A
  * send the server refuses to run beside the session's background work is
- * undone in the pane that sent it.
+ * undone in the pane that sent it, each pane's own when both panes sent, and
+ * each answer in the stacked dialogs takes out of the shared composer only
+ * the message it was about.
  */
 
 const page = vi.hoisted(() => {
@@ -35,6 +37,8 @@ const page = vi.hoisted(() => {
     },
     sent: [] as Array<{ side: string; message: Record<string, unknown> }>,
     history: new Map<string, unknown[]>(),
+    // Held open by a test to keep hand-over plan requests in flight.
+    planGate: Promise.resolve() as Promise<void>,
   };
 });
 
@@ -72,7 +76,7 @@ vi.mock('@/shared/api', () => {
           return okJson({ success: true, data: { messages, total: messages.length, hasMore: false } });
         },
         // The held process would take the turn, as far as the server can tell before the send.
-        handOverPlan: () => okJson({ success: true, data: { heldWork: true, canHandOver: true, changes: [] } }),
+        handOverPlan: () => page.planGate.then(() => okJson({ success: true, data: { heldWork: true, canHandOver: true, changes: [] } })),
         skills: notOk,
       },
     },
@@ -91,9 +95,11 @@ type StandInComposerProps = {
   onResolveBackgroundSendPrompt?: (choice: 'send' | 'queue' | 'cancel') => void;
 };
 
-// The composer's state is real; its view stands in with what this is about.
+// The composer's state is real; its view stands in with what this is about,
+// the real dialog that asks before sending over background work included.
 vi.mock('@/modules/chat/composer/ChatComposer', async () => {
   const { createElement } = await import('react');
+  const { default: BackgroundSendDialog } = await import('@/modules/chat/composer/BackgroundSendDialog');
   return {
     default: ({
       input,
@@ -116,6 +122,10 @@ vi.mock('@/modules/chat/composer/ChatComposer', async () => {
         backgroundSendPrompt ? `changes: ${(backgroundSendPrompt.changes ?? []).join(', ')}` : 'closed',
       ),
       createElement('button', { type: 'button', onClick: () => onResolveBackgroundSendPrompt?.('cancel') }, 'Cancel the prompt'),
+      createElement(BackgroundSendDialog, {
+        prompt: backgroundSendPrompt,
+        onResolve: (choice: 'send' | 'queue' | 'cancel') => onResolveBackgroundSendPrompt?.(choice),
+      }),
       createElement('button', { type: 'button', onClick: () => onSubmitBusyMode?.('queue') }, 'Queue from the menu'),
       createElement(
         'ul',
@@ -230,6 +240,7 @@ const backgroundSendPrompt = (side: WorkspacePaneSide) => pane(side)
 beforeEach(() => {
   page.sent.length = 0;
   page.history.clear();
+  page.planGate = Promise.resolve();
   localStorage.clear();
   sessionStorage.clear();
   resetChatDrafts();
@@ -321,6 +332,180 @@ describe('a send the server refuses to run beside the background work', () => {
     await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
     assert.equal(composerText('left'), 'and check the logs');
     assert.equal(page.sent.filter(({ message }) => message.type === 'chat.send').length, 1);
+  });
+});
+
+describe('sends from both panes the server refuses to run beside the background work', () => {
+  it('are each undone in the pane that sent it, and each pane asks', async () => {
+    await renderWorkspace(['left', 'right']);
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [
+        { taskId: 'w1', toolUseId: 'toolu_wf', taskType: 'local_workflow', description: 'Audit', workflowName: 'audit', startedAt: 1 },
+      ]);
+    });
+    let releasePlans = () => {};
+    page.planGate = new Promise<void>((resolve) => { releasePlans = resolve; });
+
+    // Both submits wait on the hand-over plan, so both go out as sends.
+    for (const [side, text] of [['left', 'from the left'], ['right', 'from the right']] as const) {
+      const textarea = pane(side).getByRole('textbox', { name: 'Message' });
+      fireEvent.change(textarea, { target: { value: text } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    }
+    await act(async () => { releasePlans(); });
+    const sends = () => page.sent.filter(({ message }) => message.type === 'chat.send');
+    await waitFor(() => assert.equal(sends().length, 2));
+    const requestIdOf = (side: WorkspacePaneSide) => sends().find((send) => send.side === side)?.message.clientRequestId;
+    assert.equal(typeof requestIdOf('left'), 'string');
+    assert.equal(typeof requestIdOf('right'), 'string');
+    assert.notEqual(requestIdOf('left'), requestIdOf('right'));
+    // Each pane shows the echo of its own send.
+    assert.deepEqual(transcript('left'), ['from the left']);
+    assert.deepEqual(transcript('right'), ['from the right']);
+
+    // The server refuses both, the left one first.
+    for (const side of ['left', 'right'] as const) {
+      dispatch({
+        kind: 'send_refused',
+        sessionId: 'session-a',
+        reason: 'BACKGROUND_WORK_WOULD_STOP',
+        changes: ['effort'],
+        clientRequestId: requestIdOf(side),
+      });
+    }
+
+    assert.deepEqual(transcript('left'), []);
+    assert.deepEqual(transcript('right'), []);
+    assert.equal(activity.actions?.getSessionActivity('session-a')?.background, true);
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'changes: effort'));
+    await waitFor(() => assert.equal(backgroundSendPrompt('right'), 'changes: effort'));
+    for (const side of ['left', 'right'] as const) {
+      assert.equal(composerText(side).includes('from the left'), true, `${side}: the left message is back`);
+      assert.equal(composerText(side).includes('from the right'), true, `${side}: the right message is back`);
+    }
+
+    fireEvent.click(pane('left').getByRole('button', { name: 'Cancel the prompt' }));
+    fireEvent.click(pane('right').getByRole('button', { name: 'Cancel the prompt' }));
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
+    await waitFor(() => assert.equal(backgroundSendPrompt('right'), 'closed'));
+    assert.equal(sends().length, 2, 'nothing more is sent');
+  });
+});
+
+describe('sends from both panes refused at once, answered in the dialogs as they stack', () => {
+  const sends = () => page.sent.filter(({ message }) => message.type === 'chat.send');
+  // Each dialog is portaled into the body over the whole page, so the one
+  // mounted last covers the other and is the one the user answers.
+  const dialogs = () => Array.from(document.body.querySelectorAll<HTMLElement>('[role="dialog"]'));
+  const answerTopDialog = (label: 'Cancel' | 'Queue' | 'Send anyway') => {
+    const top = dialogs().at(-1);
+    assert.ok(top, 'a dialog is open');
+    fireEvent.click(within(top).getByRole('button', { name: label }));
+  };
+  const refusalOf = (side: WorkspacePaneSide) => ({
+    provider: 'claude',
+    timestamp: '2026-10-28T10:00:00.000Z',
+    kind: 'send_refused',
+    sessionId: 'session-a',
+    reason: 'BACKGROUND_WORK_WOULD_STOP',
+    changes: ['effort'],
+    clientRequestId: sends().find((send) => send.side === side)?.message.clientRequestId,
+  });
+
+  // Both panes send while the hand-over plan is out, so both go out as sends.
+  const sendFromBothPanes = async () => {
+    await renderWorkspace(['left', 'right']);
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [
+        { taskId: 'w1', toolUseId: 'toolu_wf', taskType: 'local_workflow', description: 'Audit', workflowName: 'audit', startedAt: 1 },
+      ]);
+    });
+    let releasePlans = () => {};
+    page.planGate = new Promise<void>((resolve) => { releasePlans = resolve; });
+    for (const [side, text] of [['left', 'from the left'], ['right', 'from the right']] as const) {
+      const textarea = pane(side).getByRole('textbox', { name: 'Message' });
+      fireEvent.change(textarea, { target: { value: text } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    }
+    await act(async () => { releasePlans(); });
+    await waitFor(() => assert.equal(sends().length, 2));
+  };
+
+  // The left send is refused first, each refusal rendered before the next:
+  // the right message goes back ahead of the left one, and the right dialog
+  // goes on top.
+  const refuseLeftThenRight = async () => {
+    await sendFromBothPanes();
+    dispatch(refusalOf('left'));
+    dispatch(refusalOf('right'));
+    await waitFor(() => assert.equal(dialogs().length, 2));
+    assert.equal(composerText('left'), 'from the right\n\nfrom the left');
+  };
+
+  it('answered top first, send anyway in both, leave nothing behind', async () => {
+    await refuseLeftThenRight();
+
+    answerTopDialog('Send anyway');
+    await waitFor(() => assert.equal(sends().length, 3));
+    assert.equal(sends()[2]?.side, 'right');
+    answerTopDialog('Send anyway');
+    await waitFor(() => assert.equal(sends().length, 4));
+    await settle();
+
+    assert.equal(sends()[3]?.side, 'left');
+    assert.equal(composerText('left'), '');
+    assert.equal(composerText('right'), '');
+  });
+
+  it('the top one cancelled and the one under it sent anyway, leave only the cancelled message', async () => {
+    await refuseLeftThenRight();
+
+    answerTopDialog('Cancel');
+    await waitFor(() => assert.equal(dialogs().length, 1));
+    answerTopDialog('Send anyway');
+    await waitFor(() => assert.equal(sends().length, 3));
+    await settle();
+
+    assert.deepEqual(sends().map(({ side, message }) => [side, message.content]).at(-1), ['left', 'from the left']);
+    assert.equal(composerText('left'), 'from the right');
+    assert.equal(composerText('right'), 'from the right');
+  });
+
+  it('the top one cancelled and the one under it queued, leave only the cancelled message', async () => {
+    await refuseLeftThenRight();
+
+    answerTopDialog('Cancel');
+    await waitFor(() => assert.equal(dialogs().length, 1));
+    answerTopDialog('Queue');
+    await waitFor(() => assert.equal(dialogs().length, 0));
+    await settle();
+
+    assert.equal(sends().length, 2, 'queued, not sent');
+    assert.equal(composerText('left'), 'from the right');
+    assert.equal(composerText('right'), 'from the right');
+  });
+
+  it('refused together, the right one first, the top dialog\'s message is taken out though the other went back ahead of it', async () => {
+    await sendFromBothPanes();
+    // One render for both refusals: both dialogs mount in that commit, the
+    // right pane's last, so on top.
+    act(() => {
+      for (const side of ['right', 'left'] as const) {
+        const refusal = refusalOf(side);
+        for (const listener of page.listeners) {
+          listener(refusal as ServerEvent);
+        }
+      }
+    });
+    await waitFor(() => assert.equal(dialogs().length, 2));
+    assert.equal(composerText('left'), 'from the left\n\nfrom the right');
+
+    answerTopDialog('Send anyway');
+    await waitFor(() => assert.equal(sends().length, 3));
+    await settle();
+
+    assert.equal(sends()[2]?.side, 'right');
+    assert.equal(composerText('left'), 'from the left');
   });
 });
 

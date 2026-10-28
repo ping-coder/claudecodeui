@@ -162,7 +162,9 @@
       "enabled": "Notifications are enabled for this browser",
       "loading": "Updating...",
       "unsupported": "Push notifications are not supported in this browser.",
-      "denied": "Push notifications are blocked. Please allow them in your browser settings."
+      "denied": "Push notifications are blocked for this site. Allow notifications in the browser's site settings, then reopen Settings.",
+      "dismissed": "Notifications were not allowed. Click Enable notifications again and choose Allow when the browser asks.",
+      "failed": "Couldn't turn on push notifications for this browser. Try again later."
     },
     "desktop": {
       "title": "Notify this desktop app",

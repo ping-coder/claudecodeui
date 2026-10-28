@@ -66,8 +66,8 @@ on a 29k-row session costs ~112 MB instead of ~1 GB.
 | `src/modules/chat/hooks/useLazyRowObserver.ts` | One shared `IntersectionObserver` per pane, rooted at the scroll container. |
 | `src/modules/chat/transcript/LoadAllMessagesOverlay.tsx` | The "Load all (N)" pill shown at the top of a partially-loaded transcript. |
 | `src/modules/chat/transcript/ChatExportMenu.tsx` | Calls `onLoadFullTranscript` before building a file. |
-| `server/modules/providers/provider.routes.ts` | `GET /api/providers/sessions/:sessionId/messages` — parses `limit`/`offset`. |
-| `server/modules/providers/services/sessions.service.ts` | `fetchHistory` — cache lookup, tail slice, stamps the app session id on every row. |
+| `server/modules/providers/provider.routes.ts` | `GET /api/providers/sessions/:sessionId/messages` — parses `limit`/`offset`. `GET .../turn-question?before=<row id>&at=<timestamp>` — the question of the turn the earliest loaded row is in, for the pinned question bar. |
+| `server/modules/providers/services/sessions.service.ts` | `fetchHistory` — cache lookup, tail slice, stamps the app session id on every row. `findTurnQuestion` — finds the row by id, or by timestamp once the id changed, and walks back to the user message that opened its turn. |
 | `server/modules/providers/services/session-history-cache.service.ts` | Full-transcript LRU validated by `stat`. |
 | `server/shared/message-unification.ts` | `prepareTranscriptMessages` — reduces a Claude or Codex transcript to renderable rows before it is paged. |
 | `server/shared/utils.ts` | `sliceTailPage` — the one definition of what a page is. |

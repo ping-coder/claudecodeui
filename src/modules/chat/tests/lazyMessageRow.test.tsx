@@ -52,9 +52,11 @@ function fireIntersection(
 function Harness({
   initiallyNearViewport,
   content = <span data-testid="row-content">expensive content</span>,
+  wrapperClassName,
 }: {
   initiallyNearViewport: boolean;
   content?: ReactNode;
+  wrapperClassName?: string;
 }) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lazyRows = useLazyRowObserver(scrollContainerRef);
@@ -64,6 +66,7 @@ function Harness({
         lazyRows={lazyRows}
         timestamp="2026-01-01T00:00:00.000Z"
         initiallyNearViewport={initiallyNearViewport}
+        wrapperClassName={wrapperClassName}
       >
         {content}
       </LazyMessageRow>
@@ -220,6 +223,21 @@ describe('LazyMessageRow', () => {
 
     // A 0x0 box says nothing about the row's height; 0px would collapse it.
     expect(wrapper.style.height).toBe('123.5px');
+  });
+
+  it('keeps its wrapper class while the content is swapped for a placeholder', () => {
+    vi.stubGlobal('IntersectionObserver', StubIntersectionObserver);
+
+    const { queryByTestId } = render(<Harness initiallyNearViewport wrapperClassName="turn-opener" />);
+    const observer = StubIntersectionObserver.instances[0];
+    const wrapper = observer.observed[0] as HTMLElement;
+    modelRowLayout(wrapper, 123.5);
+
+    fireIntersection(observer, wrapper, false);
+
+    // The pinned question finds the rows that open a turn by this class, mounted or not.
+    expect(queryByTestId('row-content')).toBeNull();
+    expect(wrapper.classList.contains('turn-opener')).toBe(true);
   });
 
   it('keeps every row mounted where IntersectionObserver does not exist', () => {

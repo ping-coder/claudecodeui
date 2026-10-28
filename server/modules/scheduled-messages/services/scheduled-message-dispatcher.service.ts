@@ -17,23 +17,40 @@ const POLL_INTERVAL_MS = 30_000;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Sessions the dispatcher is still sending to: a scheduled or queued turn it
- * started whose provider run has not settled yet.
- *
- * Kept per session rather than as one flag for the whole dispatcher because a
- * run can take hours to settle: a turn that leaves background work going (a
- * backgrounded build, agent or workflow) keeps its CLI process open until that
- * work reports back. Only that session has to wait for it. Passes skip these
- * sessions and leave their messages as they are, which keeps one session's
- * messages in order and stops two of its turns racing into it.
- *
- * A session is let go early once the user's next turn has taken that process
- * over (see `runDetachedChatTurn`): the work then goes on under the user's
- * turn, and the next pass treats the session like any other, whose messages
- * wait only while sending them would disturb the work its process is held
- * for (`wouldDisturbHeldWork`, and `mustDueMessageWait` for a turn under way).
+ * A due pass asking whether a session's next due message can go
+ * (`mustDueMessageWait`), while it holds the session to ask (see
+ * `sessionsInFlight`). `answered` settles, through `settle`, once the pass
+ * has acted on the answer: it started the message's turn, and holds the
+ * session for it, or it let go of the session, the message left to wait. A
+ * message it could not claim (cancelled while the pass asked) started
+ * nothing: its check stays open until the check of the session's next due
+ * message takes its place, or the pass lets go of the session.
  */
-const sessionsInFlight = new Set<string>();
+type DueCheck = { answered: Promise<void>; settle: () => void };
+
+/**
+ * Sessions the dispatcher holds: a scheduled or queued turn it started is
+ * under way there, or a due pass is asking whether the session's next due
+ * message can go (its `DueCheck`).
+ *
+ * Kept per session rather than as one flag for the whole dispatcher, so one
+ * session's turn holds up no other session's messages. Passes skip a session
+ * held for a turn and leave its messages as they are, which keeps one
+ * session's messages in order and stops two of its turns racing into it. A
+ * queued pass waits for a due check's answer instead (see
+ * `dispatchQueuedMessages`): a due message that can go goes first, and one
+ * that has to wait keeps no queued message back.
+ *
+ * A session is held until the turn is over, not until its run settles. That
+ * can be hours later: a turn that leaves work going (a /loop's wake-up, a
+ * backgrounded build, agent or workflow) keeps its CLI process open until the
+ * work is done. From the turn's end the next pass treats the session like any
+ * other, whose messages wait only while sending them would disturb the work
+ * its process is held for (`wouldDisturbHeldWork`, and `mustDueMessageWait`
+ * for a turn under way): one the held process can take goes into it as its
+ * next turn.
+ */
+const sessionsInFlight = new Map<string, DueCheck | null>();
 
 /**
  * A message as the dispatcher sends it: its content, and the options its
@@ -43,18 +60,27 @@ const sessionsInFlight = new Set<string>();
  */
 type DispatchedTurn = { content: string; options: AnyRecord };
 
+/** How a message's run settled (see `runDetachedChatTurn`). */
+type DispatchedTurnResult = Awaited<ReturnType<typeof runDetachedChatTurn>>;
+
 /**
  * The options a message's turn runs with: the ones its client sent with it,
- * and `inheritUnset: true`. The dispatcher plans the turn with unset settings
- * taken as the held process's own (`planMessageTurn`), and a run with the
- * option hands its turn to that process the same way (see
- * `ProviderHandOverPlanOptions`). Without it, the run would read what the
- * message leaves out as a new process would (no tool rules, permissions not
- * skipped): it would switch a /loop's process out of bypassPermissions, or
- * replace the process and stop the work the plan said it would keep.
+ * `inheritUnset: true` and `restoreSwitchesAfterTurn: true`. The dispatcher
+ * plans the turn with unset settings taken as the held process's own
+ * (`planMessageTurn`), and a run with `inheritUnset` hands its turn to that
+ * process the same way (see `ProviderHandOverPlanOptions`). Without it, the
+ * run would read what the message leaves out as a new process would (no tool
+ * rules, permissions not skipped): it would switch a /loop's process out of
+ * bypassPermissions, or replace the process and stop the work the plan said
+ * it would keep. A turn handed to the held process with another model or
+ * permission mode switches the process to them for that turn only:
+ * `restoreSwitchesAfterTurn` has the provider switch it back once the turn is
+ * over, so the work the process is held for runs on as it did (see
+ * `wouldDisturbHeldWork`), and the chat gateway then puts back the model the
+ * session had recorded before the turn.
  */
 function dispatchedOptions(clientOptions: AnyRecord): AnyRecord {
-  return { ...clientOptions, inheritUnset: true };
+  return { ...clientOptions, inheritUnset: true, restoreSwitchesAfterTurn: true };
 }
 
 function readOptions(raw: string): Record<string, unknown> {
@@ -68,29 +94,102 @@ function readOptions(raw: string): Record<string, unknown> {
   }
 }
 
+function logSendFailure(sessionId: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('[ScheduledMessages] Sending to a session failed', { sessionId, error: message });
+}
+
 /**
- * Runs one session's sends, unless the dispatcher is still sending to that
+ * Runs one session's sends, unless the dispatcher already holds that
  * session, and returns them as a promise, or null when it skipped them.
+ * `send` resolves once the dispatcher may let go of the session: the turns
+ * it started there are over, or it left the session's messages to wait.
  *
  * The session is marked before `send` reaches its first await, so a pass that
- * starts meanwhile (the next poll, or two passes started together) skips it.
- * A failure is logged here rather than passed on, so one session's error does
- * not fail the pass for the others.
+ * starts meanwhile (the next poll, or two passes started together) skips it,
+ * or, for a queued pass, waits for the due check `send` opens. A failure is
+ * logged here rather than passed on, so one session's error does not fail the
+ * pass for the others.
  */
 function sendUnlessInFlight(sessionId: string, send: () => Promise<void>): Promise<void> | null {
   if (sessionsInFlight.has(sessionId)) {
     return null;
   }
 
-  sessionsInFlight.add(sessionId);
+  sessionsInFlight.set(sessionId, null);
   return send()
     .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[ScheduledMessages] Sending to a session failed', { sessionId, error: message });
+      logSendFailure(sessionId, error);
     })
     .finally(() => {
+      // A due check still open is answered by letting go: its message waits,
+      // or could not be claimed. Deleted first, so a queued pass that wakes
+      // on the answer finds the session free.
+      const check = sessionsInFlight.get(sessionId);
       sessionsInFlight.delete(sessionId);
+      check?.settle();
     });
+}
+
+/**
+ * Opens a due check on a session the due pass holds (see `DueCheck`). The
+ * pass closes it once it has started the message's turn (`closeDueCheck`);
+ * one still open when the session is let go is answered then
+ * (`sendUnlessInFlight`). A check the previous message left open, as it
+ * could not be claimed, is answered once this one stands in its place, so a
+ * queued pass waiting on it waits on this one next (`waitForDueChecks`).
+ */
+function openDueCheck(sessionId: string): void {
+  let settle = () => {};
+  const answered = new Promise<void>((resolve) => { settle = resolve; });
+  const previous = sessionsInFlight.get(sessionId);
+  sessionsInFlight.set(sessionId, { answered, settle });
+  previous?.settle();
+}
+
+/**
+ * Closes the session's due check: the session stays held, for the turn the
+ * due pass started. Called only once that turn has its run.
+ */
+function closeDueCheck(sessionId: string): void {
+  const check = sessionsInFlight.get(sessionId);
+  if (check) {
+    sessionsInFlight.set(sessionId, null);
+    check.settle();
+  }
+}
+
+/**
+ * Settles once no due check is open on the session, including the checks a
+ * due pass opens one after another for the session's later messages.
+ */
+async function waitForDueChecks(sessionId: string): Promise<void> {
+  for (let check = sessionsInFlight.get(sessionId); check; check = sessionsInFlight.get(sessionId)) {
+    await check.answered;
+  }
+}
+
+/**
+ * Runs a message's turn (`runDetachedChatTurn`) and resolves once the turn is
+ * over, with how its run settles (`settled`). The run can settle hours later:
+ * a turn that leaves work going keeps its process, and its run, open until
+ * the work is done, or until a later turn of the session goes into that
+ * process. The dispatcher holds the session only until the turn is over, and
+ * reads the outcome when the run settles. A run that did not start, or that
+ * settled without its turn completing, is over as it settles.
+ *
+ * The turn's run is reserved before this first awaits, unless the turn has
+ * to interrupt a run under way first (`interruptActiveRun`).
+ */
+async function runMessageTurn(
+  input: Omit<Parameters<typeof runDetachedChatTurn>[0], 'onTurnEnded'>,
+  runtime: ProviderRuntimeGateway,
+): Promise<{ settled: Promise<DispatchedTurnResult> }> {
+  let endTurn = () => {};
+  const turnEnded = new Promise<void>((resolve) => { endTurn = resolve; });
+  const settled = runDetachedChatTurn({ ...input, onTurnEnded: endTurn }, { runtime });
+  await Promise.race([turnEnded, settled.then(() => undefined, () => undefined)]);
+  return { settled };
 }
 
 /** The turn a queued message runs, or null when it has nothing to send. */
@@ -101,33 +200,46 @@ function readQueuedTurn(candidate: QueuedSessionMessageRecord): DispatchedTurn |
     : null;
 }
 
+/**
+ * Sends a claimed queued message's turn and resolves once the turn is over.
+ * What follows its run's settling (putting the message back when another run
+ * took the session first, dropping the draft the message leaves empty) goes
+ * into `outcomes`.
+ */
 async function sendClaimedQueuedMessage(
   candidate: QueuedSessionMessageRecord,
   turn: DispatchedTurn | null,
   runtime: ProviderRuntimeGateway,
+  outcomes: Promise<void>[],
 ): Promise<void> {
   if (!turn) {
     sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
     return;
   }
 
-  const result = await runDetachedChatTurn(
+  const { settled } = await runMessageTurn(
     {
       sessionId: candidate.sessionId,
       userId: candidate.userId,
       content: turn.content,
       options: turn.options,
     },
-    { runtime },
+    runtime,
   );
 
-  // The registry check and run reservation are separate operations. If a run
-  // wins that tiny race, put the turn back so the next poll tries again.
-  if (!result.started && result.error === 'A run was already in progress for this session.') {
-    sessionDraftsDb.restoreQueuedMessage(candidate);
-    return;
-  }
-  sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
+  outcomes.push(settled
+    .then((result) => {
+      // The registry check and run reservation are separate operations. If a
+      // run wins that tiny race, put the turn back so the next poll tries again.
+      if (!result.started && result.error === 'A run was already in progress for this session.') {
+        sessionDraftsDb.restoreQueuedMessage(candidate);
+        return;
+      }
+      sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
+    })
+    .catch((error: unknown) => {
+      logSendFailure(candidate.sessionId, error);
+    }));
 }
 
 /**
@@ -194,19 +306,17 @@ async function planMessageTurn(
  * cannot go into that process (`canHandOver`): it changes something only a
  * new process can apply, and starting one stops the work. The chat gateway
  * refuses such a send from the composer, whose dialog then offers to queue
- * it until the work is done. It does, too, when the turn would go in only
- * by switching the live process's model or permission mode (`switches`):
- * nobody is there to see the switch, and the work runs on after the turn
- * with what it switched to, as a /loop allowed to edit would ask for every
- * edit once a message switched it to the default mode, and be refused when
- * nobody answers.
+ * it until the work is done.
  *
- * A turn the process takes as it is goes on time, as its next turn, and the
- * work keeps running; waiting for the hold itself to end would keep it back
- * for as long as a self-paced /loop runs.
+ * A turn the process takes goes on time, as its next turn, and the work
+ * keeps running; waiting for the hold itself to end would keep it back for
+ * as long as a self-paced /loop runs. So does a turn that switches the live
+ * process's model or permission mode (`switches`): it runs with its own, and
+ * the process switches back once it is over (`restoreSwitchesAfterTurn`, see
+ * `dispatchedOptions`), so a /loop allowed to edit is still allowed after it.
  */
 function wouldDisturbHeldWork(plan: ProviderHandOverPlan | null): boolean {
-  return plan !== null && plan.heldWork && (!plan.canHandOver || plan.switches.length > 0);
+  return plan !== null && plan.heldWork && !plan.canHandOver;
 }
 
 /**
@@ -241,21 +351,25 @@ async function mustDueMessageWait(
 /**
  * Sends every persisted queued turn its session is free for: no turn under
  * way, no background work the tracker reports, and no held work the turn
- * would disturb (`wouldDisturbHeldWork`).
+ * would disturb (`wouldDisturbHeldWork`). A session a due pass is asking
+ * about (`DueCheck`) is looked at once it has its answer: a due message that
+ * goes keeps the session, and the queued turn waits for it, while one that
+ * has to wait keeps the queued turn back no more than if it were not there.
  *
- * Resolves with how many it claimed once the turns it started have settled.
- * The poll in this file does not wait for that; the tests do, to drive one
- * pass without the timer.
+ * Resolves with how many it claimed once the runs of the turns it started
+ * have settled. The poll in this file does not wait for that; the tests do,
+ * to drive one pass without the timer.
  */
 export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): Promise<number> {
   let claimed = 0;
   const sends: Promise<void>[] = [];
+  const outcomes: Promise<void>[] = [];
 
-  for (const candidate of sessionDraftsDb.listQueuedMessages()) {
+  const sendWhenFree = (candidate: QueuedSessionMessageRecord): Promise<void> | null => {
     if (isSessionBusy(candidate.sessionId, runtime)) {
-      continue;
+      return null;
     }
-    const send = sendUnlessInFlight(candidate.sessionId, async () => {
+    return sendUnlessInFlight(candidate.sessionId, async () => {
       const turn = readQueuedTurn(candidate);
       // Asked once the session is marked: the runtime answers asynchronously,
       // and a pass that starts meanwhile has to skip the session. The claim
@@ -267,43 +381,36 @@ export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): P
         return;
       }
       claimed += 1;
-      await sendClaimedQueuedMessage(candidate, turn, runtime);
+      await sendClaimedQueuedMessage(candidate, turn, runtime, outcomes);
     });
+  };
+
+  for (const candidate of sessionDraftsDb.listQueuedMessages()) {
+    const send = sessionsInFlight.get(candidate.sessionId)
+      ? (async () => {
+          await waitForDueChecks(candidate.sessionId);
+          await sendWhenFree(candidate);
+        })()
+      : sendWhenFree(candidate);
     if (send) {
       sends.push(send);
     }
   }
 
   await Promise.all(sends);
+  await Promise.all(outcomes);
   return claimed;
 }
 
-async function sendClaimedMessage(
-  row: ScheduledMessageRow,
-  turn: DispatchedTurn,
-  runtime: ProviderRuntimeGateway,
-): Promise<void> {
+/**
+ * Records how a due message's run settled. Recorded rather than retried, and
+ * recorded whether the run never started (deleted session, unavailable
+ * provider) or started and then failed. Silently dropping a message the user
+ * scheduled is worse than telling them it did not go.
+ */
+async function recordDueMessageOutcome(row: ScheduledMessageRow, settled: Promise<DispatchedTurnResult>): Promise<void> {
   try {
-    const result = await runDetachedChatTurn(
-      {
-        sessionId: row.session_id,
-        userId: row.user_id,
-        content: turn.content,
-        options: turn.options,
-        // The user picked this time on purpose; a run that happens to be going
-        // is aborted so the scheduled message lands when it was due, instead
-        // of being recorded as "not sent — session was busy". Only a run in
-        // a session with no background work of its own: the message waited
-        // otherwise (`mustDueMessageWait`).
-        interruptActiveRun: true,
-      },
-      { runtime },
-    );
-
-    // Recorded rather than retried, and recorded whether the run never started
-    // (deleted session, unavailable provider) or started and then failed.
-    // Silently dropping a message the user scheduled is worse than telling
-    // them it did not go.
+    const result = await settled;
     if (!result.started || result.error) {
       scheduledMessagesDb.markFailed(row.id, result.error ?? 'The session was unavailable when this was due.');
     }
@@ -314,25 +421,57 @@ async function sendClaimedMessage(
 }
 
 /**
+ * Sends a claimed due message's turn and resolves once the turn is over; how
+ * its run settles is recorded through `outcomes`. Closes the session's due
+ * check as soon as the turn has its run: the session stays held for the turn.
+ */
+async function sendClaimedMessage(
+  row: ScheduledMessageRow,
+  turn: DispatchedTurn,
+  runtime: ProviderRuntimeGateway,
+  outcomes: Promise<void>[],
+): Promise<void> {
+  const turnOver = runMessageTurn(
+    {
+      sessionId: row.session_id,
+      userId: row.user_id,
+      content: turn.content,
+      options: turn.options,
+      // The user picked this time on purpose; a run that happens to be going
+      // is aborted so the scheduled message lands when it was due, instead
+      // of being recorded as "not sent — session was busy". Only a run in
+      // a session with no background work of its own: the message waited
+      // otherwise (`mustDueMessageWait`).
+      interruptActiveRun: true,
+    },
+    runtime,
+  );
+  closeDueCheck(row.session_id);
+  const { settled } = await turnOver;
+  outcomes.push(recordDueMessageOutcome(row, settled));
+}
+
+/**
  * Sends every message whose time has come.
  *
  * Different sessions are sent to side by side. One session's messages go one
  * at a time, in the order they were due: a session runs one turn at a time,
  * and two of its messages must not race each other into it. A session the
- * dispatcher is still sending to is left for a later pass, so a message that
- * comes due meanwhile waits for that turn to settle, background work included,
- * rather than interrupting it. It interrupts only a run the dispatcher did
- * not start, and only in a session with no background work of its own: not
- * the user's turn that went into a process held for such work, such as the
- * process of a turn the dispatcher started (`mustDueMessageWait`). Nor does a
- * message go when it would disturb background work the session's process is
- * held for (`wouldDisturbHeldWork`). A waiting message stays pending, and so
- * do the session's later ones, until it can go. One the held process can
- * take as it is goes into it when due.
+ * dispatcher holds for a turn it started is left for a later pass, so a
+ * message that comes due meanwhile waits for that turn to be over rather than
+ * interrupting it, and then goes as in any session. It interrupts only a run
+ * the dispatcher did not start, and only in a session with no background work
+ * of its own: not the user's turn that went into a process held for such
+ * work (`mustDueMessageWait`). Nor does a message go when it would disturb
+ * background work the session's process is held for (`wouldDisturbHeldWork`).
+ * A waiting message stays pending, and so do the session's later ones, until
+ * it can go; the session's queued turn does not wait behind it (see
+ * `dispatchQueuedMessages`). One the held process can take goes into it when
+ * due, the process of a turn the dispatcher started included.
  *
- * Resolves with how many it claimed once the turns it started have settled.
- * The poll in this file does not wait for that; the tests do, to drive one
- * pass without the timer.
+ * Resolves with how many it claimed once the runs of the turns it started
+ * have settled and their outcomes are recorded. The poll in this file does
+ * not wait for that; the tests do, to drive one pass without the timer.
  */
 export async function dispatchDueScheduledMessages(
   runtime: ProviderRuntimeGateway,
@@ -350,6 +489,7 @@ export async function dispatchDueScheduledMessages(
 
   let claimed = 0;
   const sends: Promise<void>[] = [];
+  const outcomes: Promise<void>[] = [];
 
   for (const [sessionId, rows] of dueBySession) {
     const send = sendUnlessInFlight(sessionId, async () => {
@@ -357,19 +497,23 @@ export async function dispatchDueScheduledMessages(
         const turn: DispatchedTurn = { content: row.content, options: dispatchedOptions(readOptions(row.options)) };
         // Asked before each message, for its own options, not once per
         // session: whether the held process takes a turn depends on what the
-        // turn changes, and the user's turn may have taken over the previous
-        // message's process and left it held, or still be running in it.
+        // turn changes, and the previous message's turn, or the user's, may
+        // have left the process held, or still be running in it.
+        openDueCheck(sessionId);
         if (await mustDueMessageWait(sessionId, turn.options, runtime)) {
           return;
         }
         // Claimed right before it goes, not when listed, so a message waiting
         // for the turn before it is not marked sent early. A message
-        // cancelled while it waited is skipped here.
+        // cancelled while it waited is skipped here. Nothing went, so its due
+        // check stays open, for the session's next message to take over or
+        // for the session's release to answer: a queued pass waiting on it
+        // must not read the session as held for a turn.
         if (!scheduledMessagesDb.claim(row.id)) {
           continue;
         }
         claimed += 1;
-        await sendClaimedMessage(row, turn, runtime);
+        await sendClaimedMessage(row, turn, runtime, outcomes);
       }
     });
     if (send) {
@@ -378,6 +522,7 @@ export async function dispatchDueScheduledMessages(
   }
 
   await Promise.all(sends);
+  await Promise.all(outcomes);
   return claimed;
 }
 
@@ -400,10 +545,11 @@ export function initializeScheduledMessageDispatcher(runtime: ProviderRuntimeGat
 
   const poll = () => {
     // Neither pass is awaited: a turn's run can take hours to settle, and the
-    // passes themselves skip the sessions an earlier poll is still sending
-    // to. Each pass marks the sessions it sends to before it returns, so the
-    // queued pass skips a session the scheduled pass has just taken: a due
-    // message goes before a turn queued for the same session.
+    // passes themselves skip the sessions an earlier poll still holds for a
+    // turn. The scheduled pass marks the sessions it asks about before it
+    // returns, and the queued pass waits for each answer: a due message that
+    // goes goes before a turn queued for the same session, and one that has
+    // to wait keeps none back.
     void dispatchDueScheduledMessages(runtime).catch(logPassFailure);
     void dispatchQueuedMessages(runtime).catch(logPassFailure);
   };

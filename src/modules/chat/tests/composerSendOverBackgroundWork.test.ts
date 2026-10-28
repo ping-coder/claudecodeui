@@ -5,9 +5,12 @@ import { afterEach, beforeEach, describe, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
+import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
+import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { clearQueuedMessage, readDraftText, readQueuedMessage, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
 import type * as ChatDrafts from '@/shared/chatDrafts';
-import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, SessionActivityMap } from '@/shared/types';
+import { useSessionProtection } from '@/shared/hooks/useSessionProtection';
+import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, ServerEvent, SessionActivityMap } from '@/shared/types';
 
 /**
  * A session whose turn has ended with background work still running keeps
@@ -72,7 +75,7 @@ const planRequests = () => vi.mocked(fetch).mock.calls
   .map(([url, init]) => ({ url: String(url), body: JSON.parse(String(init?.body)) as { options: Record<string, unknown> } }));
 
 type ComposerArgs = Parameters<typeof useChatComposerState>[0];
-type SentFrame = { type: string; sessionId?: string; content?: string; options?: Record<string, unknown> };
+type SentFrame = { type: string; sessionId?: string; content?: string; options?: Record<string, unknown>; clientRequestId?: string };
 
 const render = (processingSessions: SessionActivityMap, overrides: Partial<ComposerArgs> = {}) => {
   const sent: SentFrame[] = [];
@@ -435,9 +438,109 @@ describe('a provider whose runtime runs the message beside the work', () => {
   });
 });
 
+describe('right after the user stopped a turn the held process ran, its work going on', () => {
+  // The page's activity map and realtime handler, not a fixed map: the stop's
+  // `complete` is what leaves the session as background work, before the
+  // running-sessions poll comes round.
+  const renderAfterStop = () => {
+    let listener: ((event: ServerEvent) => void) | null = null;
+    const sent: SentFrame[] = [];
+    const view = renderHook(() => {
+      const protection = useSessionProtection();
+      useChatRealtimeHandlers({
+        isActive: true,
+        subscribe: (fn) => {
+          listener = fn;
+          return () => { listener = null; };
+        },
+        provider: 'claude',
+        selectedSession: SESSION,
+        currentSessionId: SESSION.id,
+        setTokenBudget: () => undefined,
+        pendingPermissionRequests: [],
+        setPendingPermissionRequests: () => undefined,
+        claimPageEffect: () => true,
+        isBackgroundReporter: () => true,
+        lastSeqRef: { current: new Map() },
+        statusCheckSentAtRef: { current: new Map() },
+        onSessionProcessing: protection.markSessionProcessing,
+        onSessionIdle: protection.markSessionIdle,
+        onSessionBackground: protection.markSessionBackground,
+        getSessionActivity: protection.getSessionActivity,
+        requestLatestMessages: async () => undefined,
+        // The workflow's launch is not loaded: the entry's tasks are all there is.
+        sessionStore: {
+          appendRealtime: () => undefined,
+          getMessages: () => [],
+          getSessionSlot: () => ({ serverMessages: [] }),
+          updateStreaming: () => undefined,
+          finalizeStreaming: () => undefined,
+          discardStreaming: () => undefined,
+        } as unknown as SessionStore,
+      });
+      const composer = useChatComposerState({
+        selectedProject: PROJECT,
+        selectedSession: SESSION,
+        currentSessionId: SESSION.id,
+        provider: 'claude',
+        permissionMode: 'default',
+        cyclePermissionMode: () => undefined,
+        resolvePermissionModeForProvider: () => 'default' as PermissionMode,
+        currentProviderModel: 'test-model',
+        currentProviderEffort: 'medium',
+        isLoading: false,
+        processingSessions: protection.processingSessions,
+        canAbortSession: false,
+        tokenBudget: null,
+        sendMessage: (message) => { sent.push(message as SentFrame); },
+        scrollToBottom: () => undefined,
+        addMessage: () => undefined,
+        setIsUserScrolledUp: () => undefined,
+        setPendingPermissionRequests: () => undefined,
+        supportsMidRunInsert: true,
+        isConnected: true,
+      });
+      return { protection, composer };
+    });
+
+    const tasks = backgroundOnly.get('session-1')?.tasks ?? [];
+    act(() => { view.result.current.protection.markSessionBackground('session-1', tasks); });
+    // The next turn went into the held process; the user stopped it alone.
+    act(() => { view.result.current.protection.markSessionProcessing('session-1', { statusText: null, canInterrupt: true }); });
+    act(() => {
+      listener?.({ kind: 'complete', id: 'complete-1', sessionId: 'session-1', aborted: true, backgroundWork: true } as ServerEvent);
+    });
+    return { view, sent };
+  };
+
+  test('an edit still asks first, as the session reads as background work again', async () => {
+    const { view, sent } = renderAfterStop();
+    assert.equal(view.result.current.protection.getSessionActivity('session-1')?.background, true);
+
+    await act(async () => {
+      view.result.current.composer.beginEditMessage({ type: 'user', content: 'Now the docs', timestamp: new Date(), transcriptAnchorId: 'anchor-r2' });
+    });
+    await act(async () => { view.result.current.composer.setInput('Now the docs, but shorter'); });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = view.result.current.composer.handleSubmit({ preventDefault: () => undefined } as never);
+    });
+
+    await waitFor(() => assert.notEqual(view.result.current.composer.backgroundSendPrompt, null));
+    assert.equal(sent.filter((frame) => frame.type === 'chat.edit-send').length, 0, 'nothing goes out while it asks');
+    await act(async () => {
+      view.result.current.composer.resolveBackgroundSendPrompt('cancel');
+      await pending;
+    });
+    assert.equal(sent.length, 0);
+  });
+});
+
 describe('a send the server refuses to run beside the work', () => {
   const OWN_TASKS = backgroundOnly.get('session-1')?.tasks ?? [];
   const refusal = (changes: string[]) => ({ sessionId: 'session-1', reason: 'BACKGROUND_WORK_WOULD_STOP', changes });
+  /** The refusal of one send, naming it by the clientRequestId it carried, as the server hands it back. */
+  const refusalOf = (send: SentFrame | undefined, changes: string[]) => ({ ...refusal(changes), clientRequestId: send?.clientRequestId });
 
   /** A Claude composer whose echoes and their row ids, removals and background reports are recorded. */
   const renderClaude = (overrides: Partial<ComposerArgs> = {}) => {
@@ -518,6 +621,35 @@ describe('a send the server refuses to run beside the work', () => {
     assert.equal(view.result.current.input, '');
   });
 
+  test('send anyway takes the message out wherever it still stands as a paragraph of its own, and leaves a text that only runs on from it', async () => {
+    // What the composer holds by the time the user answers: another pane's
+    // refused send can have gone back ahead of this one, and the session's
+    // shared draft is that pane's too.
+    const cases: Array<{ holds: string; left: string }> = [
+      { holds: 'mine\n\ntyped since', left: 'typed since' },
+      { holds: 'from the other pane\n\nmine', left: 'from the other pane' },
+      { holds: 'first\n\nmine\n\nlast', left: 'first\n\nlast' },
+      { holds: 'mine and more\n\nother', left: 'mine and more\n\nother' },
+      { holds: 'mine and more\n\nmine', left: 'mine and more' },
+      { holds: 'mine, rewritten', left: 'mine, rewritten' },
+      { holds: 'all of mine', left: 'all of mine' },
+    ];
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const { view, sends } = renderClaude();
+
+    for (const { holds, left } of cases) {
+      await sendOver(view, 'mine');
+      act(() => { view.result.current.handleSendRefused(refusalOf(sends().at(-1), ['effort'])); });
+      await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+      await act(async () => { view.result.current.setInput(holds); });
+      await act(async () => { view.result.current.resolveBackgroundSendPrompt('send'); });
+
+      assert.equal(view.result.current.input, left, `holding ${JSON.stringify(holds)}`);
+      assert.equal(sends().at(-1)?.content, 'mine');
+      await act(async () => { view.result.current.setInput(''); });
+    }
+  });
+
   test('is taken only by the composer that sent it: the other pane on the session hears it and does nothing', async () => {
     handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
     const left = renderClaude();
@@ -561,6 +693,87 @@ describe('a send the server refuses to run beside the work', () => {
       await pending;
     });
     act(() => { view.result.current.handleSendRefused(refusal([])); });
+    assert.equal(removeMessage.mock.calls.length, 1);
+    assert.equal(view.result.current.backgroundSendPrompt, null);
+  });
+
+  test('sent from two panes at once, each refusal, by its clientRequestId, is undone by the pane that sent it', async () => {
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const left = renderClaude();
+    const right = renderClaude();
+    await sendOver(left.view, 'from the left');
+    await sendOver(right.view, 'from the right');
+    const [leftSend] = left.sends();
+    const [rightSend] = right.sends();
+    assert.match(leftSend?.clientRequestId ?? '', /^[\w-]{1,128}$/);
+    assert.match(rightSend?.clientRequestId ?? '', /^[\w-]{1,128}$/);
+    assert.notEqual(leftSend?.clientRequestId, rightSend?.clientRequestId);
+
+    // The earlier send's refusal comes first, and both panes hear each one.
+    act(() => {
+      right.view.result.current.handleSendRefused(refusalOf(leftSend, ['tools']));
+      left.view.result.current.handleSendRefused(refusalOf(leftSend, ['tools']));
+    });
+    assert.deepEqual(left.removeMessage.mock.calls, [['session-1', left.echoes[0]?.rowId]]);
+    assert.equal(right.removeMessage.mock.calls.length, 0);
+    assert.equal(right.view.result.current.backgroundSendPrompt, null);
+    await waitFor(() => assert.notEqual(left.view.result.current.backgroundSendPrompt, null));
+
+    act(() => {
+      left.view.result.current.handleSendRefused(refusalOf(rightSend, ['tools']));
+      right.view.result.current.handleSendRefused(refusalOf(rightSend, ['tools']));
+    });
+    assert.equal(left.removeMessage.mock.calls.length, 1);
+    assert.deepEqual(right.removeMessage.mock.calls, [['session-1', right.echoes[0]?.rowId]]);
+    assert.deepEqual(right.onSessionBackground.mock.calls, [['session-1', OWN_TASKS]]);
+    await waitFor(() => assert.notEqual(right.view.result.current.backgroundSendPrompt, null));
+
+    await act(async () => {
+      left.view.result.current.resolveBackgroundSendPrompt('cancel');
+      right.view.result.current.resolveBackgroundSendPrompt('cancel');
+    });
+  });
+
+  test('without an id, from a server older than ids, is taken by the composer that made the session\'s latest send, as before', async () => {
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const left = renderClaude();
+    const right = renderClaude();
+    await sendOver(left.view, 'from the left');
+    await sendOver(right.view, 'from the right');
+
+    act(() => {
+      left.view.result.current.handleSendRefused(refusal(['tools']));
+      right.view.result.current.handleSendRefused(refusal(['tools']));
+    });
+    assert.equal(left.removeMessage.mock.calls.length, 0);
+    assert.deepEqual(right.removeMessage.mock.calls, [['session-1', right.echoes[0]?.rowId]]);
+    await waitFor(() => assert.notEqual(right.view.result.current.backgroundSendPrompt, null));
+
+    // A second one finds nothing left to undo.
+    act(() => {
+      left.view.result.current.handleSendRefused(refusal([]));
+      right.view.result.current.handleSendRefused(refusal([]));
+    });
+    assert.equal(left.removeMessage.mock.calls.length, 0);
+    assert.equal(right.removeMessage.mock.calls.length, 1);
+    await act(async () => { right.view.result.current.resolveBackgroundSendPrompt('cancel'); });
+  });
+
+  test('naming a send this page did not make, or one already undone, changes nothing', async () => {
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const { view, sends, removeMessage } = renderClaude();
+    await sendOver(view, 'first');
+
+    act(() => { view.result.current.handleSendRefused({ ...refusal([]), clientRequestId: 'send_not_this_page' }); });
+    assert.equal(removeMessage.mock.calls.length, 0, 'an id is never taken for the session\'s latest send');
+    assert.equal(view.result.current.backgroundSendPrompt, null);
+
+    act(() => { view.result.current.handleSendRefused(refusalOf(sends()[0], [])); });
+    assert.equal(removeMessage.mock.calls.length, 1);
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+    await act(async () => { view.result.current.resolveBackgroundSendPrompt('cancel'); });
+
+    act(() => { view.result.current.handleSendRefused(refusalOf(sends()[0], [])); });
     assert.equal(removeMessage.mock.calls.length, 1);
     assert.equal(view.result.current.backgroundSendPrompt, null);
   });

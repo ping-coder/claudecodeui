@@ -154,6 +154,19 @@ describe('a send_refused frame', () => {
     assert.equal(chat.rows('S').length, 0);
   });
 
+  it('hands over the send\'s clientRequestId when it carries one, and nothing for one that is not a string', () => {
+    const socket = createSocket();
+    const chat = renderChat(socket, 'S');
+
+    socket.dispatch({ kind: 'send_refused', sessionId: 'S', reason: 'BACKGROUND_WORK_WOULD_STOP', changes: [], clientRequestId: 'send_mf3k2_a1b2c3' });
+    socket.dispatch({ kind: 'send_refused', sessionId: 'S', reason: 'BACKGROUND_WORK_WOULD_STOP', changes: [], clientRequestId: 7 });
+
+    assert.deepEqual(chat.onSendRefused.mock.calls.map(([event]) => event), [
+      { sessionId: 'S', reason: 'BACKGROUND_WORK_WOULD_STOP', changes: [], clientRequestId: 'send_mf3k2_a1b2c3' },
+      { sessionId: 'S', reason: 'BACKGROUND_WORK_WOULD_STOP', changes: [] },
+    ]);
+  });
+
   it('that names no session is dropped', () => {
     const socket = createSocket();
     const chat = renderChat(socket, 'S');

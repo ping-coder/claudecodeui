@@ -418,6 +418,17 @@
     "inserted": "Inserted",
     "insertedHint": "Sent while Claude was working, and read at its next step"
   },
+  "pinnedQuestion": {
+    "label": "Question of this turn",
+    "jump": "Jump to this message",
+    "loadAndJump": "Load all messages and jump to this one",
+    "reading": "Reading this turn's question…",
+    "notLoaded": "This turn's question is in earlier messages",
+    "inserts_one": "+{{count}} inserted",
+    "inserts_other": "+{{count}} inserted",
+    "attachments_one": "{{count}} attachment",
+    "attachments_other": "{{count}} attachments"
+  },
   "export": {
     "trigger": "Export conversation",
     "heading": "Export as",

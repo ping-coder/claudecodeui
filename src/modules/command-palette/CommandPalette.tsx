@@ -59,6 +59,7 @@ import type {
 import { formatShortcut } from '@/shared/utils';
 import { useSessionsSource } from '@/modules/command-palette/hooks/useSessionsSource';
 import { useFilesSource } from '@/modules/command-palette/hooks/useFilesSource';
+import { useFileSearch } from '@/modules/command-palette/hooks/useFileSearch';
 import { useCommitsSource } from '@/modules/command-palette/hooks/useCommitsSource';
 import { useSessionMessageSearch } from '@/modules/command-palette/hooks/useSessionMessageSearch';
 import { useBranchesSource } from '@/modules/command-palette/hooks/useBranchesSource';
@@ -163,6 +164,10 @@ function CommandPalette({
   const sessions = useSessionsSource(projectId, open && showSessions);
   const messageMatches = useSessionMessageSearch(projectId, search, open && showSessions);
   const { files, tooLarge: filesTooLarge } = useFilesSource(projectId, open && showFiles);
+  // A project too large to list is searched on the server, which sends back only the best matches.
+  const fileSearch = useFileSearch(projectId, search, open && showFiles && filesTooLarge, FILES_PAGE_LIMIT);
+  // The files a search ranks: every file of the project, or the server's best matches.
+  const searchableFiles = filesTooLarge ? fileSearch.files : files;
   const commits = useCommitsSource(projectId, open && showCommits);
   const branches = useBranchesSource(projectId, open && showBranches);
   const git = useGitActions(projectId);
@@ -193,7 +198,10 @@ function CommandPalette({
   // A file row's value is the file's absolute path, which no other row's value can equal; a relative
   // path could equal a branch name, and cmdk highlights and runs every row holding the selected
   // value. cmdk is handed this scorer, so files are still matched by their relative path.
-  const filesByPath = React.useMemo(() => new Map(files.map((f) => [f.path.trim(), f])), [files]);
+  const filesByPath = React.useMemo(
+    () => new Map(searchableFiles.map((f) => [f.path.trim(), f])),
+    [searchableFiles],
+  );
   const scoreRow = React.useCallback<RowScorer>(
     (value, query, keywords) => {
       const file = filesByPath.get(value);
@@ -249,7 +257,12 @@ function CommandPalette({
   const unignoredFiles = React.useMemo(() => files.filter((f) => !f.isIgnored), [files]);
   // cmdk filters only the rows it is given, so with a search the palette ranks every file itself,
   // once per keystroke, and renders the best few (root page) or the best FILES_PAGE_LIMIT (files page).
-  const fileMatches = React.useMemo(() => (search ? rankPathMatches(files, search) : null), [files, search]);
+  // The server's matches are ranked again too: those of the search before the last keystroke stay
+  // until its answer lands, narrowed to what is typed now.
+  const fileMatches = React.useMemo(
+    () => (search ? rankPathMatches(searchableFiles, search) : null),
+    [searchableFiles, search],
+  );
   const fileCandidates = fileMatches ?? unignoredFiles;
   const filesShown = fileCandidates.slice(0, page === 'files' ? FILES_PAGE_LIMIT : browseLimit);
   // Below the list: why no file can be found, or that the files page leaves some out.
@@ -257,11 +270,17 @@ function CommandPalette({
   if (showFiles && projectId) {
     if (filesTooLarge) {
       // Not while the search is empty: the palette is often opened for its actions.
-      filesNote = search
-        ? t('commandPalette.filesTooLarge', {
+      if (search && fileSearch.status === 'failed') {
+        filesNote = t('commandPalette.filesTooLarge', {
           defaultValue: 'Files are not listed for projects with more than 10,000 entries. Open a smaller folder as the project, or ignore build output in the root .gitignore.',
-        })
-        : null;
+        });
+      } else if (search && fileSearch.status === 'pending') {
+        filesNote = t('commandPalette.filesSearching', { defaultValue: 'Searching files…' });
+      } else if (search && fileSearch.incomplete) {
+        filesNote = t('commandPalette.filesSearchIncomplete', {
+          defaultValue: 'Only part of this large project was searched, so some files may be missing. Open a smaller folder as the project, or ignore build output in the root .gitignore.',
+        });
+      }
     } else if (page === 'files' && fileCandidates.length > filesShown.length) {
       filesNote = search
         ? t('commandPalette.filesBestMatches', {
@@ -718,7 +737,9 @@ function movesHighlight(event: React.KeyboardEvent): boolean {
  * query that hits the root folder's name ("claude" in .../claudecodeui/) would
  * match all files alike. A pasted absolute path (the file tree's Copy Path) is
  * read relative to the root first; separators are levelled so a Windows path
- * pasted with backslashes still matches.
+ * pasted with backslashes still matches. The server's file search, used for a
+ * project too large to list, ranks with a port of this and of cmdk's filter
+ * (server/modules/file-tree/file-search-score.service.ts): change them together.
  */
 function scoreFile(file: FilePaths, search: string): number {
   const query = search.replace(/\\/g, '/');

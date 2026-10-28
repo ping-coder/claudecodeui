@@ -224,7 +224,10 @@ type ResolvedSendTarget = {
  * in the envelope of the insert refusals: no `seq`, and never a
  * `protocol_error`, which the client takes as the session's run failing.
  * `changes` says why the turn cannot go into the held process; `content` is
- * the message as sent, for the composer to put back.
+ * the message as sent, for the composer to put back. `clientRequestId` is the
+ * send's own (see `readClientRequestId`), left out when it had none: every
+ * pane on a page shares the socket, and the id tells them which send this
+ * answers.
  */
 type SendRefusedFrame = {
   kind: Extract<GatewayEventKind, 'send_refused'>;
@@ -234,8 +237,22 @@ type SendRefusedFrame = {
   reason: 'BACKGROUND_WORK_WOULD_STOP';
   changes: HandOverChange[];
   content: string;
+  clientRequestId?: string;
   timestamp: string;
 };
+
+/**
+ * How a client names one of its sends (`clientRequestId`), for the gateway to
+ * hand back on its refusal: letters, digits, `_` and `-`, 128 at most.
+ */
+const CLIENT_REQUEST_ID_PATTERN = /^[\w-]{1,128}$/;
+
+/** The send's `clientRequestId` as the client sent it, or null when it sent none, or one out of pattern. */
+function readClientRequestId(data: AnyRecord): string | null {
+  return typeof data.clientRequestId === 'string' && CLIENT_REQUEST_ID_PATTERN.test(data.clientRequestId)
+    ? data.clientRequestId
+    : null;
+}
 
 /**
  * Refuses a `chat.send` that set `options.keepBackgroundWork` when its turn
@@ -282,6 +299,7 @@ async function refuseSendThatStopsBackgroundWork(
     return false;
   }
 
+  const clientRequestId = readClientRequestId(data);
   const frame: SendRefusedFrame = {
     kind: 'send_refused',
     id: generateMessageId('send_refused'),
@@ -290,6 +308,7 @@ async function refuseSendThatStopsBackgroundWork(
     reason: 'BACKGROUND_WORK_WOULD_STOP',
     changes: plan.changes,
     content: typeof data.content === 'string' ? data.content : '',
+    ...(clientRequestId ? { clientRequestId } : {}),
     timestamp: new Date().toISOString(),
   };
   sendJson(ws, frame);
@@ -330,6 +349,117 @@ function resolveSendTarget(
   }
 
   return { sessionId, session, provider };
+}
+
+/**
+ * What the provider runtime reports to a turn's `onSwitchesRestored` run
+ * option, the turn's switch-back: a turn run with `restoreSwitchesAfterTurn`
+ * is over, and the process it was handed to stays, switched back. For each
+ * of the model and the permission mode the turn was to switch, what the
+ * process runs with now; null for one the turn was not to switch.
+ */
+type SwitchesRestored = { model?: unknown; permissionMode?: unknown };
+
+/**
+ * One turn that recorded its model on the session for itself alone (see
+ * `recordModelForTurnAlone`).
+ */
+type TurnModelRecord = {
+  /** The model the session had recorded when the turn wrote its own; null when none was. */
+  previousModel: string | null;
+  /** The model the turn recorded. */
+  turnModel: string;
+  /** Set once the turn's switch-back has come. */
+  restored: boolean;
+  /**
+   * The session's next such turn, when it was dispatched while this turn's
+   * switch-back was still to come, so that it found this turn's model
+   * recorded. Once the switch-back comes, it takes over this turn's previous
+   * model as its own.
+   */
+  next: TurnModelRecord | null;
+};
+
+/**
+ * Per session, the latest turn that recorded its model for itself alone,
+ * until its switch-back comes: the only one whose switch-back puts a model
+ * back. One whose switch-back never comes (its process let go after the
+ * turn) stays until the session's next such turn takes its place: that turn
+ * links to it only if it still finds its model recorded, and a switch-back
+ * that never comes hands nothing on.
+ */
+const turnModelRecords = new Map<string, TurnModelRecord>();
+
+/** The model recorded on the session's row, trimmed; null when none is, or the session has gone. */
+function readRecordedModel(sessionId: string): string | null {
+  return sessionsDb.getSessionById(sessionId)?.model?.trim() || null;
+}
+
+/**
+ * Records the model of a turn whose switches last for the turn alone
+ * (`restoreSwitchesAfterTurn`, as the scheduled-messages dispatcher sends a
+ * queued or due message), and returns the turn's `onSwitchesRestored` run
+ * option, which puts the session's own model back once the turn's
+ * switch-back comes (see `SwitchesRestored`).
+ *
+ * The model is recorded before the run as for every turn: the runtime reads
+ * a resumed turn's model off the record, and the message must run on its
+ * own. But the record is also what a composer shows when the session is
+ * opened again, and what the user's next send goes with: left on the
+ * message's model, it would switch a /loop the message left as it was for
+ * good. So once the switch-back comes, the model recorded before the turn
+ * goes back, unless the record no longer holds the turn's model (the user
+ * picked another meanwhile); read and written with nothing awaited in
+ * between. The previous model goes back whatever the runtime switched back,
+ * as the turn's record replaced the user's pick even where the model was
+ * not switched, or nothing was: the turn named the process's own model and
+ * permission mode, or it was stopped while it waited for a turn the CLI ran
+ * on its own. The model the runtime names stands in only when nothing was
+ * recorded before.
+ * A turn that started a process of its own, or whose process lets go after
+ * it, gets no switch-back: it leaves the record on the turn's model, as
+ * every turn's did before.
+ *
+ * Two such turns of a session can follow each other faster than the first
+ * one's switch-back (due messages of one session in one pass). The record is
+ * then the second one's, and only the second one's switch-back puts a model
+ * back: the one the second found recorded, or, when that was the first one's
+ * model, the one recorded before the first, which the first one's
+ * switch-back hands on.
+ */
+function recordModelForTurnAlone(
+  provider: LLMProvider,
+  sessionId: string,
+  model: string,
+): (restored: SwitchesRestored) => void {
+  const recorded = readRecordedModel(sessionId);
+  const turn: TurnModelRecord = { previousModel: recorded, turnModel: model, restored: false, next: null };
+  const latest = turnModelRecords.get(sessionId);
+  if (latest && !latest.restored && latest.turnModel === recorded) {
+    latest.next = turn;
+  }
+  turnModelRecords.set(sessionId, turn);
+  providerModelsService.setSessionModel(provider, sessionId, model);
+
+  return (restored) => {
+    if (turn.restored) {
+      return;
+    }
+    turn.restored = true;
+    if (turn.next) {
+      turn.next.previousModel = turn.previousModel;
+    }
+    if (turnModelRecords.get(sessionId) !== turn) {
+      // A later such turn recorded its model: the record is that turn's.
+      return;
+    }
+    turnModelRecords.delete(sessionId);
+    const switchedBackTo = typeof restored?.model === 'string' && restored.model.trim() ? restored.model.trim() : null;
+    const previousModel = turn.previousModel ?? switchedBackTo;
+    if (previousModel && readRecordedModel(sessionId) === turn.turnModel) {
+      providerModelsService.setSessionModel(provider, sessionId, previousModel);
+    }
+  };
 }
 
 /**
@@ -387,9 +517,14 @@ async function dispatchRun(
 
   // Record what this turn runs with so reopening the session later restores the
   // same model, reasoning effort and ultracode switch, and so the resume path
-  // has a session-scoped model answer to use.
-  if (typeof clientOptions.model === 'string' && clientOptions.model.trim()) {
-    providerModelsService.setSessionModel(provider, sessionId, clientOptions.model);
+  // has a session-scoped model answer to use. A turn whose switches last for
+  // it alone puts the session's own model back afterwards.
+  const turnModel = typeof clientOptions.model === 'string' ? clientOptions.model.trim() : '';
+  let onSwitchesRestored: ((restored: SwitchesRestored) => void) | null = null;
+  if (turnModel && clientOptions.restoreSwitchesAfterTurn === true) {
+    onSwitchesRestored = recordModelForTurnAlone(provider, sessionId, turnModel);
+  } else if (turnModel) {
+    providerModelsService.setSessionModel(provider, sessionId, turnModel);
   }
   if (effort) {
     providerModelsService.setSessionEffort(provider, sessionId, effort);
@@ -422,6 +557,12 @@ async function dispatchRun(
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
   };
+  // The gateway's own callback (see recordModelForTurnAlone), never a value
+  // the client sent under its name.
+  delete runtimeOptions.onSwitchesRestored;
+  if (onSwitchesRestored) {
+    runtimeOptions.onSwitchesRestored = onSwitchesRestored;
+  }
 
   let failure: string | null = null;
   try {
@@ -945,12 +1086,12 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * Resolves when the provider run settles, which for a turn that leaves
  * background work going is when its process exits, or as soon as the turn is
  * over and the provider has handed that process to the session's next run
- * (the user sent a message, which went into the process as its next turn and
- * keeps the work going): the dispatcher waits for its own turn, not for a
- * process the user has taken on. The run itself still finishes in the
- * background, safety net included. Returns false when the session has gone
- * away or is busy without `interruptActiveRun`, which the caller reports on
- * the schedule.
+ * (a message went into the process as its next turn and keeps the work
+ * going): the caller waits for its own run, not for a process the next turn
+ * has taken on. The run itself still finishes in the background, safety net
+ * included. `onTurnEnded` tells the caller earlier, as the turn ends. Returns
+ * false when the session has gone away or is busy without
+ * `interruptActiveRun`, which the caller reports on the schedule.
  */
 export async function runDetachedChatTurn(
   input: {
@@ -966,6 +1107,15 @@ export async function runDetachedChatTurn(
      * which the abort would stop.
      */
     interruptActiveRun?: boolean;
+    /**
+     * Called once the turn is over: its run's terminal `complete` has gone
+     * out, however the turn ended. Never called for a run that did not start,
+     * which the result reports. The scheduled-messages dispatcher holds the
+     * session until then: the run can stay open for hours after, holding its
+     * process for work the turn left going, and the session's next messages
+     * may go into that process meanwhile.
+     */
+    onTurnEnded?: () => void;
   },
   dependencies: ChatWebSocketDependencies,
 ): Promise<{ started: boolean; error: string | null }> {
@@ -1001,6 +1151,7 @@ export async function runDetachedChatTurn(
   const handedOver = new Promise<{ started: boolean; error: string | null }>((resolve) => {
     settleOnHandOver = resolve;
   });
+  const { onTurnEnded } = input;
   const dispatched = dispatchRun(
     null,
     input.userId,
@@ -1011,6 +1162,9 @@ export async function runDetachedChatTurn(
     {},
     (run) => {
       void chatRunRegistry.whenHandedOver(run).then(() => settleOnHandOver({ started: true, error: null }));
+      if (onTurnEnded) {
+        void chatRunRegistry.whenCompleted(run).then(() => onTurnEnded());
+      }
     },
   );
   return Promise.race([dispatched, handedOver]);
@@ -1021,8 +1175,9 @@ export async function runDetachedChatTurn(
  * Used by the websocket server service for every chat connection.
  *
  * Inbound protocol (client to server):
- * - `chat.send`                { sessionId, content, options? } (`options.keepBackgroundWork`: refuse
- *                              rather than stop the session's background work)
+ * - `chat.send`                { sessionId, content, options?, clientRequestId? } (`options.keepBackgroundWork`:
+ *                              refuse rather than stop the session's background work; the refusal
+ *                              carries the send's `clientRequestId`)
  * - `chat.edit-send`           { sessionId, anchorId, content, options? }
  * - `chat.insert`              { sessionId, insertId, content }
  * - `chat.insert-cancel`       { sessionId, insertId }

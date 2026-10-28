@@ -21,7 +21,7 @@ type RunEnd = {
   /** The server's start time of the run, its identity. */
   runStartedAt: number;
   outcome: 'done' | 'failed' | 'aborted' | 'backgroundDone';
-  /** 'done' only: the turn ended with background work still running. */
+  /** 'done' or 'aborted': the turn ended with background work still running (an aborted one was stopped alone). */
   backgroundWork: boolean;
   /** The session's custom name on the server, for a session this tab has not loaded. */
   sessionName: string | null;
@@ -159,11 +159,14 @@ export function useRunEndedFeed({ resolveSessionLabel, onAlert }: UseRunEndedFee
     };
 
     // A finished turn has no response in flight (a background-only entry is left alone); finished background
-    // work clears the session's purple entry, but never a new turn the session has started since.
+    // work clears the session's purple entry, but never a new turn the session has started since. A turn that
+    // left background work running, finished or stopped alone, keeps the tasks its entry lists as background
+    // work until the running-sessions poll. markSessionIdle decides that against the map as it is, not as last
+    // rendered: in a tab that follows the run, the chat has just settled the entry from the run's `complete`.
     const syncActivity = (end: RunEnd) => {
       const { markSessionIdle: markIdle, markSessionBackground: markBackground, getSessionActivity: readActivity } = latestRef.current;
       if (end.outcome !== 'backgroundDone') {
-        markIdle(end.sessionId);
+        markIdle(end.sessionId, { backgroundWorkGoesOn: end.backgroundWork });
       } else if (readActivity(end.sessionId)?.background) {
         markBackground(end.sessionId, []);
       }

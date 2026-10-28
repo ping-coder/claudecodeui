@@ -224,10 +224,14 @@ export type MarkSessionProcessing = (
   activity?: { statusText?: string | null; canInterrupt?: boolean },
 ) => void;
 
-/** Marks a session's response as finished; `ifStartedBefore` lets a late acknowledgement clear only a stale run. Leaves background-only work alone, which it says nothing about. */
+/**
+ * Marks a session's response as finished; `ifStartedBefore` lets a late acknowledgement clear only a stale run. Leaves
+ * background-only work alone, which it says nothing about. `backgroundWorkGoesOn` (the run left background work
+ * running) keeps the tasks the entry lists as background work instead; an entry that lists none goes idle.
+ */
 export type MarkSessionIdle = (
   sessionId?: string | null,
-  opts?: { ifStartedBefore?: number },
+  opts?: { ifStartedBefore?: number; backgroundWorkGoesOn?: boolean },
 ) => void;
 
 /** Records the background tasks a session still has once its turn ended; an empty list marks it idle. */
@@ -523,6 +527,14 @@ export type ChatMessage = {
    * already-sent one, naming the anchor it replaces. Local to this client.
    */
   replacesAnchorId?: string;
+  /**
+   * The `id` of the store row this message was drawn from, kept where a
+   * caller has to find that row again: on the question chat's pinned
+   * question bar got from the server, which it finds among the loaded rows
+   * once they are all loaded (Cursor stamps its rows anew on every read, so
+   * the timestamp does not find it). Absent everywhere else.
+   */
+  historyRowId?: string;
   /**
    * The model that produced this assistant turn, as the provider reported it
    * on the transcript row. Absent on user turns and on rows the provider
@@ -1021,8 +1033,10 @@ export type BackgroundSendPrompt = {
  * A `send_refused` frame as chat's realtime handler hands it to the composer:
  * the server did not start a `chat.send` sent with `keepBackgroundWork`,
  * because the session's process still holds background work and the turn
- * cannot go into it. It answers only the socket that sent it, with no request
- * id, so the composer that sent the session's latest such send takes it.
+ * cannot go into it. It answers only the socket that sent it, which every
+ * pane on the page shares: `clientRequestId` is the send's own, so the
+ * composer that made that send takes it. A server older than ids sends none,
+ * and then the composer that sent the session's latest such send takes it.
  * `reason` is the server's code (BACKGROUND_WORK_WOULD_STOP); `changes` holds
  * its labels for what keeps the turn out (see BackgroundSendPrompt).
  */
@@ -1030,6 +1044,7 @@ export type SendRefusedEvent = {
   sessionId: string;
   reason: string;
   changes: string[];
+  clientRequestId?: string;
 };
 
 /**
@@ -1208,6 +1223,20 @@ export type DiffStats = {
   removed: number;
 };
 
+/**
+ * How chat's revealMessage brings a transcript row into view: `center` (the default, a smooth scroll the
+ * background-tasks strip uses) or `start`, the row's top just under the transcript's top edge, held there
+ * while rows above it settle (the pinned question's jumps); `highlight` flashes the row once it is there.
+ * `exact` takes only the row stamped with the message's own timestamp: without it the last try settles for
+ * the nearest row, as a tool call folded into a group has no row of its own. The pinned question's jumps
+ * set it, as a user message is never folded.
+ */
+export type RevealMessageOptions = {
+  block?: 'center' | 'start';
+  highlight?: boolean;
+  exact?: boolean;
+};
+
 // ---------------------------
 
 //----------------- CHAT TOOL RENDERING ------------
@@ -1307,6 +1336,17 @@ export type FileTreeNode = {
   isIgnored?: boolean;
   children?: FileTreeNode[];
   [key: string]: unknown;
+};
+
+/** One file as the command palette lists and searches it, collected from the project's listing or, for a project too large to list, returned by the server's file search; `isIgnored` files are found by searching but not listed before anything is typed. */
+export type CommandPaletteFile = {
+  path: string;
+  name: string;
+  // Relative to the project root, joined with `/`. The palette matches and shows this rather
+  // than `path`: a query that hits the prefix every absolute path shares (the project folder's
+  // name, say) would match all files alike.
+  relativePath: string;
+  isIgnored: boolean;
 };
 
 /** The image the file tree asked to preview, carrying the path plus the DB `projectId` the image viewer needs to build its raw content URL. */
@@ -2062,6 +2102,9 @@ export type NotificationPreferencesState = {
 
 /** Where the settings dialog's read of the server's notification preferences stands; until it is 'ready' the values shown are defaults, so the notifications tab keeps the switches that save them disabled and the controller sends nothing. */
 export type NotificationPreferencesStatus = 'loading' | 'ready' | 'failed';
+
+/** How an attempt to subscribe this browser to push ended: only 'subscribed' turns the Web Push channel on, and the notifications tab explains the others ('denied' and 'dismissed' answer the permission prompt, 'unsupported' means the browser has no push, 'failed' covers the rest). */
+export type PushSubscribeOutcome = 'subscribed' | 'denied' | 'dismissed' | 'unsupported' | 'failed';
 
 /** Cursor's persisted permission settings: the allowed and disallowed command patterns and whether permission prompts are skipped; read and written as one unit by the settings controller. */
 export type CursorPermissionsState = {
