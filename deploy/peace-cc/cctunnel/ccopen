@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# ccopen: cctunnel open, for macOS, Linux and WSL. Keep it in the same folder as cctunnel.
+exec "$(dirname "$0")/cctunnel" open "$@"

@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# cctunnel: use cloudcli on peace-cc from another computer (macOS, Linux, WSL) through an SSH tunnel.
+# cloudcli listens only on 127.0.0.1:3001 on peace-cc; the tunnel makes it http://127.0.0.1:3001 here.
+#
+#   cctunnel setup ADDRESS [USER]   once per computer: SSH key, "Host peace-cc" in ~/.ssh/config, test login
+#   cctunnel [up]                   start the tunnel in the background; does nothing when it already works
+#   cctunnel open [/path]           up, then open http://127.0.0.1:3001/path in the browser
+#   cctunnel status                 tunnel state and cloudcli health
+#   cctunnel down                   stop the tunnel
+#   cctunnel fwd PORT[:REMOTE]...   also forward 127.0.0.1:PORT to port REMOTE (default PORT) on peace-cc
+#   cctunnel unfwd PORT...          stop one of those forwards
+#   cctunnel watch                  stay in the foreground and reconnect whenever the tunnel drops
+#   ccopen [/path]                  same as cctunnel open (the ccopen script next to this one)
+#
+# Environment:
+#   CCTUNNEL_HOST          ssh destination, an ~/.ssh/config alias or user@host (default peace-cc)
+#   CCTUNNEL_PORT          local port of the web UI (default 3001); every command needs the same value
+#   CCTUNNEL_REMOTE_PORT   cloudcli's port on peace-cc (default 3001)
+#   CCTUNNEL_FORWARDS      forwards added whenever the tunnel starts, e.g. "8810:8800 5173"
+#   CCTUNNEL_SSH_OPTS      more ssh options, split at spaces, e.g. "-i ~/.ssh/id_peace"
+set -euo pipefail
+
+prog=$(basename "$0")
+HOST="${CCTUNNEL_HOST:-peace-cc}"
+PORT="${CCTUNNEL_PORT:-3001}"
+REMOTE_PORT="${CCTUNNEL_REMOTE_PORT:-3001}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cctunnel"
+NAME=$(printf '%s-%s' "$HOST" "$PORT" | tr -c 'A-Za-z0-9._-' '_')
+# macOS allows 103 bytes in a socket path, and ssh -M adds 17 while it creates the socket.
+if (( ${#STATE_DIR} + ${#NAME} > 80 )); then NAME=$(printf '%s' "$HOST" | cksum | awk '{ print $1 }')-$PORT; fi
+SOCK="$STATE_DIR/$NAME.sock"      # control socket of the background ssh
+FWD_FILE="$STATE_DIR/$NAME.fwd"   # its extra forwards, one LOCAL:REMOTE per line; down removes it
+LOG_FILE="$STATE_DIR/$NAME.log"   # stderr of the background ssh (OpenSSH before 8.9 keeps writing to it)
+ERR_FILE="$STATE_DIR/$NAME.err"   # stderr of the last other ssh call
+MODE=""
+SKIP=" "   # local ports fwd is about to add; start leaves them alone
+
+read -r -a EXTRA_OPTS <<<"${CCTUNNEL_SSH_OPTS:-}"
+SSH=(ssh ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"})
+# -O commands skip ~/.ssh/config: "ControlMaster yes" there would make them log in instead.
+CTL=(ssh -F /dev/null -S "$SOCK")
+HAVE_CURL=0
+if command -v curl >/dev/null 2>&1; then HAVE_CURL=1; fi
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+die() { echo "$prog: $*" >&2; exit 1; }
+
+check_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )) || die "not a port: $1"
+}
+
+is_up() { "${CTL[@]}" -O check "$HOST" >/dev/null 2>&1; }
+
+# Prints cloudcli's version when 127.0.0.1:PORT answers like cloudcli; otherwise returns curl's exit code
+# (28 = no reply in 5 s: the link is dead) or 1 when something else answers.
+health() {
+  local body
+  body=$(curl --noproxy '*' -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null) || return $?
+  [[ $body == *'"status":"ok"'* ]] || return 1
+  printf '%s\n' "$body" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+}
+
+wait_health() {
+  local i
+  (( HAVE_CURL )) || return 0
+  for i in 1 2 3 4 5; do
+    if health >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+drop_forward() {
+  if [[ -f $FWD_FILE ]]; then
+    awk -F: -v p="$1" '$1 != p' "$FWD_FILE" >"$FWD_FILE.tmp"
+    mv "$FWD_FILE.tmp" "$FWD_FILE"
+  fi
+}
+
+# The far end is "localhost" so sshd also reaches dev servers that listen only on ::1.
+add_forward() {
+  local r=""
+  if "${CTL[@]}" -O forward -L "127.0.0.1:$1:localhost:$2" "$HOST" 2>"$ERR_FILE"; then
+    drop_forward "$1"
+    echo "$1:$2" >>"$FWD_FILE"
+    echo "→ http://127.0.0.1:$1 (port $2 on $HOST)"
+    return 0
+  fi
+  # ssh only says "forward request failed": the port is ours already or another program has it.
+  if [[ -f $FWD_FILE ]]; then r=$(awk -F: -v p="$1" '$1 == p { r = $2 } END { print r }' "$FWD_FILE"); fi
+  if [[ -n $r ]]; then
+    echo "$prog: 127.0.0.1:$1 already goes to port $r; run $prog unfwd $1 first" >&2
+  elif grep -q 'forward request failed' "$ERR_FILE"; then
+    echo "$prog: cannot forward 127.0.0.1:$1: another program uses that port here" >&2
+  else
+    echo "$prog: cannot forward 127.0.0.1:$1: $(tail -n 1 "$ERR_FILE")" >&2
+  fi
+  return 1
+}
+
+# Says why the background ssh did not start; ssh's own error is already printed above.
+explain_failure() {
+  if grep -q "]:$PORT: " "$LOG_FILE"; then
+    echo "$prog: cannot listen on 127.0.0.1:$PORT; pick another port with CCTUNNEL_PORT" >&2
+  elif grep -Eq 'Could not request local forwarding|remote port forwarding failed' "$LOG_FILE"; then
+    echo "$prog: a LocalForward or RemoteForward under \"Host $HOST\" in ~/.ssh/config failed; give $prog an alias without them (CCTUNNEL_HOST)" >&2
+  elif grep -q ': terminating, ' "$LOG_FILE"; then
+    echo "$prog: ssh cannot read its config" >&2
+  elif grep -q 'Too many authentication failures' "$LOG_FILE"; then
+    echo "$prog: ssh offered $HOST too many other keys; put IdentityFile and \"IdentitiesOnly yes\" under \"Host ${HOST#*@}\" in ~/.ssh/config" >&2
+  elif ! grep -q 'Permission denied' "$LOG_FILE"; then
+    echo "$prog: ssh to $HOST failed" >&2
+  elif [[ $MODE == watch ]]; then
+    echo "$prog: $HOST refused the login (watch cannot type a key passphrase: if the key has one, load it with ssh-add)" >&2
+  elif [[ $HOST == *@* ]]; then
+    echo "$prog: $HOST refused the login (add this computer's public key to ~/.ssh/authorized_keys there)" >&2
+  else
+    echo "$prog: $HOST refused the login (new computer? run: $prog setup ADDRESS)" >&2
+  fi
+}
+
+# start: start the background ssh, then add the forwards of the tunnel it replaces and CCTUNNEL_FORWARDS.
+# Returns 2 when another program holds the local port, 1 for other failures.
+start() {
+  local carry="" spec l seen="$SKIP" batch=() alt=13001 i
+  if [[ -f $FWD_FILE ]]; then carry=$(cat "$FWD_FILE"); fi
+  if [[ $MODE == watch ]]; then batch=(-o BatchMode=yes); fi
+  mkdir -p "$STATE_DIR"
+  # A socket left by a killed ssh blocks a new one. A live socket answers: another cctunnel just started it.
+  if [[ -e $SOCK ]] && ! is_up; then rm -f "$SOCK"; fi
+  if ! "${SSH[@]}" -S "$SOCK" -M -f -N ${batch[@]+"${batch[@]}"} \
+      -o ControlPersist=no -o ExitOnForwardFailure=yes -o ConnectTimeout=15 -o LogLevel=ERROR \
+      -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+      -L "127.0.0.1:$PORT:127.0.0.1:$REMOTE_PORT" "$HOST" 2>"$LOG_FILE"; then
+    if grep -q "]:$PORT: Address already in use" "$LOG_FILE"; then
+      # Often the other program is a second cctunnel (watch, another terminal) starting this same tunnel.
+      for i in 1 2 3 4 5; do
+        if is_up; then echo "→ tunnel up: http://127.0.0.1:$PORT → port $REMOTE_PORT on $HOST"; return 0; fi
+        sleep 0.3
+      done
+      if (( 10#$PORT == alt )); then alt=13002; fi
+      echo "$prog: 127.0.0.1:$PORT is taken by another program; give every $prog command another port, e.g. put this in ~/.zshrc or ~/.bashrc: export CCTUNNEL_PORT=$alt" >&2
+      return 2
+    fi
+    cat "$LOG_FILE" >&2
+    explain_failure
+    return 1
+  fi
+  : >"$FWD_FILE"
+  echo "→ tunnel up: http://127.0.0.1:$PORT → port $REMOTE_PORT on $HOST"
+  # The saved forwards go first: they include fwd/unfwd changes made since the tunnel started.
+  for spec in $carry ${CCTUNNEL_FORWARDS:-}; do
+    l=${spec%%:*}
+    if [[ $seen == *" $l "* ]]; then continue; fi
+    seen="$seen$l "
+    add_forward "$l" "${spec#*:}" || true
+  done
+}
+
+stop() {
+  "${CTL[@]}" -O exit "$HOST" >/dev/null 2>&1 || true
+  # The old ssh may hold the port for a moment after it removes the socket.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [[ ! -S $SOCK ]]; then break; fi
+    sleep 0.3
+  done
+  sleep 0.3
+}
+
+up() {
+  local rc=0
+  if is_up; then
+    if (( HAVE_CURL )); then health >/dev/null || rc=$?; fi
+    if (( rc == 0 )); then
+      echo "→ tunnel already up: http://127.0.0.1:$PORT → port $REMOTE_PORT on $HOST"
+      return 0
+    fi
+    # 28: no reply at all, the connection is dead. Other errors mean peace-cc answered and cloudcli did not.
+    if (( rc == 28 || rc == 7 )); then
+      echo "→ no answer through the tunnel; reconnecting"
+      stop
+      start || exit 1
+    fi
+  else
+    start || exit 1
+  fi
+  wait_health || echo "$prog: tunnel is up but cloudcli does not answer on 127.0.0.1:$PORT (is cloudcli.service running on $HOST?)" >&2
+}
+
+open_url() {
+  local path="${1:-/}" url
+  [[ $path == /* ]] || path="/$path"
+  up
+  url="http://127.0.0.1:$PORT$path"
+  echo "→ $url"
+  if [[ $(uname -s) == Darwin ]]; then
+    open "$url"
+  elif grep -qi microsoft /proc/version 2>/dev/null; then
+    if command -v wslview >/dev/null 2>&1; then wslview "$url"; else explorer.exe "$url" || true; fi
+  elif command -v xdg-open >/dev/null 2>&1; then
+    (xdg-open "$url" >/dev/null 2>&1 &)
+  fi
+}
+
+status() {
+  local rc=0 v l r
+  if is_up; then
+    echo "tunnel:   up, http://127.0.0.1:$PORT → port $REMOTE_PORT on $HOST"
+    if [[ -s $FWD_FILE ]]; then
+      while IFS=: read -r l r; do echo "          http://127.0.0.1:$l → port $r"; done <"$FWD_FILE"
+    fi
+  else
+    echo "tunnel:   down"
+    rc=1
+  fi
+  if (( ! HAVE_CURL )); then
+    echo "cloudcli: unknown (curl is not installed)"
+  elif v=$(health); then
+    echo "cloudcli: ok${v:+ (v$v)}"
+  else
+    echo "cloudcli: no answer on 127.0.0.1:$PORT"
+    rc=1
+  fi
+  return $rc
+}
+
+down() {
+  if is_up; then
+    stop
+    echo "→ tunnel stopped"
+  else
+    echo "tunnel was not running"
+  fi
+  rm -f "$FWD_FILE"
+}
+
+fwd() {
+  local spec l r rc=0
+  (( $# )) || die "usage: $prog fwd PORT[:REMOTE]..."
+  for spec; do
+    l=${spec%%:*} r=${spec#*:}
+    check_port "$l"; check_port "$r"
+    if [[ $l == "$PORT" ]]; then die "127.0.0.1:$PORT is the web UI tunnel itself"; fi
+    SKIP="$SKIP$l "
+  done
+  if ! is_up; then up; fi
+  for spec; do add_forward "${spec%%:*}" "${spec#*:}" || rc=1; done
+  return $rc
+}
+
+unfwd() {
+  local l r rc=0 live=1 spec env=" "
+  (( $# )) || die "usage: $prog unfwd PORT..."
+  for spec in ${CCTUNNEL_FORWARDS:-}; do env="$env${spec%%:*} "; done
+  is_up || live=0
+  for l; do
+    l=${l%%:*}
+    check_port "$l"
+    r=""
+    if [[ -f $FWD_FILE ]]; then r=$(awk -F: -v p="$l" '$1 == p { r = $2 } END { print r }' "$FWD_FILE"); fi
+    if [[ -z $r ]]; then
+      echo "$prog: 127.0.0.1:$l is not forwarded" >&2
+      rc=1
+    elif (( ! live )); then
+      drop_forward "$l"
+      if [[ $env == *" $l "* ]]; then
+        echo "→ the tunnel is down; CCTUNNEL_FORWARDS adds 127.0.0.1:$l again when it starts"
+      else
+        echo "→ the tunnel is down; 127.0.0.1:$l will not come back with it"
+      fi
+    elif "${CTL[@]}" -O cancel -L "127.0.0.1:$l:localhost:$r" "$HOST" 2>"$ERR_FILE"; then
+      drop_forward "$l"
+      echo "→ stopped 127.0.0.1:$l"
+    else
+      echo "$prog: cannot stop 127.0.0.1:$l: $(tail -n 1 "$ERR_FILE")" >&2
+      rc=1
+    fi
+  done
+  return $rc
+}
+
+watch() {
+  local rc delay=5 nap=""
+  trap '[[ -z $nap ]] || kill "$nap" 2>/dev/null || true; down; exit 0' INT TERM
+  echo "keeping the tunnel up (Ctrl-C stops it)"
+  while :; do
+    if ! is_up; then
+      rc=0
+      start || rc=$?
+      if (( rc == 2 )); then exit 1; fi
+      # Retry sooner after a success, back off to 30 s while offline.
+      if (( rc == 0 )); then delay=5; else delay=$(( delay >= 15 ? 30 : delay * 2 )); fi
+    fi
+    MODE=watch   # only the first attempt may ask for a key passphrase
+    # bash runs the trap only after a foreground command ends; a background sleep lets "kill PID" act at once.
+    sleep "$delay" &
+    nap=$!
+    wait "$nap" || true
+    nap=""
+  done
+}
+
+setup() {
+  local addr="${1:-}" user="${2:-peacehe}" key="" k got ids
+  [[ -n $addr ]] || die "usage: $prog setup ADDRESS [USER]   (ADDRESS = peace-cc's external IP or DNS name)"
+  [[ $addr != *[@[:space:]]* && $user != *[@[:space:]]* ]] || die "usage: $prog setup ADDRESS [USER]; the user goes second"
+  [[ $HOST != *@* ]] || die "CCTUNNEL_HOST=$HOST already names user and address; nothing to set up"
+  mkdir -p "$HOME/.ssh" "$STATE_DIR"
+  chmod 700 "$HOME/.ssh"
+
+  # Use the first key ssh would offer (its defaults, or IdentityFile/-i when set); create one if there is none.
+  ids=$("${SSH[@]}" -T -G "$HOST" | awk '$1 == "identityfile" { sub(/^[^ ]+ /, ""); print }') ||
+    die "ssh cannot read its config (error above)"
+  while read -r k; do
+    if [[ $k == \~/* ]]; then k="$HOME/${k#\~/}"; fi
+    k=${k%.pub}
+    if [[ -n $k && ( -f $k || -f $k.pub ) ]]; then key=$k; break; fi
+  done <<<"$ids"
+  if [[ -z $key ]]; then
+    key="$HOME/.ssh/id_ed25519"
+    ssh-keygen -t ed25519 -f "$key" -C "$(id -un)@$(hostname)"
+  elif [[ ! -f $key.pub ]]; then
+    ssh-keygen -y -f "$key" >"$key.pub.tmp" || { rm -f "$key.pub.tmp"; die "cannot read $key"; }
+    mv "$key.pub.tmp" "$key.pub"
+  fi
+
+  got=$("${SSH[@]}" -T -G "$HOST" | awk '$1 == "hostname" { print $2 }') ||
+    die "ssh cannot read its config (error above)"
+  if [[ -n $got && $got != "$(printf '%s' "$HOST" | tr 'A-Z' 'a-z')" ]]; then
+    if [[ $got != "$(printf '%s' "$addr" | tr 'A-Z' 'a-z')" ]]; then
+      die "~/.ssh/config sends $HOST to $got, not $addr; fix HostName under \"Host $HOST\" there and run setup again"
+    fi
+    echo "→ ~/.ssh/config already has $HOST (HostName $got)"
+  else
+    # IdentitiesOnly: with 6 or more keys in ssh-agent, sshd (MaxAuthTries 6) hangs up before ssh tries this one.
+    printf '\nHost %s\n  HostName %s\n  User %s\n  IdentityFile "%s"\n  IdentitiesOnly yes\n  AddKeysToAgent yes\n  ServerAliveInterval 10\n  ServerAliveCountMax 3\n' \
+      "$HOST" "$addr" "$user" "$key" >>"$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+    echo "→ added Host $HOST to ~/.ssh/config"
+  fi
+
+  echo "→ logging in to $HOST"
+  # RemoteCommand=none: an existing alias may start tmux on login, and ssh refuses that next to "true".
+  if "${SSH[@]}" -o RemoteCommand=none -o RequestTTY=no -o ConnectTimeout=15 -o PasswordAuthentication=no \
+      -o KbdInteractiveAuthentication=no "$HOST" true 2>"$ERR_FILE"; then
+    echo "→ ready; run: $prog open"
+    return 0
+  fi
+  cat "$ERR_FILE" >&2
+  if grep -q 'Too many authentication failures' "$ERR_FILE"; then
+    die "ssh offered $HOST too many other keys; put \"IdentityFile $key\" and \"IdentitiesOnly yes\" under \"Host $HOST\" in ~/.ssh/config"
+  fi
+  grep -q 'Permission denied' "$ERR_FILE" ||
+    die "cannot reach $HOST; if the address is wrong, fix HostName under \"Host $HOST\" in ~/.ssh/config"
+  got=$("${SSH[@]}" -T -G "$HOST" | awk '$1 == "user" { print $2 }')
+  [[ $got == "$user" ]] ||
+    die "$HOST refused user $got; if your account there is $user, an earlier block in ~/.ssh/config sets User: move \"Host $HOST\" above it"
+  cat >&2 <<EOF
+
+$HOST does not accept this computer's key yet. Log in to $HOST from a computer that already can
+(or open cloudcli's shell) and run there:
+
+  echo '$(cat "$key.pub")' >> ~/.ssh/authorized_keys
+
+then: $prog open
+EOF
+  return 1
+}
+
+check_port "$PORT"
+check_port "$REMOTE_PORT"
+cmd="${1:-up}"
+if (( $# )); then shift; fi
+case "$cmd" in
+  setup)  setup "$@" ;;
+  up)     up ;;
+  open)   open_url "${1:-/}" ;;
+  status) status ;;
+  down)   down ;;
+  fwd)    fwd "$@" ;;
+  unfwd)  unfwd "$@" ;;
+  watch)  watch ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

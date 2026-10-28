@@ -27,6 +27,39 @@ ccui rollback      # Instant (<1s) rollback to previous release
 ccui sync          # Fetch & merge upstream siteboon/claudecodeui/main
 ```
 
+### Other computers (`cctunnel`)
+`deploy/peace-cc/cctunnel/` is the `ccui open` tunnel as a standalone folder: `cctunnel` and `ccopen` for macOS, Linux and WSL, `windows/` for Windows. Copy it into a folder of its own and put that folder on PATH.
+
+Windows, in PowerShell (`ssh peace-cc` must already work without a prompt):
+```powershell
+New-Item -ItemType Directory -Force $HOME\cctunnel | Out-Null
+scp -p "peace-cc:projects/github/claudecodeui/deploy/peace-cc/cctunnel/windows/*" $HOME\cctunnel
+& $HOME\cctunnel\cctunnel.cmd install   # adds the folder to the user PATH
+```
+Then open a new terminal (restart Windows Terminal if `ccopen` is still not found) and run `ccopen`.
+
+macOS, Linux, WSL:
+```bash
+mkdir -p ~/cctunnel
+scp -p 'peace-cc:projects/github/claudecodeui/deploy/peace-cc/cctunnel/cc*' ~/cctunnel/
+echo 'export PATH="$HOME/cctunnel:$PATH"' >> ~/.zshrc   # bash: ~/.bashrc; then open a new terminal
+```
+A computer that cannot log in to peace-cc yet gets `cctunnel` and `ccopen` from GitHub instead (`chmod +x` both) and runs `cctunnel setup <peace-cc external IP>`: it creates a key, adds `Host peace-cc` to `~/.ssh/config` and tests the login. If peace-cc does not know the key, it prints an `echo '<key>' >> ~/.ssh/authorized_keys` line to run on peace-cc from a session that already works (cloudcli's shell will do); the Google guest agent only manages the lines it added.
+
+Same commands everywhere:
+```
+ccopen                  # start the tunnel if needed, open http://127.0.0.1:3001
+cctunnel status         # tunnel state and cloudcli health
+cctunnel down           # stop it
+cctunnel fwd 5173       # also forward a dev server; unfwd 5173 stops it
+cctunnel watch          # foreground, restarts the tunnel after sleep or network changes
+```
+- If 3001 is taken locally, set `CCTUNNEL_PORT=13001` for good (`export` in the shell rc; `setx CCTUNNEL_PORT 13001` and a new terminal on Windows): every command finds the tunnel by its port. `cctunnel help` lists the other settings.
+- The Windows version and `watch`'s reconnects log in without a prompt, so a key with a passphrase must be in ssh-agent (`ssh-add`). Windows ships the agent disabled; start it once in an admin PowerShell: `Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent`.
+- On Windows, Ctrl-C in `cctunnel watch` stops the tunnel, then cmd asks "Terminate batch job (Y/N)?"; either answer is fine.
+- WSL can shut the distro down, tunnel included, soon after its last window closes; keep one open.
+- If peace-cc's IP changes, fix `HostName` under `Host peace-cc` in `~/.ssh/config`.
+
 ## 4. Database Backups
 Every `cloudcli-ctl deploy` backs up the database after building the release and before switching `current`, so a backup always predates the new release's migrations. It is stored as `shared/db-backups/auth-<release_id>.db` and holds the database exactly as the previous release left it. The newest 8 are kept. They contain password hashes, the JWT secret and API/GitHub tokens, so the files are `0600` in a `0700` directory.
 
