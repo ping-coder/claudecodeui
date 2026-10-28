@@ -602,7 +602,7 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
  * a provider `NormalizedMessage` (with `seq`) or a gateway event
- * (`chat_subscribed`, `session_upserted`, `loading_progress`,
+ * (`chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
  * `protocol_error`).
  */
 /**

@@ -915,6 +915,16 @@ router.get(
   }),
 );
 
+// Runs that ended in the last 10 minutes, oldest first, for a tab catching up
+// on the `run_ended` frames it missed while its socket was down.
+router.get(
+  '/sessions/run-ends',
+  asyncHandler(async (_req: Request, res: Response) => {
+    const ends = sessionsService.listRecentRunEnds();
+    res.json(createApiSuccessResponse({ ends }));
+  }),
+);
+
 router.get(
   '/sessions/recent',
   asyncHandler(async (req: Request, res: Response) => {

@@ -120,7 +120,7 @@ const parseBackgroundTasks = (value: unknown): BackgroundTaskSummary[] | undefin
   return tasks;
 };
 
-/** Mounted by the project-workspace route; tracks which sessions are busy — producing a response or running background tasks — so chat, sidebar and project-workspace agree on session activity. */
+/** Mounted by the project-workspace route; tracks which sessions are busy — producing a response or running background tasks — so chat, sidebar, project-workspace and run-notifications agree on session activity. */
 export function SessionProtectionProvider({ children }: { children: ReactNode }) {
   const {
     processingSessions,
@@ -238,6 +238,11 @@ export function useBackgroundSessionIdSet(): ReadonlySet<string> {
   return backgroundSessionIds;
 }
 
+/**
+ * The whole activity map, details included (status text, start time, background tasks), so it changes with
+ * every provider status frame. Read by chat's ChatInterface for its activity indicator and by project-workspace's
+ * ProjectEffects for the running part of the tab title; prefer the membership sets above when ids are enough.
+ */
 export function useProcessingSessions(): SessionActivityMap {
   const processingSessions = useContext(SessionProtectionStateContext);
   if (!processingSessions) {
@@ -246,6 +251,12 @@ export function useProcessingSessions(): SessionActivityMap {
   return processingSessions;
 }
 
+/**
+ * The stable actions on the activity map, for code that writes it or reads it at event time without
+ * re-rendering on its changes. Used by chat's ChatInterface (sends, realtime frames), project-workspace's
+ * ProjectWorkspaceRoute (isSessionProcessing) and run-notifications, which settles a session's entry when
+ * `run_ended` reports its run over.
+ */
 export function useSessionProtectionActions(): SessionProtectionActions {
   const actions = useContext(SessionProtectionActionsContext);
   if (!actions) {

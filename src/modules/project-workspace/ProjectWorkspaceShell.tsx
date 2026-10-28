@@ -12,6 +12,7 @@ import ImmersiveExitControl from '@/modules/project-workspace/ImmersiveExitContr
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
 import ProjectQuickSettingsRegion from '@/modules/project-workspace/ProjectQuickSettingsRegion';
+import ProjectRunNotifications from '@/modules/project-workspace/ProjectRunNotifications';
 import ProjectSidebarRegion from '@/modules/project-workspace/ProjectSidebarRegion';
 
 /** Narrowest main column that holds two panes side by side. */
@@ -88,6 +89,7 @@ function ProjectWorkspaceShell({
         style={{ bottom: 'var(--keyboard-height, 0px)' }}
       >
         <ProjectEffects />
+        <ProjectRunNotifications isMobile={isMobile} />
         <ProjectSidebarRegion isMobile={isMobile} />
 
         <div ref={mainColumnRef} className="flex min-w-0 flex-1 flex-col">

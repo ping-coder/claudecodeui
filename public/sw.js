@@ -71,6 +71,21 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
+// Pushes for a finished task. While a CloudCLI window is focused, that page chimes for
+// the task itself (run-notifications), so these pushes are shown without a sound of their own.
+const RUN_PUSH_CODES = new Set(['run.stopped', 'run.failed', 'run.background_completed']);
+
+// True when any CloudCLI window of this origin has focus, also one this worker does not
+// control yet. A failed lookup counts as no focus: the push still shows, with its sound.
+async function hasFocusedWindow() {
+  try {
+    const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    return windowClients.some(client => client.focused === true);
+  } catch {
+    return false;
+  }
+}
+
 // Push notification event
 self.addEventListener('push', event => {
   if (!event.data) return;
@@ -91,9 +106,15 @@ self.addEventListener('push', event => {
     renotify: true
   };
 
-  event.waitUntil(
-    self.registration.showNotification(payload.title || 'CloudCLI', options)
-  );
+  // Every push shows a notification, focused or not: Safari revokes the subscription of a
+  // worker that receives pushes without showing one.
+  event.waitUntil((async () => {
+    if (RUN_PUSH_CODES.has(payload.data?.code) && await hasFocusedWindow()) {
+      options.silent = true;
+      options.renotify = false;
+    }
+    await self.registration.showNotification(payload.title || 'CloudCLI', options);
+  })());
 });
 
 // Notification click event

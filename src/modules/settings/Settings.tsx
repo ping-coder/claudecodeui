@@ -76,6 +76,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
     isLoading: isPushLoading,
     subscribe: pushSubscribe,
     unsubscribe: pushUnsubscribe,
+    requestPermission: requestNotificationPermission,
   } = useWebPush();
 
   const handleEnablePush = async () => {
@@ -261,6 +262,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
                   isPushLoading={isPushLoading}
                   onEnablePush={handleEnablePush}
                   onDisablePush={handleDisablePush}
+                  onRequestNotificationPermission={requestNotificationPermission}
                   isDesktop={Boolean(desktopNotificationsBridge)}
                   desktopNotifications={desktopNotificationsState}
                   onEnableDesktopNotifications={handleEnableDesktopNotifications}

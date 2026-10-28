@@ -75,13 +75,32 @@ function createScriptedQuery(): { createQuery: NonNullable<ProviderRuntimeContex
   return { createQuery, script };
 }
 
+/**
+ * A writer like the chat gateway's: it records what the runtime sends, and
+ * counts the runtime's reports that held background work has finished.
+ */
+function createWriter() {
+  const sent: NormalizedMessage[] = [];
+  let finishedReports = 0;
+  const writer = {
+    send: (message: NormalizedMessage) => { sent.push(message); },
+    userId: null,
+    reportBackgroundWorkFinished: () => { finishedReports += 1; },
+  };
+  return { writer, sent, finishedReports: () => finishedReports };
+}
+
 async function withRun(
-  runTest: (context: { script: Scripted; sent: NormalizedMessage[]; done: Promise<unknown> }) => Promise<void>,
+  runTest: (context: {
+    script: Scripted;
+    sent: NormalizedMessage[];
+    done: Promise<unknown>;
+    finishedReports: () => number;
+  }) => Promise<void>,
 ): Promise<void> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
   const { createQuery, script } = createScriptedQuery();
-  const sent: NormalizedMessage[] = [];
-  const writer = { send: (message: NormalizedMessage) => { sent.push(message); }, userId: null };
+  const { writer, sent, finishedReports } = createWriter();
   const sessions = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null });
   const context: ProviderRuntimeContext = {
     resolveProviderSessionId: () => null,
@@ -94,7 +113,7 @@ async function withRun(
 
   try {
     const done = queryClaudeSDK('hello', { sessionId: SESSION_ID, cwd }, writer as never, context);
-    await runTest({ script, sent, done });
+    await runTest({ script, sent, done, finishedReports });
     script.end();
     await done;
   } finally {
@@ -132,7 +151,7 @@ const taskNotification = (taskId: string, toolUseId: string, status: string) => 
 const result = () => ({ type: 'result', subtype: 'success', session_id: NATIVE_ID, result: 'launched', duration_ms: 1, num_turns: 1 });
 
 test('stopping the last outstanding task releases the held process', async () => {
-  await withRun(async ({ script, sent, done }) => {
+  await withRun(async ({ script, sent, done, finishedReports }) => {
     script.emit(init());
     script.emit(toolUse('toolu_wf', 'Workflow', { script: 'export const meta = {}' }));
     script.emit(taskStarted('wf1', 'toolu_wf', 'local_workflow'));
@@ -154,33 +173,37 @@ test('stopping the last outstanding task releases the held process', async () =>
 
     assert.deepEqual(listClaudeSDKBackgroundWork(), []);
     assert.equal(script.released(), true, 'the process is let go once nothing is outstanding');
+    assert.equal(finishedReports(), 0, 'a stopped task pushes no follow-up turn, so no work is reported finished');
     void done;
   });
 });
 
 test('a task that reported completed keeps the hold for the turn that relays its result', async () => {
-  await withRun(async ({ script }) => {
+  await withRun(async ({ script, finishedReports }) => {
     script.emit(init());
     script.emit(toolUse('toolu_wf', 'Workflow', { script: 'export const meta = {}' }));
     script.emit(taskStarted('wf1', 'toolu_wf', 'local_workflow'));
     script.emit(ack('toolu_wf', 'Workflow launched in background. Task ID: wf1', { status: 'async_launched', taskId: 'wf1', taskType: 'local_workflow' }));
     script.emit(result());
     await settle();
+    assert.equal(finishedReports(), 0, 'the turn that launched the workflow finished nothing in the background');
 
     // Completed, unlike stopped, is followed by a turn the CLI pushes to relay
     // the result; closing stdin at the notification would cut it short.
     script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
     await settle();
     assert.equal(script.released(), false);
+    assert.equal(finishedReports(), 0, 'the work is reported once its follow-up turn is in, not at the notification');
 
     script.emit(result());
     await settle();
     assert.equal(script.released(), true, 'the follow-up turn\'s result ends the hold');
+    assert.equal(finishedReports(), 1, 'the writer hears once that the held work has finished');
   });
 });
 
 test('an agent that ran in the foreground and settled before the result does not hold the process', async () => {
-  await withRun(async ({ script }) => {
+  await withRun(async ({ script, finishedReports }) => {
     // An Agent call without `run_in_background` is scored as background by
     // the static rule, but the CLI ran it in the foreground: its task started
     // and settled before the turn ended. The task events know that.
@@ -194,6 +217,7 @@ test('an agent that ran in the foreground and settled before the result does not
 
     assert.deepEqual(listClaudeSDKBackgroundWork(), []);
     assert.equal(script.released(), true, 'nothing is outstanding, so nothing to hold for');
+    assert.equal(finishedReports(), 0, 'a turn with no background work reports none finished');
   });
 });
 
@@ -203,8 +227,7 @@ test('a new turn stops the tasks the held process still has going before letting
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
   const first = createScriptedQuery();
   const second = createScriptedQuery();
-  const sent: NormalizedMessage[] = [];
-  const writer = { send: (message: NormalizedMessage) => { sent.push(message); }, userId: null };
+  const { writer, sent, finishedReports } = createWriter();
   const sessions = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null });
   const context: Omit<ProviderRuntimeContext, 'createQuery'> = {
     resolveProviderSessionId: () => null,
@@ -243,6 +266,7 @@ test('a new turn stops the tasks the held process still has going before letting
     second.script.end();
     await secondRun;
     assert.deepEqual(listClaudeSDKBackgroundWork(), []);
+    assert.equal(finishedReports(), 0, 'work a new turn stopped never reports finished');
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

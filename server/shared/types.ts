@@ -247,15 +247,16 @@ export type MessageKind =
 /**
  * Event kinds added by the chat gateway layer on top of provider message kinds.
  *
- * These are app-level realtime events (subscription acks, sidebar deltas,
- * project loading progress, protocol failures) that are not produced by any
- * provider adapter. Together with `MessageKind` they form the complete set of
+ * These are app-level realtime events (subscription acks, sidebar deltas, run
+ * ends, project loading progress, protocol failures) that are not produced by
+ * any provider adapter. Together with `MessageKind` they form the complete set of
  * `kind` values a websocket client can receive, so the frontend only ever
  * needs one kind-based switch.
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
   | 'session_upserted'
+  | 'run_ended'
   | 'loading_progress'
   | 'protocol_error';
 
@@ -301,6 +302,55 @@ export type SessionUpsertedEvent = {
     lastActivity: string;
   };
   project: SessionUpsertedProject | null;
+  timestamp: string;
+};
+
+/**
+ * How a run, or the background work a completed run left behind, ended.
+ *
+ * `done`, `failed` and `aborted` describe a turn and are read from its terminal
+ * `complete`. `backgroundDone` is the later end of the agents or workflows that
+ * turn left running, reported once their follow-up turn has come back (Claude
+ * only today).
+ */
+export type RunEndOutcome = 'done' | 'failed' | 'aborted' | 'backgroundDone';
+
+/**
+ * Broadcast to every connected chat socket (like session_upserted) when the run registry sees a run's
+ * first `complete`, and when the background work a completed run left behind has finished and the CLI's
+ * follow-up turn reported (Claude). Kept 10 minutes, at most 200, for GET /api/providers/sessions/run-ends.
+ * sessionId + runStartedAt + phase (turn | background) name one end identically in every tab.
+ *
+ * Built only by `modules/websocket/services/chat-run-registry.service.ts`. It
+ * covers every run the registry tracks, whoever started it: a chat send from
+ * any tab or device, a queued or scheduled message, an Agent API call. The
+ * frame goes out a microtask after the turn's `complete`, so the run's own
+ * listeners always see the `complete` first. It is a gateway frame: it has no
+ * `seq` and is never replayed by `chat.subscribe`.
+ */
+export type RunEndedEvent = {
+  kind: 'run_ended';
+  /** App session id. */
+  sessionId: string;
+  provider: LLMProvider;
+  /** The registry run's startedAt (server clock); the run's identity. */
+  runStartedAt: number;
+  /** Server clock. */
+  endedAt: number;
+  /**
+   * complete: aborted → 'aborted'; success === false (exitCode !== 0 when success is absent) → 'failed'; else 'done'.
+   * A `complete` that carries neither `success` nor a numeric `exitCode` (Codex's live `turn_complete`)
+   * is 'done', as the chat client has always read it.
+   */
+  outcome: RunEndOutcome;
+  /** 'done' only: the runtime still held background work for the session when the turn completed. */
+  backgroundWork: boolean;
+  /**
+   * sessions.custom_name, so a tab that has not loaded the session can still name it. Trimmed;
+   * null when the row has no name or the lookup failed.
+   */
+  sessionName: string | null;
+  /** ISO time, like the other gateway frames. */
   timestamp: string;
 };
 
@@ -664,6 +714,15 @@ export type ProviderRuntimeWriter = {
   setSessionId?(sessionId: string): void;
   userId?: string | number | null;
   isWebSocketWriter?: boolean;
+  /**
+   * The background work a completed turn left behind has finished and its follow-up turn reported. Optional: SSE writers leave it out.
+   *
+   * The Claude runtime calls it where it sends the `run.background_completed`
+   * notification. Not called when the user stopped the last task, or when a new
+   * turn stopped the work, since the CLI pushes no follow-up turn then. The chat
+   * gateway's writer records it as a `backgroundDone` run end.
+   */
+  reportBackgroundWorkFinished?(): void;
 };
 
 export type ProviderPermissionDecision = {

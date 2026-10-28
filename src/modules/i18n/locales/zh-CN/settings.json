@@ -138,8 +138,25 @@
   "notifications": {
     "title": "通知",
     "description": "控制你希望接收的通知事件。",
+    "page": {
+      "title": "页面打开时",
+      "description": "浏览器里开着 CloudCLI 时，任务完成后怎么提醒你。",
+      "banner": {
+        "title": "提示条",
+        "description": "任务完成时在页面上显示提示条，可从提示条打开会话。"
+      },
+      "system": {
+        "title": "系统通知",
+        "description": "任务完成且 CloudCLI 不在前台时弹出系统通知。",
+        "allow": "允许通知",
+        "denied": "此网站的通知已被阻止，请在浏览器的网站设置中允许。",
+        "unsupported": "当前不可用，系统通知需要 HTTPS 或 localhost。",
+        "viaPush": "此浏览器已开启推送，系统通知改由推送发送。"
+      }
+    },
     "webPush": {
       "title": "通知此浏览器",
+      "description": "即使没打开 CloudCLI 也能收到。CloudCLI 在前台时，任务通知不响铃。",
       "enable": "启用通知",
       "disable": "关闭通知",
       "enabled": "此浏览器已启用通知",
@@ -156,12 +173,12 @@
     },
     "sound": {
       "title": "声音",
-      "description": "聊天运行完成时播放短提示音。",
+      "description": "任务完成或需要批准工具时播放短提示音。",
       "enabled": "已启用",
       "test": "测试声音"
     },
     "events": {
-      "title": "事件类型",
+      "title": "推送和桌面通知的事件",
       "actionRequired": "需要处理",
       "stop": "运行已停止",
       "error": "运行失败"

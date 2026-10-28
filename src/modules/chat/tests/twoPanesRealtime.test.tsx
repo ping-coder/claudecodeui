@@ -16,6 +16,7 @@ import {
 } from '@/shared/context/SessionProtectionContext';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { resetChatDrafts } from '@/shared/chatDrafts';
+import type * as ChatMessagesModule from '@/modules/chat/hooks/useChatMessages';
 import type * as ComposerStateModule from '@/modules/chat/hooks/useChatComposerState';
 import type {
   PermissionMode,
@@ -53,11 +54,13 @@ const page = vi.hoisted(() => {
         listeners.delete(listener);
       };
     },
-    sounds: { completion: 0, notification: 0, title: 0 },
+    sounds: { completion: 0, notification: 0 },
     /** What each pane wrote to the socket, in order. */
     sent: [] as Array<{ side: string; message: unknown }>,
     /** The persisted transcript a history read returns, per session; empty when unset. */
     history: new Map<string, unknown[]>(),
+    /** The kind of every store row a chat turned into transcript rows: what the session stores held. */
+    storedKinds: new Set<string>(),
   };
 });
 
@@ -69,17 +72,26 @@ vi.mock('@/shared/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof SharedUtils>()),
   playChatCompletionSound: async () => {
     page.sounds.completion += 1;
+    return true;
   },
   playNotificationSound: async () => {
     page.sounds.notification += 1;
+    return true;
   },
 }));
 
-vi.mock('@/modules/chat/utils/pageTitleNotification', () => ({
-  showCompletionTitleIndicator: () => {
-    page.sounds.title += 1;
-  },
-}));
+// The transcript rows are built from the session store's rows; seeing those tells what a chat stored, also a
+// row that would render as nothing.
+vi.mock('@/modules/chat/hooks/useChatMessages', async (importOriginal) => {
+  const actual = await importOriginal<typeof ChatMessagesModule>();
+  return {
+    ...actual,
+    normalizedToChatMessages: (messages: Parameters<typeof actual.normalizedToChatMessages>[0]) => {
+      messages.forEach((message) => page.storedKinds.add(String(message.kind)));
+      return actual.normalizedToChatMessages(messages);
+    },
+  };
+});
 
 vi.mock('@/shared/api', () => {
   const okJson = (data: unknown) => Promise.resolve({ ok: true, json: async () => data });
@@ -256,7 +268,7 @@ const delta = (sessionId: string, content: string) => {
 beforeEach(() => {
   page.sounds.completion = 0;
   page.sounds.notification = 0;
-  page.sounds.title = 0;
+  page.storedKinds.clear();
   page.sent.length = 0;
   page.history.clear();
   runSeqs.clear();
@@ -428,30 +440,33 @@ describe('a session\'s background work', () => {
   });
 });
 
-describe('sounds and the title marker', () => {
-  it('play once on the page for a completion and for a permission prompt', async () => {
+describe('sounds and the title', () => {
+  it('are no chat\'s business when a run completes: run-notifications announces its end', async () => {
     await renderWorkspace({
       left: { session: SESSION_A, focused: true },
       right: { session: SESSION_B, focused: false },
     });
-
-    dispatch({ kind: 'complete', id: 'c1', sessionId: 'session-a', seq: 9, success: true });
-    dispatch({ kind: 'permission_request', id: 'p1', requestId: 'r1', toolName: 'Bash', sessionId: 'session-b', seq: 3 });
-
-    assert.deepEqual(page.sounds, { completion: 1, title: 1, notification: 1 });
-  });
-
-  it('play again for the next run of the same session that completes', async () => {
-    await renderWorkspace({
-      left: { session: SESSION_A, focused: true },
-      right: { session: SESSION_B, focused: false },
-    });
+    document.title = 'Workspace';
 
     dispatch({ kind: 'complete', id: 'run-1-complete', sessionId: 'session-a', seq: 4, success: true });
     // The next run counts seq from 1 again, under its own ids.
     dispatch({ kind: 'complete', id: 'run-2-complete', sessionId: 'session-a', seq: 2, success: true });
+    dispatch({ kind: 'complete', id: 'run-3-complete', sessionId: 'session-b', seq: 7, success: true });
+    await settle();
 
-    assert.deepEqual(page.sounds, { completion: 2, title: 2, notification: 0 });
+    assert.equal(page.sounds.completion, 0);
+    assert.equal(document.title, 'Workspace');
+  });
+
+  it('play once on the page for a permission prompt', async () => {
+    await renderWorkspace({
+      left: { session: SESSION_A, focused: true },
+      right: { session: SESSION_B, focused: false },
+    });
+
+    dispatch({ kind: 'permission_request', id: 'p1', requestId: 'r1', toolName: 'Bash', sessionId: 'session-b', seq: 3 });
+
+    assert.deepEqual(page.sounds, { completion: 0, notification: 1 });
   });
 
   it('do not sound again for a prompt the subscribe ack already announced and the replay delivers', async () => {
@@ -470,6 +485,36 @@ describe('sounds and the title marker', () => {
     dispatch({ kind: 'permission_request', id: 'p2', requestId: 'r2', toolName: 'Bash', sessionId: 'session-a', seq: 5 });
 
     assert.equal(page.sounds.notification, 1);
+  });
+});
+
+describe('a run_ended frame', () => {
+  it('reaches no pane\'s store or transcript, and sounds nothing', async () => {
+    await renderWorkspace({
+      left: { session: SESSION_A, focused: true },
+      right: { session: SESSION_B, focused: false },
+    });
+
+    for (const [sessionId, outcome] of [['session-a', 'done'], ['session-b', 'failed']] as const) {
+      dispatch({
+        kind: 'run_ended',
+        sessionId,
+        runStartedAt: 1000,
+        endedAt: 2000,
+        outcome,
+        backgroundWork: false,
+        sessionName: null,
+      });
+    }
+    // Another frame with no seq of its own is stored as usual, so the stores are being watched.
+    dispatch({ kind: 'error', id: 'e1', sessionId: 'session-b', content: 'Rate limited' });
+    await settle();
+
+    assert.equal(page.storedKinds.has('error'), true);
+    assert.equal(page.storedKinds.has('run_ended'), false);
+    assert.deepEqual(transcript('left'), []);
+    assert.deepEqual(transcript('right'), ['Rate limited']);
+    assert.deepEqual(page.sounds, { completion: 0, notification: 0 });
   });
 });
 
@@ -587,9 +632,9 @@ describe('the page coordinator', () => {
     const right = coordinators.get('right')!;
 
     assert.equal(left.statusCheckSentAtRef, right.statusCheckSentAtRef);
-    assert.equal(left.claimPageEffect('complete:S:9:c1'), true);
-    assert.equal(right.claimPageEffect('complete:S:9:c1'), false);
-    assert.equal(left.claimPageEffect('complete:S:9:c1'), false);
+    assert.equal(left.claimPageEffect('perm:S:r1'), true);
+    assert.equal(right.claimPageEffect('perm:S:r1'), false);
+    assert.equal(left.claimPageEffect('perm:S:r1'), false);
     assert.equal(right.claimPageEffect('perm:T:r1'), true);
   });
 
@@ -613,8 +658,8 @@ describe('the page coordinator', () => {
     const right = coordinators.get('right')!;
 
     assert.notEqual(left.statusCheckSentAtRef, right.statusCheckSentAtRef);
-    assert.equal(left.claimPageEffect('complete:S:9:c1'), true);
-    assert.equal(right.claimPageEffect('complete:S:9:c1'), true);
+    assert.equal(left.claimPageEffect('perm:S:r1'), true);
+    assert.equal(right.claimPageEffect('perm:S:r1'), true);
     assert.deepEqual(reporterOf('S'), ['left', 'right']);
   });
 
@@ -630,11 +675,11 @@ describe('the page coordinator', () => {
       );
     }
     const view = render(<PageAbove generation={0} />);
-    assert.equal(coordinators.get('left')!.claimPageEffect('complete:S:9:c1'), true);
+    assert.equal(coordinators.get('left')!.claimPageEffect('perm:S:r1'), true);
 
     view.rerender(<PageAbove generation={1} />);
 
-    assert.equal(coordinators.get('right')!.claimPageEffect('complete:S:9:c1'), false);
+    assert.equal(coordinators.get('right')!.claimPageEffect('perm:S:r1'), false);
     assert.equal(coordinators.get('left')!.statusCheckSentAtRef, coordinators.get('right')!.statusCheckSentAtRef);
     assert.deepEqual(reporterOf('S'), ['left']);
     assert.deepEqual(reporterOf('unseen'), ['left']);

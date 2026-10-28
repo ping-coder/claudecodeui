@@ -131,7 +131,7 @@ export const isNotificationSoundEnabled = (): boolean => {
   return localStorage.getItem(NOTIFICATION_SOUND_ENABLED_STORAGE_KEY) !== 'false';
 };
 
-/** Persists the user's completion-sound preference; call it from settings toggles. */
+/** Persists the user's completion-sound preference; called by the settings page and by run-notifications, which mirrors the server's `channels.sound` on mount. */
 export const setNotificationSoundEnabled = (enabled: boolean): void => {
   if (typeof localStorage === 'undefined') {
     return;

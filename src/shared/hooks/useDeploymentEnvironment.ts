@@ -60,8 +60,9 @@ const getDeploymentEnvironmentSnapshot = (): string | null => deploymentEnvironm
  * from `/health` (for example "staging"); null in production, until the answer arrives and
  * when it cannot be read. All callers share one request per page load, and a caller that
  * mounts after the answer gets it on its first render. Used by the DeploymentEnvironmentBadge
- * shared UI component, by ThemeProvider for the browser chrome colour, and by
- * `useDeploymentEnvironmentTitle` and `useDeploymentEnvironmentFavicon`.
+ * shared UI component, by ThemeProvider for the browser chrome colour, by
+ * `useDeploymentEnvironmentTitle` and `useDeploymentEnvironmentFavicon`, and by run-notifications
+ * for the label in front of a system notification's title.
  */
 export function useDeploymentEnvironment(): string | null {
   return useSyncExternalStore(subscribeToDeploymentEnvironment, getDeploymentEnvironmentSnapshot);

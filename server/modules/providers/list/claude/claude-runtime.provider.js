@@ -1383,6 +1383,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
             sessionId: sessionId || capturedSessionId || null,
             sessionName: sessionSummary
           });
+          ws.reportBackgroundWorkFinished?.();
         }
         // Work started during this turn, or work from an earlier turn that
         // has not settled yet (a follow-up turn reports one task in while

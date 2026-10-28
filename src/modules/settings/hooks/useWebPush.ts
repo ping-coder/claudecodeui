@@ -8,6 +8,8 @@ type WebPushState = {
   isLoading: boolean;
   subscribe: () => Promise<void>;
   unsubscribe: () => Promise<void>;
+  /** Asks for notification permission alone (no push subscription) and resolves to the answer. */
+  requestPermission: () => Promise<NotificationPermission | 'unsupported'>;
 };
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -81,6 +83,24 @@ export function useWebPush(): WebPushState {
     }
   }, [permission]);
 
+  // The settings page's "Allow notifications" button, for page-sent system notifications.
+  // Notification.requestPermission() must stay the first async step: browsers only show
+  // the prompt while the click's user activation is still live.
+  const requestPermission = useCallback(async (): Promise<NotificationPermission | 'unsupported'> => {
+    if (permission === 'unsupported') {
+      return 'unsupported';
+    }
+
+    try {
+      const result = await Notification.requestPermission();
+      setPermission(result);
+      return result;
+    } catch (err) {
+      console.error('Notification permission request failed:', err);
+      return Notification.permission;
+    }
+  }, [permission]);
+
   const unsubscribe = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -99,5 +119,5 @@ export function useWebPush(): WebPushState {
     }
   }, []);
 
-  return { permission, isSubscribed, isLoading, subscribe, unsubscribe };
+  return { permission, isSubscribed, isLoading, subscribe, unsubscribe, requestPermission };
 }

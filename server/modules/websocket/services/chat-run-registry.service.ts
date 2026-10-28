@@ -1,10 +1,13 @@
 import { sessionsDb } from '@/modules/database/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
+import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import type {
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
+  RunEndedEvent,
+  RunEndOutcome,
 } from '@/shared/types.js';
 
 type ChatRunStatus = 'running' | 'completed';
@@ -51,6 +54,19 @@ const COMPLETED_RUN_RETENTION_MS = 5 * 60 * 1000;
 const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
 
 /**
+ * How long a run's end stays listed for GET /api/providers/sessions/run-ends.
+ * A tab whose socket dropped (laptop asleep, network change) reads the list
+ * once it reconnects and catches up on the ends it missed in this window.
+ */
+const RECENT_RUN_ENDS_RETENTION_MS = 10 * 60 * 1000;
+
+/**
+ * Upper bound on listed run ends, so a burst of short runs cannot grow the
+ * list without limit. When exceeded, the oldest ends are dropped first.
+ */
+const MAX_RECENT_RUN_ENDS = 200;
+
+/**
  * Active and recently-completed runs keyed by app session id.
  *
  * This map is the single in-memory source of truth for "is something running
@@ -58,6 +74,14 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  * path all consult it instead of asking each provider runtime individually.
  */
 const runs = new Map<string, ChatRun>();
+
+/**
+ * Every `run_ended` broadcast in the last RECENT_RUN_ENDS_RETENTION_MS, at most
+ * MAX_RECENT_RUN_ENDS, oldest first: each end is appended as it is recorded.
+ * Pruned on every write and read; lives only in memory, so a server restart
+ * empties it.
+ */
+let recentRunEnds: RunEndedEvent[] = [];
 
 /**
  * Answers whether a completed run must stay registered a while longer. Set by
@@ -91,6 +115,100 @@ function evictRunLater(run: ChatRun): void {
 }
 
 /**
+ * Reads how a turn ended from its terminal `complete`. An abort wins, then
+ * `success`, which `createCompleteMessage` always sets, then a numeric
+ * `exitCode`. A `complete` with neither — Codex sends its live
+ * `turn_complete` that way, ahead of its own `createCompleteMessage` — is
+ * `done`, as the chat client has always read it (only `success === false`
+ * counts as failed there).
+ */
+function readRunEndOutcome(message: NormalizedMessage): RunEndOutcome {
+  if (message.aborted === true) {
+    return 'aborted';
+  }
+  if (typeof message.success === 'boolean') {
+    return message.success ? 'done' : 'failed';
+  }
+  if (typeof message.exitCode === 'number') {
+    return message.exitCode === 0 ? 'done' : 'failed';
+  }
+  return 'done';
+}
+
+/**
+ * The session's custom name for a `run_ended` frame. The lookup runs inside
+ * the writer while the terminal `complete` is on its way out, so a failing
+ * read must not throw: the end goes out unnamed rather than taking the
+ * `complete` down with it.
+ */
+function readSessionName(run: ChatRun): string | null {
+  try {
+    return sessionsDb.getSessionName(run.appSessionId, run.provider)?.trim() || null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[ChatRunRegistry] Failed to read the session name for run_ended', {
+      appSessionId: run.appSessionId,
+      error: message,
+    });
+    return null;
+  }
+}
+
+/** Drops ends older than the retention window, then all but the newest MAX_RECENT_RUN_ENDS. */
+function pruneRecentRunEnds(now: number): void {
+  const cutoff = now - RECENT_RUN_ENDS_RETENTION_MS;
+  recentRunEnds = recentRunEnds.filter((end) => end.endedAt >= cutoff).slice(-MAX_RECENT_RUN_ENDS);
+}
+
+/**
+ * Records one end of `run` and broadcasts it as `run_ended` to every open
+ * chat socket, whether or not it watches the run: other tabs and devices
+ * raise their own alerts from it.
+ *
+ * The list entry is written at once, so the run-ends route has it as soon as
+ * it happened. The broadcast waits a microtask: a turn's end is recorded
+ * while its `complete` is being decorated, before the writer forwards it,
+ * and the run's own listeners must get that `complete` first.
+ */
+function recordRunEnded(run: ChatRun, outcome: RunEndOutcome, backgroundWork: boolean): void {
+  const endedAt = Date.now();
+  const event: RunEndedEvent = {
+    kind: 'run_ended',
+    sessionId: run.appSessionId,
+    provider: run.provider,
+    runStartedAt: run.startedAt,
+    endedAt,
+    outcome,
+    backgroundWork,
+    sessionName: readSessionName(run),
+    timestamp: new Date(endedAt).toISOString(),
+  };
+
+  recentRunEnds.push(event);
+  pruneRecentRunEnds(endedAt);
+
+  const payload = JSON.stringify(event);
+  queueMicrotask(() => {
+    for (const client of connectedClients) {
+      if (client.readyState !== WS_OPEN_STATE) {
+        continue;
+      }
+      // A throw inside a microtask is an uncaught exception, and one broken
+      // socket must not keep the end from the others.
+      try {
+        client.send(payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[ChatRunRegistry] Failed to send run_ended', {
+          appSessionId: run.appSessionId,
+          error: message,
+        });
+      }
+    }
+  });
+}
+
+/**
  * Decorates one outbound live event for a run and records it in the event log.
  *
  * Responsibilities:
@@ -98,7 +216,8 @@ function evictRunLater(run: ChatRun): void {
  *    app session id — provider-native ids never leave the backend.
  * 2. Assign the next `seq` so clients can detect/replay gaps.
  * 3. Buffer the event for `chat.subscribe` replay.
- * 4. Flip the run to `completed` when the terminal `complete` event passes by.
+ * 4. Flip the run to `completed` when the terminal `complete` event passes by,
+ *    and record the run's end for every connected tab.
  */
 function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): NormalizedMessage | null {
   // Exactly-one-complete contract: when a run is aborted the chat handler
@@ -124,6 +243,12 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     run.status = 'completed';
     run.completedAt = Date.now();
     evictRunLater(run);
+
+    // Only the first `complete` gets here (a duplicate returned above), so
+    // each turn ends exactly once. Background work is asked about now, as the
+    // turn ends: the runtime has already counted the tasks this turn started.
+    const outcome = readRunEndOutcome(message);
+    recordRunEnded(run, outcome, outcome === 'done' && retainCompletedRun(run.appSessionId));
   }
 
   run.events.push(outbound);
@@ -227,6 +352,17 @@ export const chatRunRegistry = {
         recordProviderSessionId(run, providerSessionId);
       },
       decorateOutboundEvent: (message) => decorateAndRecordEvent(run, message),
+      onBackgroundWorkFinished: () => {
+        // Only news about a turn that has ended and still is the session's
+        // latest run counts. A newer run in the slot stopped this run's work
+        // when it started, so a late report from it is stale. An empty slot
+        // still counts: eviction only asks whether tasks are outstanding, and
+        // the follow-up turn that reports the last of them can outlast that.
+        const current = runs.get(run.appSessionId);
+        if (run.status === 'completed' && (current === undefined || current === run)) {
+          recordRunEnded(run, 'backgroundDone', false);
+        }
+      },
     });
 
     runs.set(input.appSessionId, run);
@@ -326,9 +462,22 @@ export const chatRunRegistry = {
   },
 
   /**
-   * Test-only escape hatch: clears every tracked run.
+   * Run ends broadcast in the last 10 minutes (at most 200), oldest first, as
+   * the `run_ended` frames that went out. Used by the providers module's
+   * sessions service for GET /api/providers/sessions/run-ends, which a tab
+   * reads on mount and after a reconnect to catch up on ends it missed.
+   * Returns a copy; callers cannot change the list.
+   */
+  listRecentRunEnds(): RunEndedEvent[] {
+    pruneRecentRunEnds(Date.now());
+    return [...recentRunEnds];
+  },
+
+  /**
+   * Test-only escape hatch: clears every tracked run and every recorded end.
    */
   clearAll(): void {
     runs.clear();
+    recentRunEnds = [];
   },
 };

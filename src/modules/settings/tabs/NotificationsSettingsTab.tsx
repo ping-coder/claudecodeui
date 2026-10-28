@@ -1,9 +1,13 @@
-import { Bell, BellOff, BellRing, Loader2, Play, Volume2 } from 'lucide-react';
+import { Bell, BellOff, BellRing, Loader2, PanelTop, Play, Volume2 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useSetUiPreference, useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { Button } from '@/shared/ui';
 import { playChatCompletionSound } from '@/shared/utils';
 import type { NotificationPreferencesState } from '@/shared/types';
+import SettingsToggle from '@/modules/settings/SettingsToggle';
 
 type NotificationsSettingsTabProps = {
   notificationPreferences: NotificationPreferencesState;
@@ -13,6 +17,8 @@ type NotificationsSettingsTabProps = {
   isPushLoading: boolean;
   onEnablePush: () => void;
   onDisablePush: () => void;
+  /** Asks the browser for notification permission; must be the first async step of the click that calls it. */
+  onRequestNotificationPermission: () => Promise<NotificationPermission | 'unsupported'>;
   isDesktop?: boolean;
   desktopNotifications?: {
     enabled: boolean;
@@ -25,7 +31,33 @@ type NotificationsSettingsTabProps = {
   onDisableDesktopNotifications?: () => void;
 };
 
-/** Rendered by Settings for the "notifications" tab, covering notification channels and events. */
+type PageAlertRowProps = {
+  icon: LucideIcon;
+  label: string;
+  description: string;
+  toggle: ReactNode;
+  /** Shown under the description: the sound preview, or what the permission state means for system notifications. */
+  children?: ReactNode;
+};
+
+/** One row of the "While CloudCLI is open" card: a labelled, described switch with optional detail below. */
+function PageAlertRow({ icon: Icon, label, description, toggle, children }: PageAlertRowProps) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-4 first:pt-0 last:pb-0">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex items-center gap-2">
+          <Icon className="h-4 w-4 text-blue-600" />
+          <span className="text-sm font-medium text-foreground">{label}</span>
+        </div>
+        <p className="text-sm text-muted-foreground">{description}</p>
+        {children ? <div className="pt-2">{children}</div> : null}
+      </div>
+      <div className="flex-shrink-0">{toggle}</div>
+    </div>
+  );
+}
+
+/** Rendered by Settings for the "notifications" tab, covering the alerts shown while CloudCLI is open, notification channels and events. */
 export default function NotificationsSettingsTab({
   notificationPreferences,
   onNotificationPreferencesChange,
@@ -34,15 +66,41 @@ export default function NotificationsSettingsTab({
   isPushLoading,
   onEnablePush,
   onDisablePush,
+  onRequestNotificationPermission,
   isDesktop = false,
   desktopNotifications = null,
   onEnableDesktopNotifications,
   onDisableDesktopNotifications,
 }: NotificationsSettingsTabProps) {
   const { t } = useTranslation('settings');
+  const preferences = useUiPreferences();
+  const setPreference = useSetUiPreference();
 
   const pushSupported = pushPermission !== 'unsupported';
   const pushDenied = pushPermission === 'denied';
+  // Page-sent system notifications need the permission; until it is granted the switch
+  // reads off and cannot be flipped, whatever the stored preference says.
+  const notificationsGranted = pushPermission === 'granted';
+
+  const soundLabel = t('notifications.sound.title', { defaultValue: 'Sound' });
+  const bannerLabel = t('notifications.page.banner.title', { defaultValue: 'Banner' });
+  const systemNotificationLabel = t('notifications.page.system.title', { defaultValue: 'System notification' });
+
+  let systemNotificationNote: string | null = null;
+  if (pushPermission === 'denied') {
+    systemNotificationNote = t('notifications.page.system.denied', {
+      defaultValue: 'Notifications are blocked for this site. Allow them in the browser site settings.',
+    });
+  } else if (pushPermission === 'unsupported') {
+    systemNotificationNote = t('notifications.page.system.unsupported', {
+      defaultValue: 'Not available here. System notifications need HTTPS or localhost.',
+    });
+  } else if (notificationsGranted && isPushSubscribed) {
+    // run-notifications leaves the system notification to the push this browser receives.
+    systemNotificationNote = t('notifications.page.system.viaPush', {
+      defaultValue: 'Push notifications are on for this browser, so they deliver these instead.',
+    });
+  }
 
   return (
     <div className="space-y-6 md:space-y-8">
@@ -52,6 +110,109 @@ export default function NotificationsSettingsTab({
           <h3 className="text-lg font-medium text-foreground">{t('notifications.title')}</h3>
         </div>
         <p className="text-sm text-muted-foreground">{t('notifications.description')}</p>
+      </div>
+
+      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-1">
+          <h4 className="font-medium text-foreground">
+            {t('notifications.page.title', { defaultValue: 'While CloudCLI is open' })}
+          </h4>
+          <p className="text-sm text-muted-foreground">
+            {t('notifications.page.description', {
+              defaultValue: 'How this browser tells you a task has finished while a CloudCLI tab is open.',
+            })}
+          </p>
+        </div>
+
+        <div className="divide-y divide-border">
+          <PageAlertRow
+            icon={Volume2}
+            label={soundLabel}
+            description={t('notifications.sound.description', {
+              defaultValue: 'Play a short tone when a task finishes or needs tool approval.',
+            })}
+            toggle={
+              <SettingsToggle
+                checked={notificationPreferences.channels.sound}
+                onChange={(value) =>
+                  onNotificationPreferencesChange({
+                    ...notificationPreferences,
+                    channels: {
+                      ...notificationPreferences.channels,
+                      sound: value,
+                    },
+                  })
+                }
+                ariaLabel={soundLabel}
+              />
+            }
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void playChatCompletionSound({ force: true });
+              }}
+            >
+              <Play className="h-4 w-4" />
+              {t('notifications.sound.test', { defaultValue: 'Test sound' })}
+            </Button>
+          </PageAlertRow>
+
+          <PageAlertRow
+            icon={PanelTop}
+            label={bannerLabel}
+            description={t('notifications.page.banner.description', {
+              defaultValue: 'Show a banner when a task finishes, with a button to open its conversation.',
+            })}
+            toggle={
+              <SettingsToggle
+                checked={preferences.runAlertBanner}
+                onChange={(value) => setPreference('runAlertBanner', value)}
+                ariaLabel={bannerLabel}
+              />
+            }
+          />
+
+          {/* Hidden in the desktop app: run-notifications sends no page system notifications
+              there, and its own native notifications have the card below. */}
+          {!isDesktop && (
+            <PageAlertRow
+              icon={BellRing}
+              label={systemNotificationLabel}
+              description={t('notifications.page.system.description', {
+                defaultValue: 'Show a system notification when a task finishes and no CloudCLI tab is in front.',
+              })}
+              toggle={
+                <SettingsToggle
+                  checked={preferences.runAlertSystemNotification && notificationsGranted}
+                  onChange={(value) => setPreference('runAlertSystemNotification', value)}
+                  ariaLabel={systemNotificationLabel}
+                  disabled={!notificationsGranted}
+                />
+              }
+            >
+              {pushPermission === 'default' ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    // The click's first and only async step: browsers show the permission
+                    // prompt only while the click's user activation is still live.
+                    void onRequestNotificationPermission();
+                  }}
+                >
+                  <Bell className="h-4 w-4" />
+                  {t('notifications.page.system.allow', { defaultValue: 'Allow notifications' })}
+                </Button>
+              ) : systemNotificationNote ? (
+                <p className="text-sm text-muted-foreground">{systemNotificationNote}</p>
+              ) : null}
+            </PageAlertRow>
+          )}
+        </div>
       </div>
 
       {isDesktop ? (
@@ -104,7 +265,15 @@ export default function NotificationsSettingsTab({
         </div>
       ) : (
         <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-          <h4 className="font-medium text-foreground">{t('notifications.webPush.title')}</h4>
+          <div className="space-y-1">
+            <h4 className="font-medium text-foreground">{t('notifications.webPush.title')}</h4>
+            <p className="text-sm text-muted-foreground">
+              {t('notifications.webPush.description', {
+                defaultValue:
+                  'Reaches this browser even when CloudCLI is closed. While a CloudCLI tab is in front, task notifications arrive without sound.',
+              })}
+            </p>
+          </div>
           {!pushSupported ? (
             <p className="text-sm text-muted-foreground">{t('notifications.webPush.unsupported')}</p>
           ) : pushDenied ? (
@@ -151,55 +320,9 @@ export default function NotificationsSettingsTab({
       )}
 
       <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Volume2 className="h-4 w-4 text-blue-600" />
-              <h4 className="font-medium text-foreground">
-                {t('notifications.sound.title', { defaultValue: 'Sound' })}
-              </h4>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {t('notifications.sound.description', {
-                defaultValue: 'Play a short tone when a chat run finishes.',
-              })}
-            </p>
-          </div>
-
-          <label className="flex shrink-0 items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              checked={notificationPreferences.channels.sound}
-              onChange={(event) =>
-                onNotificationPreferencesChange({
-                  ...notificationPreferences,
-                  channels: {
-                    ...notificationPreferences.channels,
-                    sound: event.target.checked,
-                  },
-                })
-              }
-              className="h-4 w-4"
-            />
-            {t('notifications.sound.enabled', { defaultValue: 'Enabled' })}
-          </label>
-        </div>
-
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            void playChatCompletionSound({ force: true });
-          }}
-        >
-          <Play className="h-4 w-4" />
-          {t('notifications.sound.test', { defaultValue: 'Test sound' })}
-        </Button>
-      </div>
-
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-        <h4 className="font-medium text-foreground">{t('notifications.events.title')}</h4>
+        <h4 className="font-medium text-foreground">
+          {t('notifications.events.title', { defaultValue: 'Push and desktop notification events' })}
+        </h4>
         <div className="space-y-3">
           <label className="flex items-center gap-2 text-sm text-foreground">
             <input

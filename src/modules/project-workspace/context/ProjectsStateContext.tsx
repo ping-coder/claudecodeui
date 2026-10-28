@@ -18,7 +18,7 @@ import type {
 
 type ProjectsState = ReturnType<typeof useProjectsState>;
 
-/** The layout, each pane's project and the layout actions: what the main region renders the panes from, and what the shell and the palette read about the panes. */
+/** The layout, each pane's project and the layout actions: what the main region renders the panes from, and what the shell, the palette and the run notifications read about the panes. */
 type ProjectPanesState = {
   layout: WorkspaceLayout;
   /** Stable object per pane (projects row merged via mergeProjectSelectionMetadata, or an unlisted/archived project); null for an empty pane. */
@@ -72,7 +72,7 @@ type ProjectCommandState = {
   actions: WorkspaceLayoutActions;
 };
 
-/** What the headless page effects need: palette registrations, notification clicks and the document title. */
+/** What the headless page effects need: palette registrations, notification clicks and the document title's page and running parts. */
 type ProjectEffectsState = {
   openSettings: (tab?: string) => void;
   refreshProjectsSilently: () => Promise<void>;
@@ -80,6 +80,10 @@ type ProjectEffectsState = {
   openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
   focusedProject: Project | null;
   focusedSession: ProjectSession | null;
+  /** Where both title parts look up a session's live title (renames and generated summaries land here). */
+  projects: Project[];
+  /** The sessions this tab has open, which the running part names first (and counts external CLI turns only for), and the tabs' title snapshots. */
+  layout: WorkspaceLayout;
 };
 
 type ProjectsStateProviderProps = {
@@ -187,12 +191,16 @@ export function ProjectsStateProvider({
       openSessionById: state.openSessionById,
       focusedProject: state.focusedProject,
       focusedSession: state.focusedSession,
+      projects: state.projects,
+      layout: state.layout,
     }),
     [
       state.focusedProject,
       state.focusedSession,
+      state.layout,
       state.openSessionById,
       state.openSettings,
+      state.projects,
       state.refreshProjectsSilently,
       state.setSidebarOpen,
     ],
@@ -221,8 +229,9 @@ function useRequiredProjectContext<T>(value: T | null, hookName: string): T {
 /**
  * Read by ProjectMainRegion to draw both panes, change the layout and collect the panes' unsaved-editor
  * reports, by ProjectWorkspaceShell for the workspace shortcuts, the phone's immersive menu button and
- * to report whether two panes fit, and by ProjectCommandPalette for the titles and project names of its
- * Open tabs.
+ * to report whether two panes fit, by ProjectCommandPalette for the titles and project names of its
+ * Open tabs, and by ProjectRunNotifications for the session names in run alerts, the sessions the panes
+ * on display show and opening a session from a banner.
  */
 export function useProjectPanesState(): ProjectPanesState {
   return useRequiredProjectContext(useContext(ProjectPanesContext), 'useProjectPanesState');
@@ -238,7 +247,7 @@ export function useProjectCommandState(): ProjectCommandState {
   return useRequiredProjectContext(useContext(ProjectCommandContext), 'useProjectCommandState');
 }
 
-/** Read by ProjectEffects for palette registrations, notification clicks and the document title. */
+/** Read by ProjectEffects for palette registrations, notification clicks and the document title: its page part, and through useRunningSessionTitle its running part. */
 export function useProjectEffectsState(): ProjectEffectsState {
   return useRequiredProjectContext(useContext(ProjectEffectsContext), 'useProjectEffectsState');
 }

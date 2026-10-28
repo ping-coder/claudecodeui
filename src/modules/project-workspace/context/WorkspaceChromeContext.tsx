@@ -39,7 +39,7 @@ export function WorkspaceChromeProvider({ value, children }: WorkspaceChromeProv
   return <WorkspaceChromeContext.Provider value={value}>{children}</WorkspaceChromeContext.Provider>;
 }
 
-/** Read by this module's regions (the main region, its panes and their tab bars, sidebar, command palette, quick settings) to follow immersive mode and split capability. */
+/** Read by this module's regions (the main region, its panes and their tab bars, sidebar, command palette, quick settings, run notifications) to follow immersive mode and split capability. */
 export function useWorkspaceChrome(): WorkspaceChromeState {
   return useContext(WorkspaceChromeContext);
 }

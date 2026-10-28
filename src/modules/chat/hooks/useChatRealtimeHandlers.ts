@@ -2,8 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
-import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
-import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
+import { playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { collectRunningBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
@@ -89,7 +88,7 @@ type UseChatRealtimeHandlersArgs = {
    */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   /**
-   * Claims a page-wide effect (a sound, the title marker) by event key; false
+   * Claims a page-wide effect (a permission prompt's sound) by event key; false
    * when another chat on the page already ran it for the same event.
    */
   claimPageEffect: (eventKey: string) => boolean;
@@ -126,10 +125,13 @@ type UseChatRealtimeHandlersArgs = {
  * Every chat on the page hears every frame of the one shared socket (a split
  * workspace mounts two), so streamed text is buffered per session, a replay
  * this chat has already handled is dropped, and the work only one chat may do
- * (a sound, the title marker, a background-work report) goes through the
+ * (a permission prompt's sound, a background-work report) goes through the
  * page's coordinator. A chat stores a session's frames only from the start of
  * its run: the frames of a run it joined part-way, because another chat had
  * attached the socket to it, wait for the replay its own subscribe asks for.
+ * How a finished run is announced (the chime, the title alert, banners) is not
+ * the chat's business: run-notifications does it from `run_ended`, for every
+ * run on the server, followed here or not.
  */
 export function useChatRealtimeHandlers({
   isActive,
@@ -343,6 +345,12 @@ export function useChatRealtimeHandlers({
       // Not about any session: every chat re-syncs the session it shows.
       if (msg.kind === 'websocket_reconnected') {
         onWebSocketReconnect?.();
+        return;
+      }
+
+      // A gateway frame for run-notifications, which announces the run's end;
+      // it is no transcript row, so no chat stores it.
+      if (msg.kind === 'run_ended') {
         return;
       }
 
@@ -604,13 +612,6 @@ export function useChatRealtimeHandlers({
             // Abort was requested — the complete event confirms it. No
             // further UI action is needed beyond clearing the entry above.
             break;
-          }
-
-          // Celebrate only successful runs (failed runs end with success: false),
-          // once on the page however many chats hear the frame.
-          if (msg.success !== false && claimPageEffect(`complete:${sid}:${msg.seq}:${String(msg.id)}`)) {
-            showCompletionTitleIndicator();
-            void playChatCompletionSound();
           }
 
           // The session id is stable for the whole conversation (allocated

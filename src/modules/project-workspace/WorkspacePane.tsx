@@ -225,8 +225,8 @@ function WorkspacePane({
   const hasContent = liveContent !== null;
   // The content WorkspaceMain last showed. While the pane shows nothing (no tab, a conversation that
   // is gone) WorkspaceMain keeps it, hidden, instead of unmounting: its chat keeps hearing the runs it
-  // follows (completion sound, [Done] title, permission prompts) and its editor keeps any unsaved
-  // buffer for when the pane shows something again.
+  // follows (reporting the background work they leave, permission prompts) and its editor keeps any
+  // unsaved buffer for when the pane shows something again.
   const [shownContent, setShownContent] = useState<PaneContent | null>(liveContent);
   if (
     liveContent

@@ -11,6 +11,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import providerRouter from '@/modules/providers/provider.routes.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
+import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type { BackgroundTaskSummary, WorkflowAgentActivity } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
@@ -637,6 +638,37 @@ test('the running-sessions route reports a session held open for background work
     }));
   } finally {
     providerRegistry.listProviders = realListProviders;
+  }
+});
+
+test('the run-ends route lists the runs that ended recently, as they were broadcast', async () => {
+  // A tab reads this after its socket comes back, to catch up on the
+  // `run_ended` frames it missed; the registry is the only source.
+  try {
+    await withProviderServer(async (baseUrl, workspacePath) => {
+      sessionsDb.createAppSession('ended-session', 'codex', workspacePath, 'Release notes');
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'ended-session',
+        provider: 'codex',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+      run.writer.send({ kind: 'complete', provider: 'codex', sessionId: 'native-ended', exitCode: 1 });
+
+      const response = await fetch(`${baseUrl}/api/providers/sessions/run-ends`);
+      const payload = await response.json() as { success: boolean; data: { ends: Array<Record<string, unknown>> } };
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(payload, { success: true, data: { ends: chatRunRegistry.listRecentRunEnds() } });
+      assert.deepEqual(
+        payload.data.ends.map((end) => [end.sessionId, end.provider, end.runStartedAt, end.outcome, end.sessionName]),
+        [['ended-session', 'codex', run.startedAt, 'failed', 'Release notes']],
+      );
+    });
+  } finally {
+    chatRunRegistry.clearAll();
   }
 });
 

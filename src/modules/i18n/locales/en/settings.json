@@ -138,8 +138,25 @@
   "notifications": {
     "title": "Notifications",
     "description": "Control which notification events you receive.",
+    "page": {
+      "title": "While CloudCLI is open",
+      "description": "How this browser tells you a task has finished while a CloudCLI tab is open.",
+      "banner": {
+        "title": "Banner",
+        "description": "Show a banner when a task finishes, with a button to open its conversation."
+      },
+      "system": {
+        "title": "System notification",
+        "description": "Show a system notification when a task finishes and no CloudCLI tab is in front.",
+        "allow": "Allow notifications",
+        "denied": "Notifications are blocked for this site. Allow them in the browser site settings.",
+        "unsupported": "Not available here. System notifications need HTTPS or localhost.",
+        "viaPush": "Push notifications are on for this browser, so they deliver these instead."
+      }
+    },
     "webPush": {
       "title": "Notify this browser",
+      "description": "Reaches this browser even when CloudCLI is closed. While a CloudCLI tab is in front, task notifications arrive without sound.",
       "enable": "Enable notifications",
       "disable": "Disable notifications",
       "enabled": "Notifications are enabled for this browser",
@@ -156,12 +173,12 @@
     },
     "sound": {
       "title": "Sound",
-      "description": "Play a short tone when a chat run finishes or needs tool approval.",
+      "description": "Play a short tone when a task finishes or needs tool approval.",
       "enabled": "Enabled",
       "test": "Test sound"
     },
     "events": {
-      "title": "Event Types",
+      "title": "Push and desktop notification events",
       "actionRequired": "Action required",
       "stop": "Run stopped",
       "error": "Run failed"

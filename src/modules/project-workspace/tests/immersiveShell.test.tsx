@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { NavigateFunction } from 'react-router-dom';
 import { afterEach, beforeEach, test, vi } from 'vitest';
@@ -46,6 +46,9 @@ vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
   useProjectCommandState: () => COMMAND_STATE,
 }));
 vi.mock('@/modules/project-workspace/controllers/ProjectEffects', () => ({ default: () => null }));
+// Run alerts need the socket, the activity map and the UI preferences, none of which this is about; a probe
+// stands in, so the shell is still seen to mount them.
+vi.mock('@/modules/project-workspace/ProjectRunNotifications', () => ({ default: RunNotificationsProbe }));
 vi.mock('@/modules/project-workspace/ProjectCommandPalette', () => ({ default: () => null }));
 vi.mock('@/modules/project-workspace/ProjectSidebarRegion', () => ({ default: SidebarRegionProbe }));
 vi.mock('@/modules/project-workspace/ProjectMainRegion', () => ({ default: MainRegionProbe }));
@@ -89,6 +92,24 @@ function MainRegionProbe() {
       <button type="button" onClick={() => chrome.setSidebarPeekOpen(true)}>Pane show sidebar</button>
     </div>
   );
+}
+
+// How many run-notification bindings are mounted, and what the last one rendered with.
+const runNotificationsProbe = { mounted: 0, last: null as { isMobile: boolean; canSplit: boolean } | null };
+
+/** Stands in for ProjectRunNotifications: records its props and the chrome it reads. */
+function RunNotificationsProbe({ isMobile }: { isMobile: boolean }) {
+  const { canSplit: chromeCanSplit } = useWorkspaceChrome();
+  useLayoutEffect(() => {
+    runNotificationsProbe.last = { isMobile, canSplit: chromeCanSplit };
+  });
+  useEffect(() => {
+    runNotificationsProbe.mounted += 1;
+    return () => {
+      runNotificationsProbe.mounted -= 1;
+    };
+  }, []);
+  return null;
 }
 
 function QuickSettingsPanelProbe({ allowDocking }: { allowDocking?: boolean }) {
@@ -343,4 +364,16 @@ test('a pane key that keeps the focused tab still closes the drawer once it has 
   });
 
   assert.equal(isPeekOpen(), 'false');
+});
+
+test('the run notifications are mounted once, inside the workspace chrome, told whether this is a phone', () => {
+  const view = renderShell();
+  assert.equal(runNotificationsProbe.mounted, 1);
+  assert.deepEqual(runNotificationsProbe.last, { isMobile: false, canSplit: true });
+  view.unmount();
+  assert.equal(runNotificationsProbe.mounted, 0);
+
+  renderShell({ isMobile: true });
+  assert.equal(runNotificationsProbe.mounted, 1);
+  assert.deepEqual(runNotificationsProbe.last, { isMobile: true, canSplit: false });
 });

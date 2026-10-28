@@ -13,6 +13,7 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  RunEndedEvent,
   WorkflowAgentActivity,
 } from '@/shared/types.js';
 import { AppError, sliceTailPage } from '@/shared/utils.js';
@@ -215,6 +216,17 @@ export const sessionsService = {
     }
 
     return entries;
+  },
+
+  /**
+   * Returns the runs that ended in the last 10 minutes (at most 200), oldest
+   * first, as the chat gateway broadcast them in `run_ended` frames. Backs
+   * GET /api/providers/sessions/run-ends, which run-notifications reads on
+   * mount as a baseline and after a websocket reconnect to catch up on ends
+   * its socket missed.
+   */
+  listRecentRunEnds(): RunEndedEvent[] {
+    return chatRunRegistry.listRecentRunEnds();
   },
 
   /**

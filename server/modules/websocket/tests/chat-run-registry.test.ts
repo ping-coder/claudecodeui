@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
@@ -309,5 +309,384 @@ test('startRun rejects a second concurrent run for the same session', async () =
       userId: null,
     });
     assert.ok(third);
+  });
+});
+
+/** Resolves after the microtasks already queued, which is when a recorded run end has been broadcast. */
+const flushMicrotasks = () => new Promise<void>((resolve) => { queueMicrotask(resolve); });
+
+/** A socket in the gateway's broadcast set, as every connected tab's is. */
+function connectTab(): FakeConnection {
+  const connection = new FakeConnection();
+  connectedClients.add(connection);
+  return connection;
+}
+
+const runEndedFrames = (connection: FakeConnection) =>
+  connection.frames.filter((frame) => frame.kind === 'run_ended');
+
+test('a run\'s first complete reaches every open tab as run_ended, after the run\'s own listeners got the complete', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-end-1', 'claude', '/workspace/demo', 'Fix login bug');
+    const listener = connectTab();
+    const otherTab = connectTab();
+    const closedTab = connectTab();
+    closedTab.readyState = 3;
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-end-1',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: listener,
+      userId: null,
+    });
+    assert.ok(run);
+
+    run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native-1', exitCode: 0, success: true, aborted: false });
+    // Still in the writer's turn: the complete is out, the end is not yet.
+    assert.deepEqual(listener.frames.map((frame) => frame.kind), ['complete']);
+    assert.equal(otherTab.frames.length, 0);
+
+    await flushMicrotasks();
+
+    assert.deepEqual(listener.frames.map((frame) => frame.kind), ['complete', 'run_ended']);
+    assert.deepEqual(otherTab.frames.map((frame) => frame.kind), ['run_ended']);
+    assert.equal(closedTab.frames.length, 0);
+
+    const ended = otherTab.frames[0];
+    assert.equal(typeof ended?.endedAt, 'number');
+    // A gateway frame: no seq, and nothing beyond the contract.
+    assert.deepEqual(ended, {
+      kind: 'run_ended',
+      sessionId: 'app-end-1',
+      provider: 'claude',
+      runStartedAt: run.startedAt,
+      endedAt: ended?.endedAt,
+      outcome: 'done',
+      backgroundWork: false,
+      sessionName: 'Fix login bug',
+      timestamp: new Date(ended?.endedAt as number).toISOString(),
+    });
+    assert.deepEqual(listener.frames[1], ended);
+    // And it is listed for a tab that reconnects later.
+    assert.deepEqual(chatRunRegistry.listRecentRunEnds(), [ended]);
+  });
+});
+
+test('run_ended reads the outcome from the complete: an abort first, then success, then the exit code', async () => {
+  await withIsolatedDatabase(() => {
+    const cases: Array<{ complete: Record<string, unknown>; outcome: string }> = [
+      { complete: { exitCode: 0, success: true, aborted: false }, outcome: 'done' },
+      { complete: { exitCode: 1, success: false, aborted: false }, outcome: 'failed' },
+      // `success` decides whenever it is there...
+      { complete: { exitCode: 0, success: false }, outcome: 'failed' },
+      { complete: { exitCode: 1, success: true }, outcome: 'done' },
+      // ...and the exit code when it is not.
+      { complete: { exitCode: 1 }, outcome: 'failed' },
+      { complete: { exitCode: 0 }, outcome: 'done' },
+      // Codex's live turn_complete carries neither; the chat client has always read that as success.
+      { complete: {}, outcome: 'done' },
+      { complete: { exitCode: 0, success: false, aborted: true }, outcome: 'aborted' },
+    ];
+
+    for (const [index, { complete }] of cases.entries()) {
+      sessionsDb.createAppSession(`app-outcome-${index}`, 'codex', '/workspace/demo');
+      const run = chatRunRegistry.startRun({
+        appSessionId: `app-outcome-${index}`,
+        provider: 'codex',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+      run.writer.send({ kind: 'complete', provider: 'codex', sessionId: 'native', ...complete });
+    }
+
+    assert.deepEqual(
+      chatRunRegistry.listRecentRunEnds().map((end) => [end.sessionId, end.outcome, end.sessionName]),
+      cases.map(({ outcome }, index) => [`app-outcome-${index}`, outcome, null]),
+    );
+  });
+});
+
+test('an aborted run ends once, as aborted, however many completes follow', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-end-abort', 'claude', '/workspace/demo');
+    const tab = connectTab();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-end-abort',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: tab,
+      userId: null,
+    });
+    assert.ok(run);
+
+    // What chat.abort does, then the killed runtime's own late complete and the dispatcher's safety net.
+    chatRunRegistry.completeRun('app-end-abort', { exitCode: 0, aborted: true });
+    run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 1 });
+    chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
+    await flushMicrotasks();
+
+    assert.deepEqual(runEndedFrames(tab).map((frame) => frame.outcome), ['aborted']);
+    assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.outcome), ['aborted']);
+  });
+});
+
+test('a done turn that leaves background work running says so; other outcomes never do', async () => {
+  await withIsolatedDatabase(() => {
+    chatRunRegistry.setRetentionGuard((sessionId) => sessionId.startsWith('app-held-'));
+    try {
+      for (const [sessionId, exitCode] of [['app-held-done', 0], ['app-held-failed', 1], ['app-idle-done', 0]] as const) {
+        sessionsDb.createAppSession(sessionId, 'claude', '/workspace/demo');
+        const run = chatRunRegistry.startRun({
+          appSessionId: sessionId,
+          provider: 'claude',
+          providerSessionId: null,
+          connection: null,
+          userId: null,
+        });
+        assert.ok(run);
+        run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode });
+      }
+
+      assert.deepEqual(
+        chatRunRegistry.listRecentRunEnds().map((end) => [end.sessionId, end.outcome, end.backgroundWork]),
+        [
+          ['app-held-done', 'done', true],
+          ['app-held-failed', 'failed', false],
+          ['app-idle-done', 'done', false],
+        ],
+      );
+    } finally {
+      chatRunRegistry.setRetentionGuard(() => false);
+    }
+  });
+});
+
+test('the background work a completed run left behind ends as backgroundDone of that run', async () => {
+  await withIsolatedDatabase(async () => {
+    chatRunRegistry.setRetentionGuard((sessionId) => sessionId === 'app-bg-1');
+    try {
+      sessionsDb.createAppSession('app-bg-1', 'claude', '/workspace/demo', 'Audit deps');
+      const tab = connectTab();
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'app-bg-1',
+        provider: 'claude',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+
+      // Reported while the turn is still going: that ends nothing.
+      run.writer.reportBackgroundWorkFinished();
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds(), []);
+
+      run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+      run.writer.reportBackgroundWorkFinished();
+      await flushMicrotasks();
+
+      assert.deepEqual(
+        runEndedFrames(tab).map((frame) => [frame.outcome, frame.backgroundWork, frame.runStartedAt, frame.sessionName]),
+        [
+          ['done', true, run.startedAt, 'Audit deps'],
+          ['backgroundDone', false, run.startedAt, 'Audit deps'],
+        ],
+      );
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds(), runEndedFrames(tab));
+    } finally {
+      chatRunRegistry.setRetentionGuard(() => false);
+    }
+  });
+});
+
+test('a background report from a run a newer run replaced is stale and records nothing', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-bg-2', 'claude', '/workspace/demo');
+    const start = () => chatRunRegistry.startRun({
+      appSessionId: 'app-bg-2',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: null,
+      userId: null,
+    });
+
+    const first = start();
+    assert.ok(first);
+    first.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+
+    // The user's next message takes the slot, which stops the first run's work.
+    const second = start();
+    assert.ok(second);
+    first.writer.reportBackgroundWorkFinished();
+    second.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    first.writer.reportBackgroundWorkFinished();
+
+    assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.outcome), ['done', 'done']);
+  });
+});
+
+test('a background report still counts once the finished run was evicted, while no newer run took its place', async () => {
+  // Eviction only asks whether tasks are outstanding. The last one settling
+  // ends that, but the follow-up turn that reports it can outlast the window.
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    await withIsolatedDatabase(() => {
+      sessionsDb.createAppSession('app-bg-3', 'claude', '/workspace/demo');
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'app-bg-3',
+        provider: 'claude',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+      run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+
+      mock.timers.tick(5 * 60 * 1000);
+      assert.equal(chatRunRegistry.getRun('app-bg-3'), undefined);
+
+      run.writer.reportBackgroundWorkFinished();
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.outcome), ['done', 'backgroundDone']);
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('one socket that throws does not keep a run end from the others', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-end-throw', 'opencode', '/workspace/demo');
+    const brokenTab = connectTab();
+    brokenTab.send = () => { throw new Error('socket is gone'); };
+    const healthyTab = connectTab();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-end-throw',
+      provider: 'opencode',
+      providerSessionId: null,
+      connection: null,
+      userId: null,
+    });
+    assert.ok(run);
+
+    const consoleError = mock.method(console, 'error', () => {});
+    try {
+      run.writer.send({ kind: 'complete', provider: 'opencode', sessionId: 'native', exitCode: 0 });
+      await flushMicrotasks();
+    } finally {
+      consoleError.mock.restore();
+    }
+
+    assert.deepEqual(runEndedFrames(healthyTab).map((frame) => frame.sessionId), ['app-end-throw']);
+    assert.equal(consoleError.mock.callCount(), 1);
+  });
+});
+
+test('run_ended names the session from its row: trimmed, null when blank or when the lookup throws', async () => {
+  await withIsolatedDatabase(async () => {
+    const tab = connectTab();
+    const endRun = (sessionId: string) => {
+      const run = chatRunRegistry.startRun({
+        appSessionId: sessionId,
+        provider: 'claude',
+        providerSessionId: null,
+        connection: tab,
+        userId: null,
+      });
+      assert.ok(run);
+      run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    };
+
+    sessionsDb.createAppSession('app-name-padded', 'claude', '/workspace/demo', '  Fix login bug  ');
+    sessionsDb.createAppSession('app-name-blank', 'claude', '/workspace/demo', '   ');
+    sessionsDb.createAppSession('app-name-throws', 'claude', '/workspace/demo', 'Audit deps');
+    endRun('app-name-padded');
+    endRun('app-name-blank');
+
+    // The name is read while the turn's complete is on its way out: a failing
+    // read must not keep that complete from the tab.
+    const lookup = mock.method(sessionsDb, 'getSessionName', () => { throw new Error('database is locked'); });
+    const consoleWarn = mock.method(console, 'warn', () => {});
+    try {
+      endRun('app-name-throws');
+      await flushMicrotasks();
+    } finally {
+      lookup.mock.restore();
+      consoleWarn.mock.restore();
+    }
+
+    assert.deepEqual(
+      tab.frames.map((frame) => [frame.kind, frame.sessionId]),
+      [
+        ['complete', 'app-name-padded'],
+        ['complete', 'app-name-blank'],
+        ['complete', 'app-name-throws'],
+        ['run_ended', 'app-name-padded'],
+        ['run_ended', 'app-name-blank'],
+        ['run_ended', 'app-name-throws'],
+      ],
+    );
+    assert.deepEqual(runEndedFrames(tab).map((frame) => frame.sessionName), ['Fix login bug', null, null]);
+    assert.equal(chatRunRegistry.isProcessing('app-name-throws'), false);
+    assert.equal(consoleWarn.mock.callCount(), 1);
+  });
+});
+
+test('listRecentRunEnds lists ends oldest first and forgets them after 10 minutes or past 200', async () => {
+  await withIsolatedDatabase(() => {
+    let now = 1_800_000_000_000;
+    const clock = mock.method(Date, 'now', () => now);
+    try {
+      sessionsDb.createAppSession('app-list', 'opencode', '/workspace/demo');
+      const endRunAt = (time: number) => {
+        now = time;
+        const run = chatRunRegistry.startRun({
+          appSessionId: 'app-list',
+          provider: 'opencode',
+          providerSessionId: null,
+          connection: null,
+          userId: null,
+        });
+        assert.ok(run);
+        run.writer.send({ kind: 'complete', provider: 'opencode', sessionId: 'native', exitCode: 0 });
+      };
+
+      const start = now;
+      endRunAt(start);
+      endRunAt(start + 1_000);
+      endRunAt(start + 2_000);
+      const listed = chatRunRegistry.listRecentRunEnds();
+      assert.deepEqual(listed.map((end) => [end.runStartedAt, end.endedAt]), [
+        [start, start],
+        [start + 1_000, start + 1_000],
+        [start + 2_000, start + 2_000],
+      ]);
+      // A copy: emptying it changes nothing.
+      listed.length = 0;
+      assert.equal(chatRunRegistry.listRecentRunEnds().length, 3);
+
+      // Ten minutes old is still listed; a millisecond more is not.
+      now = start + 10 * 60 * 1000;
+      assert.equal(chatRunRegistry.listRecentRunEnds().length, 3);
+      now += 1;
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.endedAt), [start + 1_000, start + 2_000]);
+
+      // Past 200, the oldest go first.
+      chatRunRegistry.clearAll();
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds(), []);
+      const burst = now;
+      for (let index = 0; index < 201; index += 1) {
+        endRunAt(burst + index);
+      }
+      const capped = chatRunRegistry.listRecentRunEnds();
+      assert.equal(capped.length, 200);
+      assert.equal(capped[0]?.endedAt, burst + 1);
+      assert.equal(capped.at(-1)?.endedAt, burst + 200);
+
+      chatRunRegistry.clearAll();
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds(), []);
+    } finally {
+      clock.mock.restore();
+    }
   });
 });

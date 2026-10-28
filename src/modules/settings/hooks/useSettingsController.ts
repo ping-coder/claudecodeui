@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useTheme } from '@/shared/context/ThemeContext';
 import { api } from '@/shared/api';
-import { setNotificationSoundEnabled } from '@/shared/utils';
+import { isNotificationSoundEnabled, setNotificationSoundEnabled } from '@/shared/utils';
 import {
   readCodeEditorSettings,
   writeCodeEditorSettings,
@@ -90,7 +90,10 @@ const createDefaultNotificationPreferences = (): NotificationPreferencesState =>
     inApp: true,
     webPush: false,
     desktop: false,
-    sound: true,
+    // The local mirror, not a hard-coded true: the effect that mirrors `sound` into
+    // localStorage runs on open, before (or without) the server's answer, and would
+    // otherwise turn a sound the user switched off back on.
+    sound: isNotificationSoundEnabled(),
   },
   events: {
     actionRequired: true,

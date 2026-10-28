@@ -25,6 +25,13 @@ type ChatSessionWriterOptions = {
    * `complete` after an abort already completed the run).
    */
   decorateOutboundEvent: (message: NormalizedMessage) => NormalizedMessage | null;
+  /**
+   * Invoked when the provider runtime reports that the background work this
+   * run's completed turn left behind has finished and its follow-up turn has
+   * come back. The registry records it as a `backgroundDone` run end. A writer
+   * built without it ignores the report.
+   */
+  onBackgroundWorkFinished?: () => void;
 };
 
 /**
@@ -42,6 +49,9 @@ type ChatSessionWriterOptions = {
  *   per-run `seq` assigned before being forwarded.
  * - `setSessionId(...)` calls (used by runtimes to label captured ids) are
  *   intercepted and recorded as the provider-id mapping as well.
+ *
+ * Its one addition, `reportBackgroundWorkFinished`, is optional on
+ * `ProviderRuntimeWriter`, so runtimes call it only when it exists.
  */
 export class ChatSessionWriter {
   userId: string | number | null;
@@ -129,6 +139,17 @@ export class ChatSessionWriter {
     if (outbound) {
       this.forward(outbound);
     }
+  }
+
+  /**
+   * Called by a provider runtime (today only Claude's) when the background work
+   * a completed turn left behind has finished and the CLI's follow-up turn has
+   * reported, right where it sends the `run.background_completed` notification.
+   * Hands the news to the registry, which decides whether it still belongs to
+   * the session's current run.
+   */
+  reportBackgroundWorkFinished(): void {
+    this.options.onBackgroundWorkFinished?.();
   }
 
   /**

@@ -37,7 +37,7 @@ vi.mock('@uiw/react-codemirror', () => ({
 }));
 
 const NO_SESSIONS: ReadonlySet<string> = new Set();
-// Every chat mount, by pane: a chat that unmounts stops hearing its runs (sounds, [Done], permission prompts).
+// Every chat mount, by pane: a chat that unmounts stops hearing its runs (background-work reports, permission prompts).
 const chatLifecycle = { mounts: 0, unmounts: 0 };
 
 // The pane state reaches the group through a context here, as it does in the app.

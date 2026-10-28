@@ -70,7 +70,7 @@ const ChatInstancesContext = createContext<ChatInstancesRegistry | null>(null);
 /**
  * Exported through the chat barrel; mounted once by project-workspace's ProjectWorkspaceRoute so
  * every ChatInterface on the page shares one realtime coordinator: one record of subscribe times,
- * one writer of each session's background work, and each sound or title marker played once.
+ * one writer of each session's background work, and each permission prompt's sound played once.
  */
 export function ChatInstancesProvider({ children }: { children: ReactNode }) {
   // The page's registry, kept for the provider's lifetime: a lazy state initializer is how React
@@ -90,7 +90,7 @@ type ChatInstanceCoordinatorArgs = {
 type ChatInstanceCoordinator = {
   /** When each session's `chat.subscribe` was last sent, by any chat on the page; guards stale idle acks. */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
-  /** True for the first claim of an event key (a sound, the title marker), false for every later one. */
+  /** True for the first claim of an event key (a permission prompt's sound), false for every later one. */
   claimPageEffect: (eventKey: string) => boolean;
   /** Whether this chat writes the session's remaining background work into the activity map. */
   isBackgroundReporter: (sessionId: string) => boolean;

@@ -126,7 +126,7 @@ function ChatInterface({
   const isFocusedPaneRef = useRef(isFocusedPane);
   // Shared with every chat on the page: when each session's `chat.subscribe`
   // was last sent (idle acks older than a later request are discarded as
-  // stale), the once-per-page sounds and title marker, and the one chat that
+  // stale), the once-per-page permission prompt sounds, and the one chat that
   // reports a session's background work.
   const { statusCheckSentAtRef, claimPageEffect, isBackgroundReporter } = useChatInstanceCoordinator({
     getViewedSessionId: () => viewedSessionIdRef.current,
