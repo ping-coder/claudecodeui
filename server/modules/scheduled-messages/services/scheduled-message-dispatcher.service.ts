@@ -7,14 +7,26 @@ import { readQueuedChatMessage } from '@/shared/utils.js';
 /**
  * How often due messages are looked for.
  *
- * A minute is the granularity the composer offers, and a claim is indexed on
- * `(status, scheduled_for)`, so the poll is one cheap query. Anything finer
- * would buy precision nobody asked for.
+ * A minute is the granularity the composer offers, and the due query is
+ * indexed on `(status, scheduled_for)`, so the poll is one cheap query.
+ * Anything finer would buy precision nobody asked for.
  */
 const POLL_INTERVAL_MS = 30_000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let dispatchInFlight = false;
+
+/**
+ * Sessions the dispatcher is still sending to: a scheduled or queued turn it
+ * started whose provider run has not settled yet.
+ *
+ * Kept per session rather than as one flag for the whole dispatcher because a
+ * run can take hours to settle: a turn that leaves background work going (a
+ * backgrounded build, agent or workflow) keeps its CLI process open until that
+ * work reports back. Only that session has to wait for it. Passes skip these
+ * sessions and leave their messages as they are, which keeps one session's
+ * messages in order and stops two of its turns racing into it.
+ */
+const sessionsInFlight = new Set<string>();
 
 function readOptions(raw: string): Record<string, unknown> {
   try {
@@ -25,6 +37,31 @@ function readOptions(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Runs one session's sends, unless the dispatcher is still sending to that
+ * session, and returns them as a promise, or null when it skipped them.
+ *
+ * The session is marked before `send` reaches its first await, so a pass that
+ * starts meanwhile (the next poll, or two passes started together) skips it.
+ * A failure is logged here rather than passed on, so one session's error does
+ * not fail the pass for the others.
+ */
+function sendUnlessInFlight(sessionId: string, send: () => Promise<void>): Promise<void> | null {
+  if (sessionsInFlight.has(sessionId)) {
+    return null;
+  }
+
+  sessionsInFlight.add(sessionId);
+  return send()
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[ScheduledMessages] Sending to a session failed', { sessionId, error: message });
+    })
+    .finally(() => {
+      sessionsInFlight.delete(sessionId);
+    });
 }
 
 async function sendClaimedQueuedMessage(
@@ -69,22 +106,34 @@ function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): bool
   return chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId);
 }
 
-/** Sends every persisted queued turn whose session is currently idle. */
+/**
+ * Sends every persisted queued turn whose session is idle.
+ *
+ * Resolves with how many it claimed once the turns it started have settled.
+ * The poll in this file does not wait for that; the tests do, to drive one
+ * pass without the timer.
+ */
 export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): Promise<number> {
-  const candidates = sessionDraftsDb.listQueuedMessages();
   let claimed = 0;
+  const sends: Promise<void>[] = [];
 
-  await Promise.all(candidates.map(async (candidate) => {
+  for (const candidate of sessionDraftsDb.listQueuedMessages()) {
     if (isSessionBusy(candidate.sessionId, runtime)) {
-      return;
+      continue;
     }
-    if (!sessionDraftsDb.claimQueuedMessage(candidate)) {
-      return;
+    const send = sendUnlessInFlight(candidate.sessionId, async () => {
+      if (!sessionDraftsDb.claimQueuedMessage(candidate)) {
+        return;
+      }
+      claimed += 1;
+      await sendClaimedQueuedMessage(candidate, runtime);
+    });
+    if (send) {
+      sends.push(send);
     }
-    claimed += 1;
-    await sendClaimedQueuedMessage(candidate, runtime);
-  }));
+  }
 
+  await Promise.all(sends);
   return claimed;
 }
 
@@ -123,26 +172,60 @@ async function sendClaimedMessage(
 /**
  * Sends every message whose time has come.
  *
- * Exported so a test can drive one pass without waiting on the timer.
+ * Different sessions are sent to side by side. One session's messages go one
+ * at a time, in the order they were due: a session runs one turn at a time,
+ * and two of its messages must not race each other into it. A session the
+ * dispatcher is still sending to is left for a later pass, so a message that
+ * comes due meanwhile waits for that turn to settle, background work included,
+ * rather than interrupting it; it interrupts only a run the dispatcher did not
+ * start.
+ *
+ * Resolves with how many it claimed once the turns it started have settled.
+ * The poll in this file does not wait for that; the tests do, to drive one
+ * pass without the timer.
  */
 export async function dispatchDueScheduledMessages(
   runtime: ProviderRuntimeGateway,
   now: Date = new Date(),
 ): Promise<number> {
-  // Claimed before any of them runs, so a long turn cannot let the next poll
-  // pick the same message up again.
-  const due = scheduledMessagesDb.claimDue(now);
-  if (due.length === 0) {
-    return 0;
+  const dueBySession = new Map<string, ScheduledMessageRow[]>();
+  for (const row of scheduledMessagesDb.listDue(now)) {
+    const rows = dueBySession.get(row.session_id);
+    if (rows) {
+      rows.push(row);
+    } else {
+      dueBySession.set(row.session_id, [row]);
+    }
   }
 
-  // Sequentially: a session can only have one run at a time, and two due
-  // messages for the same session must not race each other into it.
-  for (const row of due) {
-    await sendClaimedMessage(row, runtime);
+  let claimed = 0;
+  const sends: Promise<void>[] = [];
+
+  for (const [sessionId, rows] of dueBySession) {
+    const send = sendUnlessInFlight(sessionId, async () => {
+      for (const row of rows) {
+        // Claimed right before it goes, not when listed, so a message waiting
+        // for the turn before it is not marked sent early. A message
+        // cancelled while it waited is skipped here.
+        if (!scheduledMessagesDb.claim(row.id)) {
+          continue;
+        }
+        claimed += 1;
+        await sendClaimedMessage(row, runtime);
+      }
+    });
+    if (send) {
+      sends.push(send);
+    }
   }
 
-  return due.length;
+  await Promise.all(sends);
+  return claimed;
+}
+
+function logPassFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('[ScheduledMessages] Dispatch pass failed', { error: message });
 }
 
 /**
@@ -158,21 +241,13 @@ export function initializeScheduledMessageDispatcher(runtime: ProviderRuntimeGat
   }
 
   const poll = () => {
-    // A pass that overruns the interval must not be started again underneath
-    // itself; the claim is transactional but the runs are not.
-    if (dispatchInFlight) {
-      return;
-    }
-    dispatchInFlight = true;
-    void dispatchDueScheduledMessages(runtime)
-      .then(() => dispatchQueuedMessages(runtime))
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error('[ScheduledMessages] Dispatch pass failed', { error: message });
-      })
-      .finally(() => {
-        dispatchInFlight = false;
-      });
+    // Neither pass is awaited: a turn's run can take hours to settle, and the
+    // passes themselves skip the sessions an earlier poll is still sending
+    // to. Each pass marks the sessions it sends to before it returns, so the
+    // queued pass skips a session the scheduled pass has just taken: a due
+    // message goes before a turn queued for the same session.
+    void dispatchDueScheduledMessages(runtime).catch(logPassFailure);
+    void dispatchQueuedMessages(runtime).catch(logPassFailure);
   };
 
   pollTimer = setInterval(poll, POLL_INTERVAL_MS);

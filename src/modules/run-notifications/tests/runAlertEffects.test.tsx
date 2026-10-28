@@ -11,13 +11,15 @@ import type * as SharedUtils from '@/shared/utils';
 /**
  * One finished run, one chime and at most one system notification in the whole browser: the tab the user is on
  * claims the alert at once, the others a little later, and only the claimer acts. A burst of completions makes
- * one chime. The page stays quiet when the sound is off, for a catch-up alert, when the desktop app notifies
- * natively, and when push will deliver while the user is away. The page posts a system notification only when
- * the user is away, the permission is granted, their switch is on, and neither push nor the desktop app will.
+ * one sound: one chime, and silent notifications after it. The page stays quiet when the sound is off, for a
+ * catch-up alert, when the desktop app notifies natively, and when push will deliver while the user is away. The
+ * page posts a system notification only when the user is away, the permission is granted, their switch is on, and
+ * neither push nor the desktop app will. Away from the page, the claimer first reads the preferences and the push
+ * subscription again unless they are a few seconds old, and alerts on its own when that read is slow or fails.
  */
 
 const sound = vi.hoisted(() => ({ chimes: 0, primes: 0, mirroredSettings: [] as boolean[] }));
-const server = vi.hoisted(() => ({ preferences: null as unknown, preferenceReads: 0 }));
+const server = vi.hoisted(() => ({ preferences: null as unknown, preferenceReads: 0, responseDelayMs: 0 }));
 const deployment = vi.hoisted(() => ({ environment: null as string | null }));
 
 vi.mock('@/shared/utils', async (importOriginal) => {
@@ -47,8 +49,15 @@ vi.mock('@/shared/api', () => ({
     settings: {
       notificationPreferences: async () => {
         server.preferenceReads += 1;
-        return server.preferences
-          ? { ok: true, json: async () => ({ success: true, preferences: server.preferences }) }
+        // What the server holds when the request reaches it, answered after the delay a test sets.
+        const { preferences } = server;
+        if (server.responseDelayMs > 0) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, server.responseDelayMs);
+          });
+        }
+        return preferences
+          ? { ok: true, json: async () => ({ success: true, preferences }) }
           : { ok: false, json: async () => ({}) };
       },
     },
@@ -138,6 +147,7 @@ beforeEach(() => {
   sound.mirroredSettings.length = 0;
   server.preferences = preferencesWith();
   server.preferenceReads = 0;
+  server.responseDelayMs = 0;
   deployment.environment = null;
   pageState.visible = true;
   pageState.focused = true;
@@ -384,26 +394,44 @@ test('the system notification needs the claim, the user away, the permission, th
   assert.equal(serviceWorker.notifications.length, 0);
 });
 
-test('the system notification is silent exactly when the page chimed', async () => {
+test('the system notification is silent once the burst has made its sound', async () => {
   pageState.focused = false;
   const view = await renderEffects();
 
   await announce(view, alertOf('a'));
-  // Within 1.5 s of that chime: no chime of its own, so the notification sounds.
+  // Within 1.5 s of that chime: no chime of its own, and none from the notification either.
   await announce(view, alertOf('b', { outcome: 'failed' }), 0);
   await flush(2000);
+  // Past the 1.5 s with the sound off: no chime, so the notification sounds.
+  server.preferences = preferencesWith({ sound: false });
   localStorage.setItem('notificationSoundEnabled', 'false');
   await announce(view, alertOf('c', { outcome: 'backgroundDone' }));
 
+  assert.equal(sound.chimes, 1);
   assert.deepEqual(serviceWorker.notifications.map(({ options }) => ({
     tag: options.tag,
     silent: options.silent,
     renotify: options.renotify,
   })), [
     { tag: 'claude:a:run.stopped', silent: true, renotify: false },
-    { tag: 'claude:b:run.failed', silent: false, renotify: true },
+    { tag: 'claude:b:run.failed', silent: true, renotify: false },
     { tag: 'claude:c:run.background_completed', silent: false, renotify: true },
   ]);
+});
+
+test('a completion claimed within 1.5 s of another tab\'s chime posts a silent notification', async () => {
+  pageState.focused = false;
+  const view = await renderEffects();
+  // Another tab of this browser claimed a completion, with its chime, a moment ago.
+  const now = Date.now();
+  localStorage.setItem(CLAIMS_STORAGE_KEY, JSON.stringify({ keys: { 'x:1000:turn': now }, lastChimeAt: now }));
+
+  await announce(view, alertOf('a'));
+  assert.equal(sound.chimes, 0);
+  assert.deepEqual(serviceWorker.notifications.map(({ options }) => ({
+    silent: options.silent,
+    renotify: options.renotify,
+  })), [{ silent: true, renotify: false }]);
 });
 
 test('the title leads with the environment label and is cut to 80 characters', async () => {
@@ -420,7 +448,7 @@ test('the title leads with the environment label and is cut to 80 characters', a
   assert.equal(notification.options.body, 'Replied, background work still running');
 });
 
-test('on mount the server\'s sound setting is mirrored into this browser, and read again once it is a minute old', async () => {
+test('the server\'s sound setting is mirrored on mount; on the page, the preferences are read again after a minute', async () => {
   server.preferences = preferencesWith({ sound: false });
   const view = await renderEffects();
 
@@ -428,6 +456,7 @@ test('on mount the server\'s sound setting is mirrored into this browser, and re
   assert.equal(localStorage.getItem('notificationSoundEnabled'), 'false');
   assert.equal(server.preferenceReads, 1);
 
+  // The page is active here, so a delivery goes by the last answer for a minute.
   await flush(30_000);
   await announce(view, alertOf('a'));
   assert.equal(server.preferenceReads, 1);
@@ -437,6 +466,90 @@ test('on mount the server\'s sound setting is mirrored into this browser, and re
   await announce(view, alertOf('b'));
   assert.equal(server.preferenceReads, 2);
   assert.deepEqual(sound.mirroredSettings, [false, true]);
+});
+
+test('away from the page, a delivery reads the preferences again first once they are over 5 s old', async () => {
+  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  server.preferences = preferencesWith({ webPush: true });
+  const view = await renderEffects();
+  pageState.focused = false;
+
+  // Read a moment ago: push will deliver this one, and the page stays quiet without asking again.
+  await announce(view, alertOf('a'));
+  assert.equal(server.preferenceReads, 1);
+  assert.equal(sound.chimes, 0);
+
+  // The user turns the "Run stopped" event off, in Settings here or on another device: no push comes for it now.
+  server.preferences = preferencesWith({ webPush: true, stop: false });
+  await flush(20_000);
+  await announce(view, alertOf('b'));
+  assert.equal(server.preferenceReads, 2);
+  assert.equal(sound.chimes, 1);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title b']);
+
+  // The next completion of the burst goes by that fresh read.
+  await announce(view, alertOf('c'));
+  assert.equal(server.preferenceReads, 2);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title b', 'Title c']);
+});
+
+test('away from the page, push turned on since the last read takes the alert over from the next completion', async () => {
+  const view = await renderEffects();
+  pageState.focused = false;
+
+  // The user turns push on in Settings: this browser subscribes, and the server pushes the event from now on.
+  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  server.preferences = preferencesWith({ webPush: true });
+  await flush(20_000);
+  await announce(view, alertOf('a'));
+
+  assert.equal(server.preferenceReads, 2);
+  assert.equal(view.result.current.isBrowserPushSubscribed, true);
+  assert.equal(sound.chimes, 0);
+  assert.equal(serviceWorker.notifications.length, 0);
+});
+
+test('a read that takes over 1.5 s, or fails, leaves the alert to the page, whatever the last answer said', async () => {
+  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  server.preferences = preferencesWith({ webPush: true });
+  const view = await renderEffects();
+  pageState.focused = false;
+  server.responseDelayMs = 5000;
+  await flush(20_000);
+
+  // Claimed after 300 ms; the read then gets 1.5 s.
+  act(() => view.result.current.announce(alertOf('a')));
+  await flush(1700);
+  assert.equal(sound.chimes, 0);
+  await flush(200);
+  assert.equal(sound.chimes, 1);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+
+  // The slow read lands at last; well past it, a read the server turns down does the same.
+  await flush(4000);
+  server.responseDelayMs = 0;
+  server.preferences = null;
+  await flush(10_000);
+  await announce(view, alertOf('b'));
+  assert.equal(server.preferenceReads, 3);
+  assert.equal(sound.chimes, 2);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a', 'Title b']);
+});
+
+test('a delivery waits on the read announce has started rather than making its own', async () => {
+  const view = await renderEffects();
+  pageState.focused = false;
+  // Push turned on since the read on mount, and the server slow to answer.
+  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  server.preferences = preferencesWith({ webPush: true });
+  server.responseDelayMs = 1000;
+  await flush(61_000);
+
+  // Over a minute old: announce starts a read at once, and the claim 300 ms later waits for its answer.
+  await announce(view, alertOf('a'), 2000);
+  assert.equal(server.preferenceReads, 2);
+  assert.equal(sound.chimes, 0);
+  assert.equal(serviceWorker.notifications.length, 0);
 });
 
 test('every pointerdown and keydown primes the sound', async () => {

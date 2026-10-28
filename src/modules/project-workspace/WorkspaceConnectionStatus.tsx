@@ -4,10 +4,11 @@ import { useTranslation } from 'react-i18next';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 
 /**
- * Rendered by WorkspaceHeader, and by WorkspacePane in the immersive one-line
- * pane bar, so that a lost chat connection is visible on every tab: while the
- * socket is down nothing typed into the chat can reach the server. Shows
- * nothing while connected or during the first handshake.
+ * Rendered by WorkspaceHeader in the phone header row, and by WorkspacePane in
+ * a desktop pane's tab bar (one pane only while two sit side by side), so that
+ * a lost chat connection is visible on every tab: while the socket is down
+ * nothing typed into the chat can reach the server. Shows nothing while
+ * connected or during the first handshake.
  */
 export default function WorkspaceConnectionStatus() {
   const { t } = useTranslation();
@@ -27,8 +28,8 @@ export default function WorkspaceConnectionStatus() {
       </div>
       {isDisconnected && (
         // Hidden from screen readers, which get the live region above instead.
-        // Between sm and xl the title box is capped at a third of a narrow
-        // header, so the pill drops its label there and keeps the tooltip.
+        // Between sm and xl, where the header's title box or the tab bar is
+        // short of room, the pill drops its label and keeps the tooltip.
         <span
           aria-hidden="true"
           title={description}

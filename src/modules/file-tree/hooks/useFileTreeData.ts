@@ -65,7 +65,13 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
         setError(null);
       }
       try {
-        const response = await api.getFiles(projectId, { signal: abortControllerRef.current!.signal });
+        // Gitignored entries come back greyed out rather than missing, so files
+        // such as CLAUDE.md stay reachable from the explorer.
+        const response = await api.getFiles(
+          projectId,
+          { markIgnored: true },
+          { signal: abortControllerRef.current!.signal },
+        );
 
         if (!response.ok) {
           const errorText = await response.text();

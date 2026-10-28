@@ -208,9 +208,13 @@
         "label": "Editor Theme",
         "description": "Default theme for the code editor"
       },
-      "wordWrap": {
-        "label": "Word Wrap",
-        "description": "Enable word wrapping by default in the editor"
+      "textWordWrap": {
+        "label": "Word Wrap in Markdown and Text Files",
+        "description": "Wrap long lines in Markdown and plain-text files such as .md and .txt"
+      },
+      "codeWordWrap": {
+        "label": "Word Wrap in Code Files",
+        "description": "Wrap long lines in source code and all other files"
       },
       "showMinimap": {
         "label": "Show Minimap",

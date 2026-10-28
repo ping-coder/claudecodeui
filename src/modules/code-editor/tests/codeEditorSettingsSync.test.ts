@@ -93,6 +93,7 @@ test('a settings edit in the same tab reaches the open editor', () => {
   act(() => {
     writeCodeEditorSettings({
       wordWrap: true,
+      textWordWrap: false,
       showMinimap: false,
       lineNumbers: false,
       fontSize: '20',
@@ -102,6 +103,7 @@ test('a settings edit in the same tab reaches the open editor', () => {
   assert.notEqual(before, 20);
   assert.equal(result.current.fontSize, 20);
   assert.equal(result.current.wordWrap, true);
+  assert.equal(result.current.textWordWrap, false);
   assert.equal(result.current.minimapEnabled, false);
   assert.equal(result.current.showLineNumbers, false);
 });
@@ -147,6 +149,8 @@ test('an unset minimap keeps the shared default rather than reading as off', () 
   assert.equal(result.current.minimapEnabled, true);
   assert.equal(result.current.showLineNumbers, true);
   assert.equal(result.current.wordWrap, false);
+  // Markdown and plain-text files wrap unless the user turned that off.
+  assert.equal(result.current.textWordWrap, true);
 });
 
 test('the editor releases its subscription when it unmounts', () => {

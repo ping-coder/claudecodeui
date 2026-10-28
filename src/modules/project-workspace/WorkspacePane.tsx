@@ -8,15 +8,16 @@ import { usePaletteOps, usePaletteOpsRegister } from '@/modules/command-palette'
 import { useTasksSettings } from '@/modules/task-master';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { useElementWidth } from '@/modules/project-workspace/hooks/useElementWidth';
+import { useWorkspaceViews } from '@/modules/project-workspace/hooks/useWorkspaceViews';
 import { getActiveTab } from '@/modules/project-workspace/utils/workspaceLayout';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';
 import PaneDropOverlay from '@/modules/project-workspace/PaneDropOverlay';
 import PaneEmptyState from '@/modules/project-workspace/PaneEmptyState';
 import PaneTabBar from '@/modules/project-workspace/PaneTabBar';
+import PaneViewBar from '@/modules/project-workspace/PaneViewBar';
 import WorkspaceConnectionStatus from '@/modules/project-workspace/WorkspaceConnectionStatus';
 import WorkspaceMain from '@/modules/project-workspace/WorkspaceMain';
 import WorkspaceStateView from '@/modules/project-workspace/WorkspaceStateView';
-import WorkspaceTabs from '@/modules/project-workspace/WorkspaceTabs';
 import { NO_PALETTE_OPS } from '@/shared/constants';
 import type {
   AppTab,
@@ -30,20 +31,33 @@ import type {
   WorkspaceLayoutActions,
   WorkspacePaneSide,
   WorkspacePaneState,
+  WorkspaceViewLabels,
   WorkspaceViewSetter,
 } from '@/shared/types';
 import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import { cn, getPaneScopedDomId } from '@/shared/utils';
 
-/** Narrower than this a pane beside another drops its title block and labels only the active view. */
-const COMPACT_PANE_WIDTH_PX = 640;
+/** Room the tab bar keeps for its buttons and about two full-width tabs before the view bar may join it. */
+const VIEW_BAR_INLINE_BASE_PX = 640;
+/** Rough width of one labelled view pill (icon, label, padding). */
+const VIEW_PILL_SLOT_PX = 88;
+/** The view row's horizontal padding, plus the view bar's own padding and gaps. */
+const VIEW_ROW_PADDING_PX = 32;
 /** A focus that follows a Tab key press within this window is keyboard navigation into the pane. */
 const TAB_FOCUS_WINDOW_MS = 120;
 /** An empty set, so panes without another pane pass the same object every render. */
 const NO_SESSION_IDS: ReadonlySet<string> = new Set();
 
-/** Whether a measured pane width calls for the compact header (0 is not measured yet). */
-const isCompactPaneWidth = (width: number): boolean => width > 0 && width < COMPACT_PANE_WIDTH_PX;
+/** 'wide': view bar in the tab bar, labelled. 'medium': own row, labelled. 'narrow': own row, active label only. */
+type PaneChromeTier = 'wide' | 'medium' | 'narrow';
+
+/** 0 is not measured yet (jsdom, a pane hidden since it mounted) and counts as wide. */
+const getPaneChromeTier = (width: number, viewCount: number): PaneChromeTier => {
+  if (width === 0 || width >= VIEW_BAR_INLINE_BASE_PX + VIEW_PILL_SLOT_PX * viewCount) {
+    return 'wide';
+  }
+  return width >= VIEW_PILL_SLOT_PX * viewCount + VIEW_ROW_PADDING_PX ? 'medium' : 'narrow';
+};
 
 /** Whether an event comes from a workspace-wide control (split, full screen, show sidebar), which acts on the workspace, not on this pane. */
 const isWorkspaceControlEvent = (event: SyntheticEvent): boolean => (
@@ -99,6 +113,8 @@ type WorkspacePaneProps = {
   onClaimShell: (side: WorkspacePaneSide) => void;
   /** Tabs in both panes, for the phone's Tabs button; 0 on desktop, which has no such button. */
   tabCount: number;
+  /** Every tab names its project after its title: tabs alone cannot tell (see ProjectMainRegion). */
+  showProjectNames: boolean;
   onOpenTabsSheet: () => void;
   ws: WebSocket | null;
   sendMessage: (message: unknown) => void;
@@ -161,10 +177,11 @@ function MissingSessionNotice({ header, onClose }: MissingSessionNoticeProps) {
 
 /**
  * Rendered by ProjectMainRegion once per pane (keyed by pane id). One pane of the split workspace: its
- * tab bar on desktop, then the active tab in WorkspaceMain, or an empty pane / missing-session notice
- * over the WorkspaceMain it last showed, kept mounted and hidden. A pointer press anywhere inside focuses
- * the pane (workspace-wide controls excepted), as does keyboard focus arriving by Tab (programmatic focus
- * does not); typing inside or opening a file from the chat keeps a preview tab open.
+ * tab bar on desktop (carrying the view bar too when the pane is wide enough or immersive), then the
+ * active tab in WorkspaceMain, or an empty pane / missing-session notice over the WorkspaceMain it last
+ * showed, kept mounted and hidden. A pointer press anywhere inside focuses the pane (workspace-wide
+ * controls excepted), as does keyboard focus arriving by Tab (programmatic focus does not); typing
+ * inside or opening a file from the chat keeps a preview tab open.
  */
 function WorkspacePane({
   side,
@@ -189,6 +206,7 @@ function WorkspacePane({
   shellBlockedBy,
   onClaimShell,
   tabCount,
+  showProjectNames,
   onOpenTabsSheet,
   ws,
   sendMessage,
@@ -206,16 +224,24 @@ function WorkspacePane({
   const browserUseEnabled = useBrowserUseEnabled();
   const paletteOps = usePaletteOps();
 
+  const shouldShowTasksTab = Boolean(tasksEnabled && isTaskMasterInstalled);
+  const { builtInViews, pluginViews } = useWorkspaceViews({ shouldShowTasksTab, shouldShowBrowserTab: browserUseEnabled });
+  const viewCount = builtInViews.length + pluginViews.length;
+
   const rootRef = useRef<HTMLDivElement>(null);
-  // Only the crossing of the threshold re-renders the pane, not every pixel of a divider drag.
-  const isNarrow = useElementWidth(rootRef, isCompactPaneWidth);
-  // The pane's own width decides, not the viewport, and only beside another pane: a single pane keeps
-  // its title (project name, double-click rename) at any width.
-  const isCompact = !isMobile && isSideBySide && isNarrow;
+  // The pane's own width decides, not the viewport. Only crossing a tier re-renders the pane, not every
+  // pixel of a divider drag; a plugin or view turned on or off re-tiers it at once. Hidden (the other
+  // side of a collapsed split) it keeps its tier, and the commit that shows it measures it again, so its
+  // first frame on screen already has the tier of its real width.
+  const paneTier = useElementWidth(rootRef, (width) => getPaneChromeTier(width, viewCount), `${viewCount}:${isVisible}`);
 
   const activeTab = getActiveTab(pane);
   const isMissing = Boolean(activeTab?.isMissing);
   const hasTabBar = !isMobile;
+  // Immersive keeps one row whatever the width: the view bar rides in the tab bar and only the active
+  // view keeps its label unless the pane is wide.
+  const isViewBarInTabBar = hasTabBar && (isImmersive || paneTier === 'wide');
+  const viewLabels: WorkspaceViewLabels = paneTier === 'narrow' || (isImmersive && paneTier === 'medium') ? 'active' : 'all';
   const showConnectionStatus = !(isSideBySide && side === 'right');
   const panelId = getPaneScopedDomId(side, 'tabpanel');
 
@@ -477,20 +503,32 @@ function WorkspacePane({
       : NO_SESSION_IDS
   ), [otherPane]);
 
-  const immersiveContent = isImmersive && hasTabBar && (hasContent || showConnectionStatus) ? (
+  // After the tabs: the view bar when it rides in the tab bar, and the one connection status, which an
+  // empty pane, a missing conversation and the loading screen show as well (they have no views to pick).
+  const tabBarViewContent = isViewBarInTabBar && !isLoadingProjects ? liveContent : null;
+  const tabBarTrailing = hasTabBar && (tabBarViewContent || showConnectionStatus) ? (
     <>
-      {hasContent && activeTab && (
-        <WorkspaceTabs
-          compact
-          activeTab={activeTab.view}
+      {tabBarViewContent && (
+        <PaneViewBar
+          labels={viewLabels}
+          activeTab={tabBarViewContent.view}
           setActiveTab={setActiveTab}
-          shouldShowTasksTab={Boolean(tasksEnabled && isTaskMasterInstalled)}
+          shouldShowTasksTab={shouldShowTasksTab}
           shouldShowBrowserTab={browserUseEnabled}
         />
       )}
       {showConnectionStatus && <WorkspaceConnectionStatus />}
     </>
   ) : null;
+
+  // The tab names the session and, only when tabs alone cannot tell, its project: a screen reader gets
+  // both at the top of the panel.
+  const activeTabDisplay = activeTab ? tabDisplay.get(activeTab.key) : undefined;
+  const panelHeading = hasTabBar && activeTab && liveContent
+    ? [activeTabDisplay?.title ?? activeTab.title, activeTabDisplay?.projectName || liveContent.project.displayName]
+      .filter(Boolean)
+      .join(' · ')
+    : null;
 
   // What the pane shows in place of its content.
   let placeholder: ReactNode = null;
@@ -568,10 +606,14 @@ function WorkspacePane({
           hiddenPaneActivity={hiddenPaneActivity}
           showWorkspaceControls={isRightmost}
           isLeftmost={isLeftmost}
-          immersiveContent={immersiveContent}
+          onRenameSession={renameSession}
+          showProjectNames={showProjectNames}
+          trailingContent={tabBarTrailing}
+          trailingCanShrink={isImmersive && paneTier !== 'wide'}
         />
       )}
       <div id={panelId} {...tabPanelProps} className="relative flex min-h-0 flex-1 flex-col">
+        {panelHeading && <h2 className="sr-only">{panelHeading}</h2>}
         {mainContent && (
           <div data-pane-content={hasContent ? 'shown' : 'kept'} className={hasContent ? 'contents' : 'hidden'}>
             <WorkspaceMain
@@ -579,10 +621,9 @@ function WorkspacePane({
               isFocusedPane={isFocused && hasContent}
               isPaneVisible={isVisible && hasContent}
               isSplitPane={isSideBySide}
-              compact={isCompact}
-              hideHeader={isImmersive}
+              hideHeader={isImmersive || isViewBarInTabBar}
+              viewLabels={viewLabels}
               headerActions={mobileHeaderActions}
-              showConnectionStatus={showConnectionStatus}
               shellBlockedBy={shellBlockedBy}
               onClaimShell={claimShell}
               onFocusPane={focusThisPane}

@@ -39,6 +39,7 @@ vi.mock('@/modules/task-master', () => ({
 vi.mock('@/modules/browser-use', () => ({ useBrowserUseEnabled: () => false }));
 vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ plugins: [] }), PluginIcon: () => null }));
 vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ connectionStatus: 'connected' }) }));
+vi.mock('@/shared/context/UiPreferencesContext', () => ({ useUiPreferences: () => ({ sidebarVisible: true }) }));
 vi.mock('@/modules/project-workspace/WorkspaceMain', () => ({
   default: ({ side }: { side: string }) => <textarea aria-label={`composer ${side}`} />,
 }));

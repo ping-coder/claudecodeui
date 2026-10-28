@@ -10,7 +10,8 @@ const EDGE_TOLERANCE_PX = 2;
  * A horizontally scrolling strip of tabs: a vertical mouse wheel scrolls it sideways (until an
  * edge, so the page can scroll on), the edge fades follow the scroll position and size, and
  * the selected tab (`[role="tab"][aria-selected="true"]`) is scrolled into view whenever
- * `revealKey` changes. Used by WorkspaceHeader (view tabs) and PaneTabBar (session tabs).
+ * `revealKey` changes. Used by WorkspaceHeader (the phone's view tabs), PaneViewBar (a desktop
+ * pane's view tabs) and PaneTabBar (session tabs).
  */
 export function useHorizontalWheelScroll(scrollRef: RefObject<HTMLElement | null>, revealKey: unknown) {
   // Whether content is hidden past each edge; drives the fades, the scroll buttons and the tab list menu.

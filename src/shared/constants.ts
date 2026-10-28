@@ -206,9 +206,15 @@ export const CODE_EDITOR_STORAGE_KEYS = {
  * the editor's own historical defaults; the settings dialog used to carry its
  * own copy with a different fontSize, so merely opening it rewrote the user's
  * editor font.
+ *
+ * Code files do not wrap by default, Markdown and plain-text files do.
+ * `textWordWrap` is a separate key rather than a new `wordWrap` default because
+ * many users already have `wordWrap: false` stored explicitly; it has no legacy
+ * localStorage key to migrate.
  */
 export const CODE_EDITOR_DEFAULTS = {
   wordWrap: false,
+  textWordWrap: true,
   showMinimap: true,
   lineNumbers: true,
   fontSize: '12',

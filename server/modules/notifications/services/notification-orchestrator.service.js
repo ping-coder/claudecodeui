@@ -20,6 +20,25 @@ const PROVIDER_LABELS = {
 const recentEventKeys = new Map();
 const DEDUPE_WINDOW_MS = 20000;
 
+/**
+ * Codes that report how one run ended, or that the background work it left
+ * behind finished. Their dedupe key names the run, so repeats for one run
+ * collapse while the next run of the same session (a queued or scheduled
+ * message) is notified even when it ends inside the dedupe window.
+ */
+const RUN_END_CODES = new Set(['run.stopped', 'run.failed', 'run.background_completed']);
+
+/**
+ * Finds the run an app session is running, or ran last, for a run-end report
+ * that does not name its run. The server entrypoint installs the websocket
+ * module's run registry here: this module cannot import it, as the registry's
+ * module graph imports the provider runtimes, which import this module. Until
+ * one is installed, such reports are keyed per session.
+ *
+ * @type {(appSessionId: string) => { provider: string, startedAt: number } | null | undefined}
+ */
+let findSessionRun = () => null;
+
 const cleanupOldEventKeys = () => {
   const now = Date.now();
   for (const [key, timestamp] of recentEventKeys.entries()) {
@@ -36,9 +55,38 @@ function isNotificationEventEnabled(preferences, event) {
   return eventEnabled;
 }
 
+/**
+ * The run a run-end event reports, as its start time (the identity `run_ended`
+ * frames carry); null for other events.
+ *
+ * The runtimes pass the start time of the run they report, read from the
+ * run's writer, and it wins: a runtime can report well after the run's
+ * terminal `complete` (Cursor when its process closes, Codex when its event
+ * stream ends), by which time the session's next run may hold the registry
+ * slot. A report without one falls back to the run in the slot, looked up by
+ * the app session id; that is only right while the reported run still holds
+ * the slot. Null when the slot holds no run of the event's provider.
+ */
+function readRunStartedAt(event) {
+  if (!RUN_END_CODES.has(event.code)) {
+    return null;
+  }
+  if (Number.isFinite(event.runStartedAt)) {
+    return event.runStartedAt;
+  }
+  if (!event.sessionId) {
+    return null;
+  }
+
+  const run = findSessionRun(event.sessionId);
+  return run && run.provider === event.provider ? run.startedAt : null;
+}
+
 function isDuplicate(event) {
   cleanupOldEventKeys();
-  const key = event.dedupeKey || `${event.provider}:${event.kind || 'info'}:${event.code || 'generic'}:${event.sessionId || 'none'}`;
+  const eventKey = event.dedupeKey || `${event.provider}:${event.kind || 'info'}:${event.code || 'generic'}:${event.sessionId || 'none'}`;
+  const runStartedAt = readRunStartedAt(event);
+  const key = runStartedAt === null ? eventKey : `${eventKey}:run:${runStartedAt}`;
   if (recentEventKeys.has(key)) {
     return true;
   }
@@ -54,7 +102,8 @@ function createNotificationEvent({
   meta = {},
   severity = 'info',
   dedupeKey = null,
-  requiresUserAction = false
+  requiresUserAction = false,
+  runStartedAt = null
 }) {
   return {
     provider,
@@ -65,6 +114,7 @@ function createNotificationEvent({
     severity,
     requiresUserAction,
     dedupeKey,
+    runStartedAt,
     createdAt: new Date().toISOString()
   };
 }
@@ -250,10 +300,12 @@ function notifyUserIfEnabled({ userId, event }) {
 
 /**
  * Reports a run that ended without failing: `completed`, or `aborted` by the user.
+ * `runStartedAt` is the reported run's start time, from its writer; it keeps
+ * the report from being taken for the session's next run (see `readRunStartedAt`).
  *
- * @param {{ userId: string | number | null | undefined, provider: string, sessionId?: string | null, stopReason?: string, sessionName?: string | null }} event
+ * @param {{ userId: string | number | null | undefined, provider: string, sessionId?: string | null, stopReason?: string, sessionName?: string | null, runStartedAt?: number | null }} event
  */
-function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'completed', sessionName = null }) {
+function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'completed', sessionName = null, runStartedAt = null }) {
   notifyUserIfEnabled({
     userId,
     event: createNotificationEvent({
@@ -263,7 +315,8 @@ function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'co
       code: 'run.stopped',
       meta: { stopReason, sessionName },
       severity: 'info',
-      dedupeKey: `${provider}:run:stop:${sessionId || 'none'}:${stopReason}`
+      dedupeKey: `${provider}:run:stop:${sessionId || 'none'}:${stopReason}`,
+      runStartedAt
     })
   });
 }
@@ -273,9 +326,12 @@ function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'co
  *
  * Uses the `stop` kind so it rides the existing "run stopped" preference rather
  * than needing a new opt-in that would default to off. No explicit dedupeKey, so
- * the default composite key collapses repeats inside the dedupe window.
+ * the default composite key, with the run added, collapses that run's repeats
+ * inside the dedupe window. `runStartedAt` names the run, as for `notifyRunStopped`.
+ *
+ * @param {{ userId: string | number | null | undefined, provider: string, sessionId?: string | null, sessionName?: string | null, runStartedAt?: number | null }} event
  */
-function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, sessionName = null }) {
+function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, sessionName = null, runStartedAt = null }) {
   notifyUserIfEnabled({
     userId,
     event: createNotificationEvent({
@@ -284,17 +340,19 @@ function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, ses
       kind: 'stop',
       code: 'run.background_completed',
       meta: { sessionName },
-      severity: 'info'
+      severity: 'info',
+      runStartedAt
     })
   });
 }
 
 /**
  * Reports a run that failed; `error` is an Error, a message, or anything with one.
+ * `runStartedAt` names the run, as for `notifyRunStopped`.
  *
- * @param {{ userId: string | number | null | undefined, provider: string, sessionId?: string | null, error: unknown, sessionName?: string | null }} event
+ * @param {{ userId: string | number | null | undefined, provider: string, sessionId?: string | null, error: unknown, sessionName?: string | null, runStartedAt?: number | null }} event
  */
-function notifyRunFailed({ userId, provider, sessionId = null, error, sessionName = null }) {
+function notifyRunFailed({ userId, provider, sessionId = null, error, sessionName = null, runStartedAt = null }) {
   const errorMessage = normalizeErrorMessage(error);
 
   notifyUserIfEnabled({
@@ -306,9 +364,22 @@ function notifyRunFailed({ userId, provider, sessionId = null, error, sessionNam
       code: 'run.failed',
       meta: { error: errorMessage, sessionName },
       severity: 'error',
-      dedupeKey: `${provider}:run:error:${sessionId || 'none'}:${errorMessage}`
+      dedupeKey: `${provider}:run:error:${sessionId || 'none'}:${errorMessage}`,
+      runStartedAt
     })
   });
+}
+
+/**
+ * Installs how run-end dedupe finds a session's run when a report does not
+ * name it. Used by the server entrypoint, which wires in the websocket
+ * module's run registry (`chatRunRegistry.getRun`), so repeats of one run
+ * collapse but the next run of the session is notified.
+ *
+ * @param {(appSessionId: string) => { provider: string, startedAt: number } | null | undefined} lookup
+ */
+export function setNotificationRunLookup(lookup) {
+  findSessionRun = lookup;
 }
 
 export {

@@ -1120,7 +1120,7 @@ export type DirectoryRevealRequest = {
   path: string;
 };
 
-/** One file or directory entry in a project's file listing, with directories carrying their loaded `children`; used across the file tree for rendering, searching and filtering. */
+/** One file or directory entry in a project's file listing, with directories carrying their loaded `children`; used across the file tree for rendering, searching and filtering, and by the command palette to collect searchable files. */
 export type FileTreeNode = {
   name: string;
   type: FileTreeItemType;
@@ -1128,6 +1128,10 @@ export type FileTreeNode = {
   size?: number;
   modified?: string;
   permissionsRwx?: string;
+  // True when the entry matches the project's .gitignore; only sent when the
+  // listing was requested with `markIgnored`. Such a directory is never
+  // walked, so it has no `children` and cannot be expanded.
+  isIgnored?: boolean;
   children?: FileTreeNode[];
   [key: string]: unknown;
 };
@@ -1585,6 +1589,13 @@ export type WorkspaceLayout = {
 /** Changes a pane tab's view. userInitiated pins a preview tab (view-tab click, opening a file); programmatic fallbacks keep it a preview. */
 export type WorkspaceViewSetter = (view: AppTab, options?: { userInitiated?: boolean }) => void;
 
+/**
+ * Which buttons of a desktop pane's view bar show their label: 'all', or 'active' (only the current
+ * view; the others keep their icon and tooltip). WorkspacePane picks it from the pane's width and
+ * hands it through WorkspaceMain and PaneViewBar to WorkspaceTabs.
+ */
+export type WorkspaceViewLabels = 'all' | 'active';
+
 /** Every way the UI changes the layout. URL sync and persistence follow these writes; nothing else mutates the layout. */
 export type WorkspaceLayoutActions = {
   /** Opens a session object (sidebar rows, search hits, forks, drops); resolves the project first when neither session.__projectId nor options.ownerProject names one. */
@@ -1665,7 +1676,7 @@ export type PaneTabActivity = 'running' | 'attention' | 'background';
 export type PaneTabDisplay = {
   /** resolvePaneTabTitle's result: the live title from the projects list, else the tab's snapshot; "New chat" for a draft. */
   title: string;
-  /** Owning project's name, for tooltips and menus. */
+  /** Owning project's name, for tooltips and menus, and for the suffix a tab shows when tabs alone cannot tell the project. */
   projectName: string;
   activity: PaneTabActivity | null;
 };
@@ -1873,9 +1884,12 @@ export type CursorPermissionsState = {
   skipPermissions: boolean;
 };
 
-/** The code editor display preferences shown in the appearance tab (word wrap, minimap, line numbers and font size), stored together as one server-backed `codeEditorSettings` preference. */
+/** The code editor display preferences shown in the appearance tab (word wrap for code and for text files, minimap, line numbers and font size), stored together as one server-backed `codeEditorSettings` preference. */
 export type CodeEditorSettingsState = {
+  // Wraps code files only; Markdown and plain-text files follow textWordWrap.
   wordWrap: boolean;
+  // Wraps Markdown and plain-text files (the editor's TEXT_FILE_EXTENSIONS).
+  textWordWrap: boolean;
   showMinimap: boolean;
   lineNumbers: boolean;
   fontSize: string;

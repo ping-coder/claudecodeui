@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { usePaletteOps } from '@/modules/command-palette';
+import { writeCodeEditorSettings } from '@/shared/codeEditorSettings';
 import { useTheme } from '@/shared/context/ThemeContext';
 import { useCodeEditorDocument } from '@/modules/code-editor/hooks/useCodeEditorDocument';
 import { useCodeEditorSettings } from '@/modules/code-editor/hooks/useCodeEditorSettings';
@@ -19,6 +20,11 @@ import CodeEditorLoadingState from '@/modules/code-editor/CodeEditorLoadingState
 import CodeEditorSurface from '@/modules/code-editor/CodeEditorSurface';
 import CodeEditorBinaryFile from '@/modules/code-editor/CodeEditorBinaryFile';
 import CodeEditorMediaPreview from '@/modules/code-editor/CodeEditorMediaPreview';
+
+// Prose rather than code: these files wrap by the `textWordWrap` setting (on by
+// default) and every other file by `wordWrap`. Matched case-insensitively on the
+// last extension; a file without one (LICENSE, Makefile) counts as code.
+const TEXT_FILE_EXTENSIONS = new Set(['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc']);
 
 type CodeEditorProps = {
   file: CodeEditorFile;
@@ -55,6 +61,7 @@ export default function CodeEditor({
 
   const {
     wordWrap,
+    textWordWrap,
     minimapEnabled,
     showLineNumbers,
     fontSize,
@@ -121,6 +128,18 @@ export default function CodeEditor({
     const extension = file.name.split('.').pop()?.toLowerCase();
     return extension === 'md' || extension === 'markdown';
   }, [file.name]);
+
+  const isTextFile = useMemo(() => {
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    return extension !== undefined && TEXT_FILE_EXTENSIONS.has(extension);
+  }, [file.name]);
+
+  // Each kind of file has its own setting, and the header toggle flips only the
+  // one for the open file, merged into storage so the other kind's is untouched.
+  const lineWrap = isTextFile ? textWordWrap : wordWrap;
+  const toggleLineWrap = useCallback(() => {
+    writeCodeEditorSettings(isTextFile ? { textWordWrap: !lineWrap } : { wordWrap: !lineWrap });
+  }, [isTextFile, lineWrap]);
 
   const isHtmlPreviewFile = useMemo(() => {
     const extension = file.name.split('.').pop()?.toLowerCase();
@@ -206,7 +225,7 @@ export default function CodeEditor({
       allExtensions.push(...scrollToFirstChunkExtension);
     }
 
-    if (wordWrap) {
+    if (lineWrap) {
       allExtensions.push(EditorView.lineWrapping);
     }
 
@@ -214,11 +233,11 @@ export default function CodeEditor({
   }, [
     file.diffInfo,
     file.name,
+    lineWrap,
     minimapExtension,
     scrollToFirstChunkExtension,
     showDiff,
     toolbarPanelExtension,
-    wordWrap,
   ]);
 
   useEditorKeyboardShortcuts({
@@ -298,11 +317,13 @@ export default function CodeEditor({
             isMarkdownFile={isMarkdownFile}
             isHtmlPreviewFile={isHtmlPreviewFile}
             markdownPreview={markdownPreview}
+            lineWrap={lineWrap}
             saving={saving}
             saveSuccess={saveSuccess}
             hasUnsavedChanges={hasUnsavedChanges}
             onToggleMarkdownPreview={() => setMarkdownPreview((previous) => !previous)}
             onOpenHtmlPreview={openHtmlPreview}
+            onToggleLineWrap={toggleLineWrap}
             onOpenSettings={() => paletteOps.openSettings('appearance')}
             onDownload={handleDownload}
             onSave={handleSave}
@@ -315,6 +336,11 @@ export default function CodeEditor({
               editMarkdown: t('actions.editMarkdown'),
               previewMarkdown: t('actions.previewMarkdown'),
               previewHtml: t('actions.previewHtml', 'Open HTML preview in new tab'),
+              // Names the kind of file it applies to: the toggle flips the
+              // setting for every file of that kind, not just this one.
+              lineWrap: isTextFile
+                ? t('actions.wrapTextFiles', { defaultValue: 'Word wrap (Markdown and text files)' })
+                : t('actions.wrapCodeFiles', { defaultValue: 'Word wrap (code files)' }),
               settings: t('toolbar.settings'),
               download: t('actions.download'),
               save: t('actions.save'),

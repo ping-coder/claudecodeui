@@ -40,9 +40,11 @@ function getTabTitle(activeTab: AppTab, shouldShowTasksTab: boolean, t: (key: st
 }
 
 /**
- * Rendered by WorkspaceHeader to label the workspace with the active session or
- * tab name. On the chat tab the session title can be double-clicked to rename
- * the session in place, as a second way in beside the sidebar's rename.
+ * Rendered by WorkspaceHeader, so on phones only, to label the workspace with
+ * the active session or tab name. On the chat tab the session title can be
+ * double-clicked to rename the session in place, as another way in beside the
+ * sidebar's rename. A desktop pane names the session on its tab and renames it
+ * there instead (PaneTabRenameInput, which edits the same way).
  */
 export default function WorkspaceTitle({
   activeTab,
@@ -102,6 +104,8 @@ export default function WorkspaceTitle({
                 aria-label={t('mainContent.renameSessionLabel')}
                 // Blur cancels, so a touch keyboard needs a key that commits.
                 enterKeyHint="done"
+                // An Escape layer: Escape cancels the edit alone, without also stopping the chat's run.
+                data-escape-layer=""
                 className="w-full max-w-md rounded border border-border bg-background px-1.5 py-0.5 text-sm font-semibold leading-tight text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
               />
             ) : (

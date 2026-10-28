@@ -22,7 +22,9 @@
     "saved": "已儲存！",
     "exitFullscreen": "離開全螢幕",
     "fullscreen": "全螢幕",
-    "close": "關閉"
+    "close": "關閉",
+    "wrapTextFiles": "自動換行（Markdown 和文字檔案）",
+    "wrapCodeFiles": "自動換行（程式碼檔案）"
   },
   "footer": {
     "lines": "行數：",

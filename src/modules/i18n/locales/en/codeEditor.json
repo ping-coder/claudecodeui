@@ -24,7 +24,9 @@
     "fullscreen": "Fullscreen",
     "close": "Close",
     "previewMarkdown": "Preview markdown",
-    "editMarkdown": "Edit markdown"
+    "editMarkdown": "Edit markdown",
+    "wrapTextFiles": "Word wrap (Markdown and text files)",
+    "wrapCodeFiles": "Word wrap (code files)"
   },
   "footer": {
     "lines": "Lines:",

@@ -74,8 +74,9 @@ export function useFileMentions({ selectedProject, input, setInput, textareaRef 
 
     try {
       // File list is keyed by DB projectId now; the backend resolves it to
-      // the project's path before reading.
-      const response = await api.getFiles(targetProjectId, {
+      // the project's path before reading. No `markIgnored`: the @ list
+      // leaves gitignored files out.
+      const response = await api.getFiles(targetProjectId, {}, {
         signal: abortController.signal,
       });
       if (!response.ok) {

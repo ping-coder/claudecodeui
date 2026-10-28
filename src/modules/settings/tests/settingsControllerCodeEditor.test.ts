@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { createElement } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
-import { CODE_EDITOR_DEFAULTS } from '@/shared/constants';
+import type { CodeEditorSettingsState } from '@/shared/types';
 
 /**
  * The regression was in useSettingsController itself: an effect keyed on the
@@ -58,6 +59,13 @@ vi.mock('@/modules/provider-auth', () => {
   };
   return { useProviderAuthStatus: () => authStatus };
 });
+
+// The appearance tab's other sections, kept out of the way of its wrap rows.
+vi.mock('@/modules/i18n', () => ({ LanguageSelector: () => null }));
+vi.mock('@/shared/context/UiPreferencesContext', () => ({
+  useUiPreferences: () => ({ keepProjectsExpanded: false }),
+  useSetUiPreference: () => () => undefined,
+}));
 
 /** The single localStorage blob the preference store mirrors the server into. */
 const MIRROR_STORAGE_KEY = 'user-preferences';
@@ -134,7 +142,7 @@ test('opening settings does not change a font size the user already chose', asyn
   );
 });
 
-test('changing a setting writes all four values and notifies the editor once', async () => {
+test('changing a setting stores only that key and notifies the editor once', async () => {
   const { result } = await renderSettings();
   await waitFor(() => {
     assert.ok(result.current.updateCodeEditorSetting);
@@ -155,15 +163,12 @@ test('changing a setting writes all four values and notifies the editor once', a
 
   unsubscribe();
 
+  // The keys the user never touched stay unset, so they keep following their
+  // defaults instead of freezing today's defaults into stored values.
   assert.deepEqual(
     storedCodeEditorSettings(),
-    {
-      wordWrap: CODE_EDITOR_DEFAULTS.wordWrap,
-      showMinimap: CODE_EDITOR_DEFAULTS.showMinimap,
-      lineNumbers: CODE_EDITOR_DEFAULTS.lineNumbers,
-      fontSize: '18',
-    },
-    'all four values are written together',
+    { fontSize: '18' },
+    'only the changed key is written',
   );
   assert.equal(notifications, 1);
   assert.equal(result.current.codeEditorSettings.fontSize, '18');
@@ -203,4 +208,75 @@ test('two edits in one batch both survive', async () => {
   assert.equal(storedCodeEditorSettings()?.wordWrap, true);
   assert.equal(result.current.codeEditorSettings.fontSize, '20');
   assert.equal(result.current.codeEditorSettings.wordWrap, true);
+});
+
+test('the text-file wrap setting is stored and shown like the others', async () => {
+  const { result } = await renderSettings();
+  await waitFor(() => {
+    assert.equal(result.current.codeEditorSettings.textWordWrap, true);
+  });
+
+  act(() => {
+    result.current.updateCodeEditorSetting('textWordWrap', false);
+  });
+
+  assert.deepEqual(storedCodeEditorSettings(), { textWordWrap: false });
+  assert.equal(result.current.codeEditorSettings.textWordWrap, false);
+});
+
+test('a dialog edit keeps a wrap setting written elsewhere since the dialog opened', async () => {
+  // The editor header's wrap toggle writes through the same helper. The dialog
+  // merges its own key into the newest stored value rather than writing its
+  // rendered snapshot back, and shows the stored result.
+  const { result } = await renderSettings();
+  await waitFor(() => {
+    assert.ok(result.current.updateCodeEditorSetting);
+  });
+  const { writeCodeEditorSettings } = await import('@/shared/codeEditorSettings');
+
+  act(() => {
+    writeCodeEditorSettings({ textWordWrap: false });
+  });
+  act(() => {
+    result.current.updateCodeEditorSetting('fontSize', '18');
+  });
+
+  assert.deepEqual(storedCodeEditorSettings(), { textWordWrap: false, fontSize: '18' });
+  assert.equal(result.current.codeEditorSettings.textWordWrap, false);
+});
+
+test('the appearance tab binds the text-file and code-file wrap rows to their own settings', async () => {
+  const { default: AppearanceSettingsTab } = await import('@/modules/settings/tabs/AppearanceSettingsTab');
+  const codeEditorSettings: CodeEditorSettingsState = {
+    wordWrap: false,
+    textWordWrap: true,
+    showMinimap: true,
+    lineNumbers: true,
+    fontSize: '12',
+  };
+  const onTextWordWrapChange = vi.fn();
+  const onWordWrapChange = vi.fn();
+
+  render(createElement(AppearanceSettingsTab, {
+    projectSortOrder: 'name',
+    onProjectSortOrderChange: () => undefined,
+    codeEditorSettings,
+    onCodeEditorTextWordWrapChange: onTextWordWrapChange,
+    onCodeEditorWordWrapChange: onWordWrapChange,
+    onCodeEditorShowMinimapChange: () => undefined,
+    onCodeEditorLineNumbersChange: () => undefined,
+    onCodeEditorFontSizeChange: () => undefined,
+  }));
+
+  // No i18n instance is initialised here, so the labels are their English defaults.
+  const textRow = screen.getByRole('switch', { name: 'Word Wrap in Markdown and Text Files' });
+  const codeRow = screen.getByRole('switch', { name: 'Word Wrap in Code Files' });
+  assert.equal(textRow.getAttribute('aria-checked'), 'true');
+  assert.equal(codeRow.getAttribute('aria-checked'), 'false');
+
+  fireEvent.click(textRow);
+  fireEvent.click(codeRow);
+
+  assert.deepEqual(onTextWordWrapChange.mock.calls, [[false]]);
+  assert.deepEqual(onWordWrapChange.mock.calls, [[true]]);
 });

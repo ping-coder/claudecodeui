@@ -11,6 +11,8 @@ export {
   notifyRunStopped,
   // Used by provider runtimes to report background work that finished after its turn ended.
   notifyBackgroundWorkCompleted,
+  // Used by the server entrypoint to give run-end dedupe the websocket module's run registry, for reports that do not name their run.
+  setNotificationRunLookup,
 } from '@/modules/notifications/services/notification-orchestrator.service.js';
 export {
   registerDesktopNotificationClient,

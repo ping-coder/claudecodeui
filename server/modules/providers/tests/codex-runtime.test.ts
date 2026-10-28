@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 
 import { Codex } from '@openai/codex-sdk';
 import type { Thread, ThreadOptions } from '@openai/codex-sdk';
 
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
-import type { ProviderRuntimeContext } from '@/shared/index.js';
+import { withRunNotificationCapture } from '@/modules/providers/tests/fixtures/run-notifications.js';
+import type { AnyRecord, ProviderRuntimeContext } from '@/shared/index.js';
 
 for (const resumed of [false, true]) {
   for (const permissionMode of [undefined, 'default', 'unknown', 'acceptEdits', 'bypassPermissions']) {
@@ -92,3 +94,76 @@ for (const command of ['', '  \n\t']) {
     ]);
   });
 }
+
+/**
+ * Scripts the threads Codex runs on and returns a function that runs one turn
+ * of a session, through a writer that names its run by `runStartedAt` as the
+ * chat gateway's writer does. The turn's stream yields `events` after
+ * `thread.started`, or `runStreamed` throws `streamError`.
+ */
+function scriptCodexTurns(t: TestContext) {
+  let script: { events: AnyRecord[]; streamError: Error | null } = { events: [], streamError: null };
+  t.mock.method(Codex.prototype, 'startThread', () => ({
+    id: 'native-thread',
+    async runStreamed() {
+      const { events, streamError } = script;
+      if (streamError) {
+        throw streamError;
+      }
+      return { events: (async function* () {
+        yield { type: 'thread.started', thread_id: 'native-thread' };
+        yield* events;
+      })() };
+    },
+  }) as unknown as Thread);
+  const context: ProviderRuntimeContext = {
+    resolveProviderSessionId: () => null,
+    resolveResumeModel: async () => 'test-model',
+    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
+    normalizeMessage: () => [],
+    isProviderInstalled: async () => true,
+  };
+
+  return async (turn: { userId: number; sessionId: string; runStartedAt: number; events?: AnyRecord[]; streamError?: Error }) => {
+    script = { events: turn.events ?? [], streamError: turn.streamError ?? null };
+    await codexRuntime.run('hey there', { sessionId: turn.sessionId, cwd: process.cwd() }, {
+      isWebSocketWriter: true,
+      userId: turn.userId,
+      runStartedAt: turn.runStartedAt,
+      send: () => {},
+    }, context);
+  };
+}
+
+test('Codex names the run it reports stopped, so two runs ending inside the dedupe window both notify', async (t) => {
+  const runTurn = scriptCodexTurns(t);
+  await withRunNotificationCapture(async ({ userId, delivered }) => {
+    const events = [{ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }];
+    await runTurn({ userId, sessionId: 'codex-stopped', runStartedAt: 1_000, events });
+    await runTurn({ userId, sessionId: 'codex-stopped', runStartedAt: 2_000, events });
+
+    assert.deepEqual(delivered(), ['run.stopped@codex-stopped', 'run.stopped@codex-stopped']);
+  });
+});
+
+test('Codex names the run a failed turn belongs to', async (t) => {
+  const runTurn = scriptCodexTurns(t);
+  await withRunNotificationCapture(async ({ userId, delivered }) => {
+    const events = [{ type: 'turn.failed', error: { message: 'Rate limited' } }];
+    await runTurn({ userId, sessionId: 'codex-turn-failed', runStartedAt: 1_000, events });
+    await runTurn({ userId, sessionId: 'codex-turn-failed', runStartedAt: 2_000, events });
+
+    assert.deepEqual(delivered(), ['run.failed@codex-turn-failed', 'run.failed@codex-turn-failed']);
+  });
+});
+
+test('Codex names the run whose stream threw', async (t) => {
+  const runTurn = scriptCodexTurns(t);
+  t.mock.method(console, 'error', () => undefined);
+  await withRunNotificationCapture(async ({ userId, delivered }) => {
+    await runTurn({ userId, sessionId: 'codex-threw', runStartedAt: 1_000, streamError: new Error('Codex Exec exited with code 1') });
+    await runTurn({ userId, sessionId: 'codex-threw', runStartedAt: 2_000, streamError: new Error('Codex Exec exited with code 1') });
+
+    assert.deepEqual(delivered(), ['run.failed@codex-threw', 'run.failed@codex-threw']);
+  });
+});

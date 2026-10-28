@@ -208,9 +208,13 @@
         "label": "编辑器主题",
         "description": "代码编辑器的默认主题"
       },
-      "wordWrap": {
-        "label": "自动换行",
-        "description": "在编辑器中默认启用自动换行"
+      "textWordWrap": {
+        "label": "Markdown 和文本文件自动换行",
+        "description": "在 .md、.txt 等 Markdown 和纯文本文件中自动折行显示长行"
+      },
+      "codeWordWrap": {
+        "label": "代码文件自动换行",
+        "description": "在源代码及其他所有文件中自动折行显示长行"
       },
       "showMinimap": {
         "label": "显示缩略图",

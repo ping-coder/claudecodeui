@@ -21,6 +21,7 @@ import type {
   SessionNavigationOptions,
   SettingsMainTab,
   WorkspacePaneSide,
+  WorkspaceViewLabels,
   WorkspaceViewSetter,
 } from '@/shared/types';
 import { NO_PALETTE_OPS } from '@/shared/constants';
@@ -28,6 +29,7 @@ import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { useFileOpenResolver } from '@/modules/project-workspace/hooks/useFileOpenResolver';
 import { EditorSidebar, useEditorSidebar } from '@/modules/code-editor';
+import PaneViewBar from '@/modules/project-workspace/PaneViewBar';
 import WorkspaceHeader from '@/modules/project-workspace/WorkspaceHeader';
 import WorkspaceStateView from '@/modules/project-workspace/WorkspaceStateView';
 import WorkspaceErrorBoundary from '@/modules/project-workspace/WorkspaceErrorBoundary';
@@ -41,14 +43,15 @@ type WorkspaceMainProps = {
   isPaneVisible: boolean;
   /** The pane shares the main area with another one side by side. */
   isSplitPane: boolean;
-  /** The pane is narrower than 640px: compact header. */
-  compact: boolean;
-  /** Immersive mode: no header; the pane's tab bar carries the view bar instead. */
+  /**
+   * Immersive, or the view bar already rides in the pane's tab bar: neither the phone header nor the
+   * desktop view row above the content.
+   */
   hideHeader: boolean;
+  /** Which views the desktop view row labels; WorkspacePane picks it from the pane's width. */
+  viewLabels: WorkspaceViewLabels;
   /** Extra controls at the end of the header's first row (the phone's tabs and full-screen buttons). */
   headerActions: ReactNode;
-  /** The chat connection pill; the right pane side by side hides it so the app shows one. */
-  showConnectionStatus: boolean;
   /** The other pane already holds this terminal (same PTY key), so the Shell view offers to take it over instead of connecting. */
   shellBlockedBy: WorkspacePaneSide | null;
   /** Moves the terminal lease to this pane. */
@@ -74,7 +77,7 @@ type WorkspaceMainProps = {
   onProjectSelect: (project: Project) => void;
   /** Silently re-syncs the sidebar project list after worktree projects change. */
   onProjectsRefresh: () => void;
-  /** Persists a new title for a session; resolves false when the backend refuses it. Used by the header's inline rename. */
+  /** Persists a new title for a session; resolves false when the backend refuses it. Used by the phone header's inline rename. */
   onRenameSession: (sessionId: string, summary: string) => Promise<boolean>;
   /** Hears the editor's buffer turn dirty or clean (clean again when it unmounts), for the pane's layout guard. */
   onEditorUnsavedChange: (hasUnsavedChanges: boolean) => void;
@@ -114,10 +117,9 @@ function WorkspaceMain({
   isFocusedPane,
   isPaneVisible,
   isSplitPane,
-  compact,
   hideHeader,
+  viewLabels,
   headerActions,
-  showConnectionStatus,
   shellBlockedBy,
   onClaimShell,
   onFocusPane,
@@ -266,7 +268,9 @@ function WorkspaceMain({
   return (
     <WorkspacePaneProvider value={paneContext}>
       <div className="flex h-full flex-col">
-        {!hideHeader && (
+        {/* Phones name the session in a header; a desktop pane names it on its tab, so all that is left
+            for a row of its own is the view bar, when the tab bar has no room for it. */}
+        {!hideHeader && (isMobile ? (
           <WorkspaceHeader
             activeTab={activeTab}
             setActiveTab={setActiveTab}
@@ -277,11 +281,19 @@ function WorkspaceMain({
             isMobile={isMobile}
             onMenuClick={onMenuClick}
             onRenameSession={onRenameSession}
-            compact={compact}
             headerActions={headerActions}
-            showConnectionStatus={showConnectionStatus}
           />
-        )}
+        ) : (
+          <div data-pane-view-row="" className="flex h-10 flex-shrink-0 items-center border-b border-border/60 bg-background/95 px-2">
+            <PaneViewBar
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              shouldShowTasksTab={shouldShowTasksTab}
+              shouldShowBrowserTab={shouldShowBrowserTab}
+              labels={viewLabels}
+            />
+          </div>
+        ))}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <div className={`flex min-h-0 min-w-[200px] flex-col overflow-hidden ${editorExpanded ? 'hidden' : ''} flex-1`}>

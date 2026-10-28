@@ -156,12 +156,10 @@
     },
     "sound": {
       "title": "Som",
-      "description": "Tocar um tom curto quando uma execução de chat termina ou precisa de aprovação de ferramenta.",
       "enabled": "Ativado",
       "test": "Testar som"
     },
     "events": {
-      "title": "Tipos de evento",
       "actionRequired": "Ação necessária",
       "stop": "Execução parada",
       "error": "Execução falhou"
@@ -190,10 +188,6 @@
       "theme": {
         "label": "Tema do editor",
         "description": "Tema padrão para o editor de código"
-      },
-      "wordWrap": {
-        "label": "Quebra de linha",
-        "description": "Ativar quebra de linha por padrão no editor"
       },
       "showMinimap": {
         "label": "Mostrar minimapa",

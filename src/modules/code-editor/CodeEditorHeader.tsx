@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Code2, Copy, Download, Eye, Maximize2, Minimize2, Save, Settings as SettingsIcon, X } from 'lucide-react';
+import { Check, Code2, Copy, Download, Eye, Maximize2, Minimize2, Save, Settings as SettingsIcon, WrapText, X } from 'lucide-react';
 
 import { copyTextToClipboard } from '@/shared/utils';
 import type { CodeEditorFile } from '@/shared/types';
@@ -11,11 +11,15 @@ type CodeEditorHeaderProps = {
   isMarkdownFile: boolean;
   isHtmlPreviewFile: boolean;
   markdownPreview: boolean;
+  // Whether long lines wrap in the open file, which follows the setting for its
+  // kind of file (Markdown and text, or code).
+  lineWrap: boolean;
   saving: boolean;
   saveSuccess: boolean;
   hasUnsavedChanges: boolean;
   onToggleMarkdownPreview: () => void;
   onOpenHtmlPreview: () => void;
+  onToggleLineWrap: () => void;
   onOpenSettings: () => void;
   onDownload: () => void;
   onSave: () => void;
@@ -28,6 +32,7 @@ type CodeEditorHeaderProps = {
     editMarkdown: string;
     previewMarkdown: string;
     previewHtml: string;
+    lineWrap: string;
     settings: string;
     download: string;
     save: string;
@@ -40,7 +45,7 @@ type CodeEditorHeaderProps = {
   };
 };
 
-/** Rendered by CodeEditor inside the code-editor module to show the open file's path and the save, preview, download and window controls. */
+/** Rendered by CodeEditor inside the code-editor module to show the open file's path and the save, preview, line-wrap, download and window controls. */
 export default function CodeEditorHeader({
   file,
   isSidebar,
@@ -48,11 +53,13 @@ export default function CodeEditorHeader({
   isMarkdownFile,
   isHtmlPreviewFile,
   markdownPreview,
+  lineWrap,
   saving,
   saveSuccess,
   hasUnsavedChanges,
   onToggleMarkdownPreview,
   onOpenHtmlPreview,
+  onToggleLineWrap,
   onOpenSettings,
   onDownload,
   onSave,
@@ -147,6 +154,24 @@ export default function CodeEditorHeader({
             title={labels.previewHtml}
           >
             <Eye className="h-4 w-4" />
+          </button>
+        )}
+
+        {/* The Markdown preview always wraps, so there is nothing to toggle there. */}
+        {!(isMarkdownFile && markdownPreview) && (
+          <button
+            type="button"
+            onClick={onToggleLineWrap}
+            aria-pressed={lineWrap}
+            aria-label={labels.lineWrap}
+            className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${
+              lineWrap
+                ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white'
+            }`}
+            title={labels.lineWrap}
+          >
+            <WrapText className="h-4 w-4" />
           </button>
         )}
 

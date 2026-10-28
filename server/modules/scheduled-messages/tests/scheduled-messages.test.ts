@@ -2,14 +2,23 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionsDb, userDb } from '@/modules/database/index.js';
-import { dispatchDueScheduledMessages, dispatchQueuedMessages } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
+import {
+  closeScheduledMessageDispatcher,
+  dispatchDueScheduledMessages,
+  dispatchQueuedMessages,
+  initializeScheduledMessageDispatcher,
+} from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 
 const SESSION_ID = 'scheduled-session';
+const OTHER_SESSION_ID = 'other-session';
+const ANOTHER_SESSION_ID = 'another-session';
+/** The dispatcher's poll interval. */
+const POLL_INTERVAL_MS = 30_000;
 
 async function withIsolatedDatabase(runTest: (userId: number) => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -57,6 +66,73 @@ function createRuntime(
       return true;
     },
   } as never;
+}
+
+/**
+ * A runtime whose run for `heldSessionId` ends its turn and then stays open
+ * until `release` is called, like a Claude run whose turn backgrounded a long
+ * build: the registry shows the turn completed, and the session reports
+ * background work unless `reportsBackgroundWork` is false (the CLI is only
+ * winding down). Runs after the release, and runs for other sessions, settle
+ * at once.
+ */
+function createHoldingRuntime(
+  runs: RunCall[],
+  heldSessionId: string,
+  { reportsBackgroundWork = true }: { reportsBackgroundWork?: boolean } = {},
+) {
+  const aborts: string[] = [];
+  let holding = false;
+  let released = false;
+  let releaseHeldRun = () => {};
+
+  const runtime = {
+    hasRuntime: () => true,
+    hasBackgroundWork: (sessionId: string) => reportsBackgroundWork && holding && sessionId === heldSessionId,
+    run: async (
+      provider: string,
+      command: string,
+      options: Record<string, unknown>,
+      writer: { sendComplete(opts: { exitCode: number }): void },
+    ) => {
+      runs.push({ provider, command, options });
+      if (options.sessionId !== heldSessionId || released) {
+        return;
+      }
+      holding = true;
+      writer.sendComplete({ exitCode: 0 });
+      await new Promise<void>((resolve) => {
+        releaseHeldRun = resolve;
+      });
+      holding = false;
+    },
+    abort: async (_provider: string, sessionId: string) => {
+      aborts.push(sessionId);
+      return true;
+    },
+  } as never;
+
+  return {
+    runtime,
+    aborts,
+    release: () => {
+      released = true;
+      releaseHeldRun();
+    },
+  };
+}
+
+/** Lets the passes started so far run as far as they can without a real provider. */
+function flushPasses(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function commandsFor(runs: RunCall[], sessionId: string): string[] {
+  return runs.filter((run) => run.options.sessionId === sessionId).map((run) => run.command);
+}
+
+function secondsAgo(seconds: number): string {
+  return new Date(Date.now() - seconds * 1_000).toISOString();
 }
 
 test('a message due in the past is sent on the next pass, not skipped', async () => {
@@ -254,6 +330,213 @@ test('a due message is claimed once, so overlapping passes cannot double-send it
 
     assert.equal(runs.length, 1);
   });
+});
+
+test('a dispatched turn holding its process open for background work does not hold up other sessions', { timeout: 10_000 }, async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await withIsolatedDatabase(async (userId) => {
+      sessionsDb.createAppSession(OTHER_SESSION_ID, 'claude', '/workspace/demo', 'Other session');
+      sessionsDb.createAppSession(ANOTHER_SESSION_ID, 'claude', '/workspace/demo', 'Another session');
+      const runs: RunCall[] = [];
+      const { runtime, release } = createHoldingRuntime(runs, SESSION_ID);
+
+      // A queued turn backgrounds a build that runs for hours. The turn ends,
+      // but its run stays open until the build reports back.
+      sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'start the build', attachments: [] });
+      initializeScheduledMessageDispatcher(runtime);
+      try {
+        await flushPasses();
+        assert.deepEqual(runs.map((run) => run.command), ['start the build']);
+        assert.equal(chatRunRegistry.isProcessing(SESSION_ID), false);
+
+        sessionDraftsDb.appendQueuedMessage(userId, OTHER_SESSION_ID, {
+          content: 'queued for another session',
+          attachments: [],
+        });
+        scheduledMessagesService.schedule({
+          userId,
+          sessionId: ANOTHER_SESSION_ID,
+          content: 'due for another session',
+          scheduledFor: secondsAgo(1),
+        });
+
+        mock.timers.tick(POLL_INTERVAL_MS);
+        await flushPasses();
+
+        assert.deepEqual(commandsFor(runs, OTHER_SESSION_ID), ['queued for another session']);
+        assert.deepEqual(commandsFor(runs, ANOTHER_SESSION_ID), ['due for another session']);
+        assert.equal(scheduledMessagesDb.listForSession(userId, ANOTHER_SESSION_ID)[0].status, 'sent');
+      } finally {
+        release();
+        await flushPasses();
+      }
+    });
+  } finally {
+    closeScheduledMessageDispatcher();
+    mock.timers.reset();
+  }
+});
+
+test('a due message waiting for its session\'s previous turn stays pending while other sessions\' messages go', { timeout: 10_000 }, async () => {
+  await withIsolatedDatabase(async (userId) => {
+    sessionsDb.createAppSession(OTHER_SESSION_ID, 'claude', '/workspace/demo', 'Other session');
+    const first = scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'first',
+      scheduledFor: secondsAgo(3),
+    });
+    const other = scheduledMessagesService.schedule({
+      userId,
+      sessionId: OTHER_SESSION_ID,
+      content: 'for another session',
+      scheduledFor: secondsAgo(2),
+    });
+    const second = scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'second',
+      scheduledFor: secondsAgo(1),
+    });
+    const statusOf = (sessionId: string, id: string) =>
+      scheduledMessagesDb.listForSession(userId, sessionId).find((row) => row.id === id)?.status;
+
+    // The first message's turn backgrounds a long build, so its run stays open.
+    const runs: RunCall[] = [];
+    const { runtime, release } = createHoldingRuntime(runs, SESSION_ID);
+    const pass = dispatchDueScheduledMessages(runtime);
+    try {
+      await flushPasses();
+      assert.deepEqual(commandsFor(runs, SESSION_ID), ['first']);
+      assert.deepEqual(commandsFor(runs, OTHER_SESSION_ID), ['for another session']);
+      assert.equal(statusOf(OTHER_SESSION_ID, other.id), 'sent');
+      // Not marked sent before it goes: it can still be cancelled meanwhile,
+      // and a restart now would not lose it.
+      assert.equal(statusOf(SESSION_ID, second.id), 'pending');
+    } finally {
+      release();
+      await pass;
+    }
+
+    // Once the build has reported back, the second follows the first.
+    assert.equal(await pass, 3);
+    assert.deepEqual(commandsFor(runs, SESSION_ID), ['first', 'second']);
+    assert.equal(statusOf(SESSION_ID, first.id), 'sent');
+    assert.equal(statusOf(SESSION_ID, second.id), 'sent');
+  });
+});
+
+test('a due message waiting for its session\'s previous turn can still be cancelled, and then never goes', { timeout: 10_000 }, async () => {
+  await withIsolatedDatabase(async (userId) => {
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'first',
+      scheduledFor: secondsAgo(2),
+    });
+    const second = scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'second',
+      scheduledFor: secondsAgo(1),
+    });
+
+    const runs: RunCall[] = [];
+    const { runtime, release } = createHoldingRuntime(runs, SESSION_ID);
+    const pass = dispatchDueScheduledMessages(runtime);
+    try {
+      await flushPasses();
+      scheduledMessagesService.cancel(userId, second.id);
+    } finally {
+      release();
+      await pass;
+    }
+
+    assert.equal(await pass, 1);
+    assert.deepEqual(runs.map((run) => run.command), ['first']);
+    assert.equal(
+      scheduledMessagesDb.listForSession(userId, SESSION_ID).find((row) => row.id === second.id)?.status,
+      'cancelled',
+    );
+  });
+});
+
+test('a message that comes due while a dispatched turn holds its session waits for it instead of interrupting it', { timeout: 10_000 }, async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await withIsolatedDatabase(async (userId) => {
+      const runs: RunCall[] = [];
+      const { runtime, aborts, release } = createHoldingRuntime(runs, SESSION_ID);
+      sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'start the build', attachments: [] });
+      initializeScheduledMessageDispatcher(runtime);
+      try {
+        await flushPasses();
+        scheduledMessagesService.schedule({
+          userId,
+          sessionId: SESSION_ID,
+          content: 'due during the build',
+          scheduledFor: secondsAgo(1),
+        });
+
+        mock.timers.tick(POLL_INTERVAL_MS);
+        await flushPasses();
+
+        assert.deepEqual(runs.map((run) => run.command), ['start the build']);
+        assert.deepEqual(aborts, []);
+        assert.equal(scheduledMessagesDb.listForSession(userId, SESSION_ID)[0].status, 'pending');
+      } finally {
+        release();
+        await flushPasses();
+      }
+
+      // The build has reported back and the run has settled: the next poll sends it.
+      mock.timers.tick(POLL_INTERVAL_MS);
+      await flushPasses();
+      assert.deepEqual(runs.map((run) => run.command), ['start the build', 'due during the build']);
+      assert.equal(scheduledMessagesDb.listForSession(userId, SESSION_ID)[0].status, 'sent');
+    });
+  } finally {
+    closeScheduledMessageDispatcher();
+    mock.timers.reset();
+  }
+});
+
+test('a queued turn waits until the dispatcher\'s previous run for its session has settled', { timeout: 10_000 }, async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await withIsolatedDatabase(async (userId) => {
+      const runs: RunCall[] = [];
+      // The turn has ended and reports no background work, but its run has
+      // not settled yet: the CLI is still winding down.
+      const { runtime, release } = createHoldingRuntime(runs, SESSION_ID, { reportsBackgroundWork: false });
+      sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'first follow-up', attachments: [] });
+      initializeScheduledMessageDispatcher(runtime);
+      try {
+        await flushPasses();
+        sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'second follow-up', attachments: [] });
+
+        mock.timers.tick(POLL_INTERVAL_MS);
+        await flushPasses();
+
+        assert.deepEqual(runs.map((run) => run.command), ['first follow-up']);
+        assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessage, {
+          content: 'second follow-up',
+          attachments: [],
+        });
+      } finally {
+        release();
+        await flushPasses();
+      }
+
+      mock.timers.tick(POLL_INTERVAL_MS);
+      await flushPasses();
+      assert.deepEqual(runs.map((run) => run.command), ['first follow-up', 'second follow-up']);
+    });
+  } finally {
+    closeScheduledMessageDispatcher();
+    mock.timers.reset();
+  }
 });
 
 test('the composer settings it was scheduled with travel with it', async () => {

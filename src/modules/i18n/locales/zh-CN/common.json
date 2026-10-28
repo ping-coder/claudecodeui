@@ -100,7 +100,9 @@
     "createProjectDesktop": "点击侧边栏中的文件夹图标以创建新项目",
     "newSession": "新会话",
     "untitledSession": "未命名会话",
-    "projectFiles": "项目文件"
+    "projectFiles": "项目文件",
+    "renameSessionHint": "{{title}}（双击重命名）",
+    "renameSessionLabel": "会话标题"
   },
   "fileTree": {
     "loading": "正在加载文件...",
@@ -126,6 +128,7 @@
     "newFolder": "新建文件夹 (Cmd+Shift+N)",
     "refresh": "刷新",
     "collapseAll": "全部折叠",
+    "ignoredByGitignore": "匹配 .gitignore 规则",
     "context": {
       "rename": "重命名",
       "delete": "删除",
@@ -297,9 +300,11 @@
     "closeAllTabs": "关闭全部标签",
     "keepOpen": "保持打开",
     "previewHint": "预览，双击保持打开",
+    "renameHint": "双击或按 F2 重命名",
     "openOnOtherSide": "在另一侧打开",
     "moveToOtherSide": "移到另一侧",
     "copySessionId": "复制会话 ID",
+    "renameSession": "重命名会话",
     "closePane": "关闭这一侧",
     "tabsButton": "标签 ({{count}})",
     "fullscreen": "全屏",
@@ -370,6 +375,10 @@
     "browseAllCommits": "浏览全部提交（{{count}}）",
     "browseAllBranches": "浏览全部分支（{{count}}）",
     "switchTo": "切换到：{{name}}"
+  },
+  "misc": {
+    "projectFallback": "项目",
+    "openMenu": "打开菜单"
   },
   "runNotifications": {
     "title": {

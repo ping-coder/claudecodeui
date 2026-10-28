@@ -68,35 +68,45 @@ export const scheduledMessagesDb = {
   },
 
   /**
-   * Claims every message whose time has passed, marking them in the same
-   * statement that selects them.
+   * Every pending message whose time has passed, soonest first. Nothing is
+   * marked here: the dispatcher claims each one right before sending it.
    *
-   * Claiming is what makes a missed schedule work: the server can be down at
-   * the moment a message was due, and the next poll after it starts picks the
-   * message up instead of skipping it. Doing it in one transaction is what
-   * stops two overlapping polls from sending the same message twice.
+   * Listing everything due, not only what came due since the last poll, is
+   * what makes a missed schedule work: the server can be down at the moment a
+   * message was due, and the first poll after it starts picks the message up
+   * instead of skipping it.
    */
-  claimDue(now: Date): ScheduledMessageRow[] {
-    const db = getConnection();
-    const nowIso = now.toISOString();
+  listDue(now: Date): ScheduledMessageRow[] {
+    return getConnection()
+      .prepare(
+        `SELECT ${COLUMNS} FROM scheduled_messages
+         WHERE status = 'pending' AND scheduled_for <= ?
+         ORDER BY scheduled_for ASC`
+      )
+      .all(now.toISOString()) as ScheduledMessageRow[];
+  },
 
-    return db.transaction(() => {
-      const due = db
-        .prepare(
-          `SELECT ${COLUMNS} FROM scheduled_messages
-           WHERE status = 'pending' AND scheduled_for <= ?
-           ORDER BY scheduled_for ASC`
-        )
-        .all(nowIso) as ScheduledMessageRow[];
+  /**
+   * Marks one pending message sent. Returns false when it is no longer
+   * pending: cancelled since it was listed, or already claimed by another pass.
+   *
+   * Checking and marking in one statement is what stops two overlapping
+   * passes from sending the same message twice. Claiming one message right
+   * before it goes, rather than everything due at once, keeps a message that
+   * is waiting for its session's previous turn pending: it is not shown as
+   * sent before it is, it can still be cancelled, and a restart meanwhile does
+   * not lose it.
+   */
+  claim(id: string): boolean {
+    const result = getConnection()
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'sent', updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'pending'`
+      )
+      .run(id);
 
-      for (const row of due) {
-        db.prepare(
-          `UPDATE scheduled_messages SET status = 'sent', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-        ).run(row.id);
-      }
-
-      return due;
-    })();
+    return result.changes > 0;
   },
 
   markFailed(id: string, reason: string): void {

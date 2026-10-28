@@ -130,12 +130,10 @@
     },
     "sound": {
       "title": "Ton",
-      "description": "Spielt einen kurzen Ton ab, wenn ein Chat-Lauf abgeschlossen ist.",
       "enabled": "Aktiviert",
       "test": "Ton testen"
     },
     "events": {
-      "title": "Ereignistypen",
       "actionRequired": "Aktion erforderlich",
       "stop": "Lauf gestoppt",
       "error": "Lauf fehlgeschlagen"
@@ -164,10 +162,6 @@
       "theme": {
         "label": "Editor-Design",
         "description": "Standarddesign für den Code-Editor"
-      },
-      "wordWrap": {
-        "label": "Zeilenumbruch",
-        "description": "Zeilenumbruch standardmäßig im Editor aktivieren"
       },
       "showMinimap": {
         "label": "Minimap anzeigen",

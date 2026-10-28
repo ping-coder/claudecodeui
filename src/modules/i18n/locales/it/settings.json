@@ -130,12 +130,10 @@
     },
     "sound": {
       "title": "Suono",
-      "description": "Riproduci un breve tono quando termina un'esecuzione della chat.",
       "enabled": "Attivato",
       "test": "Prova suono"
     },
     "events": {
-      "title": "Tipi di evento",
       "actionRequired": "Azione richiesta",
       "stop": "Esecuzione interrotta",
       "error": "Esecuzione fallita"
@@ -164,10 +162,6 @@
       "theme": {
         "label": "Tema editor",
         "description": "Tema predefinito per l'editor di codice"
-      },
-      "wordWrap": {
-        "label": "A capo automatico",
-        "description": "Abilita il ritorno a capo automatico nell'editor"
       },
       "showMinimap": {
         "label": "Mostra minimappa",

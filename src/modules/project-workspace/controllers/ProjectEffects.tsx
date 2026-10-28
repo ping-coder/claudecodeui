@@ -1,12 +1,14 @@
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { useProcessingSessions } from '@/shared/context/SessionProtectionContext';
 import { writeSelectedProvider } from '@/shared/selectedProvider';
 import { useProjectEffectsState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import { useRunningSessionTitle } from '@/modules/project-workspace/hooks/useRunningSessionTitle';
+import { findSessionTab } from '@/modules/project-workspace/utils/workspaceLayout';
 import type { LLMProvider } from '@/shared/types';
-import { findLiveSessionTitle, getPageTitle, getSessionTitle, setDocumentPageTitle } from '@/shared/utils';
+import { getPageTitle, resolveDocumentSessionTitle, setDocumentPageTitle } from '@/shared/utils';
 
 /**
  * Headless controller rendered by ProjectWorkspaceShell for page-wide effects: palette operations,
@@ -25,6 +27,8 @@ export default function ProjectEffects() {
     layout,
   } = useProjectEffectsState();
   const activities = useProcessingSessions();
+  // Names an untitled focused session in the interface language, and re-renders when that changes.
+  const { t } = useTranslation('common');
 
   usePaletteOpsRegister({
     openSettings,
@@ -34,11 +38,11 @@ export default function ProjectEffects() {
   useRunningSessionTitle({ activities, projects, layout });
 
   // Rendered here rather than in the sidebar, so the title keeps following the focused pane while the
-  // sidebar is collapsed, switched to another mode or hidden by immersive mode. The live title comes
-  // first, like the running part's, so a session that starts running keeps the name it showed; the
-  // focused tab's own session object can be older than a rename or a generated summary.
+  // sidebar is collapsed, switched to another mode or hidden by immersive mode. The focused session is
+  // named exactly as the running part names it (live title, its tab's snapshot, localized placeholder),
+  // so when it starts running the title only gains the marker.
   const pageTitle = focusedSession
-    ? findLiveSessionTitle(focusedSession.id, projects) ?? getSessionTitle(focusedSession)
+    ? resolveDocumentSessionTitle(focusedSession.id, projects, findSessionTab(layout, focusedSession.id)?.tab.title, t)
     : getPageTitle(focusedProject, null);
   useEffect(() => {
     setDocumentPageTitle(pageTitle);

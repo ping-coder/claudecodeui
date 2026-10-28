@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
+import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
 import type { Project, ProjectSession } from '@/shared/types';
 
 /**
- * The chat header's session title can be renamed in place: double-click opens
+ * The phone header's session title can be renamed in place: double-click opens
  * an input seeded with the title, Enter saves the trimmed draft, Escape and
- * clicking away discard it. This is the second way to rename a session beside
- * the sidebar's menu, so it must never reach the backend for a no-op edit.
+ * clicking away discard it. This is another way to rename a session beside
+ * the sidebar's menu, so it must never reach the backend for a no-op edit. The
+ * input is an Escape layer: Escape cancels the edit without stopping the run.
  */
 
 vi.mock('react-i18next', () => ({
@@ -188,4 +190,22 @@ test('the title is not editable without a session or off the chat tab', () => {
   fireEvent.doubleClick(titleHeading());
   assert.equal(queryRenameInput() === null, true);
   assert.equal(onRenameSession.mock.calls.length, 0);
+});
+
+test('the rename input is an Escape layer, so the chat does not also stop its run on that Escape', () => {
+  renderTitle();
+  fireEvent.doubleClick(titleHeading());
+  assert.equal(renameInput().hasAttribute('data-escape-layer'), true);
+
+  // The chat stops its run on Escape from a document capture listener unless an Escape layer is open.
+  const escapeLayerAtCapture: boolean[] = [];
+  const recordEscapeLayer = (event: KeyboardEvent) => {
+    escapeLayerAtCapture.push(event.key === 'Escape' && document.querySelector(ESCAPE_LAYER_SELECTOR) !== null);
+  };
+  document.addEventListener('keydown', recordEscapeLayer, true);
+  fireEvent.keyDown(renameInput(), { key: 'Escape' });
+  document.removeEventListener('keydown', recordEscapeLayer, true);
+
+  assert.deepEqual(escapeLayerAtCapture, [true]);
+  assert.equal(queryRenameInput() === null, true);
 });

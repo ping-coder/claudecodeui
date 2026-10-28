@@ -72,6 +72,11 @@ test('a file added after the list was loaded shows up the next time `@` opens th
 
   await waitFor(() => assert.deepEqual(shownNames(), ['uploaded.txt']));
   assert.equal(getFiles.mock.calls.length, 2);
+  // The @ list leaves gitignored files out instead of listing them greyed.
+  assert.equal(
+    getFiles.mock.calls.some((call) => (call[1] as { markIgnored?: boolean } | undefined)?.markIgnored === true),
+    false,
+  );
 });
 
 test('typing the query while the dropdown stays open does not refetch on every keystroke', async () => {
@@ -133,7 +138,7 @@ test('an older refetch that lands after a newer one cannot overwrite it', async 
   await waitFor(() => assert.equal(getFiles.mock.calls.length, 3));
 
   // The newer request superseded the older one.
-  const olderSignal = (getFiles.mock.calls[1][1] as { signal: AbortSignal }).signal;
+  const olderSignal = (getFiles.mock.calls[1][2] as { signal: AbortSignal }).signal;
   assert.equal(olderSignal.aborted, true);
 
   await act(async () => {

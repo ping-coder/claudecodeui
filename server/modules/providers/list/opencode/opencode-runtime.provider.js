@@ -158,7 +158,10 @@ async function spawnOpenCode(command, options = {}, ws, context) {
       }
 
       terminalNotificationSent = true;
-      // Notifications are app-facing, so they carry the app session id.
+      // Notifications are app-facing, so they carry the app session id. They
+      // name this run by its start time: an exit with code 127 or none is
+      // reported after an await that follows the run's `complete`, by which
+      // time the session's next run may have started.
       const finalSessionId = sessionId || capturedSessionId || processKey;
       if (code === 0 && !error) {
         notifyRunStopped({
@@ -167,6 +170,7 @@ async function spawnOpenCode(command, options = {}, ws, context) {
           sessionId: finalSessionId,
           sessionName: sessionSummary,
           stopReason: 'completed',
+          runStartedAt: ws?.runStartedAt ?? null,
         });
         return;
       }
@@ -177,6 +181,7 @@ async function spawnOpenCode(command, options = {}, ws, context) {
         sessionId: finalSessionId,
         sessionName: sessionSummary,
         error: error || `OpenCode CLI exited with code ${code}`,
+        runStartedAt: ws?.runStartedAt ?? null,
       });
     };
 

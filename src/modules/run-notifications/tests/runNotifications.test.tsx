@@ -261,6 +261,28 @@ test('the prompt asks for the permission first thing in the click, and is gone f
   assert.equal(requestedPermissions.count, 1);
 });
 
+test('a click that focuses the prompt, as Chrome\'s does, leaves its card to go after 8 s all the same', async () => {
+  allowSystemCta();
+  await renderRunNotifications();
+  await runEnded('session-a', 1000);
+  await flush(400);
+
+  const promptCard = screen.getAllByRole('article')[0];
+  const prompt = within(promptCard).getByRole('button', { name: ENABLE_SYSTEM });
+  fireEvent.mouseEnter(promptCard);
+  act(() => prompt.focus());
+  fireEvent.click(prompt);
+  fireEvent.mouseLeave(promptCard);
+  assert.equal(hasSystemCta(), false);
+  assert.deepEqual(bannerTitles(), ['Fix login bug']);
+
+  // The pointer gone and the focused button with it, the card's visible time counts on to its 8 s.
+  await flush(7599);
+  assert.deepEqual(bannerTitles(), ['Fix login bug']);
+  await flush(1);
+  assert.deepEqual(bannerTitles(), []);
+});
+
 test('an answer given in another tab holds here at once, and this tab never takes it back', async () => {
   allowSystemCta();
   await renderRunNotifications();

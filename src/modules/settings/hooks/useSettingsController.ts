@@ -268,19 +268,24 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
 
   // Persist on the user's edit rather than in an effect keyed on the settings
   // object. The effect form also ran on mount, so merely opening this dialog
-  // rewrote all four keys — which reset the editor's font size for anyone who
-  // had never changed it.
+  // rewrote every key — which reset the editor's font size for anyone who had
+  // never changed it.
   //
-  // The other three keys are merged from storage rather than from the rendered
-  // state, so two edits landing in one React batch cannot write the second one
-  // on top of a pre-first-edit snapshot. Storage is the newest value because
-  // this is the only writer that can be behind — the editor's own wordWrap
-  // mirror in useCodeEditorSettings only ever writes back what it just read.
+  // Two places write these settings, this dialog and the editor header's wrap
+  // toggle, and each merges only its own key into this tab's stored copy. Keys
+  // the user never changed therefore stay unset and keep following their
+  // defaults, and neither writer undoes an edit the other made in this tab. An
+  // edit made in another tab or on another device can still be lost, because
+  // the whole blob is written back and the last writer wins (see
+  // writeCodeEditorSettings). The state is re-read from storage rather than
+  // built from the rendered value, so two edits landing in one React batch both
+  // survive.
   const updateCodeEditorSetting = useCallback(
     <K extends keyof CodeEditorSettingsState>(key: K, value: CodeEditorSettingsState[K]) => {
-      const next = { ...readCodeEditorSettings(), [key]: value };
-      setCodeEditorSettings(next);
-      writeCodeEditorSettings(next);
+      const update: Partial<CodeEditorSettingsState> = {};
+      update[key] = value;
+      writeCodeEditorSettings(update);
+      setCodeEditorSettings(readCodeEditorSettings());
     },
     [],
   );

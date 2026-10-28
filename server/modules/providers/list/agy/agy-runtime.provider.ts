@@ -394,13 +394,17 @@ async function runAgyTurn(
     }
   };
   // Notifications are app-facing, so they carry the app session id. They are
-  // a side channel: a failure to deliver one must not stall the turn.
+  // a side channel: a failure to deliver one must not stall the turn. They
+  // name this run by its start time: an abort is reported once agy's process
+  // closes, after the abort handler already ended the run, so the session's
+  // next run may have started.
   const notifyOutcome = (outcome: { failure: string } | { stopReason: 'completed' | 'aborted' }): void => {
     const target = {
       userId: writer.userId ?? null,
       provider: 'agy',
       sessionId: appSessionId || conversationId,
       sessionName,
+      runStartedAt: writer.runStartedAt ?? null,
     };
     try {
       if ('failure' in outcome) {

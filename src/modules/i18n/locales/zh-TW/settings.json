@@ -131,12 +131,10 @@
     },
     "sound": {
       "title": "聲音",
-      "description": "聊天執行完成時播放短提示音。",
       "enabled": "已啟用",
       "test": "測試聲音"
     },
     "events": {
-      "title": "事件類型",
       "actionRequired": "需要處理",
       "stop": "執行已停止",
       "error": "執行失敗"
@@ -166,9 +164,13 @@
         "label": "編輯器佈景主題",
         "description": "程式碼編輯器的預設佈景主題"
       },
-      "wordWrap": {
-        "label": "自動換行",
-        "description": "在編輯器中預設啟用自動換行"
+      "textWordWrap": {
+        "label": "Markdown 和文字檔案自動換行",
+        "description": "在 .md、.txt 等 Markdown 和純文字檔案中自動折行顯示長行"
+      },
+      "codeWordWrap": {
+        "label": "程式碼檔案自動換行",
+        "description": "在原始碼及其他所有檔案中自動折行顯示長行"
       },
       "showMinimap": {
         "label": "顯示縮圖",

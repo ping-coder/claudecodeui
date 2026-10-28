@@ -1,12 +1,12 @@
-import { MessageSquare, Terminal, Folder, GitBranch, ClipboardCheck, MonitorPlay, type LucideIcon } from 'lucide-react';
 import { Fragment } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Tooltip, PillBar, Pill } from '@/shared/ui';
-import type { AppTab, WorkspaceViewSetter } from '@/shared/types';
+import type { AppTab, WorkspaceViewLabels, WorkspaceViewSetter } from '@/shared/types';
 import { cn } from '@/shared/utils';
-import { usePlugins,PluginIcon } from '@/modules/plugins';
+import { PluginIcon } from '@/modules/plugins';
+import { useWorkspaceViews } from '@/modules/project-workspace/hooks/useWorkspaceViews';
 
 type WorkspaceTabsProps = {
   activeTab: AppTab;
@@ -14,79 +14,32 @@ type WorkspaceTabsProps = {
   setActiveTab: WorkspaceViewSetter;
   shouldShowTasksTab: boolean;
   shouldShowBrowserTab: boolean;
-  /** Narrow pane or the immersive one-line bar: smaller pills, and only the active view keeps its label at any viewport width. */
-  compact?: boolean;
-};
-
-type BuiltInTab = {
-  kind: 'builtin';
-  id: AppTab;
-  labelKey: string;
-  icon: LucideIcon;
-};
-
-type PluginTab = {
-  kind: 'plugin';
-  id: AppTab;
-  label: string;
-  pluginName: string;
-  iconFile: string;
-};
-
-type TabDefinition = BuiltInTab | PluginTab;
-
-const BASE_TABS: BuiltInTab[] = [
-  { kind: 'builtin', id: 'chat',  labelKey: 'tabs.chat',  icon: MessageSquare },
-  { kind: 'builtin', id: 'shell', labelKey: 'tabs.shell', icon: Terminal },
-  { kind: 'builtin', id: 'files', labelKey: 'tabs.files', icon: Folder },
-  { kind: 'builtin', id: 'git',   labelKey: 'tabs.git',   icon: GitBranch },
-];
-
-const BROWSER_TAB: BuiltInTab = {
-  kind: 'builtin',
-  id: 'browser',
-  labelKey: 'tabs.browser',
-  icon: MonitorPlay,
-};
-
-const TASKS_TAB: BuiltInTab = {
-  kind: 'builtin',
-  id: 'tasks',
-  labelKey: 'tabs.tasks',
-  icon: ClipboardCheck,
+  /**
+   * 'phone' (default): the phone header's bordered bar, where only the active view keeps its label below
+   * the lg breakpoint. 'pane': a desktop pane's view bar, with larger icons and labels set by `labels`.
+   */
+  variant?: 'phone' | 'pane';
+  /** Which views show their label in the 'pane' variant; ignored by 'phone'. Default 'all'. */
+  labels?: WorkspaceViewLabels;
 };
 
 /**
- * Rendered by WorkspaceHeader, and by WorkspacePane in the immersive one-line pane bar, to show the
- * built-in workspace tabs plus any enabled plugin tabs.
+ * Rendered by WorkspaceHeader (the phone header) and by PaneViewBar (a desktop pane's view bar) to
+ * show the built-in workspace tabs plus any enabled plugin tabs.
  */
 export default function WorkspaceTabs({
   activeTab,
   setActiveTab,
   shouldShowTasksTab,
   shouldShowBrowserTab,
-  compact = false,
+  variant = 'phone',
+  labels = 'all',
 }: WorkspaceTabsProps) {
   const { t } = useTranslation();
-  const { plugins } = usePlugins();
+  const { builtInViews, pluginViews } = useWorkspaceViews({ shouldShowTasksTab, shouldShowBrowserTab });
+  const isPane = variant === 'pane';
 
-  const builtInTabs: BuiltInTab[] = [
-    ...BASE_TABS,
-    ...(shouldShowBrowserTab ? [BROWSER_TAB] : []),
-    ...(shouldShowTasksTab ? [TASKS_TAB] : []),
-  ];
-
-  const pluginTabs: PluginTab[] = plugins
-    .filter((p) => p.enabled)
-    .map((p) => ({
-      kind: 'plugin',
-      id: `plugin:${p.name}` as AppTab,
-      label: p.displayName,
-      pluginName: p.name,
-      iconFile: p.icon,
-    }));
-
-  const tabs: TabDefinition[] = [...builtInTabs, ...pluginTabs];
+  const tabs = [...builtInViews, ...pluginViews];
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const tabList = event.currentTarget.closest('[role="tablist"]');
@@ -113,8 +66,8 @@ export default function WorkspaceTabs({
       aria-label={t('tabs.views', { defaultValue: 'Workspace views' })}
       className={cn(
         'min-w-max bg-muted/50',
-        // Compact drops the border and padding so the bar fits the 36px pane tab bar.
-        compact ? 'p-0.5' : 'border border-border/40 shadow-inner shadow-black/[0.025] dark:shadow-black/10',
+        // The pane bar drops the border and keeps a slim padding so it fits a 40px row.
+        isPane ? 'p-0.5' : 'border border-border/40 shadow-inner shadow-black/[0.025] dark:shadow-black/10',
       )}
     >
       {tabs.map((tab, index) => {
@@ -123,7 +76,7 @@ export default function WorkspaceTabs({
 
         return (
           <Fragment key={`${tab.id}-${index}`}>
-            {index === builtInTabs.length && pluginTabs.length > 0 && (
+            {index === builtInViews.length && pluginViews.length > 0 && (
               <span aria-hidden="true" className="mx-1 h-4 w-px shrink-0 bg-border" />
             )}
             <Tooltip content={displayLabel} position="bottom">
@@ -135,18 +88,26 @@ export default function WorkspaceTabs({
                 isActive={isActive}
                 onClick={() => setActiveTab(tab.id, { userInitiated: true })}
                 onKeyDown={handleTabKeyDown}
-                className={compact ? 'h-7 max-w-40 px-2 py-1' : 'h-8 max-w-44 px-2.5 py-[5px]'}
+                className={isPane ? 'h-8 max-w-40 gap-1.5 px-2.5 py-0' : 'h-8 max-w-44 px-2.5 py-[5px]'}
               >
                 {tab.kind === 'builtin' ? (
-                  <tab.icon className="h-3.5 w-3.5 shrink-0" strokeWidth={isActive ? 2.2 : 1.8} />
+                  <tab.icon className={cn(isPane ? 'h-4 w-4' : 'h-3.5 w-3.5', 'shrink-0')} strokeWidth={isActive ? 2.2 : 1.8} />
                 ) : (
                   <PluginIcon
                     pluginName={tab.pluginName}
                     iconFile={tab.iconFile}
-                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center [&>svg]:h-full [&>svg]:w-full"
+                    className={cn(
+                      isPane ? 'h-4 w-4' : 'h-3.5 w-3.5',
+                      'flex shrink-0 items-center justify-center [&>svg]:h-full [&>svg]:w-full',
+                    )}
                   />
                 )}
-                <span className={cn(isActive ? 'inline max-w-28' : 'hidden', 'truncate sm:max-w-36', !compact && 'lg:inline')}>
+                {/* The pane bar labels by the pane's width (WorkspacePane), never by the viewport. */}
+                <span
+                  className={isPane
+                    ? cn('max-w-32 truncate', labels === 'active' && !isActive && 'hidden')
+                    : cn(isActive ? 'inline max-w-28' : 'hidden', 'truncate sm:max-w-36', 'lg:inline')}
+                >
                   {displayLabel}
                 </span>
               </Pill>

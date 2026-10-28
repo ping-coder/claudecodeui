@@ -130,12 +130,10 @@
     },
     "sound": {
       "title": "サウンド",
-      "description": "チャット実行が完了したときに短い音を再生します。",
       "enabled": "有効",
       "test": "サウンドをテスト"
     },
     "events": {
-      "title": "イベント種別",
       "actionRequired": "対応が必要",
       "stop": "実行停止",
       "error": "実行失敗"
@@ -164,10 +162,6 @@
       "theme": {
         "label": "エディタのテーマ",
         "description": "コードエディタのデフォルトテーマ"
-      },
-      "wordWrap": {
-        "label": "折り返し",
-        "description": "エディタでデフォルトで折り返しを有効にします"
       },
       "showMinimap": {
         "label": "ミニマップを表示",

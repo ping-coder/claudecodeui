@@ -263,7 +263,10 @@ function RunAlertBanners({
     }
   };
 
-  // A card that goes while hovered or focused (dismissed, expired) fires no mouseleave or blur; let go of it here.
+  // Whatever goes while hovered or focused fires no mouseleave or blur on its way out: a card dismissed or expired,
+  // but also a focused button while every card stays, like the system-notification prompt once used, or "Dismiss
+  // all" once the banners folded into its line are seen in another tab. Those change no card key, so the check runs
+  // after every commit, not on a dependency: it is cheap, and the memoized stack seldom renders.
   useEffect(() => {
     const shownKeys = new Set(visibleKeysSignature ? visibleKeysSignature.split('\u0000') : []);
     let changed = false;
@@ -280,7 +283,7 @@ function RunAlertBanners({
     if (changed) {
       reportHover();
     }
-  }, [reportHover, visibleKeysSignature]);
+  });
 
   return createPortal(
     <section

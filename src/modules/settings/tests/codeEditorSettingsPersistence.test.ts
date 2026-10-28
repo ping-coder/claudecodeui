@@ -83,6 +83,7 @@ test('both modules resolve the same settings from one shared preference', () => 
   });
   assert.deepEqual(readCodeEditorSettings(), {
     wordWrap: true,
+    textWordWrap: true,
     showMinimap: false,
     lineNumbers: false,
     fontSize: '18',
@@ -118,8 +119,16 @@ test('a fresh user gets the shared defaults', () => {
 
   assert.equal(settings.fontSize, CODE_EDITOR_DEFAULTS.fontSize);
   assert.equal(settings.wordWrap, CODE_EDITOR_DEFAULTS.wordWrap);
+  assert.equal(settings.textWordWrap, CODE_EDITOR_DEFAULTS.textWordWrap);
   assert.equal(settings.showMinimap, CODE_EDITOR_DEFAULTS.showMinimap);
   assert.equal(settings.lineNumbers, CODE_EDITOR_DEFAULTS.lineNumbers);
+});
+
+test('Markdown and plain-text files wrap by default, code files do not', () => {
+  // A separate key, so the many users who already have `wordWrap: false`
+  // stored explicitly still get wrapped text files.
+  assert.equal(CODE_EDITOR_DEFAULTS.textWordWrap, true);
+  assert.equal(CODE_EDITOR_DEFAULTS.wordWrap, false);
 });
 
 test('an explicit edit persists every setting and notifies the code-editor module', () => {
@@ -133,6 +142,7 @@ test('an explicit edit persists every setting and notifies the code-editor modul
 
   writeCodeEditorSettings({
     wordWrap: true,
+    textWordWrap: false,
     showMinimap: false,
     lineNumbers: false,
     fontSize: '18',
@@ -140,15 +150,47 @@ test('an explicit edit persists every setting and notifies the code-editor modul
 
   unsubscribe();
 
-  // All four travel together, and they survive a reload: the mirror is what the
+  // They travel together, and they survive a reload: the mirror is what the
   // next page load reads before the server responds.
   assert.deepEqual(mirroredPreferences().codeEditorSettings, {
     wordWrap: true,
+    textWordWrap: false,
     showMinimap: false,
     lineNumbers: false,
     fontSize: '18',
   });
   assert.equal(notified, 1);
+});
+
+test('a write merges only the given keys into what is stored', () => {
+  // The settings dialog and the editor header's wrap toggle both write here.
+  // Writing every key would turn the defaults of settings the user never chose
+  // into stored values, so a later change to a default would not reach them.
+  writeUserPreference('codeEditorSettings', { fontSize: '16' });
+
+  writeCodeEditorSettings({ textWordWrap: false });
+
+  assert.deepEqual(mirroredPreferences().codeEditorSettings, {
+    fontSize: '16',
+    textWordWrap: false,
+  });
+  assert.deepEqual(readCodeEditorSettings(), {
+    wordWrap: false,
+    textWordWrap: false,
+    showMinimap: true,
+    lineNumbers: true,
+    fontSize: '16',
+  });
+});
+
+test('a stored blob that is not an object is replaced, not spread into the write', () => {
+  // The server stores the blob without checking its shape; spreading a string
+  // would write one numbered key per character.
+  writeUserPreference('codeEditorSettings', 'corrupt');
+
+  writeCodeEditorSettings({ textWordWrap: false });
+
+  assert.deepEqual(mirroredPreferences().codeEditorSettings, { textWordWrap: false });
 });
 
 test('a font size the user already chose survives a settings read', () => {
@@ -184,6 +226,7 @@ test('the editor and the dialog decode a stored value the same way', () => {
 
   assert.deepEqual(readCodeEditorSettings(), {
     wordWrap: true,
+    textWordWrap: true,
     showMinimap: false,
     lineNumbers: true,
     fontSize: '20',

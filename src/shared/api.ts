@@ -315,8 +315,18 @@ export const api = {
     get(fileContentPath(projectId, filePath), options),
   saveFile: (projectId: string, filePath: string, content: string) =>
     put(`/api/file-tree/projects/${projectId}/file`, { filePath, content }),
-  getFiles: (projectId: string, options: ApiRequestOptions = {}) =>
-    get(`/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true })}`, options),
+  // Entries matching the project's .gitignore are left out, which the @ mention
+  // list and bare file-name links expect. `markIgnored` lists them instead,
+  // flagged `isIgnored` and never walked, for the explorer and the palette.
+  getFiles: (
+    projectId: string,
+    { markIgnored = false }: { markIgnored?: boolean } = {},
+    options: ApiRequestOptions = {},
+  ) =>
+    get(
+      `/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true, markIgnored })}`,
+      options,
+    ),
 
   // File operations
   createFile: (

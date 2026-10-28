@@ -130,12 +130,10 @@
     },
     "sound": {
       "title": "Son",
-      "description": "Jouer un court son lorsqu'une exécution de chat se termine.",
       "enabled": "Activé",
       "test": "Tester le son"
     },
     "events": {
-      "title": "Types d'événements",
       "actionRequired": "Action requise",
       "stop": "Exécution arrêtée",
       "error": "Exécution échouée"
@@ -164,10 +162,6 @@
       "theme": {
         "label": "Thème de l'éditeur",
         "description": "Thème par défaut pour l'éditeur de code"
-      },
-      "wordWrap": {
-        "label": "Retour à la ligne",
-        "description": "Activer le retour à la ligne par défaut dans l'éditeur"
       },
       "showMinimap": {
         "label": "Afficher la minimap",

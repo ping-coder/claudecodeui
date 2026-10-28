@@ -1,23 +1,32 @@
 import assert from 'node:assert/strict';
 
-import { act, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { useLayoutEffect } from 'react';
 import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import type { NavigateFunction } from 'react-router-dom';
-import { beforeEach, test, vi } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import type * as ProjectsStateContextModule from '@/modules/project-workspace/context/ProjectsStateContext';
 import { createInitialLayout } from '@/modules/project-workspace/utils/workspaceLayout';
-import type { Project, ProjectSession, SessionActivityMap, SessionOpenOptions, WorkspaceLayout } from '@/shared/types';
+import type {
+  Project,
+  ProjectSession,
+  SessionActivity,
+  SessionActivityMap,
+  SessionOpenOptions,
+  WorkspaceLayout,
+  WorkspaceSessionTab,
+} from '@/shared/types';
 
 /**
  * The page-wide effects the workspace runs once: the browser tab title follows the focused pane (by
- * the session's live title), names the latest running session while one runs, and goes back to the
- * app name when the workspace unmounts; a notification click opens its session kept, on the Chat
- * view, in the focused pane. The provider hands these effects the current projects and layout. The
- * route mounts one ChatInstancesProvider, so every chat on the page shares one realtime coordinator.
+ * the session's live title, else its tab's snapshot), names the latest running session while one
+ * runs, a focused one by the same text, and goes back to the app name when the workspace unmounts;
+ * a notification click opens its session kept, on the Chat view, in the focused pane. The provider
+ * hands these effects the current projects and layout. The route mounts one ChatInstancesProvider,
+ * so every chat on the page shares one realtime coordinator.
  */
 
 type EffectsState = {
@@ -97,17 +106,54 @@ const makeState = (overrides: Partial<EffectsState> = {}): EffectsState => ({
   ...overrides,
 });
 
+/**
+ * The focused pane showing `session` in its only tab, the way the provider hands it over: the focused
+ * session is that tab's session object, and the tab keeps `tabTitle` as its snapshot.
+ */
+const focusing = (
+  session: ProjectSession,
+  tabTitle = typeof session.summary === 'string' ? session.summary : '',
+): Pick<EffectsState, 'focusedSession' | 'layout'> => {
+  const tab: WorkspaceSessionTab = {
+    key: `tab-${session.id}`,
+    sessionId: session.id,
+    projectId: ALPHA.projectId,
+    provider: 'claude',
+    title: tabTitle,
+    view: 'chat',
+    isPreview: false,
+    session,
+  };
+  const layout = createInitialLayout();
+  return {
+    focusedSession: session,
+    layout: { ...layout, left: { ...layout.left, tabs: [tab], activeTabKey: tab.key, mru: [tab.key] } },
+  };
+};
+
+/** A CloudCLI turn in flight, as the activity map lists it. */
+const turnStartedAt = (startedAt: number): SessionActivity => ({ statusText: null, canInterrupt: true, startedAt });
+
+// A language switch saves the choice to the server; it must not reach the network.
+vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) })));
+
 beforeEach(() => {
   registeredPaletteOps.length = 0;
   processing.activities = new Map();
 });
 
+afterEach(async () => {
+  // Unmount first, so restoring the language cannot re-render this test's tree.
+  cleanup();
+  await i18n.changeLanguage('en');
+});
+
 test('the browser tab title follows the focused pane: its session, else its project', () => {
-  effects.state = makeState({ focusedSession: { id: 's1', summary: 'Fix the login bug', __provider: 'claude' } });
+  effects.state = makeState(focusing({ id: 's1', summary: 'Fix the login bug', __provider: 'claude' }));
   const view = render(<ProjectEffects />);
   assert.equal(document.title, 'Fix the login bug');
 
-  effects.state = makeState({ focusedSession: { id: 's2', summary: 'Other pane chat', __provider: 'claude' } });
+  effects.state = makeState(focusing({ id: 's2', summary: 'Other pane chat', __provider: 'claude' }));
   view.rerender(<ProjectEffects />);
   assert.equal(document.title, 'Other pane chat');
 
@@ -118,18 +164,18 @@ test('the browser tab title follows the focused pane: its session, else its proj
 
 test('the page title takes the focused session\'s live title over the one its tab was opened with', () => {
   const projects = [{ ...ALPHA, sessions: [{ id: 's1', summary: 'Renamed in the sidebar', __provider: 'claude' as const }] }];
-  effects.state = makeState({ projects, focusedSession: { id: 's1', summary: 'Fix the login bug', __provider: 'claude' } });
+  effects.state = makeState({ projects, ...focusing({ id: 's1', summary: 'Fix the login bug', __provider: 'claude' }) });
   const view = render(<ProjectEffects />);
   assert.equal(document.title, 'Renamed in the sidebar');
 
   // A session the loaded projects do not list keeps its tab's title.
-  effects.state = makeState({ projects, focusedSession: { id: 's2', summary: 'Other pane chat', __provider: 'claude' } });
+  effects.state = makeState({ projects, ...focusing({ id: 's2', summary: 'Other pane chat', __provider: 'claude' }) });
   view.rerender(<ProjectEffects />);
   assert.equal(document.title, 'Other pane chat');
 });
 
 test('unmounting the workspace (signing out, leaving its route) puts the app name back in the tab title', () => {
-  effects.state = makeState({ focusedSession: { id: 's1', summary: 'Fix the login bug', __provider: 'claude' } });
+  effects.state = makeState(focusing({ id: 's1', summary: 'Fix the login bug', __provider: 'claude' }));
   const view = render(<ProjectEffects />);
   assert.equal(document.title, 'Fix the login bug');
 
@@ -139,14 +185,70 @@ test('unmounting the workspace (signing out, leaving its route) puts the app nam
 
 test('while a session runs, the tab title names it behind the running marker instead of the focused pane', () => {
   const projects = [{ ...ALPHA, sessions: [{ id: 's2', summary: 'Audit deps', __provider: 'claude' as const }] }];
-  processing.activities = new Map([['s2', { statusText: null, canInterrupt: true, startedAt: 1000 }]]);
-  effects.state = makeState({ projects, focusedSession: { id: 's1', summary: 'Fix the login bug', __provider: 'claude' } });
+  processing.activities = new Map([['s2', turnStartedAt(1000)]]);
+  effects.state = makeState({ projects, ...focusing({ id: 's1', summary: 'Fix the login bug', __provider: 'claude' }) });
   const view = render(<ProjectEffects />);
   assert.equal(document.title, '[Running] Audit deps');
 
   processing.activities = new Map();
   view.rerender(<ProjectEffects />);
   assert.equal(document.title, 'Fix the login bug');
+});
+
+test('a focused session that starts running keeps its title and only gains the marker', () => {
+  const cases: Array<{ name: string; projects: Project[]; session: ProjectSession; tabTitle: string; expected: string }> = [
+    {
+      name: 'live title',
+      projects: [{ ...ALPHA, sessions: [{ id: 's1', summary: 'Renamed live', __provider: 'claude' }] }],
+      session: { id: 's1', summary: 'Opened as', __provider: 'claude' },
+      tabTitle: 'Opened as',
+      expected: 'Renamed live',
+    },
+    {
+      // Not listed, and opened from an object with only a `title`: the tab's snapshot took it, while
+      // the session object has no summary or name for getSessionTitle to read.
+      name: 'tab snapshot',
+      projects: [ALPHA],
+      session: { id: 's1', title: 'Snapshot title', __provider: 'claude' },
+      tabTitle: 'Snapshot title',
+      expected: 'Snapshot title',
+    },
+    {
+      name: 'no title anywhere',
+      projects: [ALPHA],
+      session: { id: 's1', __provider: 'claude' },
+      tabTitle: '',
+      expected: 'Untitled session',
+    },
+  ];
+
+  for (const { name, projects, session, tabTitle, expected } of cases) {
+    processing.activities = new Map();
+    effects.state = makeState({ projects, ...focusing(session, tabTitle) });
+    const view = render(<ProjectEffects />);
+    assert.equal(document.title, expected, `${name}: idle`);
+
+    processing.activities = new Map([['s1', turnStartedAt(1000)]]);
+    view.rerender(<ProjectEffects />);
+    assert.equal(document.title, `[Running] ${expected}`, `${name}: running`);
+    view.unmount();
+  }
+});
+
+test('an untitled focused session reads Untitled session in the interface language, idle and running', async () => {
+  effects.state = makeState(focusing({ id: 's1', __provider: 'claude' }, ''));
+  const view = render(<ProjectEffects />);
+  assert.equal(document.title, 'Untitled session');
+
+  // A language switch alone rewrites the placeholder.
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  assert.equal(document.title, '未命名会话');
+
+  processing.activities = new Map([['s1', turnStartedAt(1000)]]);
+  view.rerender(<ProjectEffects />);
+  assert.equal(document.title, '[运行中] 未命名会话');
 });
 
 test('the provider renews the effects state when only the projects or only the layout changes, so renames and opened tabs reach the title', () => {

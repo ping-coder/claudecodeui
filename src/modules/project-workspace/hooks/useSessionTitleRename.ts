@@ -3,9 +3,9 @@ import type { KeyboardEvent, RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 
 type UseSessionTitleRenameArgs = {
-  /** The open session's id, or null when the header is not naming a session. */
+  /** The named session's id, or null when the title is not naming a session. */
   sessionId: string | null;
-  /** The title the header shows; seeds the draft when editing starts. */
+  /** The title on screen; seeds the draft when editing starts. */
   currentTitle: string;
   /** Persists the title; resolves false when the backend refuses it. */
   onRenameSession: (sessionId: string, summary: string) => Promise<boolean>;
@@ -27,12 +27,16 @@ type SessionTitleRename = {
   startEditing: () => void;
   updateDraft: (value: string) => void;
   cancelEditing: () => void;
+  /** Saves the draft as Enter does, for a caller that also commits on another key (the tab box's Tab). */
+  saveDraft: () => Promise<void>;
   handleInputKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
 };
 
 /**
- * The inline rename behind the workspace header's session title: double-click
- * opens an input over the title, Enter saves, Escape or clicking away cancels.
+ * The inline rename shared by the phone header's session title
+ * (WorkspaceTitle, on a double-click) and the box over a desktop pane tab
+ * (PaneTabRenameInput): startEditing opens an input over the title, Enter
+ * saves, Escape or clicking away cancels.
  *
  * Mirrors the sidebar's rename: the draft is trimmed, an empty or unchanged
  * draft just closes the editor, and a refused or failed save is reported with
@@ -133,6 +137,7 @@ export function useSessionTitleRename({
     startEditing,
     updateDraft,
     cancelEditing,
+    saveDraft,
     handleInputKeyDown,
   };
 }

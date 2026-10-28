@@ -23,15 +23,15 @@ type WorkspaceHeaderProps = {
   onMenuClick: () => void;
   /** Persists a new title for a session; resolves false when the backend refuses it. */
   onRenameSession: (sessionId: string, summary: string) => Promise<boolean>;
-  /** Narrow pane: no title block (the pane's session tab already names it) and a compact view bar. Default false. */
-  compact?: boolean;
   /** Controls at the end of the first row: the phone's tabs and full-screen buttons. */
   headerActions?: ReactNode;
-  /** The chat connection pill; the right pane side by side passes false so the app shows one. Default true. */
-  showConnectionStatus?: boolean;
 };
 
-/** Rendered by WorkspaceMain to show the workspace title and chat connection status alongside the scrollable tab bar. */
+/**
+ * Rendered by WorkspaceMain on phones to show the workspace title and chat connection status alongside
+ * the scrollable view tabs. A desktop pane has no header: its tab names the session, and its view bar
+ * sits in the tab bar or in a row of its own (PaneViewBar).
+ */
 export default function WorkspaceHeader({
   activeTab,
   setActiveTab,
@@ -42,42 +42,34 @@ export default function WorkspaceHeader({
   isMobile,
   onMenuClick,
   onRenameSession,
-  compact = false,
   headerActions = null,
-  showConnectionStatus = true,
 }: WorkspaceHeaderProps) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const { canScrollLeft, canScrollRight, updateScrollState, scrollByPage } = useHorizontalWheelScroll(scrollRef, activeTab);
   const hasOverflow = canScrollLeft || canScrollRight;
-  // A compact desktop pane without the connection pill has nothing left of the view bar; an empty block would still take a gap.
-  const hasLeadingBlock = isMobile || !compact || showConnectionStatus || Boolean(headerActions);
 
   return (
     <header className="pwa-header-safe flex-shrink-0 border-b border-border/60 bg-background/95 px-3 py-1.5 backdrop-blur-sm sm:px-4 sm:py-2">
       <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
-        {hasLeadingBlock && (
-          <div className={cn('flex min-w-0 items-center gap-2', !compact && 'sm:max-w-[min(34%,24rem)] sm:flex-[1_1_18rem]')}>
-            {isMobile && <MobileMenuButton onMenuClick={onMenuClick} />}
-            {/* On phones the sidebar (which carries the badge) is a closed drawer, so the
-                header marks a non-production deployment itself. */}
-            {isMobile && <DeploymentEnvironmentBadge className="max-w-20" />}
-            {!compact && (
-              <WorkspaceTitle
-                activeTab={activeTab}
-                selectedProject={selectedProject}
-                selectedSession={selectedSession}
-                shouldShowTasksTab={shouldShowTasksTab}
-                onRenameSession={onRenameSession}
-              />
-            )}
-            {showConnectionStatus && <WorkspaceConnectionStatus />}
-            {headerActions && <div className="ml-auto flex flex-shrink-0 items-center gap-1">{headerActions}</div>}
-          </div>
-        )}
+        <div className="flex min-w-0 items-center gap-2 sm:max-w-[min(34%,24rem)] sm:flex-[1_1_18rem]">
+          {isMobile && <MobileMenuButton onMenuClick={onMenuClick} />}
+          {/* On phones the sidebar (which carries the badge) is a closed drawer, so the
+              header marks a non-production deployment itself. */}
+          {isMobile && <DeploymentEnvironmentBadge className="max-w-20" />}
+          <WorkspaceTitle
+            activeTab={activeTab}
+            selectedProject={selectedProject}
+            selectedSession={selectedSession}
+            shouldShowTasksTab={shouldShowTasksTab}
+            onRenameSession={onRenameSession}
+          />
+          <WorkspaceConnectionStatus />
+          {headerActions && <div className="ml-auto flex flex-shrink-0 items-center gap-1">{headerActions}</div>}
+        </div>
 
         <div className="-mx-3 min-w-0 sm:mx-0 sm:flex-1">
-          <div className={cn('relative w-fit max-w-full', !compact && 'ml-auto')}>
+          <div className="relative ml-auto w-fit max-w-full">
             {canScrollLeft && (
               <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-12 bg-gradient-to-r from-background via-background/90 to-transparent" />
             )}
@@ -94,7 +86,6 @@ export default function WorkspaceHeader({
                 setActiveTab={setActiveTab}
                 shouldShowTasksTab={shouldShowTasksTab}
                 shouldShowBrowserTab={shouldShowBrowserTab}
-                compact={compact}
               />
             </div>
             {canScrollRight && (

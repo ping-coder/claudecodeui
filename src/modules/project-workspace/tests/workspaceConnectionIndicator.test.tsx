@@ -4,14 +4,14 @@ import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
-import type { AppTab, Project } from '@/shared/types';
 
 /**
  * Issue #582: a dropped chat socket changed nothing on screen, so the user kept
- * typing into a chat that could not reach the server. The workspace header now
- * says it is reconnecting for as long as the socket is down, on every tab, and
- * shows nothing during the first handshake. Wired as App wires it: the real
- * WebSocketProvider driving the real header.
+ * typing into a chat that could not reach the server. The workspace now says it
+ * is reconnecting for as long as the socket is down, on every tab (the phone
+ * header and a desktop pane's tab bar both carry this status), and shows
+ * nothing during the first handshake. Wired as App wires it: the real
+ * WebSocketProvider driving the real status.
  */
 
 // Hoisted to a constant so `user` keeps one identity across renders; a fresh
@@ -20,11 +20,6 @@ const AUTH = { user: { id: 1 }, token: 'token', isLoading: false };
 
 vi.mock('@/modules/auth', () => ({
   useAuth: () => AUTH,
-}));
-
-vi.mock('@/modules/plugins', () => ({
-  usePlugins: () => ({ plugins: [] }),
-  PluginIcon: () => null,
 }));
 
 class FakeWebSocket {
@@ -62,31 +57,11 @@ class FakeWebSocket {
 }
 
 const { WebSocketProvider } = await import('@/shared/context/WebSocketContext');
-const { default: WorkspaceHeader } = await import('@/modules/project-workspace/WorkspaceHeader');
+const { default: WorkspaceConnectionStatus } = await import('@/modules/project-workspace/WorkspaceConnectionStatus');
 
-const PROJECT: Project = {
-  projectId: 'project-1',
-  path: '/repo',
-  fullPath: '/repo',
-  displayName: 'repo',
-  isStarred: false,
-  sessions: [],
-  sessionMeta: { hasMore: false, total: 0 },
-};
-
-const header = (activeTab: AppTab) => (
+const status = () => (
   <WebSocketProvider>
-    <WorkspaceHeader
-      activeTab={activeTab}
-      setActiveTab={() => undefined}
-      selectedProject={PROJECT}
-      selectedSession={null}
-      shouldShowTasksTab={false}
-      shouldShowBrowserTab={false}
-      isMobile={false}
-      onMenuClick={() => undefined}
-      onRenameSession={async () => true}
-    />
+    <WorkspaceConnectionStatus />
   </WebSocketProvider>
 );
 
@@ -94,9 +69,9 @@ const latestSocket = () => FakeWebSocket.instances[FakeWebSocket.instances.lengt
 // A boolean, not the element: a failed assertion on a jsdom node makes node:assert
 // inspect the whole DOM tree, which can exhaust the worker's memory.
 const isIndicatorShown = () => screen.queryByText('Reconnecting...') !== null;
-// What a screen reader is told, or null when the header has no polite live region.
+// What a screen reader is told, or null when there is no polite live region.
 const liveRegionText = () => {
-  const region = document.querySelector('header [role="status"][aria-live="polite"]');
+  const region = document.querySelector('[role="status"][aria-live="polite"]');
   return region === null ? null : (region.textContent ?? '');
 };
 
@@ -104,12 +79,6 @@ beforeEach(() => {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
   vi.stubGlobal('WebSocket', FakeWebSocket);
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Element.prototype.scrollIntoView = () => undefined;
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
@@ -118,8 +87,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test('the header shows nothing during the first handshake or while connected', () => {
-  render(header('chat'));
+test('the status shows nothing during the first handshake or while connected', () => {
+  render(status());
   assert.equal(isIndicatorShown(), false, 'no warning while the first handshake is in flight');
 
   act(() => latestSocket().serverOpens());
@@ -129,17 +98,17 @@ test('the header shows nothing during the first handshake or while connected', (
   assert.equal(liveRegionText(), '', 'an empty polite live region is mounted while connected');
 });
 
-test('the header says it is reconnecting while the chat socket is down, and clears once it is back', () => {
-  const view = render(header('chat'));
+test('the status says it is reconnecting while the chat socket is down, and clears once it is back', () => {
+  const view = render(status());
   act(() => latestSocket().serverOpens());
 
   act(() => latestSocket().serverDrops());
   assert.equal(isIndicatorShown(), true, 'a dropped socket is shown');
   assert.equal(liveRegionText(), 'Chat connection lost. Reconnecting...', 'and announced, naming the chat connection');
 
-  // Still down while the retry handshakes, and on another tab too.
+  // Still down while the retry handshakes, and after a re-render (another view, say).
   act(() => { vi.advanceTimersByTime(3000); });
-  view.rerender(header('files'));
+  view.rerender(status());
   assert.equal(isIndicatorShown(), true);
 
   act(() => latestSocket().serverOpens());
@@ -148,7 +117,7 @@ test('the header says it is reconnecting while the chat socket is down, and clea
 });
 
 test('a first connection that fails is shown too', () => {
-  render(header('chat'));
+  render(status());
   act(() => latestSocket().serverDrops());
   assert.equal(isIndicatorShown(), true);
 });

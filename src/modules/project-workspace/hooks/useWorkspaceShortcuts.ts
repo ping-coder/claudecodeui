@@ -68,8 +68,9 @@ const matchesShortcutKeys = (event: KeyboardEvent, keys: readonly string[]): boo
  * Which workspace shortcut a key press is, if any. Mod is Command on Apple platforms and Ctrl
  * elsewhere; the other primary modifier and Alt must be up, so AltGr chords never match. Keys are
  * matched by their physical position (event.code), which Shift and the keyboard layout leave alone.
+ * Also used by PaneTabRenameInput, whose box ignores exactly the full-screen chord and no other Enter.
  */
-const readWorkspaceShortcut = (event: KeyboardEvent): WorkspaceShortcut | null => {
+export const readWorkspaceShortcut = (event: KeyboardEvent): WorkspaceShortcut | null => {
   const isApple = isApplePlatform();
   const isModDown = isApple ? event.metaKey : event.ctrlKey;
   const isOtherPrimaryDown = isApple ? event.ctrlKey : event.metaKey;

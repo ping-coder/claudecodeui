@@ -312,6 +312,28 @@ test('startRun rejects a second concurrent run for the same session', async () =
   });
 });
 
+test('each run\'s writer names its run by the start time that run\'s ends carry', async () => {
+  await withIsolatedDatabase(() => {
+    let now = 7_000_000;
+    const clock = mock.method(Date, 'now', () => now);
+    try {
+      sessionsDb.createAppSession('app-run-started', 'cursor', '/workspace/demo');
+      const first = chatRunRegistry.startRun({ appSessionId: 'app-run-started', provider: 'cursor', providerSessionId: null, connection: null, userId: null });
+      assert.ok(first);
+      chatRunRegistry.completeRun('app-run-started', { exitCode: 0 });
+      now = 7_000_300;
+      const second = chatRunRegistry.startRun({ appSessionId: 'app-run-started', provider: 'cursor', providerSessionId: null, connection: null, userId: null });
+      assert.ok(second);
+
+      // The first run's writer still names the first run once the next one holds the slot.
+      assert.deepEqual([first.writer.runStartedAt, second.writer.runStartedAt], [7_000_000, 7_000_300]);
+      assert.deepEqual(chatRunRegistry.listRecentRunEnds().map((end) => end.runStartedAt), [7_000_000]);
+    } finally {
+      clock.mock.restore();
+    }
+  });
+});
+
 /** Resolves after the microtasks already queued, which is when a recorded run end has been broadcast. */
 const flushMicrotasks = () => new Promise<void>((resolve) => { queueMicrotask(resolve); });
 

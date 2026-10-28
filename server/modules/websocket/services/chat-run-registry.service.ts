@@ -348,6 +348,7 @@ export const chatRunRegistry = {
       userId: input.userId,
       provider: input.provider,
       providerSessionId: input.providerSessionId,
+      runStartedAt: run.startedAt,
       onProviderSessionId: (providerSessionId) => {
         recordProviderSessionId(run, providerSessionId);
       },

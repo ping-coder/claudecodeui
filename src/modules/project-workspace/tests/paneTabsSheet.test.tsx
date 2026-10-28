@@ -41,6 +41,7 @@ vi.mock('@/modules/task-master', () => ({
 vi.mock('@/modules/browser-use', () => ({ useBrowserUseEnabled: () => false }));
 vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ plugins: [] }), PluginIcon: () => null }));
 vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ connectionStatus: 'connected' }) }));
+vi.mock('@/shared/context/UiPreferencesContext', () => ({ useUiPreferences: () => ({ sidebarVisible: true }) }));
 // The real WorkspaceMain draws headerActions in its header, which it leaves out while immersive.
 vi.mock('@/modules/project-workspace/WorkspaceMain', () => ({
   default: ({ side, headerActions, hideHeader }: MainProps) => (

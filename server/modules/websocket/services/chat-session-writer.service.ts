@@ -32,6 +32,8 @@ type ChatSessionWriterOptions = {
    * built without it ignores the report.
    */
   onBackgroundWorkFinished?: () => void;
+  /** The run's `startedAt`, exposed as `runStartedAt`; null when unknown. */
+  runStartedAt: number | null;
 };
 
 /**
@@ -50,8 +52,8 @@ type ChatSessionWriterOptions = {
  * - `setSessionId(...)` calls (used by runtimes to label captured ids) are
  *   intercepted and recorded as the provider-id mapping as well.
  *
- * Its one addition, `reportBackgroundWorkFinished`, is optional on
- * `ProviderRuntimeWriter`, so runtimes call it only when it exists.
+ * Its additions, `reportBackgroundWorkFinished` and `runStartedAt`, are
+ * optional on `ProviderRuntimeWriter`, so runtimes use them only when present.
  */
 export class ChatSessionWriter {
   userId: string | number | null;
@@ -60,6 +62,14 @@ export class ChatSessionWriter {
    * gateway writer is a drop-in replacement for `WebSocketWriter`.
    */
   isWebSocketWriter = true;
+  /**
+   * When the run this writer belongs to started, in ms: the registry's
+   * `startedAt`, which the run's `run_ended` frames carry as `runStartedAt`.
+   * Null when unknown. Runtimes pass it with their run-end notifications, so
+   * the push dedupe names the run that ended even when the report comes in
+   * after the session's next run has started.
+   */
+  readonly runStartedAt: number | null;
 
   private readonly options: ChatSessionWriterOptions;
   /**
@@ -91,6 +101,7 @@ export class ChatSessionWriter {
     }
     this.userId = options.userId;
     this.providerSessionId = options.providerSessionId;
+    this.runStartedAt = options.runStartedAt;
   }
 
   send(data: unknown): void {

@@ -131,6 +131,9 @@ async function spawnCursor(command, options = {}, ws, context) {
         terminalNotificationSent = true;
 
         // Notifications are app-facing, so they carry the app session id.
+        // They name this run by its start time: the process closes after the
+        // `result` line already ended the run, so the session's next run may
+        // have started by now.
         const finalSessionId = sessionId || capturedSessionId || processKey;
         if (code === 0 && !error) {
           notifyRunStopped({
@@ -138,7 +141,8 @@ async function spawnCursor(command, options = {}, ws, context) {
             provider: 'cursor',
             sessionId: finalSessionId,
             sessionName: sessionSummary,
-            stopReason: 'completed'
+            stopReason: 'completed',
+            runStartedAt: ws?.runStartedAt ?? null
           });
           return;
         }
@@ -148,7 +152,8 @@ async function spawnCursor(command, options = {}, ws, context) {
           provider: 'cursor',
           sessionId: finalSessionId,
           sessionName: sessionSummary,
-          error: error || `Cursor CLI exited with code ${code}`
+          error: error || `Cursor CLI exited with code ${code}`,
+          runStartedAt: ws?.runStartedAt ?? null
         });
       };
 

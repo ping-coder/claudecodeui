@@ -13,7 +13,7 @@ import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMo
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
 import type { DirectoryRevealRequest, FileTreeImageSelection, FileTreeNode,Project } from '@/shared/types';
 import { formatFileSize, formatRelativeTime, isImageFile } from '@/modules/file-tree/utils/fileTreeUtils';
-import { directoryRevealPaths } from '@/modules/file-tree/utils/revealDirectory';
+import { directoryRevealFolders } from '@/modules/file-tree/utils/revealDirectory';
 import { ScrollArea, Input } from '@/shared/ui';
 import FileTreeBody from '@/modules/file-tree/FileTreeBody';
 import FileTreeDetailedColumns from '@/modules/file-tree/FileTreeDetailedColumns';
@@ -65,19 +65,22 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
   const revealedRef = useRef<DirectoryRevealRequest | null>(null);
 
   // Expand every ancestor between the project root and the requested folder.
-  // A request that arrives before the tree finds nothing to expand and is
-  // retried when `files` lands.
+  // A request that arrives before the tree finds no folder and is retried when
+  // `files` lands.
   useEffect(() => {
     const projectRoot = selectedProject?.path || selectedProject?.fullPath;
     if (!revealDirectory || !projectRoot || revealedRef.current === revealDirectory) {
       return;
     }
-    const paths = directoryRevealPaths(files, projectRoot, revealDirectory.path);
-    if (paths.length === 0) {
+    const folders = directoryRevealFolders(files, projectRoot, revealDirectory.path);
+    if (folders.length === 0) {
       return;
     }
     revealedRef.current = revealDirectory;
-    expandDirectories(paths);
+    // Reaching a gitignored folder serves the request too, but the folder is
+    // not recorded as expanded: it cannot open, and the record would open it
+    // on a refresh once it stops being ignored.
+    expandDirectories(folders.filter((folder) => !folder.isIgnored).map((folder) => folder.path));
   }, [revealDirectory, selectedProject?.path, selectedProject?.fullPath, expandDirectories, files]);
 
   // File operations
@@ -143,7 +146,11 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
   const handleItemClick = useCallback(
     (item: FileTreeNode) => {
       if (item.type === 'directory') {
-        toggleDirectory(item.path);
+        // A gitignored folder cannot be opened. Recording it as expanded would
+        // only leave stale state that opens it once it stops being ignored.
+        if (!item.isIgnored) {
+          toggleDirectory(item.path);
+        }
         return;
       }
 

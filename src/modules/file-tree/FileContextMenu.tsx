@@ -11,6 +11,7 @@ type FileContextItem = {
   size?: number;
   modified?: string;
   permissionsRwx?: string;
+  isIgnored?: boolean;
   children?: FileContextItem[];
   [key: string]: unknown;
 };
@@ -127,31 +128,40 @@ export default function FileContextMenu({
     }
 
     if (item?.type === 'directory') {
+      // A gitignored folder is listed but never walked: whatever is created or
+      // uploaded in it would not show up, and a download would be an empty
+      // archive because its children were never loaded.
+      const listsContents = !item.isIgnored;
       return [
-        {
-          key: 'newFile',
-          icon: FileText,
-          label: t('fileTree.context.newFile', 'New File'),
-          onSelect: () => onNewFile?.(item.path),
-        },
-        {
-          key: 'newFolder',
-          icon: FolderPlus,
-          label: t('fileTree.context.newFolder', 'New Folder'),
-          onSelect: () => onNewFolder?.(item.path),
-        },
-        {
-          key: 'upload',
-          icon: Upload,
-          label: t('fileTree.context.upload', 'Upload Files'),
-          onSelect: () => onUpload?.(item.path),
-        },
+        ...(listsContents
+          ? [
+              {
+                key: 'newFile',
+                icon: FileText,
+                label: t('fileTree.context.newFile', 'New File'),
+                onSelect: () => onNewFile?.(item.path),
+              },
+              {
+                key: 'newFolder',
+                icon: FolderPlus,
+                label: t('fileTree.context.newFolder', 'New Folder'),
+                onSelect: () => onNewFolder?.(item.path),
+              },
+              {
+                key: 'upload',
+                icon: Upload,
+                label: t('fileTree.context.upload', 'Upload Files'),
+                onSelect: () => onUpload?.(item.path),
+              },
+            ]
+          : []),
         {
           key: 'rename',
           icon: Pencil,
           label: t('fileTree.context.rename', 'Rename'),
           onSelect: () => onRename?.(item),
-          showDividerBefore: true,
+          // Only a separator between groups, never above the first item.
+          showDividerBefore: listsContents,
         },
         {
           key: 'delete',
@@ -167,12 +177,16 @@ export default function FileContextMenu({
           onSelect: () => onCopyPath?.(item),
           showDividerBefore: true,
         },
-        {
-          key: 'download',
-          icon: Download,
-          label: t('fileTree.context.download', 'Download'),
-          onSelect: () => onDownload?.(item),
-        },
+        ...(listsContents
+          ? [
+              {
+                key: 'download',
+                icon: Download,
+                label: t('fileTree.context.download', 'Download'),
+                onSelect: () => onDownload?.(item),
+              },
+            ]
+          : []),
       ];
     }
 

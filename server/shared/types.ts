@@ -723,6 +723,17 @@ export type ProviderRuntimeWriter = {
    * gateway's writer records it as a `backgroundDone` run end.
    */
   reportBackgroundWorkFinished?(): void;
+  /**
+   * When the run this writer belongs to started, in ms, or null when unknown.
+   * The chat gateway's writer sets it to the run registry's `startedAt`; other
+   * writers leave it out.
+   *
+   * Runtimes pass it as `runStartedAt` to `notifyRunStopped`, `notifyRunFailed`
+   * and `notifyBackgroundWorkCompleted`, so the push dedupe names the run that
+   * ended. A runtime can report after its terminal `complete`, by which time
+   * the session's next run may already hold the registry slot.
+   */
+  readonly runStartedAt?: number | null;
 };
 
 export type ProviderPermissionDecision = {
@@ -760,6 +771,8 @@ export type ProviderRuntimeContext = {
   createQuery?: (input: { prompt: AsyncIterable<unknown>; options: AnyRecord }) => AsyncIterable<unknown> & {
     interrupt(): Promise<void>;
     stopTask?(taskId: string): Promise<void>;
+    /** Ends the query and its CLI process: stdin first, then SIGTERM and SIGKILL. */
+    close?(): void;
   };
 };
 
@@ -1417,6 +1430,12 @@ export type FileTreeNode = {
   permissions: string;
   permissionsRwx: string;
   isSymlink?: boolean;
+  /**
+   * Present, and true, only when `listProjectFiles` runs with `markIgnored`
+   * and the entry matches the project root's `.gitignore`. Ignored directories
+   * are never walked, so they never carry `children`.
+   */
+  isIgnored?: boolean;
   children?: FileTreeNode[];
 };
 
@@ -1559,9 +1578,28 @@ export type FileTreeServices = {
     path: string;
     message: string;
   }>;
+  /**
+   * Lists the project tree, up to 10 levels deep. `node_modules`, `.git`,
+   * `.svn` and `.hg` are always left out.
+   *
+   * By default, and whenever the project root has no readable `.gitignore`,
+   * folders with conventional build and cache names (`dist`, `build`,
+   * `__pycache__` and so on) are left out too. With `respectGitignore` the root
+   * `.gitignore` decides instead and every matching entry is left out, which
+   * the `@` mention list and bare file-name links rely on.
+   *
+   * Adding `markIgnored` lists matching entries with `isIgnored: true` instead,
+   * for the file explorer and the command palette. Ignored directories are not
+   * walked. Still hidden in this mode: matching folders with a conventional
+   * build or cache name, and `.DS_Store` and `Thumbs.db`.
+   *
+   * A tree with more than 10,000 entries, not counting ignored ones, fails
+   * with a 413 (`FILE_TREE_TOO_LARGE`). Ignored entries have a separate cap of
+   * 2,000; past it they are dropped rather than failing the request.
+   */
   listProjectFiles(
     projectId: string,
-    options?: { respectGitignore: boolean },
+    options?: { respectGitignore: boolean; markIgnored?: boolean },
   ): Promise<FileTreeNode[]>;
   createEntry(input: {
     projectId: string;

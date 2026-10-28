@@ -26,3 +26,12 @@ test('SDK sessions always run under CloudCLI\'s own entrypoint', () => {
   assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_ENTRYPOINT: 'cli' }).CLAUDE_CODE_ENTRYPOINT, 'sdk-ts');
   assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_ENTRYPOINT: 'local-agent' }).CLAUDE_CODE_ENTRYPOINT, 'sdk-ts');
 });
+
+// Once CloudCLI closes the CLI's stdin it no longer needs the process, and a
+// process with stdin closed cannot be told to stop anything. A host value
+// would only keep that work around longer; 0 would keep it forever.
+test('the CLI\'s background-work ceiling is always CloudCLI\'s five minutes', () => {
+  assert.equal(buildClaudeSdkEnv({}).CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, '300000');
+  assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0' }).CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, '300000');
+  assert.equal(buildClaudeSdkEnv({ CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '7200000' }).CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, '300000');
+});

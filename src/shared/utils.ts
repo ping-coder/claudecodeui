@@ -300,8 +300,8 @@ export const getPageTitle = (
  * summaries land), else its `name`, trimmed, a blank one counting as missing; null when no
  * loaded project lists the session with a title. Unlike `getSessionTitle` it never falls back
  * to a placeholder, so a caller can try its own next source (a pane tab's snapshot). Used by
- * project-workspace's ProjectEffects (page title), useRunningSessionTitle (the session the
- * running part is about) and ProjectRunNotifications (alert labels).
+ * `resolveDocumentSessionTitle` (the tab title's session names) and project-workspace's
+ * ProjectRunNotifications (alert labels).
  */
 export const findLiveSessionTitle = (sessionId: string, projects: readonly Project[]): string | null => {
   for (const project of projects) {
@@ -320,6 +320,23 @@ export const findLiveSessionTitle = (sessionId: string, projects: readonly Proje
 
   return null;
 };
+
+/**
+ * How the browser tab title names a session, the same in the page part (the focused session)
+ * and the running part (the latest running one), so a focused session that starts running keeps
+ * its text and only gains the marker: its live title (`findLiveSessionTitle`), else `tabTitle`,
+ * the snapshot of a pane tab holding it, trimmed, else the localized "Untitled session" (common's
+ * runNotifications.untitledSession, whatever namespace `t` defaults to). Never `getSessionTitle`'s
+ * English-only "New Session". Used by project-workspace's ProjectEffects and useRunningSessionTitle.
+ */
+export const resolveDocumentSessionTitle = (
+  sessionId: string,
+  projects: readonly Project[],
+  tabTitle: string | null | undefined,
+  t: TFunction,
+): string => findLiveSessionTitle(sessionId, projects)
+  || tabTitle?.trim()
+  || t('runNotifications.untitledSession', { ns: 'common', defaultValue: 'Untitled session' });
 
 /**
  * The page part of the tab title, as last given to `setDocumentPageTitle`. It starts as the

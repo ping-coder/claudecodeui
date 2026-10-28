@@ -300,7 +300,7 @@ export const showRunAlertSystemNotification = async ({
   /** `${provider}:${sessionId}:${code}`, the tag the server's push for the same run uses. */
   tag: string;
   data: { sessionId: string; provider: LLMProvider; code: string };
-  /** True when the page already chimed for this alert, so the notification makes no second sound. */
+  /** True once this alert's burst has made its sound: the page chimed, or another claim within 1.5 s took the chime. */
   silent: boolean;
 }): Promise<boolean> => {
   try {

@@ -36,7 +36,7 @@ test('an Agent with no run_in_background holds the process open', () => {
 
 test('a foreground Agent does not', () => {
   // It never pushes a follow-up turn, so holding for it would pin the process
-  // for the full BG_WAIT_CEILING_MS.
+  // for the full HOLD_IDLE_MS.
   assert.equal(startsBackgroundWork(turn({ name: 'Agent', input: { run_in_background: false } })), false);
 });
 
@@ -210,4 +210,26 @@ test('messages that are not task events leave the set untouched', () => {
   tracker.apply('s1', { type: 'result', task_id: 't1' });
 
   assert.equal(tracker.has('s1', 't1'), true);
+});
+
+test('only tasks the session started itself count as its own outstanding work', () => {
+  // A held process is kept through silence while its own work runs; a
+  // nested task (started inside an agent's transcript) does not keep it.
+  const tracker = createBackgroundWorkTracker();
+  tracker.apply('s1', {
+    type: 'assistant',
+    parent_tool_use_id: null,
+    message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_t1', name: 'Workflow', input: {} }] },
+  });
+  tracker.apply('s1', started('t1', { task_type: 'local_workflow' }));
+  tracker.apply('s1', started('t2', { task_type: 'local_bash' }));
+  assert.equal(tracker.hasOwnOutstanding('s1'), true);
+
+  tracker.apply('s1', notified('t1', 'completed'));
+  assert.equal(tracker.hasOutstanding('s1'), true, 'the nested task is still outstanding');
+  assert.equal(tracker.hasOwnOutstanding('s1'), false, 'but it is not the session\'s own');
+
+  tracker.apply('s1', notified('t2', 'completed'));
+  assert.equal(tracker.hasOwnOutstanding('s1'), false);
+  assert.equal(tracker.hasOwnOutstanding('s2'), false, 'a session with no tasks has none of its own');
 });

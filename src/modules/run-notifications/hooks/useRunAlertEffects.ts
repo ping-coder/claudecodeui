@@ -41,8 +41,18 @@ type RunAlertDeliveryPreferences = {
 /** How long the server's notification preferences are trusted before an announce reads them again, in the background. */
 const PREFERENCES_MAX_AGE_MS = 60_000;
 
-/** How long the push subscription check is trusted before it runs again. */
+/** How long the push subscription check is trusted while the user is on the page. */
 const PUSH_SUBSCRIPTION_MAX_AGE_MS = 60_000;
+
+/**
+ * Away from the page, how long a delivery trusts the preferences and the push subscription as last read. Older,
+ * it reads them again first, so a change made since (in Settings here, in another tab, on another device) holds
+ * from the next completion on.
+ */
+const AWAY_DELIVERY_TRUST_MS = 5000;
+
+/** How long an away delivery waits for fresh preferences: past it, as when the read fails, the page alerts on its own. */
+const AWAY_PREFERENCES_READ_TIMEOUT_MS = 1500;
 
 /** A tab the user is not on waits this long before claiming, plus up to CLAIM_DELAY_SPREAD_MS, so the tab in use claims first. */
 const CLAIM_DELAY_BACKGROUND_MS = 300;
@@ -109,13 +119,21 @@ const truncateNotificationTitle = (title: string): string => {
 const readDesktopNotificationsEnabled = (state: unknown): boolean =>
   (state as { desktopNotifications?: { enabled?: unknown } } | null)?.desktopNotifications?.enabled === true;
 
+/** Resolves as `promise` does if it resolves within `timeoutMs`; to `fallback` if it rejects or takes longer. */
+const settleWithin = <T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> => new Promise((resolve) => {
+  const timer = window.setTimeout(() => resolve(fallback), timeoutMs);
+  promise.then(resolve, () => resolve(fallback)).finally(() => window.clearTimeout(timer));
+});
+
 /**
  * The sound and the system notification of finished-run alerts. On mount it reads the server's notification
  * preferences and mirrors `channels.sound` into the local sound switch (which used to stay on until the user opened
  * Settings on that device), follows the desktop app's notification switch, checks for a push subscription, and
  * unlocks the chime on every pointerdown and keydown. `announce` lets the tab the user is on claim at once and the
- * others a little later; the claimer chimes, unless the desktop app or push will make the sound, and posts a system
- * notification when the user is away and nothing else will. Used by RunNotifications.
+ * others a little later. With the user away, the claimer first reads the preferences and the push subscription again
+ * unless they were read in the last few seconds. It chimes, unless the desktop app or push will make the sound, and
+ * posts a system notification when the user is away and nothing else will, silent once the burst has made its
+ * sound. Used by RunNotifications.
  */
 export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEffectsInput): RunAlertEffects {
   const { t } = useTranslation('common');
@@ -143,31 +161,42 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
 
   // The server's notification preferences as last read and when; null until a read succeeds.
   const preferencesRef = useRef<{ delivery: RunAlertDeliveryPreferences; readAt: number } | null>(null);
-  const isReadingPreferencesRef = useRef(false);
+  // The read in flight, if any. Every caller gets it until it settles rather than starting another: a delivery
+  // waits on the very read that announce, or the mount, started.
+  const preferencesReadRef = useRef<Promise<boolean> | null>(null);
 
-  const refreshPreferences = useCallback(async () => {
-    if (isReadingPreferencesRef.current) {
-      return;
+  // Reads the preferences again; resolves to whether that read succeeded. A failed one leaves the last answer in place.
+  const refreshPreferences = useCallback((): Promise<boolean> => {
+    if (preferencesReadRef.current) {
+      return preferencesReadRef.current;
     }
-    isReadingPreferencesRef.current = true;
-    try {
-      const response = await api.settings.notificationPreferences();
-      if (!response.ok) {
-        return;
+    const read = (async () => {
+      try {
+        const response = await api.settings.notificationPreferences();
+        if (!response.ok) {
+          return false;
+        }
+        const parsed = parseDeliveryPreferences(await response.json());
+        if (!parsed || disposedRef.current) {
+          return false;
+        }
+        preferencesRef.current = { delivery: parsed.delivery, readAt: Date.now() };
+        if (typeof parsed.sound === 'boolean') {
+          setNotificationSoundEnabled(parsed.sound);
+        }
+        return true;
+      } catch {
+        return false;
       }
-      const parsed = parseDeliveryPreferences(await response.json());
-      if (!parsed || disposedRef.current) {
-        return;
+    })();
+    preferencesReadRef.current = read;
+    // Let go of it once settled. A then-callback never runs at once, so this always follows the assignment above.
+    void read.then(() => {
+      if (preferencesReadRef.current === read) {
+        preferencesReadRef.current = null;
       }
-      preferencesRef.current = { delivery: parsed.delivery, readAt: Date.now() };
-      if (typeof parsed.sound === 'boolean') {
-        setNotificationSoundEnabled(parsed.sound);
-      }
-    } catch {
-      // The last answer stays in use; the next announce asks again.
-    } finally {
-      isReadingPreferencesRef.current = false;
-    }
+    });
+    return read;
   }, []);
 
   useEffect(() => {
@@ -203,12 +232,13 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
     };
   }, []);
 
-  // The push subscription check as last made and when, so deliveries within a minute of it do not repeat it.
+  // The push subscription check as last made and when, so a delivery soon after it does not repeat it.
   const pushSubscriptionRef = useRef<{ subscribed: boolean; readAt: number } | null>(null);
 
-  const readPushSubscribed = useCallback(async (): Promise<boolean> => {
+  // Whether this browser holds a push subscription: the last check while under `maxAgeMs` old, else a new one.
+  const readPushSubscribed = useCallback(async (maxAgeMs: number): Promise<boolean> => {
     const cached = pushSubscriptionRef.current;
-    if (cached && Date.now() - cached.readAt < PUSH_SUBSCRIPTION_MAX_AGE_MS) {
+    if (cached && Date.now() - cached.readAt < maxAgeMs) {
       return cached.subscribed;
     }
     const subscribed = await readBrowserPushSubscribed();
@@ -220,7 +250,7 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
   }, []);
 
   useEffect(() => {
-    void readPushSubscribed();
+    void readPushSubscribed(PUSH_SUBSCRIPTION_MAX_AGE_MS);
   }, [readPushSubscribed]);
 
   // Every gesture resumes the chime's audio context, so a chime later played outside any gesture (and after iOS
@@ -241,7 +271,22 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
       return;
     }
 
-    const delivery = preferencesRef.current?.delivery ?? null;
+    // Away from the page, the preferences decide whether push or the desktop app sounds instead of the page, and the
+    // user may have changed them since they were read: older than AWAY_DELIVERY_TRUST_MS, they are read again first
+    // (by the claimer alone, so one request per completion at most). Without an answer in time the page alerts on
+    // its own. A push that comes as well replaces the page's notification (same tag), but sw.js sounds it again when
+    // no window has focus: a possible second sound, taken over a possible silence.
+    const isAway = !isPageActive();
+    const preferences = preferencesRef.current;
+    let delivery = preferences?.delivery ?? null;
+    if (isAway && (!preferences || Date.now() - preferences.readAt > AWAY_DELIVERY_TRUST_MS)) {
+      const isRead = await settleWithin(refreshPreferences(), AWAY_PREFERENCES_READ_TIMEOUT_MS, false);
+      if (disposedRef.current) {
+        return;
+      }
+      delivery = isRead ? preferencesRef.current?.delivery ?? null : null;
+    }
+
     const eventEnabled = delivery?.events[alert.outcome === 'failed' ? 'error' : 'stop'] === true;
     const desktopBridge = readDesktopNotificationsBridge();
     // The desktop app's native notification makes its own sound.
@@ -249,8 +294,11 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
       && desktopNotificationsEnabledRef.current
       && delivery?.desktop === true
       && eventEnabled;
-    // Push delivers the system notification, with its sound unless a CloudCLI window has focus (sw.js).
-    const pushWillAlert = delivery?.webPush === true && eventEnabled && (await readPushSubscribed());
+    // Push delivers the system notification, with its sound unless a CloudCLI window has focus (sw.js). Away, the
+    // subscription gets the same few seconds of trust as the preferences: Settings may have dropped or made it since.
+    const pushWillAlert = delivery?.webPush === true
+      && eventEnabled
+      && (await readPushSubscribed(isAway ? AWAY_DELIVERY_TRUST_MS : PUSH_SUBSCRIPTION_MAX_AGE_MS));
 
     let chimed = false;
     if (claim.chime && !desktopWillAlert && !(pushWillAlert && !isPageActive())) {
@@ -283,9 +331,13 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
         : outcomeText,
       tag: `${alert.provider}:${alert.sessionId}:${code}`,
       data: { sessionId: alert.sessionId, provider: alert.provider, code },
-      silent: chimed,
+      // Silent once the burst has made its sound: the page chimed, or a claim within the last 1.5 s, in this tab or
+      // another, took the burst's one chime. The price: should that claim make no sound in the end (its chime failed
+      // or the sound was off while the user was on its tab, so it posted nothing; its tab closed first), the whole
+      // burst stays silent, where this notification used to sound.
+      silent: chimed || !claim.chime,
     });
-  }, [readPushSubscribed]);
+  }, [readPushSubscribed, refreshPreferences]);
 
   // Claim timers still waiting, cleared on unmount.
   const claimTimersRef = useRef(new Set<number>());
@@ -305,7 +357,8 @@ export function useRunAlertEffects({ systemNotificationsEnabled }: UseRunAlertEf
 
     const preferences = preferencesRef.current;
     if (!preferences || Date.now() - preferences.readAt > PREFERENCES_MAX_AGE_MS) {
-      // In the background: this alert goes by the last answer.
+      // In the background. With the user on the page this alert goes by the last answer; away, the delivery waits on
+      // this same read.
       void refreshPreferences();
     }
 

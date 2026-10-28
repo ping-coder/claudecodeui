@@ -331,6 +331,108 @@ test('listProjectFiles shares the entry limit across nested directories', async 
   );
 });
 
+test('listProjectFiles marks gitignored entries without walking them', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const sourceDirectory = path.join(projectRoot, 'src');
+  const readDirectories: string[] = [];
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    readTextFile: async (filePath) => {
+      assert.equal(filePath, path.join(projectRoot, '.gitignore'));
+      return ['CLAUDE.md', '.claude/', 'dist/', '*.log', '!keep.log', 'src/generated.ts', 'node_modules/'].join('\n');
+    },
+    openDirectory: createDirectoryReader((directoryPath) => {
+      readDirectories.push(directoryPath);
+      if (directoryPath === projectRoot) {
+        return [
+          ...['.git', 'node_modules', '.claude', 'dist', 'src'].map((name) => createDirectoryEntry(name, true)),
+          ...['AGENTS.md', 'CLAUDE.md', 'debug.log', 'keep.log'].map((name) => createDirectoryEntry(name, false)),
+        ];
+      }
+      if (directoryPath === sourceDirectory) {
+        return [
+          createDirectoryEntry('generated.ts', false),
+          createDirectoryEntry('index.ts', false),
+        ];
+      }
+      return [];
+    }),
+    lstat: async () => createStats(false, 0o644),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
+
+  // dist/ matches too, but a build folder stays hidden; .git and node_modules always do.
+  assert.deepEqual(tree.map((entry) => entry.name), ['.claude', 'src', 'AGENTS.md', 'CLAUDE.md', 'debug.log', 'keep.log']);
+  assert.deepEqual(
+    tree.filter((entry) => entry.isIgnored === true).map((entry) => entry.name),
+    ['.claude', 'CLAUDE.md', 'debug.log'],
+  );
+  // The other entries do not carry the field at all.
+  assert.deepEqual(
+    tree.filter((entry) => 'isIgnored' in entry).map((entry) => entry.name),
+    ['.claude', 'CLAUDE.md', 'debug.log'],
+  );
+  assert.equal(tree[0]?.children, undefined);
+  for (const closedDirectory of ['.claude', 'dist', 'node_modules', '.git']) {
+    assert.equal(
+      readDirectories.includes(path.join(projectRoot, closedDirectory)),
+      false,
+      `${closedDirectory} must not be read`,
+    );
+  }
+  assert.deepEqual(
+    tree[1]?.children?.map((entry) => [entry.name, entry.isIgnored]),
+    [['generated.ts', true], ['index.ts', undefined]],
+  );
+});
+
+test('listProjectFiles caps ignored entries without a 413', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    readTextFile: async () => '*.o',
+    // Ignored entries come first, so charging them to the visible budget
+    // would push the 10,000 visible files over the limit.
+    openDirectory: createDirectoryReader((directoryPath) => directoryPath === projectRoot
+      ? [
+          ...Array.from({ length: 3_000 }, (_, index) => createDirectoryEntry(`object-${index}.o`, false)),
+          ...Array.from({ length: 10_000 }, (_, index) => createDirectoryEntry(`file-${index}.txt`, false)),
+        ]
+      : []),
+    lstat: async () => createStats(false, 0o644),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
+
+  assert.equal(tree.length, 12_000);
+  assert.equal(tree.filter((entry) => entry.isIgnored === true).length, 2_000);
+});
+
+test('browseWorkspace still hides build folders', async () => {
+  const workspaceRoot = path.resolve('file-tree-test-workspace');
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    stat: async () => createStats(true, 0o755),
+    realpath: async (candidatePath) => candidatePath,
+    openDirectory: createDirectoryReader((directoryPath) => directoryPath === workspaceRoot
+      ? [
+          createDirectoryEntry('dist', true),
+          createDirectoryEntry('node_modules', true),
+          createDirectoryEntry('src', true),
+        ]
+      : []),
+    lstat: async () => createStats(true, 0o755),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, workspaceRoot));
+
+  const browsed = await service.browseWorkspace(workspaceRoot);
+
+  assert.deepEqual(browsed.suggestions.map((entry) => entry.name), ['src']);
+});
+
 test('readTextFile rejects traversal before invoking the filesystem adapter', async () => {
   const projectRoot = path.resolve('file-tree-test-project');
   const readPaths: string[] = [];

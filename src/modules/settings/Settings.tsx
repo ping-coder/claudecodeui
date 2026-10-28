@@ -226,6 +226,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
                   projectSortOrder={projectSortOrder}
                   onProjectSortOrderChange={setProjectSortOrder}
                   codeEditorSettings={codeEditorSettings}
+                  onCodeEditorTextWordWrapChange={(value) => updateCodeEditorSetting('textWordWrap', value)}
                   onCodeEditorWordWrapChange={(value) => updateCodeEditorSetting('wordWrap', value)}
                   onCodeEditorShowMinimapChange={(value) => updateCodeEditorSetting('showMinimap', value)}
                   onCodeEditorLineNumbersChange={(value) => updateCodeEditorSetting('lineNumbers', value)}

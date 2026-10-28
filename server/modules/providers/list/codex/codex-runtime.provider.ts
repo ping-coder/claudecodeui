@@ -306,6 +306,10 @@ async function queryCodex(
   // Session-map key: the app session id when the caller supplied one, else
   // the provider-native thread id once captured (legacy/direct API callers).
   const sessionKey = () => sessionId || capturedSessionId || null;
+  // Names this run in its end notifications. They can go out after the live
+  // `turn_complete` already ended the run (the stopped report waits for the
+  // event stream to finish), so the session's next run may have started.
+  const runStartedAt = ws?.runStartedAt ?? null;
 
   try {
     codex = new Codex();
@@ -419,7 +423,8 @@ async function queryCodex(
           provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
-          error: terminalFailure
+          error: terminalFailure,
+          runStartedAt,
         });
       }
 
@@ -449,7 +454,8 @@ async function queryCodex(
           provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
-          stopReason: 'completed'
+          stopReason: 'completed',
+          runStartedAt,
         });
       }
     }
@@ -485,7 +491,8 @@ async function queryCodex(
           provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
-          error
+          error,
+          runStartedAt,
         });
       }
     }

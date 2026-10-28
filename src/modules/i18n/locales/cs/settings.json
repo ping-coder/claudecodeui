@@ -136,12 +136,10 @@
     },
     "sound": {
       "title": "Zvuk",
-      "description": "Přehrát krátký tón, když běh chatu skončí nebo čeká na schválení nástroje.",
       "enabled": "Zapnuto",
       "test": "Vyzkoušet zvuk"
     },
     "events": {
-      "title": "Typy událostí",
       "actionRequired": "Vyžadována akce",
       "stop": "Běh zastaven",
       "error": "Běh selhal"
@@ -163,10 +161,6 @@
       "theme": {
         "label": "Motiv editoru",
         "description": "Výchozí motiv editoru kódu"
-      },
-      "wordWrap": {
-        "label": "Zalamování řádků",
-        "description": "Ve výchozím stavu zalamovat řádky v editoru"
       },
       "showMinimap": {
         "label": "Zobrazit minimapu",

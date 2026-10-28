@@ -156,12 +156,10 @@
     },
     "sound": {
       "title": "Suara",
-      "description": "Putar nada singkat saat proses chat selesai atau memerlukan persetujuan tool.",
       "enabled": "Aktif",
       "test": "Uji suara"
     },
     "events": {
-      "title": "Jenis Event",
       "actionRequired": "Tindakan diperlukan",
       "stop": "Proses dihentikan",
       "error": "Proses gagal"
@@ -190,10 +188,6 @@
       "theme": {
         "label": "Tema Editor",
         "description": "Tema default untuk editor kode"
-      },
-      "wordWrap": {
-        "label": "Bungkus Teks",
-        "description": "Aktifkan pembungkusan teks secara default di editor"
       },
       "showMinimap": {
         "label": "Tampilkan Minimap",

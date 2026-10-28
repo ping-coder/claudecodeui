@@ -9,21 +9,24 @@ const normalizePath = (value: string): string =>
 const isAbsolutePath = (value: string): boolean => /^(\/|[A-Za-z]:\/)/.test(value);
 
 /**
- * The paths to expand, root first, so `reference` becomes visible in the file
- * tree; empty when the reference is not inside the loaded tree.
+ * The folders from the project root down to `reference` that the loaded tree
+ * holds, root first, for the file tree to open; empty when the reference is not
+ * inside the loaded tree.
  *
  * Each level is looked up by name in the tree that is already loaded, rather
  * than composed as a string: an in-chat reference is usually relative
  * (`decisions/`, as the model wrote it) while every node is keyed by the
- * absolute path the server built with its own platform separator. Expansion
+ * absolute path the server built with its own platform separator. The walk
  * stops at the last level actually present, so a folder hidden by `.gitignore`
- * or below the walk depth still opens as far as the tree goes.
+ * or below the walk depth still opens as far as the tree goes. A gitignored
+ * folder the tree lists greyed out is always such a last level: it was never
+ * walked, so it has no children to descend into.
  */
-export function directoryRevealPaths(
+export function directoryRevealFolders(
   files: FileTreeNode[],
   projectPath: string,
   reference: string,
-): string[] {
+): FileTreeNode[] {
   const root = normalizePath(projectPath);
   const target = normalizePath(reference);
 
@@ -37,16 +40,16 @@ export function directoryRevealPaths(
     relative = target.slice(root.length + 1);
   }
 
-  const paths: string[] = [];
+  const folders: FileTreeNode[] = [];
   let level = files;
   for (const segment of relative.split('/').filter(Boolean)) {
     const directory = level.find((node) => node.type === 'directory' && node.name === segment);
     if (!directory) {
       break;
     }
-    paths.push(directory.path);
+    folders.push(directory);
     level = directory.children ?? [];
   }
 
-  return paths;
+  return folders;
 }

@@ -131,12 +131,10 @@
     },
     "sound": {
       "title": "Ses",
-      "description": "Sohbet çalışması tamamlandığında kısa bir ton çal.",
       "enabled": "Etkin",
       "test": "Sesi test et"
     },
     "events": {
-      "title": "Etkinlik Türleri",
       "actionRequired": "Aksiyon gerekli",
       "stop": "Çalıştırma durduruldu",
       "error": "Çalıştırma başarısız"
@@ -165,10 +163,6 @@
       "theme": {
         "label": "Editör Teması",
         "description": "Kod editörü için varsayılan tema"
-      },
-      "wordWrap": {
-        "label": "Kelime Kaydırma",
-        "description": "Editörde kelime kaydırmayı varsayılan olarak etkinleştir"
       },
       "showMinimap": {
         "label": "Minimap'i Göster",

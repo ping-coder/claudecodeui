@@ -47,11 +47,11 @@ const alertOf = (sessionId: string, overrides: Partial<RunAlert> = {}): RunAlert
 /** Newest first, as the presentation hands them over. */
 const NEWEST_FIRST = ['e', 'd', 'c', 'b', 'a'].map((sessionId) => alertOf(sessionId));
 
-const propsWith = (overrides: Partial<BannersProps> = {}): BannersProps => ({
-  banners: NEWEST_FIRST,
-  maxVisible: 3,
-  placement: 'desktop',
-  showSystemNotificationCta: false,
+// The same functions on every render, as RunNotifications passes them, so a rerender changes only what a test changes.
+const CALLBACKS: Pick<
+  BannersProps,
+  'onOpen' | 'onDismiss' | 'onDismissAll' | 'onEnableSystemNotifications' | 'onHoverChange'
+> = {
   onOpen: (alert) => reported.opened.push(alert.key),
   onDismiss: (alertKey) => reported.dismissed.push(alertKey),
   onDismissAll: () => {
@@ -61,6 +61,14 @@ const propsWith = (overrides: Partial<BannersProps> = {}): BannersProps => ({
     reported.enableSystem += 1;
   },
   onHoverChange: (hovered) => reported.hover.push(hovered),
+};
+
+const propsWith = (overrides: Partial<BannersProps> = {}): BannersProps => ({
+  banners: NEWEST_FIRST,
+  maxVisible: 3,
+  placement: 'desktop',
+  showSystemNotificationCta: false,
+  ...CALLBACKS,
   ...overrides,
 });
 
@@ -272,6 +280,23 @@ test('the pointer or the focus on a card pauses the stack, and a card that goes 
   fireEvent.mouseEnter(card('Title c'));
   view.rerender(<RunAlertBanners {...propsWith({ banners: NEWEST_FIRST.filter((alert) => alert.sessionId !== 'c') })} />);
   assert.deepEqual(reported.hover, [true, false, true, false, true, false]);
+});
+
+test('a focused button that goes while every card stays lets go of the stack', () => {
+  const view = renderBanners({ showSystemNotificationCta: true });
+
+  // Chrome and Edge focus a clicked button. Once used, the prompt unmounts under the focus, which fires no blur.
+  act(() => screen.getByRole('button', { name: 'Turn on system notifications' }).focus());
+  view.rerender(<RunAlertBanners {...propsWith({ showSystemNotificationCta: false })} />);
+  assert.deepEqual(cardTitles(), ['Title e', 'Title d', 'Title c']);
+  assert.deepEqual(reported.hover, [true, false]);
+
+  // "Dismiss all" focused, and the banners folded into its line seen in another tab: the line goes, the cards stay.
+  act(() => screen.getByRole('button', { name: 'Dismiss all' }).focus());
+  view.rerender(<RunAlertBanners {...propsWith({ banners: NEWEST_FIRST.slice(0, 3) })} />);
+  assert.equal(screen.queryByRole('button', { name: 'Dismiss all' }) === null, true);
+  assert.deepEqual(cardTitles(), ['Title e', 'Title d', 'Title c']);
+  assert.deepEqual(reported.hover, [true, false, true, false]);
 });
 
 test('the stack reads in Simplified Chinese', async () => {

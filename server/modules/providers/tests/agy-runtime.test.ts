@@ -13,6 +13,7 @@ import {
   resolveAgyPermissionFlags,
 } from '@/modules/providers/list/agy/agy-runtime.provider.js';
 import { AgySessionsProvider } from '@/modules/providers/list/agy/agy-sessions.provider.js';
+import { withRunNotificationCapture } from '@/modules/providers/tests/fixtures/run-notifications.js';
 import type { AnyRecord, NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
 
 /**
@@ -781,4 +782,29 @@ test('a helper that keeps agy\'s output open after agy exits does not hang the t
 
 test('abort for a session with nothing running answers false', async () => {
   assert.equal(await agyRuntime.abort('no-such-session'), false);
+});
+
+test('agy names the run it reports, so two runs ending inside the dedupe window both notify', async () => {
+  await withAgySandbox(async (sandbox) => {
+    await withRunNotificationCapture(async ({ userId, delivered }) => {
+      // A writer that names its run by `runStartedAt`, as the chat gateway's writer does.
+      const writerOf = (runStartedAt: number) => ({ ...createWriter().writer, userId, runStartedAt });
+      for (const runStartedAt of [1_000, 2_000]) {
+        await agyRuntime.run('scenario:new-session', { sessionId: 'agy-stopped', cwd: sandbox.project }, writerOf(runStartedAt), createContext());
+      }
+      for (const runStartedAt of [3_000, 4_000]) {
+        await assert.rejects(
+          agyRuntime.run('scenario:error-exit-3', { sessionId: 'agy-failed', cwd: sandbox.project }, writerOf(runStartedAt), createContext()),
+          /could not be resumed/,
+        );
+      }
+
+      assert.deepEqual(delivered(), [
+        'run.stopped@agy-stopped',
+        'run.stopped@agy-stopped',
+        'run.failed@agy-failed',
+        'run.failed@agy-failed',
+      ]);
+    });
+  });
 });

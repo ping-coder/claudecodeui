@@ -17,6 +17,8 @@ import type * as SharedUtils from '@/shared/utils';
  * banner and the page's own system notification, all as switches. The system notification
  * needs the browser's permission, so its switch reads off and stays locked until the
  * permission is granted, with the way forward (or the reason there is none) shown beneath.
+ * Once push will deliver finished-task notifications instead (this browser subscribed, the
+ * Web Push channel and both run events on, as the server decides), a note says so.
  */
 
 // The preference store saves to the server on a debounce; keep that off the network.
@@ -38,6 +40,12 @@ type TabProps = ComponentProps<typeof NotificationsSettingsTab>;
 const notificationPreferences = (): NotificationPreferencesState => ({
   channels: { inApp: true, webPush: false, desktop: false, sound: true },
   events: { actionRequired: true, stop: true, error: true },
+});
+
+/** Preferences with the Web Push channel on (subscribing turns it on), and any event switches changed. */
+const pushChannelOn = (events: Partial<NotificationPreferencesState['events']> = {}): NotificationPreferencesState => ({
+  channels: { ...notificationPreferences().channels, webPush: true },
+  events: { ...notificationPreferences().events, ...events },
 });
 
 const renderTab = (overrides: Partial<TabProps> = {}) => {
@@ -210,13 +218,35 @@ test('a granted permission with the preference off shows the switch off but usab
 });
 
 test('with push on for this browser, the system row says push delivers them instead', () => {
-  renderTab({ pushPermission: 'granted', isPushSubscribed: true });
+  renderTab({ pushPermission: 'granted', isPushSubscribed: true, notificationPreferences: pushChannelOn() });
 
   assert.equal(hasText(VIA_PUSH_NOTE), true);
   // The preference still shows and can still be changed.
   const toggle = switchNamed(SYSTEM_NOTIFICATION);
   assert.equal(toggle.getAttribute('aria-checked'), 'true');
   assert.equal(toggle.disabled, false);
+});
+
+test('a subscribed browser gets no push note while the Web Push channel is off, as the server then pushes nothing', () => {
+  // The channel is account-wide: turning push off on another device turns it off here too.
+  renderTab({ pushPermission: 'granted', isPushSubscribed: true, notificationPreferences: notificationPreferences() });
+
+  assert.equal(hasText(VIA_PUSH_NOTE), false);
+  const toggle = switchNamed(SYSTEM_NOTIFICATION);
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  assert.equal(toggle.disabled, false);
+});
+
+test('the push note needs the run events pushed too: completions ride stop, failures error', () => {
+  for (const events of [{ stop: false }, { error: false }, { stop: false, error: false }]) {
+    renderTab({ pushPermission: 'granted', isPushSubscribed: true, notificationPreferences: pushChannelOn(events) });
+    assert.equal(hasText(VIA_PUSH_NOTE), false, JSON.stringify(events));
+    cleanup();
+  }
+
+  // Waiting for approval is no finished task: its switch leaves the note alone.
+  renderTab({ pushPermission: 'granted', isPushSubscribed: true, notificationPreferences: pushChannelOn({ actionRequired: false }) });
+  assert.equal(hasText(VIA_PUSH_NOTE), true);
 });
 
 test('the desktop app shows no system notification row', () => {
@@ -264,7 +294,7 @@ test('in Chinese each permission note reads correctly', async () => {
     ['granted', true, '此浏览器已开启推送，系统通知改由推送发送。'],
   ];
   for (const [pushPermission, isPushSubscribed, note] of notes) {
-    renderTab({ pushPermission, isPushSubscribed });
+    renderTab({ pushPermission, isPushSubscribed, notificationPreferences: pushChannelOn() });
     assert.equal(hasText(note), true, pushPermission);
     cleanup();
   }

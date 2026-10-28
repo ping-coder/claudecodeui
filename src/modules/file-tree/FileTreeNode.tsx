@@ -53,13 +53,19 @@ function getParentDirectoryPath(itemPath: string) {
 function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
   if (item.type === 'directory') {
     return (
-      <span className="flex flex-shrink-0 items-center gap-0.5">
-        <ChevronRight
-          className={cn(
-            'w-3.5 h-3.5 text-muted-foreground/70 transition-transform duration-150',
-            isOpen && 'rotate-90',
-          )}
-        />
+      <span className={cn('flex flex-shrink-0 items-center gap-0.5', item.isIgnored && 'opacity-60')}>
+        {item.isIgnored ? (
+          // A gitignored folder cannot be opened, so it gets no chevron; the
+          // blank keeps its icon aligned with its siblings.
+          <span className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+        ) : (
+          <ChevronRight
+            className={cn(
+              'w-3.5 h-3.5 text-muted-foreground/70 transition-transform duration-150',
+              isOpen && 'rotate-90',
+            )}
+          />
+        )}
         {isOpen ? (
           <FolderOpen className="h-4 w-4 flex-shrink-0 text-blue-500" />
         ) : (
@@ -69,7 +75,11 @@ function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
     );
   }
 
-  return <span className="ml-[18px] flex flex-shrink-0 items-center">{renderFileIcon(item.name)}</span>;
+  return (
+    <span className={cn('ml-[18px] flex flex-shrink-0 items-center', item.isIgnored && 'opacity-60')}>
+      {renderFileIcon(item.name)}
+    </span>
+  );
 }
 
 /** Rendered by FileTreeList for each file or directory row, including its context menu and inline rename input. */
@@ -102,15 +112,25 @@ export default function FileTreeNode({
 }: FileTreeNodeProps) {
   const { t } = useTranslation();
   const isDirectory = item.type === 'directory';
-  const isOpen = isDirectory && expandedDirs.has(item.path);
+  const isIgnored = item.isIgnored === true;
+  // A gitignored folder was never walked, so it has nothing to show. Clicks
+  // and chat reveals do not record it as expanded; this check also keeps a
+  // folder closed that was opened before a rule started matching it.
+  const isOpen = isDirectory && !isIgnored && expandedDirs.has(item.path);
   const hasChildren = Boolean(isDirectory && item.children && item.children.length > 0);
   const isRenaming = renamingItem?.path === item.path;
   const dragTargetPath = isDirectory ? item.path : getParentDirectoryPath(item.path);
   const isDropTarget = isDirectory && dropTarget === item.path;
+  // Whatever lands in a gitignored folder would not show up in the tree, so it
+  // offers no upload button and does not claim drops: a file dragged over it
+  // goes to the root, as over empty space.
+  const isIgnoredDirectory = isDirectory && isIgnored;
 
   const nameClassName = cn(
     'text-[13px] leading-tight truncate',
     isDirectory ? 'font-medium text-foreground' : 'text-foreground/90',
+    // Greyed on the icon and name only: on the row it would fade the hover background too.
+    isIgnored && 'opacity-60',
   );
 
   // View mode only changes the row layout; selection, expansion, and recursion stay shared.
@@ -157,7 +177,7 @@ export default function FileTreeNode({
     );
   }
 
-  const uploadHoverButton = isDirectory && onUpload && (
+  const uploadHoverButton = isDirectory && !isIgnoredDirectory && onUpload && (
     <button
       type="button"
       onClick={(event) => {
@@ -180,8 +200,11 @@ export default function FileTreeNode({
     <div
       className={rowClassName}
       style={{ paddingLeft: `${level * 16 + 4}px` }}
+      // "Matches a rule" rather than "ignored by git": a tracked file that
+      // matches a rule is greyed out too.
+      title={isIgnored ? t('fileTree.ignoredByGitignore', { defaultValue: 'Matches a .gitignore rule' }) : undefined}
       onClick={() => onItemClick(item)}
-      onDragOver={onItemDragOver ? (event) => onItemDragOver(event, dragTargetPath) : undefined}
+      onDragOver={onItemDragOver && !isIgnoredDirectory ? (event) => onItemDragOver(event, dragTargetPath) : undefined}
     >
       {viewMode === 'detailed' ? (
         <>

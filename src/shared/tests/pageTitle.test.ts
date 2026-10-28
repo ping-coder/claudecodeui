@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 
 import { test } from 'vitest';
 
+import { i18n } from '@/modules/i18n';
 import type { Project, ProjectSession } from '@/shared/types';
-import { findLiveSessionTitle, getPageTitle } from '@/shared/utils';
+import { findLiveSessionTitle, getPageTitle, resolveDocumentSessionTitle } from '@/shared/utils';
 
 const project: Project = {
   projectId: 'project-1',
@@ -95,4 +96,26 @@ test('a session no loaded project lists has no live title', () => {
 
   assert.equal(findLiveSessionTitle('session-9', projects), null);
   assert.equal(findLiveSessionTitle('session-1', []), null);
+});
+
+test('the tab title names a session by its live title, else its tab\'s snapshot, else Untitled session', () => {
+  const t = i18n.getFixedT('en', 'common');
+  const projects = projectsWithSessions([[
+    { id: 'listed', summary: 'Renamed live', __provider: 'claude' },
+    { id: 'untitled-cursor', summary: '', __provider: 'cursor' },
+  ]]);
+
+  assert.equal(resolveDocumentSessionTitle('listed', projects, 'Opened as', t), 'Renamed live');
+  // Not listed: the snapshot of a pane tab holding it, trimmed; a blank one counts as missing.
+  assert.equal(resolveDocumentSessionTitle('unlisted', projects, '  Snapshot title \n', t), 'Snapshot title');
+  assert.equal(resolveDocumentSessionTitle('unlisted', projects, '   ', t), 'Untitled session');
+  assert.equal(resolveDocumentSessionTitle('unlisted', projects, null, t), 'Untitled session');
+  // Never getSessionTitle's English provider placeholders ("New Session", Cursor's "Untitled Session").
+  assert.equal(resolveDocumentSessionTitle('untitled-cursor', projects, undefined, t), 'Untitled session');
+});
+
+test('the Untitled session placeholder follows the language and is read from common whatever namespace t defaults to', () => {
+  assert.equal(resolveDocumentSessionTitle('unlisted', [], '', i18n.getFixedT('zh-CN', 'common')), '未命名会话');
+  assert.equal(resolveDocumentSessionTitle('unlisted', [], '', i18n.getFixedT('zh-CN', 'settings')), '未命名会话');
+  assert.equal(resolveDocumentSessionTitle('unlisted', [], '', i18n.getFixedT('en', 'settings')), 'Untitled session');
 });

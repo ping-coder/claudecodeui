@@ -81,6 +81,14 @@ export default function NotificationsSettingsTab({
   // Page-sent system notifications need the permission; until it is granted the switch
   // reads off and cannot be flipped, whatever the stored preference says.
   const notificationsGranted = pushPermission === 'granted';
+  // run-notifications leaves a finished task's system notification to push only when push will
+  // deliver it, which the server decides per event: this browser subscribed, the Web Push channel
+  // on, and the event's switch on (completions, replies and finished background work ride `stop`,
+  // failures `error`). Short of all of that the page still sends some itself, so no note.
+  const pushDeliversRunAlerts = isPushSubscribed
+    && notificationPreferences.channels.webPush
+    && notificationPreferences.events.stop
+    && notificationPreferences.events.error;
 
   const soundLabel = t('notifications.sound.title', { defaultValue: 'Sound' });
   const bannerLabel = t('notifications.page.banner.title', { defaultValue: 'Banner' });
@@ -95,8 +103,7 @@ export default function NotificationsSettingsTab({
     systemNotificationNote = t('notifications.page.system.unsupported', {
       defaultValue: 'Not available here. System notifications need HTTPS or localhost.',
     });
-  } else if (notificationsGranted && isPushSubscribed) {
-    // run-notifications leaves the system notification to the push this browser receives.
+  } else if (notificationsGranted && pushDeliversRunAlerts) {
     systemNotificationNote = t('notifications.page.system.viaPush', {
       defaultValue: 'Push notifications are on for this browser, so they deliver these instead.',
     });

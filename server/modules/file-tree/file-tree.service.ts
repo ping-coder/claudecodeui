@@ -28,6 +28,11 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   '.gradle', '.idea', 'coverage', '.nyc_output',
 ]);
 
+// OS clutter that a .gitignore usually lists. It stays hidden even when
+// ignored entries are marked, or macOS would add a greyed row to almost every
+// directory.
+const QUIET_IGNORED_FILE_NAMES = new Set(['.DS_Store', 'Thumbs.db']);
+
 const COMMON_WORKSPACE_DIRECTORY_NAMES = [
   'Desktop',
   'Documents',
@@ -43,15 +48,28 @@ const COMMON_WORKSPACE_DIRECTORY_NAMES = [
 // server heap before the browser has a chance to switch to a narrower project.
 const MAXIMUM_FILE_TREE_ENTRIES = 10_000;
 
-type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => boolean;
+// Gitignored entries listed in mark mode draw on their own budget. Running out
+// of it drops the rest silently instead of failing with a 413, so marking them
+// can never make a project that lists today too large to open.
+const MAXIMUM_IGNORED_FILE_TREE_ENTRIES = 2_000;
 
-function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): boolean {
-  return !isDirectory || !HARD_EXCLUDED_DIRECTORY_NAMES.has(path.basename(entryPath));
+// `visible` entries are listed and walked, `ignored` ones are listed but never
+// walked, `hidden` ones are left out of the tree entirely.
+type FileTreeEntryVisibility = 'visible' | 'ignored' | 'hidden';
+
+type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => FileTreeEntryVisibility;
+
+// What is left of each budget. One object is shared by every branch of a walk,
+// so the caps apply to the whole tree rather than per directory.
+type FileTreeEntryBudget = { visible: number; ignored: number };
+
+function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): FileTreeEntryVisibility {
+  return isDirectory && HARD_EXCLUDED_DIRECTORY_NAMES.has(path.basename(entryPath)) ? 'hidden' : 'visible';
 }
 
-function includeEntryByFallbackDirectoryNames(entryPath: string, isDirectory: boolean): boolean {
-  return includeEntryByHardExclusions(entryPath, isDirectory)
-    && (!isDirectory || !IGNORED_DIRECTORY_NAMES.has(path.basename(entryPath)));
+// IGNORED_DIRECTORY_NAMES includes the hard exclusions, so one lookup covers both.
+function includeEntryByFallbackDirectoryNames(entryPath: string, isDirectory: boolean): FileTreeEntryVisibility {
+  return isDirectory && IGNORED_DIRECTORY_NAMES.has(path.basename(entryPath)) ? 'hidden' : 'visible';
 }
 
 function createFileTreeError(message: string, statusCode: number, code: string): AppError {
@@ -157,18 +175,33 @@ function mapFileSystemError(
   throw error;
 }
 
+/**
+ * Classifies entries against the project root's `.gitignore`.
+ *
+ * A matching entry is hidden, unless `markIgnored` asks for it to be listed as
+ * ignored. Matching build and cache folders and OS clutter stay hidden even
+ * then: those rows would bury the few ignored entries worth seeing, such as
+ * CLAUDE.md or `.claude/`.
+ */
 function createGitignoreEntryFilter(
   projectRoot: string,
   gitignoreContent: string,
+  markIgnored: boolean,
 ): FileTreeEntryFilter {
   const gitignore = ignore().add(gitignoreContent);
 
   return (entryPath, isDirectory) => {
-    if (!includeEntryByHardExclusions(entryPath, isDirectory)) return false;
+    if (includeEntryByHardExclusions(entryPath, isDirectory) === 'hidden') return 'hidden';
 
     const relativePath = path.relative(projectRoot, entryPath).split(path.sep).join('/');
     const matchPath = isDirectory ? `${relativePath}/` : relativePath;
-    return !gitignore.ignores(matchPath);
+    if (!gitignore.ignores(matchPath)) return 'visible';
+
+    const name = path.basename(entryPath);
+    const isNoise = isDirectory
+      ? IGNORED_DIRECTORY_NAMES.has(name)
+      : QUIET_IGNORED_FILE_NAMES.has(name);
+    return markIgnored && !isNoise ? 'ignored' : 'hidden';
   };
 }
 
@@ -194,39 +227,49 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
   }
 
   /**
-   * Streams one directory and keeps only the entries the tree will show.
+   * Streams one directory and keeps only the entries the tree will show, each
+   * flagged with whether it is listed as gitignored.
    *
    * Entries are filtered and charged against the shared budget one at a time,
    * so a pathologically large directory stops the walk at the cap instead of
    * being read into memory in full first.
    */
-  async function collectVisibleEntries(
+  async function collectListedEntries(
     directoryPath: string,
     includeEntry: FileTreeEntryFilter,
-    remainingEntries: { value: number },
-  ): Promise<FileTreeDirectoryEntry[]> {
-    const visibleEntries: FileTreeDirectoryEntry[] = [];
+    remainingEntries: FileTreeEntryBudget,
+  ): Promise<Array<{ entry: FileTreeDirectoryEntry; isIgnored: boolean }>> {
+    const listedEntries: Array<{ entry: FileTreeDirectoryEntry; isIgnored: boolean }> = [];
 
     await acquire();
     try {
       for await (const entry of fileSystem.openDirectory(directoryPath)) {
-        const isDirectory = entry.isDirectory();
-        if (!includeEntry(path.join(directoryPath, entry.name), isDirectory)) {
+        const visibility = includeEntry(path.join(directoryPath, entry.name), entry.isDirectory());
+        if (visibility === 'hidden') {
           continue;
         }
 
-        // Charged after visibility filtering so ignored entries never consume
-        // the budget. Every recursive branch shares one counter, so the cap
-        // applies to the whole tree rather than per directory.
-        if (remainingEntries.value <= 0) {
+        if (visibility === 'ignored') {
+          // Past this cap ignored entries are dropped, not reported: they are
+          // extras, and listing them must never fail a tree that loads today.
+          if (remainingEntries.ignored > 0) {
+            remainingEntries.ignored -= 1;
+            listedEntries.push({ entry, isIgnored: true });
+          }
+          continue;
+        }
+
+        // Charged after visibility filtering so hidden and ignored entries
+        // never consume this budget.
+        if (remainingEntries.visible <= 0) {
           throw createFileTreeError(
             `Project file tree exceeds the ${MAXIMUM_FILE_TREE_ENTRIES.toLocaleString()} entry limit. Choose a narrower project directory or add ignore rules.`,
             413,
             'FILE_TREE_TOO_LARGE',
           );
         }
-        remainingEntries.value -= 1;
-        visibleEntries.push(entry);
+        remainingEntries.visible -= 1;
+        listedEntries.push({ entry, isIgnored: false });
       }
     } catch (error) {
       // The entry cap is a caller-visible outcome, not an unreadable directory.
@@ -242,7 +285,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       release();
     }
 
-    return visibleEntries;
+    return listedEntries;
   }
 
   async function buildFileTree(
@@ -250,11 +293,14 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     maximumDepth: number,
     currentDepth = 0,
     includeEntry: FileTreeEntryFilter = includeEntryByFallbackDirectoryNames,
-    remainingEntries = { value: MAXIMUM_FILE_TREE_ENTRIES },
+    remainingEntries: FileTreeEntryBudget = {
+      visible: MAXIMUM_FILE_TREE_ENTRIES,
+      ignored: MAXIMUM_IGNORED_FILE_TREE_ENTRIES,
+    },
   ): Promise<FileTreeNode[]> {
-    const visibleEntries = await collectVisibleEntries(directoryPath, includeEntry, remainingEntries);
+    const listedEntries = await collectListedEntries(directoryPath, includeEntry, remainingEntries);
 
-    const items = await Promise.all(visibleEntries.map(async (entry): Promise<FileTreeNode> => {
+    const items = await Promise.all(listedEntries.map(async ({ entry, isIgnored }): Promise<FileTreeNode> => {
       const itemPath = path.join(directoryPath, entry.name);
       const item: FileTreeNode = {
         name: entry.name,
@@ -265,6 +311,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         permissions: '000',
         permissionsRwx: '---------',
       };
+      if (isIgnored) {
+        item.isIgnored = true;
+      }
 
       try {
         await acquire();
@@ -296,7 +345,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       // that make traversal from a broad root (e.g. "/") pathologically slow.
       const isForbiddenSystemDir = FORBIDDEN_WORKSPACE_PATHS.includes(normalizeProjectPath(itemPath));
 
-      if (entry.isDirectory() && currentDepth < maximumDepth && !isForbiddenSystemDir) {
+      // An ignored directory is listed but never walked: its contents would
+      // cost directory reads and budget for rows the explorer does not open.
+      if (entry.isDirectory() && !isIgnored && currentDepth < maximumDepth && !isForbiddenSystemDir) {
         item.children = await buildFileTree(
           itemPath,
           maximumDepth,
@@ -519,7 +570,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       if (options?.respectGitignore) {
         try {
           const gitignoreContent = await fileSystem.readTextFile(path.join(projectRoot, '.gitignore'));
-          includeEntry = createGitignoreEntryFilter(projectRoot, gitignoreContent);
+          includeEntry = createGitignoreEntryFilter(projectRoot, gitignoreContent, options.markIgnored === true);
         } catch (error) {
           if (readErrorCode(error) !== 'ENOENT') {
             dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);

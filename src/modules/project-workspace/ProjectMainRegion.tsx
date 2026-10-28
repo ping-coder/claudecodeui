@@ -17,6 +17,7 @@ import {
   WORKSPACE_PANE_SIDES,
 } from '@/shared/constants';
 import { useBackgroundSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
+import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import type {
   PaneTabActivity,
   PaneTabDisplay,
@@ -53,7 +54,7 @@ const NO_PROJECTS: Project[] = [];
  * split, both panes side by side with a divider when the column is wide enough, otherwise the
  * focused pane only, the other kept mounted but hidden; phones render the focused pane alone.
  * It also owns what spans both panes: the drag-over state for the drop zones, the terminal lease,
- * the TaskMaster project (the focused pane's) and the phone's tab sheet.
+ * the TaskMaster project (the focused pane's), whether tabs name their project, and the phone's tab sheet.
  */
 function ProjectMainRegion({
   isMobile,
@@ -75,7 +76,8 @@ function ProjectMainRegion({
     refreshProjectsSilently,
     setPaneEditorUnsaved,
   } = useProjectPanesState();
-  const { canSplit } = useWorkspaceChrome();
+  const { canSplit, isImmersive } = useWorkspaceChrome();
+  const { sidebarVisible } = useUiPreferences();
   const busySessionIds = useBusySessionIdSet();
   const backgroundSessionIds = useBackgroundSessionIdSet();
   const groupRef = useRef<HTMLDivElement>(null);
@@ -161,6 +163,14 @@ function ProjectMainRegion({
       })
       : [],
   ), [tabDisplayKey]);
+
+  // Tabs name their project only when they cannot tell on their own: tabs of more than one project are
+  // open, or the sidebar that lists the projects is out of sight on desktop (collapsed to its icon rail,
+  // or immersive). A missing conversation's '' is no project.
+  const openProjectCount = new Set(
+    [...layout.left.tabs, ...(layout.right?.tabs ?? [])].map((tab) => tab.projectId).filter(Boolean),
+  ).size;
+  const showProjectNames = openProjectCount > 1 || (!isMobile && (isImmersive || !sidebarVisible));
 
   /** What a hidden pane's tabs are doing, for the collapsed switcher's dot: attention first, then any running work. */
   const getPaneActivity = (side: WorkspacePaneSide): PaneTabActivity | null => {
@@ -338,6 +348,7 @@ function ProjectMainRegion({
         shellBlockedBy={getShellBlockedBy(side)}
         onClaimShell={claimShell}
         tabCount={isMobile ? tabCount : 0}
+        showProjectNames={showProjectNames}
         onOpenTabsSheet={openTabsSheet}
         ws={ws}
         sendMessage={sendMessage}

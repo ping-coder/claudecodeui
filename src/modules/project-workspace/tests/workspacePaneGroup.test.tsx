@@ -12,6 +12,7 @@ import type {
   WorkspaceLayoutActions,
   WorkspacePaneState,
   WorkspaceSessionTab,
+  WorkspaceViewLabels,
 } from '@/shared/types';
 
 /**
@@ -20,6 +21,9 @@ import type {
  * divider between them. Split without room it collapses to the focused pane while the other
  * stays mounted (hidden, told it is not visible), so unsaved editor text and scroll survive.
  * Phones mount the focused pane only. Dragging the divider touches nothing but that variable.
+ * Each pane's own width decides where its view bar goes (into the tab bar, or a row of its own)
+ * and which views it labels; a hidden pane keeps its tier and is measured again as it shows. Tabs
+ * name their project when tabs alone cannot tell it.
  */
 
 type MainProps = {
@@ -27,9 +31,8 @@ type MainProps = {
   isPaneVisible: boolean;
   isFocusedPane: boolean;
   isSplitPane: boolean;
-  compact: boolean;
   hideHeader: boolean;
-  showConnectionStatus: boolean;
+  viewLabels: WorkspaceViewLabels;
   headerActions: ReactNode;
 };
 
@@ -39,6 +42,9 @@ const panes: { state: Record<string, unknown> } = { state: {} };
 const NO_SESSIONS: ReadonlySet<string> = new Set();
 // What the session protection context reports as busy / only running background work.
 const sessionActivity: { busy: ReadonlySet<string>; background: ReadonlySet<string> } = { busy: NO_SESSIONS, background: NO_SESSIONS };
+// Whether the sidebar is expanded (false: collapsed to its icon rail), and whether the Browser view is on.
+const uiPreferences = { sidebarVisible: true };
+const browserUse = { enabled: false };
 
 vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
   useProjectPanesState: () => panes.state,
@@ -51,7 +57,8 @@ vi.mock('@/modules/task-master', () => ({
   useTaskMasterProjectSync: (project: Project | null) => taskMasterSync(project),
   useTasksSettings: () => ({ tasksEnabled: false, isTaskMasterInstalled: false }),
 }));
-vi.mock('@/modules/browser-use', () => ({ useBrowserUseEnabled: () => false }));
+vi.mock('@/shared/context/UiPreferencesContext', () => ({ useUiPreferences: () => uiPreferences }));
+vi.mock('@/modules/browser-use', () => ({ useBrowserUseEnabled: () => browserUse.enabled }));
 vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ plugins: [] }), PluginIcon: () => null }));
 vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ connectionStatus: 'connected' }) }));
 vi.mock('@/modules/project-workspace/WorkspaceMain', () => ({
@@ -164,7 +171,14 @@ const regionElement = ({ canSplit = true, isMobile = false, isImmersive = false 
 );
 
 const pane = (side: 'left' | 'right') => document.querySelector<HTMLElement>(`[data-workspace-pane="${side}"]`);
+const tabBar = (side: 'left' | 'right') => document.querySelector(`[data-pane-tab-bar="${side}"]`) as HTMLElement;
 const lastMainProps = (side: 'left' | 'right') => [...mainRenders].reverse().find((props) => props.side === side);
+/** Whether the pane's tab bar carries the view bar. */
+const hasViewBarInTabBar = (side: 'left' | 'right') => within(tabBar(side)).queryByRole('tablist', { name: 'Workspace views' }) !== null;
+/** Whether each session tab of the pane shows a project suffix, in tab order (the view bar's tabs left out). */
+const projectSuffixes = (side: 'left' | 'right' = 'left') => within(within(tabBar(side)).getByRole('tablist', { name: 'Open tabs' }))
+  .getAllByRole('tab')
+  .map((tab) => tab.querySelector('[data-tab-project]') !== null);
 
 beforeEach(() => {
   mainRenders.length = 0;
@@ -172,6 +186,8 @@ beforeEach(() => {
   actions = makeActions();
   sessionActivity.busy = NO_SESSIONS;
   sessionActivity.background = NO_SESSIONS;
+  uiPreferences.sidebarVisible = true;
+  browserUse.enabled = false;
 });
 
 test('unsplit, one pane fills the column with no divider', () => {
@@ -213,9 +229,9 @@ test('split with room, both panes show side by side with the left one sized by -
   assert.equal(lastMainProps('left')?.isSplitPane, true);
   assert.equal(lastMainProps('left')?.isFocusedPane, true);
   assert.equal(lastMainProps('right')?.isFocusedPane, false);
-  // One connection status for the whole app: the right pane hides its own.
-  assert.equal(lastMainProps('left')?.showConnectionStatus, true);
-  assert.equal(lastMainProps('right')?.showConnectionStatus, false);
+  // One connection status for the whole app: it rides in the left pane's tab bar.
+  assert.equal(tabBar('left').querySelector('[role="status"]') !== null, true);
+  assert.equal(tabBar('right').querySelector('[role="status"]') === null, true);
 });
 
 test('split without room, the focused pane shows and the other stays mounted but hidden and not visible', () => {
@@ -319,16 +335,62 @@ const measurePanes = (widths: Partial<Record<'left' | 'right', number>>) => {
   });
 };
 
-test('a pane narrower than 640px gets the compact header: each pane is measured, not the viewport', () => {
-  measurePanes({ left: 639, right: 720 });
-  setLayout(splitLayout());
-  render(regionElement({ canSplit: true }));
+/** Pane roots report `width` while shown and 0 while hidden with CSS (display: none), as a browser does. */
+const measureShownPanes = (width: number) => {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure(this: HTMLElement) {
+    const measured = this.hasAttribute('data-workspace-pane') && !this.classList.contains('hidden') ? width : 0;
+    return { x: 0, y: 0, left: 0, top: 0, right: measured, bottom: 600, width: measured, height: 600, toJSON: () => ({}) } as DOMRect;
+  });
+};
 
-  assert.equal(lastMainProps('left')?.compact, true);
-  assert.equal(lastMainProps('right')?.compact, false);
+/** A ResizeObserver that reports only when told to; returns the call that makes every connected one report. */
+const stubSilentResizeObserver = () => {
+  const connected = new Set<() => void>();
+  vi.stubGlobal('ResizeObserver', class {
+    private readonly notify: () => void;
+
+    constructor(callback: ResizeObserverCallback) {
+      this.notify = () => callback([], this as unknown as ResizeObserver);
+    }
+
+    observe() {
+      connected.add(this.notify);
+    }
+
+    unobserve() {}
+
+    disconnect() {
+      connected.delete(this.notify);
+    }
+  });
+  return () => {
+    act(() => {
+      connected.forEach((notify) => notify());
+    });
+  };
+};
+
+test('each pane is measured, not the viewport: a wide one carries its view bar in the tab bar, a narrower one gets a row of its own', () => {
+  measurePanes({ left: 1000, right: 700 });
+  setLayout(splitLayout());
+  const view = render(regionElement({ canSplit: true }));
+
+  assert.equal(lastMainProps('left')?.hideHeader, true);
+  assert.equal(hasViewBarInTabBar('left'), true);
+  assert.equal(lastMainProps('right')?.hideHeader, false);
+  assert.equal(lastMainProps('right')?.viewLabels, 'all');
+  assert.equal(hasViewBarInTabBar('right'), false);
+  view.unmount();
+
+  // Too narrow to label every view: only the active one keeps its label.
+  measurePanes({ left: 380 });
+  setLayout(unsplitLayout());
+  render(regionElement({ canSplit: false }));
+  assert.equal(lastMainProps('left')?.hideHeader, false);
+  assert.equal(lastMainProps('left')?.viewLabels, 'active');
 });
 
-test('immersive, the header goes and each pane keeps one row: tabs, the compact view bar and one connection status', () => {
+test('immersive, the header goes and each pane keeps one row: tabs, the view bar and one connection status', () => {
   setLayout(splitLayout());
   render(regionElement({ canSplit: true, isImmersive: true }));
   const leftBar = document.querySelector('[data-pane-tab-bar="left"]') as HTMLElement;
@@ -347,6 +409,26 @@ test('immersive, the header goes and each pane keeps one row: tabs, the compact 
   assert.ok(within(leftBar).getByRole('button', { name: 'Show sidebar' }));
   assert.equal(within(rightBar).queryByRole('button', { name: 'Show sidebar' }) === null, true);
   assert.ok(within(rightBar).getByRole('button', { name: 'Exit full screen' }));
+});
+
+test('immersive, a pane below the wide tier labels only its active view and lets the view bar shrink; a wide one labels every view', () => {
+  const isFilesLabelHidden = (side: 'left' | 'right') => within(within(tabBar(side)).getByRole('tab', { name: 'Files' }))
+    .getByText('Files')
+    .classList.contains('hidden');
+  const canTrailingShrink = (side: 'left' | 'right') => tabBar(side).querySelector('[data-tab-bar-trailing]')?.classList.contains('flex-shrink') ?? false;
+
+  measurePanes({ left: 700, right: 700 });
+  setLayout(splitLayout());
+  const view = render(regionElement({ canSplit: true, isImmersive: true }));
+  assert.deepEqual([isFilesLabelHidden('left'), isFilesLabelHidden('right')], [true, true]);
+  assert.deepEqual([lastMainProps('left')?.hideHeader, lastMainProps('right')?.hideHeader], [true, true], 'still one row');
+  assert.deepEqual([canTrailingShrink('left'), canTrailingShrink('right')], [true, true]);
+  view.unmount();
+
+  measurePanes({ left: 1000, right: 1000 });
+  render(regionElement({ canSplit: true, isImmersive: true }));
+  assert.deepEqual([isFilesLabelHidden('left'), isFilesLabelHidden('right')], [false, false]);
+  assert.deepEqual([canTrailingShrink('left'), canTrailingShrink('right')], [false, false], 'the tabs give way first');
 });
 
 test('collapsed, the switcher dot follows what the hidden pane\'s sessions are doing', () => {
@@ -379,9 +461,9 @@ test('collapsed, the switcher dot follows what the hidden pane\'s sessions are d
   assert.equal(within(pane('left') as HTMLElement).queryByRole('button', { name: 'Focus right pane' }) === null, true);
 });
 
-test('the compact header drops the title and labels only the active view; the right pane\'s has no connection status', () => {
+test('the phone header names the session and its project, and carries the connection status and the phone\'s controls', () => {
   const setView = vi.fn();
-  const header = (props: { compact?: boolean; showConnectionStatus?: boolean; headerActions?: ReactNode } = {}) => (
+  render(
     <WorkspaceHeader
       activeTab="chat"
       setActiveTab={setView}
@@ -389,40 +471,20 @@ test('the compact header drops the title and labels only the active view; the ri
       selectedSession={{ id: 'session-a1', summary: 'Fix the build', __provider: 'claude' }}
       shouldShowTasksTab={false}
       shouldShowBrowserTab={false}
-      isMobile={false}
+      isMobile
       onMenuClick={vi.fn()}
       onRenameSession={vi.fn(async () => true)}
-      {...props}
-    />
+      headerActions={<button type="button">Tabs (3)</button>}
+    />,
   );
-  const filesLabel = () => within(screen.getByRole('tab', { name: 'Files' })).getByText('Files');
 
-  const view = render(header());
-  assert.ok(screen.getByRole('heading', { name: 'Fix the build' }));
+  assert.equal(screen.queryByRole('heading', { name: 'Fix the build' }) !== null, true);
+  assert.equal(screen.queryByText('Alpha') !== null, true);
   assert.equal(document.querySelector('header [role="status"]') !== null, true);
-  assert.ok(filesLabel().className.includes('lg:inline'), 'wide headers label every view on large screens');
-
-  // A wide right pane side by side keeps its title but leaves the one connection status to the left pane.
-  view.rerender(header({ showConnectionStatus: false }));
-  assert.ok(screen.getByRole('heading', { name: 'Fix the build' }));
-  assert.equal(document.querySelector('header [role="status"]') === null, true);
-
-  // A narrow left pane keeps the status but not the title.
-  view.rerender(header({ compact: true }));
-  assert.equal(screen.queryByRole('heading', { name: 'Fix the build' }) === null, true, 'the pane tab already names the session');
-  assert.equal(document.querySelector('header [role="status"]') !== null, true);
-
-  view.rerender(header({ compact: true, showConnectionStatus: false }));
-  assert.equal(screen.queryByRole('heading', { name: 'Fix the build' }) === null, true, 'the pane tab already names the session');
-  assert.equal(document.querySelector('header [role="status"]') === null, true);
-  assert.equal(filesLabel().className.includes('lg:inline'), false, 'only the active view keeps its label');
-  assert.equal(document.querySelector('header > div')?.children.length, 1, 'no empty block is left before the view bar');
+  assert.equal(screen.queryByRole('button', { name: 'Tabs (3)' }) !== null, true);
 
   fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
   assert.deepEqual(setView.mock.calls, [['files', { userInitiated: true }]]);
-
-  view.rerender(header({ compact: true, headerActions: <button type="button">Tabs (3)</button> }));
-  assert.ok(screen.getByRole('button', { name: 'Tabs (3)' }));
 });
 
 test('tab titles prefer the live projects row over the tab\'s snapshot, and name drafts and missing conversations', () => {
@@ -444,15 +506,17 @@ test('tab titles prefer the live projects row over the tab\'s snapshot, and name
   panes.state = { ...panes.state, projects: projectsWithRename };
   render(regionElement());
 
-  const titles = within(document.querySelector('[data-pane-tab-bar="left"]') as HTMLElement)
-    .getAllByRole('tab')
-    .map((tab) => tab.textContent);
+  // The view bar shares the tab bar, so the session tabs are read from the Open tabs list.
+  const strip = within(tabBar('left')).getByRole('tablist', { name: 'Open tabs' });
+  const titles = Array.from(strip.querySelectorAll('[data-tab-title]')).map((title) => title.textContent);
   assert.deepEqual(titles, [
     'Renamed in the sidebar',
     'Chat a2',
     'New chat',
     'This conversation no longer exists',
   ]);
+  // Alpha and Beta tabs side by side: every tab names its project.
+  assert.deepEqual(projectSuffixes('left'), [true, true, true, true]);
 });
 
 test('a freshly split, empty right pane offers the left pane\'s conversation and leaves it out of the recent list', () => {
@@ -529,20 +593,67 @@ test('keyboard focus follows the split button into the tab bar that carries it a
   assert.equal(document.activeElement === within(pane('left') as HTMLElement).getByRole('button', { name: 'Split view' }), true);
 });
 
-test('a single pane keeps its title however narrow; only a pane beside another goes compact', () => {
+test('a single pane is tiered by its width too: at 480px its view bar gets a labelled row of its own', () => {
   measurePanes({ left: 480 });
   setLayout(unsplitLayout());
   const view = render(regionElement({ canSplit: false }));
-  assert.equal(lastMainProps('left')?.compact, false, 'the project name and the rename box stay');
+  assert.equal(lastMainProps('left')?.hideHeader, false);
+  assert.equal(lastMainProps('left')?.viewLabels, 'all');
+  assert.equal(hasViewBarInTabBar('left'), false);
 
-  // Collapsed, the visible pane is alone on screen too.
+  // Collapsed, the visible pane goes by its width as well.
   setLayout(splitLayout('left'));
   view.rerender(regionElement({ canSplit: false }));
-  assert.equal(lastMainProps('left')?.compact, false);
+  assert.equal(lastMainProps('left')?.hideHeader, false);
+  assert.equal(lastMainProps('left')?.viewLabels, 'all');
+  assert.equal(hasViewBarInTabBar('left'), false);
 });
 
-test('a pane only re-renders when its width crosses the compact threshold, not on every pixel of a drag', () => {
-  let leftWidth = 720;
+test('collapsed, the pane the switcher shows is tiered by its own width in the commit that shows it', () => {
+  // The observer stays silent: the first frame on screen gets only what the commit itself measured.
+  stubSilentResizeObserver();
+  measureShownPanes(700);
+  /** [header row hidden, view bar in the tab bar]: at 700px both false, the view bar has a row of its own. */
+  const rows = (side: 'left' | 'right') => [lastMainProps(side)?.hideHeader, hasViewBarInTabBar(side)];
+  try {
+    setLayout(splitLayout('left'));
+    const view = render(regionElement({ canSplit: false }));
+    assert.deepEqual(rows('left'), [false, false]);
+
+    // The right pane, hidden since it mounted, comes into view.
+    setLayout(splitLayout('right'));
+    view.rerender(regionElement({ canSplit: false }));
+    assert.deepEqual(rows('right'), [false, false]);
+
+    // And the left one again.
+    setLayout(splitLayout('left'));
+    view.rerender(regionElement({ canSplit: false }));
+    assert.deepEqual(rows('left'), [false, false]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('a pane hidden by a collapsed split keeps its tier rather than the one a 0px width would give', () => {
+  const notifyResize = stubSilentResizeObserver();
+  measureShownPanes(700);
+  try {
+    setLayout(splitLayout('left'));
+    const view = render(regionElement({ canSplit: false }));
+    assert.equal(lastMainProps('left')?.hideHeader, false);
+
+    // The switcher hides the left pane: the commit and then the observer measure it at 0.
+    setLayout(splitLayout('right'));
+    view.rerender(regionElement({ canSplit: false }));
+    notifyResize();
+    assert.equal(lastMainProps('left')?.hideHeader, false, 'still the medium tier, not re-rendered as a wide pane');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('a pane only re-renders when its width crosses a tier, not on every pixel of a drag', () => {
+  let leftWidth = 900;
   const notifyResize: Array<() => void> = [];
   vi.stubGlobal('ResizeObserver', class {
     constructor(private readonly callback: ResizeObserverCallback) {}
@@ -565,20 +676,22 @@ test('a pane only re-renders when its width crosses the compact threshold, not o
     const leftRenders = () => mainRenders.filter((props) => props.side === 'left').length;
     const before = leftRenders();
 
-    // Ten frames of a divider drag, 3px each, all wider than 640px.
+    // Ten frames of a divider drag, 3px each, all within the medium tier (384-991px for four views).
     for (let frame = 0; frame < 10; frame += 1) {
       leftWidth -= 3;
       act(() => {
         notifyResize.forEach((notify) => notify());
       });
     }
-    assert.equal(leftRenders(), before, 'no re-render while the width stays on one side of 640px');
+    assert.equal(lastMainProps('left')?.hideHeader, false);
+    assert.equal(leftRenders(), before, 'no re-render while the width stays within one tier');
 
-    leftWidth = 600;
+    // Into the wide tier: the view bar joins the tab bar.
+    leftWidth = 1000;
     act(() => {
       notifyResize.forEach((notify) => notify());
     });
-    assert.equal(lastMainProps('left')?.compact, true);
+    assert.equal(lastMainProps('left')?.hideHeader, true);
     assert.equal(leftRenders(), before + 1, 'one re-render for the crossing');
   } finally {
     vi.unstubAllGlobals();
@@ -594,4 +707,86 @@ test('collapsed, the switcher dot also counts background work left running on th
     .getByRole('button', { name: 'Focus right pane' })
     .querySelector('[data-hidden-pane-activity]');
   assert.equal(dot?.getAttribute('data-hidden-pane-activity'), 'running');
+});
+
+test('each view raises the room the view bar needs in the tab bar, and turning one on re-tiers the pane at once', () => {
+  measurePanes({ left: 1050 });
+  setLayout(unsplitLayout());
+  const view = render(regionElement({ canSplit: false }));
+  assert.equal(lastMainProps('left')?.hideHeader, true, 'four views fit beside the tabs from 992px');
+
+  // Browser makes five views, which need 1080px: no resize is needed to notice.
+  browserUse.enabled = true;
+  view.rerender(regionElement({ canSplit: false }));
+  assert.equal(lastMainProps('left')?.hideHeader, false);
+  assert.equal(lastMainProps('left')?.viewLabels, 'all');
+  assert.equal(hasViewBarInTabBar('left'), false);
+});
+
+test('tabs name their project only when tabs alone cannot tell it', () => {
+  // One project, the sidebar listing it: the tabs need no suffix.
+  setLayout(unsplitLayout());
+  const view = render(regionElement({ canSplit: false }));
+  assert.deepEqual(projectSuffixes('left'), [false, false]);
+
+  const draft = (key: string, projectId: string): WorkspaceSessionTab => ({ ...makeTab(key, projectId), sessionId: null, session: null, title: '' });
+  const singlePane = (tabs: WorkspaceSessionTab[]): WorkspaceLayout => ({ left: makePane(tabs), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  const show = (layout: WorkspaceLayout, chrome: { isImmersive?: boolean } = {}) => {
+    setLayout(layout);
+    view.rerender(regionElement({ canSplit: false, ...chrome }));
+    return projectSuffixes('left');
+  };
+
+  // A Beta tab joins: every tab says whose it is.
+  assert.deepEqual(show(singlePane([makeTab('a1', 'alpha'), makeTab('a2', 'alpha'), makeTab('b1', 'beta')])), [true, true, true]);
+
+  // A draft is "New chat" in any project, so it always names its own.
+  assert.deepEqual(show(singlePane([makeTab('a1', 'alpha'), draft('d1', 'alpha')])), [false, true]);
+
+  // A missing conversation without a project ('') is not a second project.
+  assert.deepEqual(show(singlePane([makeTab('a1', 'alpha'), { ...makeTab('m1', ''), isMissing: true, session: null }])), [false, false]);
+
+  // The sidebar out of sight: collapsed to its rail, or immersive.
+  uiPreferences.sidebarVisible = false;
+  assert.deepEqual(show(unsplitLayout()), [true, true]);
+  uiPreferences.sidebarVisible = true;
+  assert.deepEqual(show(unsplitLayout(), { isImmersive: true }), [true, true]);
+});
+
+test('the left tab bar keeps the one connection status, but no view bar, while that pane is empty, missing its conversation or loading', () => {
+  const chrome = () => [tabBar('left').querySelector('[role="status"]') !== null, tabBar('right').querySelector('[role="status"]') !== null, hasViewBarInTabBar('left')];
+  // The left pane keeps its id throughout, so the content it showed first stays mounted behind each state.
+  const withLeft = (tabs: WorkspaceSessionTab[]): WorkspaceLayout => ({
+    left: { ...makePane(tabs), id: 'pane-a1' },
+    right: makePane([makeTab('b1', 'beta')]),
+    focusedSide: 'right',
+    splitRatio: 0.5,
+  });
+
+  setLayout(withLeft([makeTab('a1', 'alpha')]));
+  const view = render(regionElement({ canSplit: true }));
+  assert.deepEqual(chrome(), [true, false, true]);
+
+  setLayout(withLeft([{ ...makeTab('m1', 'alpha'), isMissing: true, session: null }]));
+  view.rerender(regionElement({ canSplit: true }));
+  assert.deepEqual(chrome(), [true, false, false], 'missing conversation');
+
+  setLayout(withLeft([]));
+  view.rerender(regionElement({ canSplit: true }));
+  assert.deepEqual(chrome(), [true, false, false], 'empty pane');
+
+  setLayout(withLeft([makeTab('a1', 'alpha')]));
+  panes.state = { ...panes.state, isLoadingProjects: true };
+  view.rerender(regionElement({ canSplit: true }));
+  assert.deepEqual(chrome(), [true, false, false], 'loading');
+});
+
+test('a pane showing a conversation names it and its project in a visually hidden heading', () => {
+  setLayout({ left: makePane([makeTab('a1', 'alpha')]), right: makePane([]), focusedSide: 'left', splitRatio: 0.5 });
+  render(regionElement({ canSplit: true }));
+
+  const heading = within(pane('left') as HTMLElement).queryByRole('heading', { level: 2, name: 'Chat a1 · Alpha' });
+  assert.equal(heading?.classList.contains('sr-only'), true);
+  assert.equal(heading?.closest('[role="tabpanel"]') !== null, true);
+  assert.equal(within(pane('right') as HTMLElement).queryByRole('heading', { name: /·/ }) === null, true, 'an empty pane has none');
 });

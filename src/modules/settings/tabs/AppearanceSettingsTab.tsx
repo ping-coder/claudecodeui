@@ -13,6 +13,7 @@ type AppearanceSettingsTabProps = {
   projectSortOrder: ProjectSortOrder;
   onProjectSortOrderChange: (value: ProjectSortOrder) => void;
   codeEditorSettings: CodeEditorSettingsState;
+  onCodeEditorTextWordWrapChange: (value: boolean) => void;
   onCodeEditorWordWrapChange: (value: boolean) => void;
   onCodeEditorShowMinimapChange: (value: boolean) => void;
   onCodeEditorLineNumbersChange: (value: boolean) => void;
@@ -24,6 +25,7 @@ export default function AppearanceSettingsTab({
   projectSortOrder,
   onProjectSortOrderChange,
   codeEditorSettings,
+  onCodeEditorTextWordWrapChange,
   onCodeEditorWordWrapChange,
   onCodeEditorShowMinimapChange,
   onCodeEditorLineNumbersChange,
@@ -33,6 +35,8 @@ export default function AppearanceSettingsTab({
   const { themeMode, setThemeMode } = useTheme();
   const preferences = useUiPreferences();
   const setPreference = useSetUiPreference();
+  const textWordWrapLabel = t('appearanceSettings.codeEditor.textWordWrap.label', { defaultValue: 'Word Wrap in Markdown and Text Files' });
+  const codeWordWrapLabel = t('appearanceSettings.codeEditor.codeWordWrap.label', { defaultValue: 'Word Wrap in Code Files' });
 
   return (
     <div className="space-y-8">
@@ -98,13 +102,24 @@ export default function AppearanceSettingsTab({
       <SettingsSection title={t('appearanceSettings.codeEditor.title')}>
         <SettingsCard divided>
           <SettingsRow
-            label={t('appearanceSettings.codeEditor.wordWrap.label')}
-            description={t('appearanceSettings.codeEditor.wordWrap.description')}
+            label={textWordWrapLabel}
+            description={t('appearanceSettings.codeEditor.textWordWrap.description', { defaultValue: 'Wrap long lines in Markdown and plain-text files such as .md and .txt' })}
+          >
+            <SettingsToggle
+              checked={codeEditorSettings.textWordWrap}
+              onChange={onCodeEditorTextWordWrapChange}
+              ariaLabel={textWordWrapLabel}
+            />
+          </SettingsRow>
+
+          <SettingsRow
+            label={codeWordWrapLabel}
+            description={t('appearanceSettings.codeEditor.codeWordWrap.description', { defaultValue: 'Wrap long lines in source code and all other files' })}
           >
             <SettingsToggle
               checked={codeEditorSettings.wordWrap}
               onChange={onCodeEditorWordWrapChange}
-              ariaLabel={t('appearanceSettings.codeEditor.wordWrap.label')}
+              ariaLabel={codeWordWrapLabel}
             />
           </SettingsRow>
 

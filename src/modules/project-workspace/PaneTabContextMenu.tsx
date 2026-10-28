@@ -14,6 +14,8 @@ type PaneTabMenuItem = {
   disabled?: boolean;
   /** Draws a separator above the entry. */
   separatorBefore?: boolean;
+  /** The key that does the same on a focused tab (F2 renames), shown dimmed at the right and announced as aria-keyshortcuts. */
+  shortcut?: string;
 };
 
 type PaneTabContextMenuProps = {
@@ -145,6 +147,7 @@ export default function PaneTabContextMenu({ anchor, label, items, onClose }: Pa
             type="button"
             role="menuitem"
             disabled={item.disabled}
+            aria-keyshortcuts={item.shortcut}
             onClick={() => runItem(item)}
             className={cn(
               'flex w-full items-center rounded-md px-3 py-1.5 text-left text-sm transition-colors focus:outline-none focus-visible:bg-accent',
@@ -152,6 +155,7 @@ export default function PaneTabContextMenu({ anchor, label, items, onClose }: Pa
             )}
           >
             {item.label}
+            {item.shortcut && <span aria-hidden="true" className="ml-auto pl-6 text-xs text-muted-foreground">{item.shortcut}</span>}
           </button>
         </Fragment>
       ))}

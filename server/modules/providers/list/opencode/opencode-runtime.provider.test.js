@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { withRunNotificationCapture } from '@/modules/providers/tests/fixtures/run-notifications.js';
+
 import {
   opencodeRuntime,
   resolveOpenCodePermissionOptions,
@@ -41,6 +43,8 @@ const events = [
 for (const event of events) {
   console.log(JSON.stringify(event));
 }
+
+process.exitCode = Number(process.env.OPENCODE_FAKE_EXIT_CODE || 0);
 `, 'utf8');
 
   if (process.platform === 'win32') {
@@ -267,4 +271,77 @@ test('spawnOpenCode passes permission mode flags and env to the CLI', async () =
 
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+/**
+ * Runs `runTest` with the fake opencode first on PATH. The fake exits with
+ * OPENCODE_FAKE_EXIT_CODE (0 when unset), which a test may set; it is
+ * restored afterwards.
+ */
+async function withFakeOpenCode(runTest) {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-cli-notify-'));
+  const pathKey = findEnvKey('PATH');
+  const pathExtKey = findEnvKey('PATHEXT');
+  const savedEnv = [pathKey, pathExtKey, 'OPENCODE_FAKE_EXIT_CODE', 'OPENCODE_ARGS_CAPTURE']
+    .map((key) => [key, process.env[key]]);
+
+  try {
+    await createFakeOpenCodeExecutable(tempRoot);
+    delete process.env.OPENCODE_ARGS_CAPTURE;
+    process.env[pathKey] = `${tempRoot}${path.delimiter}${process.env[pathKey] || ''}`;
+    if (process.platform === 'win32') {
+      const previousPathExt = process.env[pathExtKey];
+      process.env[pathExtKey] = previousPathExt?.toUpperCase().includes('.CMD')
+        ? previousPathExt
+        : `.COM;.EXE;.BAT;.CMD${previousPathExt ? `;${previousPathExt}` : ''}`;
+    }
+
+    await runTest(tempRoot);
+  } finally {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+/** A writer that names its run by `runStartedAt`, as the chat gateway's writer does. */
+const writerOf = (userId, runStartedAt) => ({
+  userId,
+  runStartedAt,
+  send() {},
+  setSessionId() {},
+});
+
+test('spawnOpenCode names the run it reports stopped, so two runs ending inside the dedupe window both notify', async () => {
+  await withFakeOpenCode(async (tempRoot) => {
+    await withRunNotificationCapture(async ({ userId, delivered }) => {
+      const options = { sessionId: 'opencode-stopped', cwd: tempRoot };
+      await opencodeRuntime.run('Hi', options, writerOf(userId, 1_000), runtimeContext);
+      await opencodeRuntime.run('Hi again', options, writerOf(userId, 2_000), runtimeContext);
+
+      assert.deepEqual(delivered(), ['run.stopped@opencode-stopped', 'run.stopped@opencode-stopped']);
+    });
+  });
+});
+
+test('spawnOpenCode names the run it reports failed', async () => {
+  await withFakeOpenCode(async (tempRoot) => {
+    process.env.OPENCODE_FAKE_EXIT_CODE = '2';
+    await withRunNotificationCapture(async ({ userId, delivered }) => {
+      const options = { sessionId: 'opencode-failed', cwd: tempRoot };
+      for (const runStartedAt of [1_000, 2_000]) {
+        await assert.rejects(
+          opencodeRuntime.run('Hi', options, writerOf(userId, runStartedAt), runtimeContext),
+          /exited with code 2/,
+        );
+      }
+
+      assert.deepEqual(delivered(), ['run.failed@opencode-failed', 'run.failed@opencode-failed']);
+    });
+  });
 });

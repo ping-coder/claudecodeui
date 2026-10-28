@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { findSessionTab, layoutHasSession } from '@/modules/project-workspace/utils/workspaceLayout';
 import type { Project, SessionActivity, SessionActivityMap, WorkspaceLayout } from '@/shared/types';
-import { findLiveSessionTitle, setDocumentTitleActivity } from '@/shared/utils';
+import { resolveDocumentSessionTitle, setDocumentTitleActivity } from '@/shared/utils';
 
 type UseRunningSessionTitleInput = {
   activities: SessionActivityMap;
@@ -21,7 +21,7 @@ type RunningTitleCandidate = {
   startedAt: number;
   /** A tab of either pane of this browser tab holds the session, which puts it ahead of the others. */
   isOpenHere: boolean;
-  /** The session's title as the running part shows it. */
+  /** The session's title, named as the page part names the focused session (resolveDocumentSessionTitle). */
   subject: string;
 };
 
@@ -71,15 +71,12 @@ export function useRunningSessionTitle({ activities, projects, layout }: UseRunn
     ? 'running'
     : backgroundEntries.length > 0 ? 'background' : null;
   if (group) {
-    const untitledSession = t('runNotifications.untitledSession', { defaultValue: 'Untitled session' });
     const candidates = (group === 'running' ? runningEntries : backgroundEntries)
       .map(([sessionId, activity]): RunningTitleCandidate => ({
         sessionId,
         startedAt: activity.startedAt,
         isOpenHere: layoutHasSession(layout, sessionId),
-        subject: findLiveSessionTitle(sessionId, projects)
-          || findSessionTab(layout, sessionId)?.tab.title.trim()
-          || untitledSession,
+        subject: resolveDocumentSessionTitle(sessionId, projects, findSessionTab(layout, sessionId)?.tab.title, t),
       }))
       .sort((left, right) => (left.sessionId < right.sessionId ? -1 : left.sessionId > right.sessionId ? 1 : 0));
 
