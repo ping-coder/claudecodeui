@@ -370,5 +370,37 @@
     "browseAllCommits": "浏览全部提交（{{count}}）",
     "browseAllBranches": "浏览全部分支（{{count}}）",
     "switchTo": "切换到：{{name}}"
+  },
+  "runNotifications": {
+    "title": {
+      "running": "[运行中]",
+      "runningCount": "[运行中 {{count}}]",
+      "background": "[后台]",
+      "backgroundCount": "[后台 {{count}}]",
+      "done": "[完成]",
+      "doneCount": "[完成 {{count}}]",
+      "failed": "[失败]",
+      "failedCount": "[失败 {{count}}]",
+      "replied": "[已回复]",
+      "repliedCount": "[已回复 {{count}}]"
+    },
+    "untitledSession": "未命名会话",
+    "outcome": {
+      "done": "已完成",
+      "replied": "已回复，后台任务仍在运行",
+      "failed": "失败",
+      "backgroundDone": "后台任务已完成"
+    },
+    "withProject": "{{outcome}} · {{project}}",
+    "banner": {
+      "region": "任务通知",
+      "open": "查看",
+      "openLabel": "打开 {{title}}",
+      "dismiss": "关闭",
+      "dismissAll": "全部关闭",
+      "more": "还有 {{count}} 条",
+      "announce": "{{outcome}}：{{title}}",
+      "enableSystem": "开启系统通知"
+    }
   }
 }

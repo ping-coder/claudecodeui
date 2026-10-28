@@ -38,7 +38,27 @@ test('a fresh install gets the documented defaults', () => {
     sidebarVisible: true,
     keepProjectsExpanded: false,
     voiceEnabled: false,
+    runAlertBanner: true,
+    runAlertSystemNotification: true,
   });
+});
+
+test('the run alert switches are on by default and a stored false is read back', () => {
+  storeUiPreferences({ runAlertBanner: false });
+  assert.equal(readStoredUiPreferences().runAlertBanner, false);
+  assert.equal(readStoredUiPreferences().runAlertSystemNotification, true);
+
+  storeUiPreferences({ runAlertBanner: true, runAlertSystemNotification: false });
+  assert.equal(readStoredUiPreferences().runAlertBanner, true);
+  assert.equal(readStoredUiPreferences().runAlertSystemNotification, false);
+});
+
+test('the run alert switches can be set like any other preference', () => {
+  const state = baseline();
+  const next = uiPreferencesReducer(state, { type: 'set', key: 'runAlertSystemNotification', value: false });
+
+  assert.equal(next.runAlertSystemNotification, false);
+  assert.equal(next.runAlertBanner, true);
 });
 
 test('the stored blob is read back', () => {

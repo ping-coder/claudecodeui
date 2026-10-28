@@ -405,7 +405,7 @@ export type ActivityDetails = {
 /**
  * One frame received from the chat websocket. The server guarantees every
  * frame carries a `kind` (provider message kinds plus gateway kinds such as
- * `chat_subscribed`, `session_upserted`, `loading_progress`,
+ * `chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
  * `protocol_error`). The synthetic `websocket_reconnected` kind is injected
  * client-side when the socket re-opens after a drop.
  */
@@ -1747,6 +1747,59 @@ export type QuickSettingsTab = 'settings' | 'commands';
 
 /** Inline style for the quick settings drag handle, produced by the drag hook from the stored handle position and applied by the handle component. */
 export type QuickSettingsHandleStyle = CSSProperties;
+
+// ---------------------------
+
+//----------------- RUN NOTIFICATIONS ------------
+
+/**
+ * The status part of the browser tab title: a localized marker ("[Running 2]", "[Done]") and the session title it is
+ * about. Set through shared/utils' setDocumentTitleActivity (project-workspace's ProjectEffects) and
+ * setDocumentTitleAlert (run-notifications); the alert wins over the activity.
+ */
+export type DocumentTitleStatus = {
+  /** Leads the tab title, ahead of the deployment environment label. */
+  marker: string;
+  /** Session title written after the marker (and the environment label), in place of the page title. */
+  subject: string;
+};
+
+/**
+ * What a finished run means for whoever is waiting on it: done; replied (the turn ended but left background tasks
+ * running); failed; backgroundDone (that background work finished and its follow-up turn reported). Aborted runs raise no alert.
+ */
+export type RunAlertOutcome = 'done' | 'replied' | 'failed' | 'backgroundDone';
+
+/** How the workspace names a session in a banner or a system notification. */
+export type RunSessionLabel = {
+  /** Live title, else the tab snapshot; '' when neither is known. */
+  title: string;
+  /** Owning project's display name, archived projects included; null when unknown. */
+  projectName: string | null;
+};
+
+/** Names a session for run-notifications; null when the workspace knows nothing about it (the server's session name, then a placeholder, stand in). Implemented by project-workspace's ProjectRunNotifications. */
+export type ResolveRunSessionLabel = (sessionId: string) => RunSessionLabel | null;
+
+/** One finished-run alert as a tab shows it: in its title, its banners and, in the tab that claims it, a sound and a system notification. */
+export type RunAlert = {
+  /** `${sessionId}:${runStartedAt}:turn` or `…:background`; identical in every tab, so tabs agree on which alert was claimed or seen. */
+  key: string;
+  sessionId: string;
+  outcome: RunAlertOutcome;
+  /** Session name to show: the workspace label's title, else the server's session name, else the untitled placeholder. */
+  title: string;
+  /** Owning project's display name; null when unknown. */
+  projectName: string | null;
+  provider: LLMProvider;
+  /** Date.now() when this tab learned of it. */
+  receivedAt: number;
+  /** Learned from the recent-ends list after a reconnect rather than live: shown, never chimed or notified. */
+  isCatchUp: boolean;
+};
+
+/** Where run alert banners sit: below the pane headers on desktop and phones, below the exit capsule in phone immersive mode. */
+export type RunAlertBannerPlacement = 'desktop' | 'phone' | 'phoneImmersive';
 
 // ---------------------------
 

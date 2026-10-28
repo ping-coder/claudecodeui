@@ -454,5 +454,37 @@
     "sidebarDrawer": "Sidebar",
     "shortcutsHintUnsplit": "{{split}} split · {{fullscreen}} full screen",
     "shortcutsHintFullscreen": "{{fullscreen}} full screen"
+  },
+  "runNotifications": {
+    "title": {
+      "running": "[Running]",
+      "runningCount": "[Running {{count}}]",
+      "background": "[Background]",
+      "backgroundCount": "[Background {{count}}]",
+      "done": "[Done]",
+      "doneCount": "[Done {{count}}]",
+      "failed": "[Failed]",
+      "failedCount": "[Failed {{count}}]",
+      "replied": "[Replied]",
+      "repliedCount": "[Replied {{count}}]"
+    },
+    "untitledSession": "Untitled session",
+    "outcome": {
+      "done": "Done",
+      "replied": "Replied, background work still running",
+      "failed": "Failed",
+      "backgroundDone": "Background work finished"
+    },
+    "withProject": "{{outcome}} · {{project}}",
+    "banner": {
+      "region": "Task notifications",
+      "open": "Open",
+      "openLabel": "Open {{title}}",
+      "dismiss": "Dismiss",
+      "dismissAll": "Dismiss all",
+      "more": "{{count}} more",
+      "announce": "{{outcome}}: {{title}}",
+      "enableSystem": "Turn on system notifications"
+    }
   }
 }

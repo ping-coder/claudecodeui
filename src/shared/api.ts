@@ -277,6 +277,10 @@ export const api = {
   sessionDetails: (sessionId: string) =>
     get(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
   runningSessions: () => get('/api/providers/sessions/running'),
+  // Runs that ended in the last 10 minutes (at most 200, oldest first), as the
+  // `run_ended` frames the server broadcast: { data: { ends } }. run-notifications
+  // reads it on mount as a baseline and after a reconnect to catch up on missed ends.
+  runEnds: () => get('/api/providers/sessions/run-ends'),
   recentConversations: ({ limit = 40, offset = 0 }: { limit?: number; offset?: number } = {}) =>
     get(`/api/providers/sessions/recent${query({ limit, offset })}`),
   providerSessionId: (sessionId: string) =>

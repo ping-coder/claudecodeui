@@ -16,6 +16,10 @@ export type UiPreferences = {
   sidebarVisible: boolean;
   keepProjectsExpanded: boolean;
   voiceEnabled: boolean;
+  /** Shows run-notifications' in-page banner when a run finishes. */
+  runAlertBanner: boolean;
+  /** Lets run-notifications post a system notification for a finished run; acts only when Notification.permission === 'granted'. */
+  runAlertSystemNotification: boolean;
 };
 
 export type UiPreferenceKey = keyof UiPreferences;
@@ -31,6 +35,8 @@ const DEFAULTS: UiPreferences = {
   sidebarVisible: true,
   keepProjectsExpanded: false,
   voiceEnabled: false,
+  runAlertBanner: true,
+  runAlertSystemNotification: true,
 };
 
 const PREFERENCE_KEYS = Object.keys(DEFAULTS) as UiPreferenceKey[];

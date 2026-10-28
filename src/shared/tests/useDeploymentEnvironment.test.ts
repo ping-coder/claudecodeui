@@ -164,8 +164,8 @@ test('in production the title hook never writes the tab title', async () => {
   const { useDeploymentEnvironmentTitle } = await loadHooks();
   const { setDocumentPageTitle } = await import('@/shared/utils');
   setDocumentPageTitle('Fix browser tab title');
-  // Written straight into the title by the chat module; a rewrite would drop it.
-  document.title = '[Done] Fix browser tab title';
+  // A sentinel written straight into the title: any rewrite by the hook would replace it.
+  document.title = 'sentinel';
 
   const { unmount } = renderHook(() => useDeploymentEnvironmentTitle());
   await settle();
@@ -175,7 +175,26 @@ test('in production the title hook never writes the tab title', async () => {
   unmount();
 
   assert.equal(healthRequests, 1);
-  assert.equal(document.title, '[Done] Fix browser tab title');
+  assert.equal(document.title, 'sentinel');
+});
+
+test('the title hook swaps the label behind a status marker and keeps the alert', async () => {
+  stubHealth(replyWith({ environment: 'staging' }));
+  const { useDeploymentEnvironmentTitle } = await loadHooks();
+  const { setDocumentPageTitle, setDocumentTitleAlert } = await import('@/shared/utils');
+  setDocumentPageTitle('Write release notes');
+  setDocumentTitleAlert({ marker: '[Done]', subject: 'Fix login bug' });
+
+  const { unmount } = renderHook(() => useDeploymentEnvironmentTitle());
+  await waitFor(() => assert.equal(document.title, '[Done] Stage · Fix login bug'));
+
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  assert.equal(document.title, '[Done] 预发布 · Fix login bug');
+
+  unmount();
+  assert.equal(document.title, '[Done] Fix login bug');
 });
 
 test('the favicon hook swaps the tab icons for the amber ones, and back on unmount', async () => {

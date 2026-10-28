@@ -4,6 +4,7 @@ import { twMerge } from 'tailwind-merge';
 
 import type {
   AppTab,
+  DocumentTitleStatus,
   LLMProvider,
   Project,
   ProjectSession,
@@ -105,6 +106,13 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
 /** localStorage key holding the user's completion-sound preference. Private to the sound helpers. */
 const NOTIFICATION_SOUND_ENABLED_STORAGE_KEY = 'notificationSoundEnabled';
 
+/**
+ * How long a chime waits for the AudioContext to resume. Browsers leave resume() pending, not rejected, while
+ * their autoplay policy holds a page back (no user gesture yet), and a caller waiting on the chime's answer
+ * (run-notifications, before it posts a system notification) must not wait forever. Private to `playNotificationSound`.
+ */
+const NOTIFICATION_SOUND_RESUME_TIMEOUT_MS = 1000;
+
 /** The browser's AudioContext constructor, including the webkit-prefixed fallback; undefined outside a browser. */
 const AudioContextConstructor =
   typeof window !== 'undefined'
@@ -171,35 +179,82 @@ const playTone = (
 };
 
 /**
+ * Resumes the shared context before a chime: true once it runs, false while the autoplay policy still holds it
+ * back after NOTIFICATION_SOUND_RESUME_TIMEOUT_MS. A rejected resume() (a closed context) rejects this too.
+ * Private to `playNotificationSound`.
+ */
+const resumeAudioContextForChime = async (context: AudioContext): Promise<boolean> => {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const heldBack = new Promise<boolean>((resolve) => {
+    timeoutId = setTimeout(() => resolve(false), NOTIFICATION_SOUND_RESUME_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([context.resume().then(() => true), heldBack]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+/**
  * Plays the two-tone notification chime, honouring the user's preference unless `force`
  * is set (settings previews pass `force` so the user can hear the sound while it is off).
+ * Resolves to whether the tones were scheduled: false while the sound is off, without Web
+ * Audio, when the context does not resume in time, or when resuming or playing throws, so
+ * run-notifications can give a system notification its own sound when the page made none.
  */
-export const playNotificationSound = async ({ force = false } = {}): Promise<void> => {
+export const playNotificationSound = async ({ force = false }: { force?: boolean } = {}): Promise<boolean> => {
   if (!force && !isNotificationSoundEnabled()) {
-    return;
-  }
-
-  const context = getAudioContext();
-  if (!context) {
-    return;
+    return false;
   }
 
   try {
-    if (context.state === 'suspended') {
-      await context.resume();
+    const context = getAudioContext();
+    if (!context) {
+      return false;
+    }
+
+    // Tones go only onto a running context: ones scheduled on a held-back context
+    // would play late, whenever a later gesture finally resumes it.
+    if (context.state !== 'running' && !(await resumeAudioContextForChime(context))) {
+      return false;
     }
 
     const now = context.currentTime;
     playTone(context, 740, now, 0.12, 0.075);
     playTone(context, 988, now + 0.11, 0.16, 0.06);
+    return true;
   } catch (error) {
     // Browsers may block audio until the page receives a user gesture.
     console.warn('Unable to play notification sound:', error);
+    return false;
   }
 };
 
-/** Plays the chime for a finished assistant turn; named for the chat call site it serves. */
-export const playChatCompletionSound = (options = {}): Promise<void> => playNotificationSound(options);
+/** Task-completion chime, used by run-notifications and the settings page's sound preview; resolves like `playNotificationSound`. */
+export const playChatCompletionSound = (options: { force?: boolean } = {}): Promise<boolean> =>
+  playNotificationSound(options);
+
+/**
+ * Unlocks the chime ahead of time: while the sound is on, takes the shared AudioContext (creating it on first
+ * use) and resumes it unless it is already running, so a later chime that plays outside any user gesture is
+ * heard, also after iOS interrupted the context. Errors are swallowed; the next gesture tries again. Call it
+ * from user-gesture handlers: run-notifications does on every pointerdown and keydown. A no-op while the sound is off.
+ */
+export const primeNotificationSound = (): void => {
+  if (!isNotificationSoundEnabled()) {
+    return;
+  }
+
+  try {
+    const context = getAudioContext();
+    if (context && context.state !== 'running') {
+      void context.resume().catch(() => undefined);
+    }
+  } catch {
+    // Creating or resuming a context can throw (a closed context, too many contexts).
+  }
+};
 
 // ---------------------------
 
@@ -241,40 +296,92 @@ export const getPageTitle = (
 };
 
 /**
+ * A session's live title in the loaded projects: its `summary` (where renames and generated
+ * summaries land), else its `name`, trimmed, a blank one counting as missing; null when no
+ * loaded project lists the session with a title. Unlike `getSessionTitle` it never falls back
+ * to a placeholder, so a caller can try its own next source (a pane tab's snapshot). Used by
+ * project-workspace's ProjectEffects (page title), useRunningSessionTitle (the session the
+ * running part is about) and ProjectRunNotifications (alert labels).
+ */
+export const findLiveSessionTitle = (sessionId: string, projects: readonly Project[]): string | null => {
+  for (const project of projects) {
+    for (const session of project.sessions ?? []) {
+      if (session.id !== sessionId) {
+        continue;
+      }
+
+      const summary = typeof session.summary === 'string' ? session.summary.trim() : '';
+      const name = typeof session.name === 'string' ? session.name.trim() : '';
+      if (summary || name) {
+        return summary || name;
+      }
+    }
+  }
+
+  return null;
+};
+
+/**
  * The page part of the tab title, as last given to `setDocumentPageTitle`. It starts as the
  * static `<title>` of index.html, which the login and setup screens keep. Private to the title helpers.
  */
 let documentPageTitle = DEFAULT_PAGE_TITLE;
 
-/** Label of the non-production deployment that leads the tab title; null in production. Private to the title helpers. */
+/** Label of the non-production deployment, written after the status marker and ahead of the rest of the tab title; null in production. Private to the title helpers. */
 let documentTitleEnvironmentLabel: string | null = null;
 
-/** Writes the tab title from the two parts above. Private to the title setters. */
+/** The running part of the tab title (the latest running session and its marker), as last given to `setDocumentTitleActivity`; null while nothing runs. Private to the title helpers. */
+let documentTitleActivity: DocumentTitleStatus | null = null;
+
+/** The alert part of the tab title (unread finished-run alerts), as last given to `setDocumentTitleAlert`; wins over the running part; null when there is none and between blinks. Private to the title helpers. */
+let documentTitleAlert: DocumentTitleStatus | null = null;
+
+/**
+ * Writes the tab title from the four parts above. The status is the alert, else the running part:
+ * with one the title reads "marker label · subject", without one "label · page title"; production
+ * has no label, so no "label · " either. Private to the title setters.
+ */
 const applyDocumentTitle = (): void => {
   if (typeof document === 'undefined') {
     return;
   }
 
-  document.title = documentTitleEnvironmentLabel
-    ? `${documentTitleEnvironmentLabel} · ${documentPageTitle}`
-    : documentPageTitle;
+  const environmentPrefix = documentTitleEnvironmentLabel ? `${documentTitleEnvironmentLabel} · ` : '';
+  const status = documentTitleAlert ?? documentTitleActivity;
+  document.title = status
+    ? `${status.marker} ${environmentPrefix}${status.subject}`
+    : `${environmentPrefix}${documentPageTitle}`;
+};
+
+/** Whether two status parts read the same, so repeating one leaves the title alone. Private to the status setters. */
+const isSameDocumentTitleStatus = (current: DocumentTitleStatus | null, next: DocumentTitleStatus | null): boolean => {
+  if (!current || !next) {
+    return current === next;
+  }
+
+  return current.marker === next.marker && current.subject === next.subject;
 };
 
 /**
- * Sets the browser tab title of the current page. Outside production the deployment
- * environment label stays in front of it ("Stage · My session"); in production the title
- * is written exactly as given. Write page titles through here rather than assigning
- * `document.title`, which would drop the label. Called by project-workspace's ProjectEffects.
+ * Sets the page part of the browser tab title, or puts the app name back with null (the
+ * workspace passes null as it unmounts, so a signed-out tab does not keep the last session's
+ * name). It shows while no status part is set; outside production the deployment environment
+ * label stays in front of it ("Stage · My session"), and in production the title is written
+ * exactly as given. Every call rewrites the title. Write page titles through here rather than
+ * assigning `document.title`, which would drop the label and the status marker. Called by
+ * project-workspace's ProjectEffects.
  */
-export const setDocumentPageTitle = (title: string): void => {
-  documentPageTitle = title;
+export const setDocumentPageTitle = (title: string | null): void => {
+  documentPageTitle = title ?? DEFAULT_PAGE_TITLE;
   applyDocumentTitle();
 };
 
 /**
- * Sets the label that leads the browser tab title, or removes it with null; production
- * passes null, so its titles stay exactly as the page sets them. The title is rewritten
- * only when the label changes. Used by the `useDeploymentEnvironmentTitle` shared hook.
+ * Sets the deployment environment label of the browser tab title, or removes it with null;
+ * production passes null, so its titles stay exactly as the page sets them. The label leads
+ * the title ("Stage · My session"), except that a status marker goes before it ("[Running]
+ * Stage · My session"). The title is rewritten only when the label changes. Used by the
+ * `useDeploymentEnvironmentTitle` shared hook.
  */
 export const setDocumentTitleEnvironmentLabel = (label: string | null): void => {
   if (label === documentTitleEnvironmentLabel) {
@@ -282,6 +389,37 @@ export const setDocumentTitleEnvironmentLabel = (label: string | null): void => 
   }
 
   documentTitleEnvironmentLabel = label;
+  applyDocumentTitle();
+};
+
+/**
+ * Sets the running part of the browser tab title, a localized marker and the session it is
+ * about ("[Running 2] Fix login bug"), or clears it with null. While set, and no alert is,
+ * it shows in place of the page title. Returns early, leaving the title alone, when the marker
+ * and subject are unchanged. Called by project-workspace's useRunningSessionTitle, which
+ * ProjectEffects runs.
+ */
+export const setDocumentTitleActivity = (status: DocumentTitleStatus | null): void => {
+  if (isSameDocumentTitleStatus(documentTitleActivity, status)) {
+    return;
+  }
+
+  documentTitleActivity = status ? { marker: status.marker, subject: status.subject } : null;
+  applyDocumentTitle();
+};
+
+/**
+ * Sets the alert part of the browser tab title, unread finished-run alerts ("[Done] Fix login
+ * bug"), or clears it with null. While set it shows in place of the running part and the page
+ * title. Returns early, leaving the title alone, when the marker and subject are unchanged, so
+ * only a blinking alert rewrites the title every second. Called by run-notifications.
+ */
+export const setDocumentTitleAlert = (status: DocumentTitleStatus | null): void => {
+  if (isSameDocumentTitleStatus(documentTitleAlert, status)) {
+    return;
+  }
+
+  documentTitleAlert = status ? { marker: status.marker, subject: status.subject } : null;
   applyDocumentTitle();
 };
 
@@ -311,7 +449,8 @@ const DEPLOYMENT_ENVIRONMENT_LABEL_KEYS = new Map<string, string>([
  * regardless of case (staging, stage, preprod and pre-production give "Stage" / "预发布"),
  * otherwise the id exactly as the operator wrote it. The key is read from the `common`
  * namespace whichever namespace `t` defaults to. Used by the DeploymentEnvironmentBadge
- * shared UI component and the `useDeploymentEnvironmentTitle` shared hook.
+ * shared UI component, the `useDeploymentEnvironmentTitle` shared hook and run-notifications
+ * (the system notification title).
  */
 export const getDeploymentEnvironmentLabel = (environment: string, t: TFunction): string => {
   const labelKey = DEPLOYMENT_ENVIRONMENT_LABEL_KEYS.get(environment.trim().toLowerCase());
