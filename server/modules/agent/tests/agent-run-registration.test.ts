@@ -331,6 +331,45 @@ test('a run a tab aborted ends without branching or opening a PR, and says so', 
   });
 });
 
+test('a run whose runtime returns while a tab\'s abort is still on its way ends without branching or opening a PR, and says so', async () => {
+  // A turn handed to a process held for background work returns as soon as
+  // the abort reaches it, before the abort has sent the run's complete.
+  await withIsolatedDatabase(async () => {
+    let entered = false;
+    let returnFromRuntime = () => {};
+    let gitCalls = 0;
+    const dependencies = createDependencies(async () => {
+      entered = true;
+      await new Promise<void>((resolve) => { returnFromRuntime = resolve; });
+    });
+    dependencies.spawnProcess = (() => { gitCalls += 1; throw new Error('git should not run after an abort'); }) as unknown as AgentDependencies['spawnProcess'];
+    await withAgentServer(dependencies, async (baseUrl) => {
+      const responsePromise = post(baseUrl, { projectPath: '/home/test/project', message: 'Run it', createBranch: true, stream: false });
+      for (let i = 0; i < 50 && !entered; i += 1) {
+        await new Promise((resolve) => { setTimeout(resolve, 20); });
+      }
+      const [running] = chatRunRegistry.listRunningRuns();
+      assert.ok(running);
+
+      // What chat.abort does, with a runtime that lets the run return first
+      // and answers the abort a moment later.
+      const aborting = chatRunRegistry.abortRun(running.sessionId, async () => {
+        returnFromRuntime();
+        await new Promise((resolve) => { setTimeout(resolve, 20); });
+        return true;
+      });
+
+      const response = await responsePromise;
+      const body = await response.json() as { success: boolean; aborted?: boolean; branch?: unknown };
+      assert.equal(await aborting, true);
+      assert.equal(body.success, false);
+      assert.equal(body.aborted, true);
+      assert.equal(body.branch, undefined);
+      assert.equal(gitCalls, 0);
+    });
+  });
+});
+
 test('a non-streaming run answers with the assistant\'s replies, its token usage and the provider id', async () => {
   await withIsolatedDatabase(async () => {
     const dependencies = createDependencies(async (_command, _options, writer) => {

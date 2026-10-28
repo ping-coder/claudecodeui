@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ChevronRight, Folder, FolderOpen, Upload } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
-import type { FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
+import type { FileTreeDetailedColumn, FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
 import { Input } from '@/shared/ui';
 import FileContextMenu from '@/modules/file-tree/FileContextMenu';
 
@@ -11,6 +11,9 @@ type FileTreeNodeProps = {
   item: FileTreeNodeType;
   level: number;
   viewMode: FileTreeViewMode;
+  // Detailed view only: the metadata columns that fit and the grid they share with the header.
+  detailedColumns: readonly FileTreeDetailedColumn[];
+  detailedGridTemplate: string;
   expandedDirs: Set<string>;
   onItemClick: (item: FileTreeNodeType) => void;
   renderFileIcon: (filename: string) => ReactNode;
@@ -87,6 +90,8 @@ export default function FileTreeNode({
   item,
   level,
   viewMode,
+  detailedColumns,
+  detailedGridTemplate,
   expandedDirs,
   onItemClick,
   renderFileIcon,
@@ -119,7 +124,9 @@ export default function FileTreeNode({
   const isOpen = isDirectory && !isIgnored && expandedDirs.has(item.path);
   const hasChildren = Boolean(isDirectory && item.children && item.children.length > 0);
   const isRenaming = renamingItem?.path === item.path;
-  const dragTargetPath = isDirectory ? item.path : getParentDirectoryPath(item.path);
+  // A top-level file's folder is the project root, sent as '' like a drop on
+  // empty space: an older server refuses the root's own absolute path (403).
+  const dragTargetPath = isDirectory ? item.path : level === 0 ? '' : getParentDirectoryPath(item.path);
   const isDropTarget = isDirectory && dropTarget === item.path;
   // Whatever lands in a gitignored folder would not show up in the tree, so it
   // offers no upload button and does not claim drops: a file dragged over it
@@ -136,7 +143,7 @@ export default function FileTreeNode({
   // View mode only changes the row layout; selection, expansion, and recursion stay shared.
   const rowClassName = cn(
     viewMode === 'detailed'
-      ? 'group grid grid-cols-12 gap-2 py-[3px] pr-2 hover:bg-accent/60 cursor-pointer items-center rounded-sm transition-colors duration-100'
+      ? 'group grid gap-x-2 py-[3px] pr-2 hover:bg-accent/60 cursor-pointer items-center rounded-sm transition-colors duration-100'
       : viewMode === 'compact'
       ? 'group flex items-center justify-between py-[3px] pr-2 hover:bg-accent/60 cursor-pointer rounded-sm transition-colors duration-100'
       : 'group flex items-center gap-1.5 py-[3px] pr-2 cursor-pointer rounded-sm hover:bg-accent/60 transition-colors duration-100',
@@ -151,7 +158,11 @@ export default function FileTreeNode({
     return (
       <div
         className={cn(rowClassName, 'bg-accent/30')}
-        style={{ paddingLeft: `${level * 16 + 4}px` }}
+        // In the detailed grid the input spans the row instead of one metadata track.
+        style={{
+          paddingLeft: `${level * 16 + 4}px`,
+          ...(viewMode === 'detailed' ? { gridTemplateColumns: 'auto minmax(0, 1fr)' } : null),
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
@@ -199,7 +210,10 @@ export default function FileTreeNode({
   const rowContent = (
     <div
       className={rowClassName}
-      style={{ paddingLeft: `${level * 16 + 4}px` }}
+      style={{
+        paddingLeft: `${level * 16 + 4}px`,
+        ...(viewMode === 'detailed' ? { gridTemplateColumns: detailedGridTemplate } : null),
+      }}
       // "Matches a rule" rather than "ignored by git": a tracked file that
       // matches a rule is greyed out too.
       title={isIgnored ? t('fileTree.ignoredByGitignore', { defaultValue: 'Matches a .gitignore rule' }) : undefined}
@@ -208,15 +222,21 @@ export default function FileTreeNode({
     >
       {viewMode === 'detailed' ? (
         <>
-          <div className="col-span-5 flex min-w-0 items-center gap-1.5">
+          <div data-column="name" className="flex min-w-0 items-center gap-1.5">
             <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
             <span className={nameClassName}>{item.name}</span>
           </div>
-          <div className="col-span-2 text-sm tabular-nums text-muted-foreground">
-            {item.type === 'file' ? formatFileSize(item.size) : ''}
-          </div>
-          <div className="col-span-3 text-sm text-muted-foreground">{formatRelativeTime(item.modified)}</div>
-          <div className="col-span-2 font-mono text-sm text-muted-foreground">{item.permissionsRwx || ''}</div>
+          {detailedColumns.includes('size') && (
+            <div data-column="size" className="truncate text-sm tabular-nums text-muted-foreground">
+              {item.type === 'file' ? formatFileSize(item.size) : ''}
+            </div>
+          )}
+          {detailedColumns.includes('modified') && (
+            <div data-column="modified" className="truncate text-sm text-muted-foreground">{formatRelativeTime(item.modified)}</div>
+          )}
+          {detailedColumns.includes('permissions') && (
+            <div data-column="permissions" className="truncate font-mono text-sm text-muted-foreground">{item.permissionsRwx || ''}</div>
+          )}
         </>
       ) : viewMode === 'compact' ? (
         <>
@@ -279,6 +299,8 @@ export default function FileTreeNode({
               item={child}
               level={level + 1}
               viewMode={viewMode}
+              detailedColumns={detailedColumns}
+              detailedGridTemplate={detailedGridTemplate}
               expandedDirs={expandedDirs}
               onItemClick={onItemClick}
               renderFileIcon={renderFileIcon}

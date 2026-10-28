@@ -44,6 +44,7 @@ vi.mock('@/shared/api', () => {
           headers: { 'Content-Type': 'application/json' },
         }),
         savePreferences: ok,
+        patchPreferences: ok,
         drafts: ok,
         saveDraft: ok,
         deleteDraft: ok,

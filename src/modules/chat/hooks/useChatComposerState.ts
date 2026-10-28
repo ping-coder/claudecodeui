@@ -12,11 +12,11 @@ import type {
 import { useDropzone } from 'react-dropzone';
 import { useTranslation } from 'react-i18next';
 
-import { api, ApiRequestError } from '@/shared/api';
+import { api, ApiRequestError, readApiJson } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
-import { buildModelRunOptions } from '@/shared/utils';
-import type { BackgroundSendChoice, BackgroundSendPrompt, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import { buildModelRunOptions, describeBackgroundTask, ownBackgroundTasks } from '@/shared/utils';
+import type { AddChatMessageOptions, BackgroundSendChoice, BackgroundSendPrompt, BackgroundTaskSummary, BusySubmitMode, CommandModalPayload, CostCommandData, HelpCommandData, InsertUnavailableReason, MarkSessionBackground, MarkSessionProcessing, ModelCommandData, OwnInsert, OwnInsertOutcome, QueuedDraft, SendRefusedEvent, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   appendQueuedMessage,
@@ -28,9 +28,9 @@ import {
   writeDraftText,
 } from '@/shared/chatDrafts';
 import { escapeRegExp } from '@/modules/chat/utils/chatFormatting';
-import { describeBackgroundTask, ownBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
 import { useFileMentions } from '@/modules/chat/hooks/useFileMentions';
 import { useInputHistory } from '@/modules/chat/hooks/useInputHistory';
+import { usePendingInserts } from '@/modules/chat/hooks/usePendingInserts';
 import { useSlashCommands } from '@/modules/chat/hooks/useSlashCommands';
 
 type UseChatComposerStateArgs = {
@@ -63,6 +63,28 @@ type UseChatComposerStateArgs = {
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
+  /**
+   * Whether the provider's runtime takes a message in the middle of a turn
+   * (`chat.insert`), from the capability matrix. Absent means it does not, and
+   * a message sent while a turn runs is queued. Such a runtime (Claude) also
+   * runs a message sent once the turn has ended, while background work still
+   * runs, as a new turn of the process that work runs in, so sending then
+   * does not stop the work. It asks first only when the server's hand-over
+   * plan says the message needs a new process, and its sends carry
+   * `keepBackgroundWork`, so the server refuses one rather than stop the work.
+   */
+  supportsMidRunInsert?: boolean;
+  /**
+   * Whether the chat socket is open. An insert sent over a closed one would be
+   * dropped without a word, so none is offered then; absent means closed.
+   */
+  isConnected?: boolean;
+  /**
+   * Which of the given message ids the session's transcript holds once its
+   * latest page is re-read: how an insert whose run ended unheard is found to
+   * have landed. Absent finds nothing, so such an insert's text comes back.
+   */
+  findTranscriptMessages?: (sessionId: string, messageIds: string[]) => Promise<Set<string>>;
   tokenBudget: Record<string, unknown> | null;
   sendMessage: (message: unknown) => void;
   sendByCtrlEnter?: boolean;
@@ -78,7 +100,18 @@ type UseChatComposerStateArgs = {
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
   scrollToBottom: () => void;
-  addMessage: (msg: ChatMessage) => void;
+  addMessage: (msg: ChatMessage, options?: AddChatMessageOptions) => void;
+  /**
+   * Takes a row this composer added (by the `rowId` it gave `addMessage`) out
+   * of a session's transcript: the echo of a send the server refused, or a
+   * notice that turned out wrong. Absent leaves such rows where they are.
+   */
+  removeMessage?: (sessionId: string, rowId: string) => void;
+  /**
+   * Reports the background tasks a session is left with, which a refused send
+   * puts the session back to after it was marked busy for that send.
+   */
+  onSessionBackground?: MarkSessionBackground;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
 };
@@ -110,11 +143,162 @@ type SubmitOptions = {
    * run that command instead of being sent.
    */
   skipCommandInterception?: boolean;
+  /**
+   * What a message submitted while a turn runs does. Absent inserts it when it
+   * can go into the turn (resolveInsertUnavailableReason) and queues it
+   * otherwise; `queue` always queues. Once the turn has ended with background
+   * work still running, `queue` queues the message until the work finishes
+   * where a send would not ask first. No effect while the session is idle.
+   */
+  busySubmitMode?: BusySubmitMode;
 };
 
 const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
 };
+
+/**
+ * A message as a submit took it from the composer: the draft scope it was
+ * typed in, its text and its browser files. The composer stays editable while
+ * a submit waits (on an upload, a new chat's session or the hand-over plan),
+ * so once the message has left, the composer may hold more, or show another
+ * scope.
+ */
+type ComposerSubmission = {
+  scope: string | null;
+  text: string;
+  files: File[];
+};
+
+/**
+ * A composer text with a message that has left it taken off the front: what
+ * was typed after the message, without the blank space before it. A text that
+ * no longer opens with the message (the user rewrote it) is kept whole.
+ */
+const withoutSubmittedText = (current: string, submittedText: string): string => {
+  const message = submittedText.trimEnd();
+  return current.startsWith(message) ? current.slice(message.length).trimStart() : current;
+};
+
+/**
+ * Why a message cannot go into the running turn, or null when it can. The
+ * provider must take messages mid-turn; the CLI never reads a slash command
+ * mid-turn, and inserts carry text only for now; and the turn must be one
+ * CloudCLI drives (a terminal CLI's cannot be written to) over an open
+ * socket, while no sent message is being replaced.
+ */
+const resolveInsertUnavailableReason = ({
+  supportsMidRunInsert,
+  canAbortSession,
+  isConnected,
+  isEditing,
+  content,
+  hasAttachments,
+}: {
+  supportsMidRunInsert: boolean;
+  canAbortSession: boolean;
+  isConnected: boolean;
+  isEditing: boolean;
+  content: string;
+  hasAttachments: boolean;
+}): InsertUnavailableReason | null => {
+  if (!supportsMidRunInsert) {
+    return 'provider';
+  }
+  if (content.trimStart().startsWith('/')) {
+    return 'slashCommand';
+  }
+  if (hasAttachments) {
+    return 'attachments';
+  }
+  if (!canAbortSession || !isConnected || isEditing) {
+    return 'unavailable';
+  }
+  return null;
+};
+
+/** The transcript lookup used when the caller gives none: it finds nothing. */
+const findNoTranscriptMessages = async (): Promise<Set<string>> => new Set<string>();
+
+/** The refusals an insert falls back from by sending or queueing its text; any other gives the text back. */
+const INSERT_FALLBACK_REASONS = new Set(['NO_ACTIVE_RUN', 'UNSUPPORTED', 'SLASH_COMMAND']);
+
+/** How many notices of inserts given back unanswered are kept, to take out should one turn out delivered. */
+const UNANSWERED_NOTICES_KEPT = 20;
+
+/** How long a send waits for the server's hand-over plan before it goes without one. */
+const HAND_OVER_PLAN_TIMEOUT_MS = 5_000;
+
+/**
+ * The server's word on whether a send with given options would run in the
+ * process the session holds open for its background work: `heldWork` (such a
+ * process holds work), `canHandOver` (the send would go in) and `changes`
+ * (what keeps it out otherwise; see BackgroundSendPrompt).
+ */
+type HandOverPlan = {
+  heldWork: boolean;
+  canHandOver: boolean;
+  changes: string[];
+};
+
+/**
+ * Asks the server for a send's hand-over plan (see HandOverPlan). Null when
+ * it cannot tell: a server older than the route, a failed or slow request, or
+ * an answer of another shape.
+ */
+const readHandOverPlan = async (sessionId: string, options: QueuedSendOptions): Promise<HandOverPlan | null> => {
+  try {
+    const response = await api.providers.handOverPlan(sessionId, options, {
+      ...(typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(HAND_OVER_PLAN_TIMEOUT_MS) } : {}),
+    });
+    const { data } = await readApiJson<{ data?: Partial<Record<keyof HandOverPlan, unknown>> }>(response);
+    if (!data || typeof data.heldWork !== 'boolean' || typeof data.canHandOver !== 'boolean') {
+      return null;
+    }
+    return {
+      heldWork: data.heldWork,
+      canHandOver: data.canHandOver,
+      changes: Array.isArray(data.changes)
+        ? data.changes.filter((change): change is string => typeof change === 'string')
+        : [],
+    };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * A store row id for a row this composer adds and may take out again. Shaped
+ * like the ones chat's session state makes: a user echo needs the `local_`
+ * prefix for the history refresh to match it with the persisted turn.
+ */
+const createLocalRowId = (): string => `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+/** A send made with keepBackgroundWork, as its composer may have to undo and resend it. */
+type KeepWorkSend = {
+  /** The mounted composer that made it. */
+  owner: symbol;
+  sessionId: string;
+  content: string;
+  uploadedAttachments: unknown[];
+  /** The browser files it carried, given back with its text if the user cancels. */
+  browserFiles: File[];
+  options: QueuedSendOptions;
+  /** The store row of its echo in the transcript. */
+  echoRowId: string;
+  /** The session's background tasks when it was sent, which the session goes back to. */
+  tasks: BackgroundTaskSummary[];
+};
+
+/**
+ * The latest `chat.send` this page made to each session, while it was made
+ * with keepBackgroundWork. A `send_refused` answers the socket every pane on
+ * the page shares and names no request, so only the composer that made the
+ * session's latest send undoes it. A send the server started is never refused
+ * afterwards, so a record it leaves behind is never acted on; the next send to
+ * the session replaces it.
+ */
+const keepWorkSends = new Map<string, KeepWorkSend>();
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
@@ -225,6 +409,9 @@ export function useChatComposerState({
   isLoading,
   processingSessions,
   canAbortSession,
+  supportsMidRunInsert = false,
+  isConnected = false,
+  findTranscriptMessages = findNoTranscriptMessages,
   tokenBudget,
   sendMessage,
   sendByCtrlEnter,
@@ -234,6 +421,8 @@ export function useChatComposerState({
   onShowSettings,
   scrollToBottom,
   addMessage,
+  removeMessage,
+  onSessionBackground,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
 }: UseChatComposerStateArgs) {
@@ -286,6 +475,11 @@ export function useChatComposerState({
     ) => Promise<void>) | null
   >(null);
   const inputValueRef = useRef(input);
+  // The draft text this composer last agreed with for its scope: the text it
+  // last wrote there or followed from there. A draft that reads otherwise was
+  // written by another composer on the scope, the other pane of a split on
+  // the same session (see restoreDraft).
+  const syncedDraftRef = useRef({ scope: inputState.scope, text: inputState.value });
   const selectedProjectId = selectedProject?.projectId;
   // Prefer the stable backend-allocated id (selectedSession.id) but fall back
   // to currentSessionId for a just-established session that hasn't been
@@ -333,6 +527,26 @@ export function useChatComposerState({
   }, []);
   const sessionKeyRef = useRef(sessionKey);
   sessionKeyRef.current = sessionKey;
+  // Read when a refused insert falls back, which happens on a server frame
+  // rather than in a render: whether a turn is still in flight then.
+  const isLoadingRef = useRef(isLoading);
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
+  // Per session, the own inserts whose text was given back and the block of
+  // text they form at the start of its composer or draft. Texts this composer
+  // gives back in a burst (a stop takes back every pending insert) go there in
+  // the order they were sent, whatever order their frames come in; the other
+  // pane of a split on the session keeps its own block, so between the two
+  // the order is the order their frames came in.
+  const restoredInsertsRef = useRef(new Map<string, { inserts: OwnInsert[]; text: string }>());
+  // The transcript notice that an own insert went back unanswered, by insert
+  // id, with the session it was written to: taken out again should the insert
+  // turn out to have been delivered.
+  const unansweredNoticesRef = useRef(new Map<string, { sessionId: string; rowId: string }>());
+  // This composer's mark on the sends it made with keepBackgroundWork (see
+  // keepWorkSends), made once per mount.
+  const [composerToken] = useState(() => Symbol('chat-composer'));
 
   // Recall writes go through the same pair of stores a send reads: the state
   // (for the render) and inputValueRef (so an immediate Enter submits the
@@ -591,6 +805,41 @@ export function useChatComposerState({
     textareaRef,
   });
 
+  // Takes a submitted message out of the composer once it has left: sent,
+  // queued or inserted. Only what the submit took goes (see
+  // ComposerSubmission): its browser files, and its text from the scope it
+  // was typed in, while it still opens that scope's text, keeping whatever
+  // was typed after it. Once the composer shows another scope, the text comes
+  // out of its scope's draft, so going back does not offer it to be sent
+  // again, and the scope now open is left alone.
+  const takeSubmissionOutOfComposer = useCallback(({ scope, text, files }: ComposerSubmission) => {
+    if (files.length > 0) {
+      setAttachedFiles((attached) => attached.filter((file) => !files.includes(file)));
+    }
+    const showsScope = draftScopeRef.current === scope;
+    if (showsScope) {
+      setFileErrors(new Map());
+    }
+    const current = showsScope ? inputValueRef.current : scope ? readDraftText(scope) : '';
+    const remaining = withoutSubmittedText(current, text);
+    if (remaining === current) {
+      return;
+    }
+    if (showsScope) {
+      setInput(remaining);
+      inputValueRef.current = remaining;
+      resetCommandMenuState();
+      setIsTextareaExpanded(false);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+    }
+    if (scope) {
+      writeDraftText(scope, remaining);
+      restoredInsertsRef.current.delete(scope);
+    }
+  }, [resetCommandMenuState, setInput]);
+
   const syncInputOverlayScroll = useCallback((target: HTMLTextAreaElement) => {
     if (!inputHighlightRef.current || !target) {
       return;
@@ -737,17 +986,18 @@ export function useChatComposerState({
     processingSessionsRef.current = processingSessions;
   }, [processingSessions]);
 
-  // Sending over background work asks first. The dialog is rendered by the
-  // composer; the submit awaits the user's choice through this resolver.
+  // Sending over background work asks first when the send would stop it. The
+  // dialog is rendered by the composer; the submit awaits the user's choice
+  // through this resolver.
   const [backgroundSendPrompt, setBackgroundSendPrompt] = useState<BackgroundSendPrompt | null>(null);
   const backgroundSendResolverRef = useRef<((choice: BackgroundSendChoice) => void) | null>(null);
 
   const askBeforeSendingOverBackgroundWork = useCallback(
-    (work: string[]) => new Promise<BackgroundSendChoice>((resolve) => {
+    (prompt: BackgroundSendPrompt) => new Promise<BackgroundSendChoice>((resolve) => {
       // Only one prompt at a time: a stale one is answered "cancel".
       backgroundSendResolverRef.current?.('cancel');
       backgroundSendResolverRef.current = resolve;
-      setBackgroundSendPrompt({ work });
+      setBackgroundSendPrompt(prompt);
     }),
     [],
   );
@@ -765,6 +1015,42 @@ export function useChatComposerState({
     backgroundSendResolverRef.current = null;
   }, []);
 
+  // What a send to a session whose turn has ended does while its background
+  // work runs: `send` (with keepBackgroundWork when the work is to keep
+  // running), `queue` behind the work, or `cancel`. A provider whose runtime
+  // runs the turn in the process the work runs in asks the server first. When
+  // the turn can go there, or the server cannot say, it is sent with
+  // keepBackgroundWork, so the server refuses it rather than stop the work;
+  // when it cannot, the user is asked, told what only a new process can
+  // apply. Elsewhere, and for an edit, every new turn replaces that process,
+  // so the user is asked. Only while the composer shows the session, though:
+  // once it shows another, the answer is `cancel`, unasked, and the caller
+  // leaves the message in the session's draft.
+  const decideSendOverBackgroundWork = useCallback(async (
+    sessionId: string,
+    options: QueuedSendOptions,
+    isEdit: boolean,
+  ): Promise<{ choice: BackgroundSendChoice; keepBackgroundWork: boolean }> => {
+    const work = ownBackgroundTasks(processingSessionsRef.current?.get(sessionId)?.tasks ?? [])
+      .map((task) => describeBackgroundTask(task, t));
+    let prompt: BackgroundSendPrompt = { work };
+    if (supportsMidRunInsert && !isEdit) {
+      const plan = await readHandOverPlan(sessionId, options);
+      if (!plan || !plan.heldWork || plan.canHandOver) {
+        return { choice: 'send', keepBackgroundWork: true };
+      }
+      prompt = { work, changes: plan.changes };
+    }
+    // The plan, or the upload a submit waits on before it, can come back
+    // after the user has opened another session. A prompt there would ask
+    // about work and a message that session does not have, and send anyway
+    // would send the message to a session the user is not looking at.
+    if (sessionKeyRef.current !== sessionId) {
+      return { choice: 'cancel', keepBackgroundWork: false };
+    }
+    return { choice: await askBeforeSendingOverBackgroundWork(prompt), keepBackgroundWork: false };
+  }, [askBeforeSendingOverBackgroundWork, supportsMidRunInsert, t]);
+
   // Persist a message to send "when this finishes" and show it as the queued
   // card. Used while a turn is in flight and when the user chooses to queue
   // behind background work. Attachments must already be uploaded.
@@ -775,33 +1061,25 @@ export function useChatComposerState({
   // does the append against what it has stored, and the card shows what it
   // returns: exactly what will be sent.
   //
-  // The composer empties when the message is taken, as it does for a direct
-  // send, not when the server answers: what the user types during that round
-  // trip is the next follow-up and must not be erased with this one. If the
-  // server refuses the message, it goes back into the composer, in front of
-  // anything typed since, and the composer says so, rather than showing a card
-  // nothing will send.
+  // A message submitted from the composer (`submission`) comes out of it when
+  // the message is taken, as for a direct send, not when the server answers:
+  // what the user types during that round trip is the next follow-up and
+  // must not be erased with this one. If the server refuses the message, it
+  // goes back into the composer, in front of anything typed since, and the
+  // composer says so, rather than showing a card nothing will send.
+  //
+  // Without `submission` it queues a message that already left the composer
+  // (an insert or a send the server refused), so nothing in the composer is
+  // taken out: it was emptied when the message was taken, and what it holds
+  // now came after.
   const queueMessage = useCallback(
-    async (durableDraft: QueuedDraft, queuedSessionKey: string | null) => {
-      const queuedFromOpenComposer = !queuedSessionKey || sessionKeyRef.current === queuedSessionKey;
-      if (queuedFromOpenComposer) {
-        setInput('');
-        inputValueRef.current = '';
-        setAttachedFiles([]);
-        setFileErrors(new Map());
-        resetCommandMenuState();
-        setIsTextareaExpanded(false);
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto';
-        }
-        if (draftScopeRef.current) {
-          writeDraftText(draftScopeRef.current, '');
-        }
-      } else if (queuedSessionKey && readDraftText(queuedSessionKey) === durableDraft.content) {
-        // The user changed sessions during the upload. The composer they left
-        // still holds the text as its draft: clear it, or going back and
-        // pressing Enter would queue the same message a second time.
-        writeDraftText(queuedSessionKey, '');
+    async (
+      durableDraft: QueuedDraft,
+      queuedSessionKey: string | null,
+      { submission }: { submission?: ComposerSubmission } = {},
+    ) => {
+      if (submission) {
+        takeSubmissionOutOfComposer(submission);
       }
 
       let queuedCard = durableDraft;
@@ -839,8 +1117,8 @@ export function useChatComposerState({
             const restored = withTypedSince(inputValueRef.current);
             setInput(restored);
             inputValueRef.current = restored;
-            if (queuedFromOpenComposer) {
-              setAttachedFiles((current) => [...durableDraft.attachments, ...current]);
+            if (submission) {
+              setAttachedFiles((current) => [...submission.files, ...current]);
             }
             if (draftScopeRef.current) {
               writeDraftText(draftScopeRef.current, restored);
@@ -876,8 +1154,375 @@ export function useChatComposerState({
           : queuedCard.attachments,
       }));
     },
-    [addMessage, recordSentMessage, resetCommandMenuState, setInput, t],
+    [addMessage, recordSentMessage, setInput, t, takeSubmissionOutOfComposer],
   );
+
+  // Starts a turn: the message's echo in the transcript, the session marked
+  // busy, and the frame that sends it. Shared by a submit, by the normal send
+  // an insert falls back to when its run ended before it got there, and by the
+  // send the user confirms after the server refused one.
+  const startTurn = useCallback((turn: {
+    sessionId: string;
+    content: string;
+    uploadedAttachments: unknown[];
+    options: QueuedSendOptions;
+    /** The already-sent message this one replaces, or null for a new turn. */
+    anchorId: string | null;
+    /**
+     * Asks the server to keep the session's background work: a turn that
+     * cannot run in the process the work runs in is refused (`send_refused`,
+     * see handleSendRefused) rather than started in a new process, which
+     * would stop the work. A plain `chat.send` only.
+     */
+    keepBackgroundWork: boolean;
+    /** The browser files behind `uploadedAttachments`, given back with the text if a refusal is cancelled. */
+    browserFiles?: File[];
+  }) => {
+    const attachmentRecords = turn.uploadedAttachments as ChatAttachment[];
+    const userMessage: ChatMessage = {
+      type: 'user',
+      content: turn.content,
+      images: attachmentRecords.filter(isImageAttachment),
+      files: attachmentRecords.filter((attachment) => !isImageAttachment(attachment)),
+      timestamp: new Date(),
+      // Tags this echo as the replacement, so the truncation the server
+      // broadcasts a moment later cuts the turns being replaced without
+      // taking the message the user just sent with them.
+      ...(turn.anchorId ? { replacesAnchorId: turn.anchorId } : {}),
+    };
+
+    const echoRowId = createLocalRowId();
+    addMessage(userMessage, { rowId: echoRowId });
+    const keepBackgroundWork = turn.keepBackgroundWork && !turn.anchorId;
+    keepWorkSends.delete(turn.sessionId);
+    if (keepBackgroundWork) {
+      keepWorkSends.set(turn.sessionId, {
+        owner: composerToken,
+        sessionId: turn.sessionId,
+        content: turn.content,
+        uploadedAttachments: turn.uploadedAttachments,
+        browserFiles: turn.browserFiles ?? [],
+        options: turn.options,
+        echoRowId,
+        tasks: processingSessionsRef.current?.get(turn.sessionId)?.tasks ?? [],
+      });
+    }
+    // Mark this request as processing in the per-session activity map (the
+    // single source of truth the indicator derives from). The id is always
+    // concrete at this point — no pending placeholder exists anymore.
+    onSessionProcessing?.(turn.sessionId, {
+      statusText: null,
+      canInterrupt: true,
+    });
+
+    setIsUserScrolledUp(false);
+    setTimeout(() => scrollToBottom(), 100);
+
+    // One message shape for every provider. The backend resolves the
+    // provider, project path, and provider-native resume id from the
+    // session row; `options` only carries composer-level preferences.
+    sendMessage({
+      // Replacing an already-sent message is its own frame: it changes the
+      // shape of the conversation, so it gets validated separately and can
+      // report why it was refused.
+      type: turn.anchorId ? 'chat.edit-send' : 'chat.send',
+      sessionId: turn.sessionId,
+      ...(turn.anchorId ? { anchorId: turn.anchorId } : {}),
+      content: turn.content,
+      options: {
+        ...turn.options,
+        attachments: turn.uploadedAttachments,
+        ...(keepBackgroundWork ? { keepBackgroundWork: true } : {}),
+      },
+    });
+  }, [addMessage, composerToken, onSessionProcessing, scrollToBottom, sendMessage, setIsUserScrolledUp]);
+
+  // A session's composer text: this composer's when it shows the session
+  // (inputValueRef, which restoreDraft keeps up with the other pane of a
+  // split), else the session's draft.
+  const readSessionText = useCallback((sessionId: string): string => (
+    sessionKeyRef.current === sessionId ? inputValueRef.current : readDraftText(sessionId)
+  ), []);
+
+  // Writes a session's composer text: into the composer and its draft when it
+  // shows the session, else into that session's draft.
+  const writeSessionText = useCallback((sessionId: string, text: string) => {
+    if (sessionKeyRef.current === sessionId) {
+      setInput(text);
+      inputValueRef.current = text;
+      if (draftScopeRef.current) {
+        writeDraftText(draftScopeRef.current, text);
+      }
+      return;
+    }
+    writeDraftText(sessionId, text);
+  }, [setInput]);
+
+  // Puts a message that did not go back into its composer, ahead of anything
+  // typed since, with its browser files; or, once the composer shows another
+  // session, into that session's draft, where browser files cannot follow.
+  const putTextBack = useCallback((sessionId: string, text: string, browserFiles: File[] = []) => {
+    const current = readSessionText(sessionId);
+    writeSessionText(sessionId, current.trim() ? `${text}\n\n${current}` : text);
+    if (browserFiles.length > 0 && sessionKeyRef.current === sessionId) {
+      setAttachedFiles((attached) => [...browserFiles, ...attached]);
+    }
+  }, [readSessionText, writeSessionText]);
+
+  // Takes a message putTextBack gave back out again, as it is sent or queued
+  // after all: its text while it still opens the composer (or the session's
+  // draft) as put back, keeping what follows it, and its browser files.
+  const takeTextBack = useCallback((sessionId: string, text: string, browserFiles: File[] = []) => {
+    const current = readSessionText(sessionId);
+    if (current === text || current.startsWith(`${text}\n\n`)) {
+      writeSessionText(sessionId, current.slice(text.length).replace(/^\n\n/, ''));
+    }
+    if (browserFiles.length > 0 && sessionKeyRef.current === sessionId) {
+      setAttachedFiles((attached) => attached.filter((file) => !browserFiles.includes(file)));
+    }
+  }, [readSessionText, writeSessionText]);
+
+  // Gives an own insert's text back: into the composer when it shows the
+  // insert's session, else into that session's draft, ahead of anything typed
+  // since. Texts given back in a burst line up in the order they were sent.
+  const restoreInsertText = useCallback((insert: OwnInsert) => {
+    const current = readSessionText(insert.sessionId);
+    const block = restoredInsertsRef.current.get(insert.sessionId);
+    // Still the block given back before, possibly with typing after it.
+    const continuesBlock = Boolean(block && (current === block.text || current.startsWith(`${block.text}\n\n`)));
+    const inserts = [...(continuesBlock && block ? block.inserts : []), insert]
+      .sort((first, second) => first.sentAt - second.sentAt);
+    const text = inserts.map((restored) => restored.content).join('\n\n');
+    const typedSince = continuesBlock && block
+      ? current.slice(block.text.length)
+      : current.trim() ? `\n\n${current}` : '';
+    restoredInsertsRef.current.set(insert.sessionId, { inserts, text });
+    writeSessionText(insert.sessionId, `${text}${typedSince}`);
+  }, [readSessionText, writeSessionText]);
+
+  // Takes an own insert's text back out of the block restoreInsertText gave
+  // back, as it reached the model after all: only while the block still opens
+  // the composer (or the session's draft) as it was given back, with any
+  // typing after it kept. False when the user has changed the block, or sent
+  // it, since.
+  const takeBackRestoredInsert = useCallback((insert: OwnInsert): boolean => {
+    const block = restoredInsertsRef.current.get(insert.sessionId);
+    if (!block || !block.inserts.some((restored) => restored.insertId === insert.insertId)) {
+      return false;
+    }
+    const current = readSessionText(insert.sessionId);
+    if (current !== block.text && !current.startsWith(`${block.text}\n\n`)) {
+      return false;
+    }
+    const inserts = block.inserts.filter((restored) => restored.insertId !== insert.insertId);
+    const text = inserts.map((restored) => restored.content).join('\n\n');
+    // Empty, or the typing after the block with the blank line before it.
+    const typedSince = current.slice(block.text.length);
+    if (inserts.length > 0) {
+      restoredInsertsRef.current.set(insert.sessionId, { inserts, text });
+    } else {
+      restoredInsertsRef.current.delete(insert.sessionId);
+    }
+    writeSessionText(insert.sessionId, text ? `${text}${typedSince}` : typedSince.replace(/^\n\n/, ''));
+    return true;
+  }, [readSessionText, writeSessionText]);
+
+  // Sends an insert the server refused the way its reason says: a session
+  // whose turn ended before the insert got there takes a normal send (decided
+  // over background work like any other: see decideSendOverBackgroundWork),
+  // and the rest is queued, as is everything when a turn is in flight again
+  // or the composer has moved to another session. The composer is never
+  // cleared here: it was emptied when the insert was sent, and anything in it
+  // now was typed since.
+  const fallBackFromRefusedInsert = useCallback(async (insert: OwnInsert, reason: string) => {
+    const draft: QueuedDraft = {
+      content: insert.content,
+      attachments: [],
+      uploadedAttachments: [],
+      options: buildSendOptions(insert.content),
+    };
+    const sendsNow = reason === 'NO_ACTIVE_RUN'
+      && !isLoadingRef.current
+      && sessionKeyRef.current === insert.sessionId;
+    if (!sendsNow) {
+      await queueMessage(draft, insert.sessionId);
+      return;
+    }
+
+    const options = draft.options ?? {};
+    let keepBackgroundWork = supportsMidRunInsert;
+    if (processingSessionsRef.current?.get(insert.sessionId)?.background) {
+      const decision = await decideSendOverBackgroundWork(insert.sessionId, options, false);
+      // Cancelled, or left unasked once the composer shows another session:
+      // the text goes back to the insert's session either way.
+      if (decision.choice === 'cancel') {
+        restoreInsertText(insert);
+        return;
+      }
+      if (decision.choice === 'queue') {
+        await queueMessage(draft, insert.sessionId);
+        return;
+      }
+      keepBackgroundWork = decision.keepBackgroundWork;
+    }
+
+    startTurn({
+      sessionId: insert.sessionId,
+      content: insert.content,
+      uploadedAttachments: [],
+      options,
+      anchorId: null,
+      keepBackgroundWork,
+    });
+  }, [buildSendOptions, decideSendOverBackgroundWork, queueMessage, restoreInsertText, startTurn, supportsMidRunInsert]);
+
+  // What the composer does when an insert it sent ends. Only this composer
+  // hears it, so in a split workspace the text goes back only where it was
+  // typed. A stop or a withdrawal is the user's own doing and says nothing;
+  // any other text given back says why in the transcript, when it is the one
+  // on screen.
+  const handleOwnInsertSettled = useCallback((insert: OwnInsert, outcome: OwnInsertOutcome) => {
+    if (outcome.kind === 'delivered') {
+      return;
+    }
+    if (outcome.kind === 'refused' && INSERT_FALLBACK_REASONS.has(outcome.reason)) {
+      void fallBackFromRefusedInsert(insert, outcome.reason);
+      return;
+    }
+
+    restoreInsertText(insert);
+    if (outcome.kind === 'returned' && outcome.reason === 'cancelled') {
+      return;
+    }
+    if (sessionKeyRef.current !== insert.sessionId) {
+      return;
+    }
+    const unanswered = outcome.kind === 'returned' && outcome.reason === 'noResponse';
+    const rowId = createLocalRowId();
+    addMessage({
+      type: 'error',
+      content: unanswered
+        ? t('input.insert.noResponse', {
+            defaultValue: 'The insert got no answer, so the message is back in the composer.',
+          })
+        : t('input.insert.notDelivered', {
+            defaultValue: 'The insert was not delivered, so the message is back in the composer.',
+          }),
+      timestamp: new Date(),
+    }, { rowId });
+    if (unanswered) {
+      // An unanswered insert may still turn out delivered (see
+      // handleReturnedInsertEnded), and this notice wrong.
+      const notices = unansweredNoticesRef.current;
+      notices.set(insert.insertId, { sessionId: insert.sessionId, rowId });
+      if (notices.size > UNANSWERED_NOTICES_KEPT) {
+        const oldestInsertId = notices.keys().next().value;
+        if (oldestInsertId !== undefined) {
+          notices.delete(oldestInsertId);
+        }
+      }
+    }
+  }, [addMessage, fallBackFromRefusedInsert, restoreInsertText, t]);
+
+  // How an own insert whose text went back unanswered turned out. Delivered
+  // after all, its text comes back out of the composer (or its session's
+  // draft) while it is still there as given back, and the notice that said
+  // it went back goes, being wrong. When the user has changed or sent the
+  // text since, the text stays, and the transcript says the insert landed.
+  const handleReturnedInsertEnded = useCallback((insert: OwnInsert, delivered: boolean) => {
+    const notice = unansweredNoticesRef.current.get(insert.insertId);
+    unansweredNoticesRef.current.delete(insert.insertId);
+    if (!delivered) {
+      return;
+    }
+    if (notice) {
+      removeMessage?.(notice.sessionId, notice.rowId);
+    }
+    if (takeBackRestoredInsert(insert) || sessionKeyRef.current !== insert.sessionId) {
+      return;
+    }
+    addMessage({
+      type: 'error',
+      content: t('input.insert.deliveredLate', {
+        defaultValue: 'The insert was delivered after all, so it does not need sending again.',
+      }),
+      timestamp: new Date(),
+    });
+  }, [addMessage, removeMessage, takeBackRestoredInsert, t]);
+
+  const {
+    pendingInserts,
+    sendInsert,
+    withdrawInsert,
+    handleInsertStatus,
+    handleInsertRunEnded,
+  } = usePendingInserts({
+    sessionId: sessionKey,
+    sendMessage,
+    onOwnInsertSettled: handleOwnInsertSettled,
+    onReturnedInsertEnded: handleReturnedInsertEnded,
+    findTranscriptMessages,
+  });
+
+  // The server did not start a send this composer made with
+  // keepBackgroundWork: the turn could not run in the process the session's
+  // background work runs in, and a new process would have stopped the work.
+  // Only the composer that made the session's latest send acts (see
+  // keepWorkSends). It undoes the optimistic turn (the echo, the session
+  // marked busy), puts the message back in the composer at once, so nothing
+  // is lost whatever happens next, and asks as it would have before sending,
+  // naming what keeps the turn out of that process: cancel leaves the message
+  // in the composer, queue and send anyway take it out again. Once the
+  // composer shows another session, the text goes back into that session's
+  // draft and nothing is asked.
+  const handleSendRefused = useCallback((event: SendRefusedEvent) => {
+    const refused = keepWorkSends.get(event.sessionId);
+    if (!refused || refused.owner !== composerToken) {
+      return;
+    }
+    keepWorkSends.delete(event.sessionId);
+    removeMessage?.(refused.sessionId, refused.echoRowId);
+    onSessionBackground?.(refused.sessionId, refused.tasks);
+    putTextBack(refused.sessionId, refused.content, refused.browserFiles);
+    if (sessionKeyRef.current !== refused.sessionId) {
+      return;
+    }
+
+    void (async () => {
+      const work = ownBackgroundTasks(refused.tasks).map((task) => describeBackgroundTask(task, t));
+      const choice = await askBeforeSendingOverBackgroundWork({ work, changes: event.changes });
+      if (choice === 'cancel') {
+        return;
+      }
+      takeTextBack(refused.sessionId, refused.content, refused.browserFiles);
+      if (choice === 'queue') {
+        await queueMessage({
+          content: refused.content,
+          attachments: refused.browserFiles,
+          uploadedAttachments: refused.uploadedAttachments,
+          options: refused.options,
+        }, refused.sessionId);
+        return;
+      }
+      startTurn({
+        sessionId: refused.sessionId,
+        content: refused.content,
+        uploadedAttachments: refused.uploadedAttachments,
+        options: refused.options,
+        anchorId: null,
+        keepBackgroundWork: false,
+      });
+    })();
+  }, [askBeforeSendingOverBackgroundWork, composerToken, onSessionBackground, putTextBack, queueMessage, removeMessage, startTurn, t, takeTextBack]);
+
+  // A send this composer made can be refused only while it is mounted to undo it.
+  useEffect(() => () => {
+    for (const [sessionId, send] of keepWorkSends) {
+      if (send.owner === composerToken) {
+        keepWorkSends.delete(sessionId);
+      }
+    }
+  }, [composerToken]);
 
   const submitMessage = useCallback(
     async (
@@ -900,6 +1545,15 @@ export function useChatComposerState({
         return;
       }
 
+      // What comes out of the composer once the message has left (see
+      // takeSubmissionOutOfComposer), fixed now: the awaits below leave the
+      // composer editable, and the user may type on or change sessions.
+      const submission: ComposerSubmission = {
+        scope: draftScopeRef.current,
+        text: currentInput,
+        files: currentAttachments,
+      };
+
       // A turn is already in flight: stash this message instead of sending it.
       // Upload attached files now so the queued record contains durable image
       // descriptors that can be sent even if another session is open later.
@@ -910,6 +1564,25 @@ export function useChatComposerState({
         if (queuedSubmission) {
           queuedDraftSessionRef.current = sessionKey;
           setQueuedDraft(queuedSubmission);
+          return;
+        }
+
+        // Into the running turn, which the model reads at its next step,
+        // unless the user picked Queue or the message cannot go in. The
+        // composer empties as for any send; the card above it shows the
+        // insert until the model has read it.
+        const insertUnavailable = resolveInsertUnavailableReason({
+          supportsMidRunInsert,
+          canAbortSession,
+          isConnected,
+          isEditing: Boolean(editingAnchorId),
+          content: currentInput,
+          hasAttachments: currentAttachments.length > 0,
+        });
+        if (submitOptions?.busySubmitMode !== 'queue' && insertUnavailable === null && sessionKey) {
+          sendInsert(sessionKey, currentInput);
+          recordSentMessage(currentInput, sessionKey);
+          takeSubmissionOutOfComposer(submission);
           return;
         }
 
@@ -934,7 +1607,7 @@ export function useChatComposerState({
           attachments: currentAttachments,
           uploadedAttachments,
           options: queuedOptions,
-        }, queuedSessionKey);
+        }, queuedSessionKey, { submission });
         return;
       }
 
@@ -1049,17 +1722,42 @@ export function useChatComposerState({
         });
       }
 
-      // A new turn replaces the CLI process a session's background work runs
-      // under: the agents, workflows and commands it still has going are
-      // stopped, or finish where nothing is listening. Sending is the user's
-      // call, but not one to make for them — and queueing behind the work,
-      // which the server holds until it finishes, is the safe alternative.
-      const backgroundActivity = processingSessionsRef.current?.get(targetSessionId);
-      if (backgroundActivity?.background) {
-        const work = ownBackgroundTasks(backgroundActivity.tasks ?? [])
-          .map((task) => describeBackgroundTask(task, t));
-        const choice = await askBeforeSendingOverBackgroundWork(work);
+      // A session whose turn has ended can still have background work going.
+      // A provider that takes inserts (Claude) runs the message as a new turn
+      // of the process that work runs in, which keeps it going, unless the
+      // message needs a new process; the send key with Alt queues it behind
+      // the work instead. Elsewhere, and for an edit (it resumes the
+      // conversation partway, in a process of its own), a new turn replaces
+      // that process: the agents, workflows and commands it still has going
+      // are stopped, or finish where nothing is listening. Sending is then the
+      // user's call, but not one to make for them, and queueing behind the
+      // work, which the server holds until it finishes, is the safe
+      // alternative (see decideSendOverBackgroundWork). Every send of such a
+      // provider asks the server to keep the work, even where none shows here
+      // yet: the server refuses it rather than stop work it holds.
+      const sendOptions = queuedSubmission?.options ?? buildSendOptions(messageContent);
+      const runsBesideWork = supportsMidRunInsert && !editingAnchorId;
+      let keepBackgroundWork = runsBesideWork;
+      if (processingSessionsRef.current?.get(targetSessionId)?.background) {
+        let choice: BackgroundSendChoice = 'queue';
+        if (!runsBesideWork || submitOptions?.busySubmitMode !== 'queue') {
+          const decision = await decideSendOverBackgroundWork(targetSessionId, sendOptions, Boolean(editingAnchorId));
+          choice = decision.choice;
+          keepBackgroundWork = decision.keepBackgroundWork;
+        }
         if (choice === 'cancel') {
+          // Also the answer, unasked, once the composer shows another session
+          // (see decideSendOverBackgroundWork). Nothing has come out of that
+          // session's draft, so the message is still there to send on coming
+          // back, unless the draft no longer opens with it (rewritten before
+          // the switch, or since by the other pane of a split): then it goes
+          // back in ahead of what the draft holds now.
+          if (
+            sessionKeyRef.current !== targetSessionId
+            && !readSessionText(targetSessionId).startsWith(submission.text.trimEnd())
+          ) {
+            putTextBack(targetSessionId, submission.text);
+          }
           return;
         }
         if (choice === 'queue') {
@@ -1074,97 +1772,56 @@ export function useChatComposerState({
             attachments: currentAttachments,
             uploadedAttachments,
             options: buildSendOptions(currentInput),
-          }, targetSessionId);
+          }, targetSessionId, { submission });
           return;
         }
       }
 
-      const attachmentRecords = uploadedAttachments as ChatAttachment[];
-      const userMessage: ChatMessage = {
-        type: 'user',
-        content: currentInput,
-        images: attachmentRecords.filter(isImageAttachment),
-        files: attachmentRecords.filter((attachment) => !isImageAttachment(attachment)),
-        timestamp: new Date(),
-        // Tags this echo as the replacement, so the truncation the server
-        // broadcasts a moment later cuts the turns being replaced without
-        // taking the message the user just sent with them.
-        ...(editingAnchorId ? { replacesAnchorId: editingAnchorId } : {}),
-      };
-
-      addMessage(userMessage);
-      // Mark this request as processing in the per-session activity map (the
-      // single source of truth the indicator derives from). The id is always
-      // concrete at this point — no pending placeholder exists anymore.
-      onSessionProcessing?.(targetSessionId, {
-        statusText: null,
-        canInterrupt: true,
-      });
-
-      setIsUserScrolledUp(false);
-      setTimeout(() => scrollToBottom(), 100);
-
-      // One message shape for every provider. The backend resolves the
-      // provider, project path, and provider-native resume id from the
-      // session row; `options` only carries composer-level preferences.
-      sendMessage({
-        // Replacing an already-sent message is its own frame: it changes the
-        // shape of the conversation, so it gets validated separately and can
-        // report why it was refused.
-        type: editingAnchorId ? 'chat.edit-send' : 'chat.send',
+      startTurn({
         sessionId: targetSessionId,
-        ...(editingAnchorId ? { anchorId: editingAnchorId } : {}),
         content: messageContent,
-        options: {
-          ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
-          attachments: uploadedAttachments,
-        },
+        uploadedAttachments,
+        options: sendOptions,
+        anchorId: editingAnchorId,
+        keepBackgroundWork,
+        browserFiles: currentAttachments,
       });
-      setEditingAnchorId(null);
+      // Only the edit this message made ends; one begun while it waited stays.
+      setEditingAnchorId((current) => (current === editingAnchorId ? null : current));
 
       // Recorded under the (possibly just-allocated) session id, so the first
       // message of a new chat lands in the history of the session the user is
       // navigated to. Queued drafts were recorded when they were queued; the
       // consecutive-duplicate check keeps this second call a no-op.
       recordSentMessage(currentInput, targetSessionId);
-      setInput('');
-      inputValueRef.current = '';
-      resetCommandMenuState();
-      setAttachedFiles([]);
-      setFileErrors(new Map());
-      setIsTextareaExpanded(false);
-
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-
-      if (draftScopeRef.current) {
-        writeDraftText(draftScopeRef.current, '');
-      }
+      takeSubmissionOutOfComposer(submission);
     },
     [
       selectedSession,
-      askBeforeSendingOverBackgroundWork,
       attachedFiles,
       buildSendOptions,
+      canAbortSession,
       currentSessionId,
+      decideSendOverBackgroundWork,
       editingAnchorId,
       executeCommand,
+      isConnected,
       isLoading,
-      onSessionProcessing,
       onSessionEstablished,
       provider,
+      putTextBack,
       queueMessage,
+      readSessionText,
       recordSentMessage,
       resetCommandMenuState,
-      scrollToBottom,
       selectedProject,
-      sendMessage,
+      sendInsert,
       sessionKey,
       addMessage,
-      setIsUserScrolledUp,
       slashCommands,
-      t,
+      startTurn,
+      supportsMidRunInsert,
+      takeSubmissionOutOfComposer,
     ],
   );
 
@@ -1200,6 +1857,24 @@ export function useChatComposerState({
   useEffect(() => {
     handleSubmitRef.current = handleSubmit;
   }, [handleSubmit]);
+
+  // The send button's menu while a turn runs: the submit Enter makes, with
+  // the mode picked. Focus goes back to the textarea the menu took it from.
+  const submitWithBusyMode = useCallback((mode: BusySubmitMode) => {
+    void handleSubmit(createFakeSubmitEvent(), undefined, { busySubmitMode: mode });
+    textareaRef.current?.focus();
+  }, [handleSubmit]);
+
+  // Why the message in the composer would be queued rather than inserted if
+  // it were sent now; the send button and its hint follow it.
+  const insertUnavailableReason = resolveInsertUnavailableReason({
+    supportsMidRunInsert,
+    canAbortSession,
+    isConnected,
+    isEditing: Boolean(editingAnchorId),
+    content: input,
+    hasAttachments: attachedFiles.length > 0,
+  });
 
   // The VPS dispatcher owns sending. While the card is visible, periodically
   // reconcile it with the server, so the UI notices when the server claims it
@@ -1292,6 +1967,17 @@ export function useChatComposerState({
 
     const restoreDraft = () => {
       const savedInput = readDraftText(draftScope);
+      const synced = syncedDraftRef.current;
+      if (synced.scope !== draftScope || synced.text !== savedInput) {
+        // Another composer wrote the scope's draft (or the scope is new):
+        // what a send, or a text given back, reads follows at once. React runs
+        // the updater below at once only while this component has no other
+        // update queued, so in a burst of frames it can wait for the next
+        // render, and a text given back meanwhile would be written over the
+        // other composer's.
+        syncedDraftRef.current = { scope: draftScope, text: savedInput };
+        inputValueRef.current = savedInput;
+      }
       setInputState((previous) => {
         if (previous.scope === draftScope && previous.value === savedInput) {
           return previous;
@@ -1311,6 +1997,8 @@ export function useChatComposerState({
     if (!draftScope || inputState.scope !== draftScope) {
       return;
     }
+    // Before the write, whose notice comes back to restoreDraft at once.
+    syncedDraftRef.current = { scope: draftScope, text: inputState.value };
     writeDraftText(draftScope, inputState.value);
   }, [inputState, draftScope]);
 
@@ -1399,12 +2087,17 @@ export function useChatComposerState({
           return;
         }
 
+        // Alt with the send key queues a message the turn in flight would
+        // otherwise take as an insert, or one a Claude session would run next
+        // to its background work until that work finishes; on an idle
+        // session it just sends.
+        const submitOptions: SubmitOptions | undefined = event.altKey ? { busySubmitMode: 'queue' } : undefined;
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
           event.preventDefault();
-          handleSubmit(event);
+          handleSubmit(event, undefined, submitOptions);
         } else if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !sendByCtrlEnter) {
           event.preventDefault();
-          handleSubmit(event);
+          handleSubmit(event, undefined, submitOptions);
         }
       }
     },
@@ -1561,6 +2254,13 @@ export function useChatComposerState({
     isDragActive,
     openAttachmentPicker: open,
     handleSubmit,
+    submitWithBusyMode,
+    insertUnavailableReason,
+    pendingInserts,
+    withdrawInsert,
+    handleInsertStatus,
+    handleInsertRunEnded,
+    handleSendRefused,
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,

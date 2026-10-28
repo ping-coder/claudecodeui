@@ -62,6 +62,16 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
+  // Field-level saves for object preferences. Servers older than this route
+  // answer it with 404, which tells the client to fall back to /preferences.
+  router.patch('/preferences/merge', (req, res, next) => {
+    try {
+      res.json(service.patchPreferences(readUserId(req), req.body));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/drafts', (req, res, next) => {
     try {
       res.json(service.getDrafts(readUserId(req)));

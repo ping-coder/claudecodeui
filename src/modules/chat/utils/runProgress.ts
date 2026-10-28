@@ -13,9 +13,9 @@ import type {
   WorkflowAgentProgress,
   WorkflowAgentRow,
 } from '@/shared/types';
+import { ownBackgroundTasks } from '@/shared/utils';
 import {
   describeWorkflowAgent,
-  ownBackgroundTasks,
   readBackgroundTaskStatus,
   resolveBackgroundTaskStatus,
 } from '@/modules/chat/utils/backgroundTasks';

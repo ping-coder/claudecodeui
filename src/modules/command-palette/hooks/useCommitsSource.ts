@@ -29,5 +29,5 @@ export function useCommitsSource(projectId: string | undefined, enabled: boolean
         author: c.author,
       }));
     },
-  });
+  }).items;
 }

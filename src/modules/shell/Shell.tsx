@@ -16,6 +16,7 @@ import ShellConnectionOverlay from '@/modules/shell/ShellConnectionOverlay';
 import ShellEmptyState from '@/modules/shell/ShellEmptyState';
 import ShellHeader from '@/modules/shell/ShellHeader';
 import ShellMinimalView from '@/modules/shell/ShellMinimalView';
+import ShellSessionBusyNotice from '@/modules/shell/ShellSessionBusyNotice';
 import TerminalShortcutsPanel from '@/modules/shell/TerminalShortcutsPanel';
 
 const SHELL_RESTART_DELAY_MS = 200;
@@ -177,8 +178,12 @@ export default function Shell({
     isInitialized,
     isConnecting,
     isClaudeThemeOutdated,
+    sessionBusy,
+    isTakingOver,
     connectToShell,
     disconnectFromShell,
+    retrySessionInit,
+    takeOverSession,
   } = useShellRuntime({
     selectedProject,
     selectedSession,
@@ -450,6 +455,16 @@ export default function Shell({
             connectTitle={t('shell.actions.connectTitle')}
             connectingLabel={t('shell.connecting')}
             onConnect={handleRestartShell}
+          />
+        )}
+
+        {/* The socket is open but no CLI was started: CloudCLI still runs the session. */}
+        {!overlayMode && sessionBusy && (
+          <ShellSessionBusyNotice
+            busy={sessionBusy}
+            isTakingOver={isTakingOver}
+            onRetry={retrySessionInit}
+            onTakeOver={takeOverSession}
           />
         )}
 

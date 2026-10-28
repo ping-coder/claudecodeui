@@ -548,6 +548,41 @@ test('a background report from a run a newer run replaced is stale and records n
   });
 });
 
+test('a background report from a run whose process the next run took over still counts, until a later run replaces that one', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-bg-handover', 'claude', '/workspace/demo');
+    const start = () => chatRunRegistry.startRun({
+      appSessionId: 'app-bg-handover',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: null,
+      userId: null,
+    });
+
+    const first = start();
+    assert.ok(first);
+    first.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+
+    // The next message runs as a turn of the first run's held process, so
+    // the work the first turn left going carries on.
+    const second = start();
+    assert.ok(second);
+    first.writer.reportProcessHandedOver();
+    first.writer.reportBackgroundWorkFinished();
+    assert.deepEqual(
+      chatRunRegistry.listRecentRunEnds().map((end) => [end.runStartedAt === first.startedAt, end.outcome]),
+      [[true, 'done'], [true, 'backgroundDone']],
+    );
+
+    // A later run that replaced the second one stopped whatever was left.
+    second.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    const third = start();
+    assert.ok(third);
+    first.writer.reportBackgroundWorkFinished();
+    assert.equal(chatRunRegistry.listRecentRunEnds().filter((end) => end.outcome === 'backgroundDone').length, 1);
+  });
+});
+
 test('a background report still counts once the finished run was evicted, while no newer run took its place', async () => {
   // Eviction only asks whether tasks are outstanding. The last one settling
   // ends that, but the follow-up turn that reports it can outlast the window.
@@ -710,5 +745,282 @@ test('listRecentRunEnds lists ends oldest first and forgets them after 10 minute
     } finally {
       clock.mock.restore();
     }
+  });
+});
+
+test('abortRun aborts a running run through the runtime and completes it as aborted; with no run running it does nothing', async () => {
+  await withIsolatedDatabase(async () => {
+    const aborts: string[] = [];
+    const abort = async (provider: string, appSessionId: string) => {
+      aborts.push(`${provider}:${appSessionId}`);
+      return true;
+    };
+
+    assert.equal(await chatRunRegistry.abortRun('app-abort-none', abort), false);
+    assert.deepEqual(aborts, []);
+
+    sessionsDb.createAppSession('app-abort-run', 'codex', '/workspace/demo');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-abort-run',
+      provider: 'codex',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(run);
+
+    assert.equal(await chatRunRegistry.abortRun('app-abort-run', abort), true);
+    assert.deepEqual(aborts, ['codex:app-abort-run']);
+    assert.equal(chatRunRegistry.isProcessing('app-abort-run'), false);
+    const completes = connection.frames.filter((frame) => frame.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0]?.aborted, true);
+    assert.equal(completes[0]?.exitCode, 0);
+
+    // Completed already: nothing more to abort.
+    assert.equal(await chatRunRegistry.abortRun('app-abort-run', abort), false);
+    assert.deepEqual(aborts, ['codex:app-abort-run']);
+  });
+});
+
+test('abortRun completes a run the runtime could not abort with exit code 1', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-failed', 'claude', '/workspace/demo');
+    const connection = new FakeConnection();
+    chatRunRegistry.startRun({
+      appSessionId: 'app-abort-failed',
+      provider: 'claude',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+
+    assert.equal(await chatRunRegistry.abortRun('app-abort-failed', async () => false), true);
+    const completes = connection.frames.filter((frame) => frame.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0]?.aborted, true);
+    assert.equal(completes[0]?.exitCode, 1);
+  });
+});
+
+test('abortRun leaves alone a newer run that took the slot while the abort was under way', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-raced', 'codex', '/workspace/demo');
+    const connection = new FakeConnection();
+    const startRun = () => chatRunRegistry.startRun({
+      appSessionId: 'app-abort-raced',
+      provider: 'codex',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    const firstRun = startRun();
+    assert.ok(firstRun);
+
+    let nextRun: ReturnType<typeof startRun> = null;
+    const aborted = await chatRunRegistry.abortRun('app-abort-raced', async () => {
+      // The runtime ends the turn on its own before it answers the abort,
+      // and another send starts the session's next run.
+      firstRun.writer.send({ kind: 'complete', provider: 'codex', sessionId: 'native', exitCode: 0 });
+      nextRun = startRun();
+      return true;
+    });
+
+    assert.equal(aborted, true);
+    assert.ok(nextRun);
+    assert.equal(chatRunRegistry.getRun('app-abort-raced'), nextRun);
+    assert.equal(chatRunRegistry.isProcessing('app-abort-raced'), true);
+    assert.equal(connection.frames.filter((frame) => frame.kind === 'complete').length, 1);
+  });
+});
+
+/** Lets the microtasks and immediates queued so far run, a run's `run_ended` broadcast among them. */
+const flushRegistry = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+
+test('abortRun ends a run as aborted even when the runtime lets the run settle, and its safety net fire, before it answers', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-settled', 'claude', '/workspace/demo');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-abort-settled',
+      provider: 'claude',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(run);
+    // The chat gateway's dispatch: once the runtime's promise settles, its
+    // safety net completes a run the runtime left running.
+    let settleRuntime = () => {};
+    const dispatch = new Promise<void>((resolve) => { settleRuntime = resolve; })
+      .then(() => chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 }));
+
+    // A turn handed to a held process: the abort lets the turn's promise
+    // settle before the runtime's answer gets back here.
+    const aborted = await chatRunRegistry.abortRun('app-abort-settled', async () => {
+      settleRuntime();
+      await Promise.resolve();
+      return true;
+    });
+    await dispatch;
+    await flushRegistry();
+
+    assert.equal(aborted, true);
+    const completes = connection.frames.filter((frame) => frame.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0]?.aborted, true);
+    assert.equal(completes[0]?.exitCode, 0);
+    assert.deepEqual(
+      connection.frames.filter((frame) => frame.kind === 'run_ended').map((frame) => frame.outcome),
+      ['aborted'],
+    );
+  });
+});
+
+test('abortRun still ends the run, as aborted with exit code 1, when the runtime\'s abort throws, and passes the error on', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-throws', 'claude', '/workspace/demo');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-abort-throws',
+      provider: 'claude',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(run);
+    let settleRuntime = () => {};
+    const dispatch = new Promise<void>((resolve) => { settleRuntime = resolve; })
+      .then(() => chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 }));
+
+    // The safety net fires while the abort is under way and holds off for
+    // the abort's own complete, which must come even though the abort fails.
+    await assert.rejects(
+      chatRunRegistry.abortRun('app-abort-throws', async () => {
+        settleRuntime();
+        await Promise.resolve();
+        throw new Error('the interrupt failed');
+      }),
+      /the interrupt failed/,
+    );
+    await dispatch;
+
+    assert.equal(chatRunRegistry.isProcessing('app-abort-throws'), false);
+    const completes = connection.frames.filter((frame) => frame.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0]?.aborted, true);
+    assert.equal(completes[0]?.exitCode, 1);
+  });
+});
+
+test('a second abortRun of a run already being aborted waits for the first instead of calling the runtime again', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-twice', 'codex', '/workspace/demo');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-abort-twice',
+      provider: 'codex',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(run);
+    const aborts: string[] = [];
+    let answerAbort = () => {};
+    const abort = (_provider: string, appSessionId: string) => {
+      aborts.push(appSessionId);
+      return new Promise<boolean>((resolve) => { answerAbort = () => resolve(true); });
+    };
+
+    const first = chatRunRegistry.abortRun('app-abort-twice', abort);
+    let secondSettled = false;
+    const second = chatRunRegistry.abortRun('app-abort-twice', abort).then((result) => {
+      secondSettled = true;
+      return result;
+    });
+    await flushRegistry();
+    assert.deepEqual(aborts, ['app-abort-twice']);
+    assert.equal(secondSettled, false, 'the second abort waits for the first');
+
+    answerAbort();
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    const completes = connection.frames.filter((frame) => frame.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0]?.aborted, true);
+  });
+});
+
+test('pendingAbort is the abort under way until it has completed the run, and null otherwise', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-abort-pending', 'claude', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-abort-pending',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: null,
+      userId: null,
+    });
+    assert.ok(run);
+    assert.equal(chatRunRegistry.pendingAbort(run), null);
+
+    let answerAbort = () => {};
+    const aborting = chatRunRegistry.abortRun(
+      'app-abort-pending',
+      () => new Promise<boolean>((resolve) => { answerAbort = () => resolve(true); }),
+    );
+    const pending = chatRunRegistry.pendingAbort(run);
+    assert.ok(pending);
+    let completesWhenSettled: number | null = null;
+    const settled = pending.then(() => {
+      completesWhenSettled = run.events.filter((event) => event.kind === 'complete' && event.aborted === true).length;
+    });
+
+    answerAbort();
+    await aborting;
+    await settled;
+    assert.equal(completesWhenSettled, 1, 'it settles with the aborted complete already out');
+    assert.equal(chatRunRegistry.pendingAbort(run), null);
+  });
+});
+
+test('whenHandedOver settles once the run\'s turn has completed and its process went on to the session\'s next run, and only then', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-handed-over', 'claude', '/workspace/demo');
+    const start = () => chatRunRegistry.startRun({
+      appSessionId: 'app-handed-over',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: null,
+      userId: null,
+    });
+
+    const first = start();
+    assert.ok(first);
+    let firstHandedOver = false;
+    void chatRunRegistry.whenHandedOver(first).then(() => { firstHandedOver = true; });
+    first.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    await flushRegistry();
+    assert.equal(firstHandedOver, false, 'a completed turn whose process is still its own is not handed over');
+
+    // The user's next message runs as a turn of the first run's held process.
+    const second = start();
+    assert.ok(second);
+    first.writer.reportProcessHandedOver();
+    await flushRegistry();
+    assert.equal(firstHandedOver, true);
+
+    // A run whose turn completes and is then replaced, rather than handed
+    // over, never settles; nor does one that reports a hand-over with no
+    // other run in the slot.
+    let secondHandedOver = false;
+    void chatRunRegistry.whenHandedOver(second).then(() => { secondHandedOver = true; });
+    second.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    second.writer.reportProcessHandedOver();
+    const third = start();
+    assert.ok(third);
+    await flushRegistry();
+    assert.equal(secondHandedOver, false);
   });
 });

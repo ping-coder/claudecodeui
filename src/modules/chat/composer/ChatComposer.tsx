@@ -15,7 +15,7 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
-import type { ActivityDetails, ActivityProgress, BackgroundSendChoice, BackgroundSendPrompt, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { ActivityDetails, ActivityProgress, BackgroundSendChoice, BackgroundSendPrompt, BusySubmitMode, InsertUnavailableReason, PendingInsert, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -33,6 +33,8 @@ import VoiceInputButton from '@/modules/chat/composer/VoiceInputButton';
 import PermissionRequestsBanner from '@/modules/chat/composer/PermissionRequestsBanner';
 import TokenUsageSummary from '@/modules/chat/composer/TokenUsageSummary';
 import QueuedMessageCard from '@/modules/chat/composer/QueuedMessageCard';
+import PendingInsertsCard from '@/modules/chat/composer/PendingInsertsCard';
+import BusySendMenu from '@/modules/chat/composer/BusySendMenu';
 import BackgroundSendDialog from '@/modules/chat/composer/BackgroundSendDialog';
 import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessagePopover';
 import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
@@ -111,6 +113,22 @@ type ChatComposerProps = {
   onCancelScheduledMessage: (id: string) => void;
   onEditQueuedDraft: () => void;
   onDeleteQueuedDraft: () => void;
+  /** Messages inserted into this session's running turn that the model has not read yet. */
+  pendingInserts?: PendingInsert[];
+  onWithdrawInsert?: (insertId: string) => void;
+  /**
+   * Why the message in the box would be queued rather than inserted if sent
+   * now, or null when Enter inserts it; read while a turn runs. After the
+   * turn, while only background work runs, anything but `provider` means the
+   * provider runs the message as a new turn beside that work. Absent means
+   * it cannot be inserted.
+   */
+  insertUnavailableReason?: InsertUnavailableReason | null;
+  /**
+   * Sends the message in the box while a turn runs, into the turn or queued
+   * behind it. Absent, the send button offers no choice and Enter decides.
+   */
+  onSubmitBusyMode?: (mode: BusySubmitMode) => void;
   attachedFiles: File[];
   onRemoveAttachment: (index: number) => void;
   fileErrors: Map<string, string>;
@@ -153,8 +171,8 @@ type ChatComposerProps = {
 
 /**
  * Rendered by chat's ChatInterface as the whole input area: textarea, pending
- * attachments, queued message, permission banner, voice input and the
- * model/permission popovers that drive the next turn.
+ * attachments, pending inserts, queued message, permission banner, voice input
+ * and the model/permission popovers that drive the next turn.
  */
 export default function ChatComposer({
   pendingPermissionRequests,
@@ -198,6 +216,10 @@ export default function ChatComposer({
   onCancelScheduledMessage,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
+  pendingInserts = [],
+  onWithdrawInsert,
+  insertUnavailableReason = 'provider',
+  onSubmitBusyMode,
   attachedFiles,
   onRemoveAttachment,
   fileErrors,
@@ -315,25 +337,64 @@ export default function ChatComposer({
 
   const hasQueuedDraft = Boolean(queuedDraft);
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
-  const submitHint = canQueueDraft
+  // While a turn runs, the send key puts the message into the turn when it
+  // can go in, and the same key with Alt queues it.
+  const insertsByDefault = canQueueDraft && insertUnavailableReason === null;
+  // After the turn, while only its background work runs, a provider that
+  // takes inserts (the reason is `provider` otherwise) runs the message as a
+  // new turn of the process the work runs in: the send key sends, asking
+  // first only when the message needs a new process, and the same key with
+  // Alt queues it until the work finishes. An edit asks first.
+  const sendsBesideBackgroundWork = !isLoading
+    && activity?.background === true
+    && insertUnavailableReason !== 'provider'
+    && !isEditingSentMessage
+    && Boolean(input.trim() || attachedFiles.length > 0);
+  const sendKey = sendByCtrlEnter ? 'Ctrl+Enter' : 'Enter';
+  const queueKey = sendByCtrlEnter ? 'Ctrl+Alt+Enter' : 'Alt+Enter';
+  const submitHint = insertsByDefault
     ? hasQueuedDraft
-      ? t('input.hintText.appendQueued', { defaultValue: 'Enter to add to the queued message' })
-      : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
-    : sendByCtrlEnter
-      ? t('input.hintText.ctrlEnter')
-      : t('input.hintText.enter');
+      ? t('input.hintText.insertAppendQueued', {
+          insertKey: sendKey,
+          queueKey,
+          defaultValue: '{{insertKey}} to insert • {{queueKey}} to add to the queued message',
+        })
+      : t('input.hintText.insert', {
+          insertKey: sendKey,
+          queueKey,
+          defaultValue: '{{insertKey}} to insert • {{queueKey}} to queue',
+        })
+    : canQueueDraft
+      ? hasQueuedDraft
+        ? t('input.hintText.appendQueued', { defaultValue: 'Enter to add to the queued message' })
+        : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
+      : sendsBesideBackgroundWork
+        ? t('input.hintText.sendBesideBackgroundWork', {
+            sendKey,
+            queueKey,
+            defaultValue: '{{sendKey}} to send • {{queueKey}} to queue until background work finishes',
+          })
+        : sendByCtrlEnter
+          ? t('input.hintText.ctrlEnter')
+          : t('input.hintText.enter');
   const attachmentsUnsupportedLabel = t('input.attachmentsUnsupported', {
     provider: providerLabel,
     defaultValue: '{{provider}} does not support attachments yet',
   });
   const attachButtonLabel = attachmentsSupported ? t('input.attachFiles') : attachmentsUnsupportedLabel;
-  const submitAriaLabel = canQueueDraft
-    ? hasQueuedDraft
-      ? t('input.queue.append', { defaultValue: 'Add to queued message' })
-      : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
-    : isLoading
-      ? t('input.stop')
-      : t('input.send');
+  const submitAriaLabel = insertsByDefault
+    ? t('input.insert.send', { defaultValue: 'Insert message' })
+    : canQueueDraft
+      ? hasQueuedDraft
+        ? t('input.queue.append', { defaultValue: 'Add to queued message' })
+        : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
+      : isLoading
+        ? t('input.stop')
+        : t('input.send');
+  // The send button splits in two while a turn runs and there is something
+  // to send, or after it beside background work: the button does what Enter
+  // does, the menu offers both.
+  const showsBusySendMenu = (canQueueDraft || sendsBesideBackgroundWork) && Boolean(onSubmitBusyMode);
 
   return (
     <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-2 pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6">
@@ -403,6 +464,16 @@ export default function ChatComposer({
         prompt={backgroundSendPrompt}
         onResolve={onResolveBackgroundSendPrompt}
       />
+
+      {/* Above the queued message: inserts reach the model first. */}
+      {pendingInserts.length > 0 && onWithdrawInsert && (
+        <PendingInsertsCard
+          inserts={pendingInserts}
+          providerLabel={providerLabel}
+          isAwaitingApproval={hasPendingPermissions}
+          onWithdraw={onWithdrawInsert}
+        />
+      )}
 
       {queuedDraft && (
         <QueuedMessageCard
@@ -595,46 +666,59 @@ export default function ChatComposer({
               providerLabel={providerLabel}
             />
 
-            <PromptInputSubmit
-              onClick={
-                canQueueDraft
-                  ? (e: MouseEvent<HTMLButtonElement>) => {
-                      e.preventDefault();
-                      onSubmit(e);
-                    }
-                  : isLoading
-                    ? onAbortSession
-                    : isRecording
-                      ? (e: MouseEvent<HTMLButtonElement>) => {
-                          e.preventDefault();
-                          voiceStop({ send: true });
-                        }
-                      : undefined
-              }
-              disabled={
-                isLoading
-                  ? false
-                  : isRecording
+            {/* One control in two halves while the menu shows, so no gap between them. */}
+            <div className="flex shrink-0 items-center">
+              <PromptInputSubmit
+                onClick={
+                  canQueueDraft
+                    ? (e: MouseEvent<HTMLButtonElement>) => {
+                        e.preventDefault();
+                        onSubmit(e);
+                      }
+                    : isLoading
+                      ? onAbortSession
+                      : isRecording
+                        ? (e: MouseEvent<HTMLButtonElement>) => {
+                            e.preventDefault();
+                            voiceStop({ send: true });
+                          }
+                        : undefined
+                }
+                disabled={
+                  isLoading
                     ? false
-                    : isTranscribing
-                      ? true
-                      : !input.trim() && attachedFiles.length === 0
-              }
-              aria-label={submitAriaLabel}
-              title={submitAriaLabel}
-              className="h-10 w-10 sm:h-10 sm:w-10"
-            >
-              {isTranscribing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : canQueueDraft ? (
-                <ArrowUpIcon className="h-4 w-4" />
-              ) : undefined}
-            </PromptInputSubmit>
+                    : isRecording
+                      ? false
+                      : isTranscribing
+                        ? true
+                        : !input.trim() && attachedFiles.length === 0
+                }
+                aria-label={submitAriaLabel}
+                title={submitAriaLabel}
+                className={showsBusySendMenu ? 'h-10 w-10 rounded-r-none sm:h-10 sm:w-10' : 'h-10 w-10 sm:h-10 sm:w-10'}
+              >
+                {isTranscribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : canQueueDraft ? (
+                  <ArrowUpIcon className="h-4 w-4" />
+                ) : undefined}
+              </PromptInputSubmit>
+              {showsBusySendMenu && onSubmitBusyMode && (
+                <BusySendMenu
+                  insertUnavailableReason={insertUnavailableReason}
+                  providerLabel={providerLabel}
+                  hasQueuedDraft={hasQueuedDraft}
+                  sendByCtrlEnter={sendByCtrlEnter}
+                  afterTurn={sendsBesideBackgroundWork}
+                  onSelect={onSubmitBusyMode}
+                />
+              )}
+            </div>
           </div>
 
           <div
             className={`order-last hidden basis-full px-2 text-center text-xs leading-4 text-muted-foreground/50 transition-opacity duration-200 lg:block ${
-              input.trim() && !canQueueDraft ? 'opacity-0' : 'opacity-100'
+              input.trim() && !canQueueDraft && !sendsBesideBackgroundWork ? 'opacity-0' : 'opacity-100'
             }`}
           >
             {submitHint}

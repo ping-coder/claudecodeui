@@ -1,11 +1,14 @@
 import type { DragEvent, ReactNode, RefObject } from 'react';
 
-import type { FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
+import type { FileTreeDetailedColumn, FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
 import FileTreeNode from '@/modules/file-tree/FileTreeNode';
 
 type FileTreeListProps = {
   items: FileTreeNodeType[];
   viewMode: FileTreeViewMode;
+  // Detailed view only: the metadata columns that fit and the grid they share with the header.
+  detailedColumns: readonly FileTreeDetailedColumn[];
+  detailedGridTemplate: string;
   expandedDirs: Set<string>;
   onItemClick: (item: FileTreeNodeType) => void;
   renderFileIcon: (filename: string) => ReactNode;
@@ -36,6 +39,8 @@ type FileTreeListProps = {
 export default function FileTreeList({
   items,
   viewMode,
+  detailedColumns,
+  detailedGridTemplate,
   expandedDirs,
   onItemClick,
   renderFileIcon,
@@ -67,6 +72,8 @@ export default function FileTreeList({
           item={item}
           level={0}
           viewMode={viewMode}
+          detailedColumns={detailedColumns}
+          detailedGridTemplate={detailedGridTemplate}
           expandedDirs={expandedDirs}
           onItemClick={onItemClick}
           renderFileIcon={renderFileIcon}

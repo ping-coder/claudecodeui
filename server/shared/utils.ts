@@ -756,6 +756,54 @@ export function splitLegacyUltracodeEffort<
 }
 
 // ---------------------------
+//----------------- CHAT TURN OPTION UTILITIES ------------
+/**
+ * The run options a provider runtime gets for one chat turn of a session,
+ * built from the `options` its client sent (a `chat.send`, or a queued or
+ * scheduled message replaying one) and the session's row:
+ * - the legacy `ultracode` effort becomes effort xhigh with ultracode on
+ *   (`splitLegacyUltracodeEffort`); `effort` is trimmed and undefined when
+ *   blank, and `ultracode` is kept only as a real boolean, since clients omit
+ *   it for models that cannot run ultracode;
+ * - `sessionId` is the app session id;
+ * - `cwd` is the client's when it named one, else the session's project;
+ * - `projectPath` is the session's project, else the client's.
+ *
+ * `extraOptions` (how an edited message asks to resume partway) go over the
+ * client's. Attachments pass through as sent: the chat gateway re-validates
+ * them and sets its own before a run.
+ *
+ * Used by the chat gateway for every turn it runs, by the provider runtime
+ * service to plan whether a `chat.send` would go into the process a runtime
+ * holds for the session's background work, and by the scheduled-messages
+ * dispatcher to plan the same for a queued or due message before it sends
+ * it, so the plan and the turn read the same options.
+ */
+export function buildTurnRunOptions(input: {
+  sessionId: string;
+  projectPath: string | null | undefined;
+  clientOptions: AnyRecord;
+  extraOptions?: AnyRecord;
+}): AnyRecord & { effort: string | undefined; ultracode: boolean | undefined } {
+  const { clientOptions } = input;
+  const requestedEffort = typeof clientOptions.effort === 'string' ? clientOptions.effort.trim() : '';
+  const { effort, ultracode } = splitLegacyUltracodeEffort({
+    effort: requestedEffort || undefined,
+    ultracode: typeof clientOptions.ultracode === 'boolean' ? clientOptions.ultracode : undefined,
+  });
+
+  return {
+    ...clientOptions,
+    ...input.extraOptions,
+    effort,
+    ultracode,
+    sessionId: input.sessionId,
+    cwd: clientOptions.cwd ?? input.projectPath ?? undefined,
+    projectPath: input.projectPath ?? clientOptions.projectPath,
+  };
+}
+
+// ---------------------------
 //----------------- WEBSOCKET PAYLOAD PARSING UTILITIES ------------
 /**
  * Parses one websocket message payload into a plain JSON object record.

@@ -93,6 +93,96 @@ test('one unreadable preference value does not cost the user the others', async 
   });
 });
 
+test('savePreferences still replaces an object preference whole', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.savePreferences(USER_ID, { codeEditorSettings: { fontSize: '16' } });
+    userPreferencesDb.savePreferences(USER_ID, { codeEditorSettings: { wordWrap: true } });
+
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), { codeEditorSettings: { wordWrap: true } });
+  });
+});
+
+test('a merge keeps the stored fields it does not name', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.savePreferences(USER_ID, { codeEditorSettings: { fontSize: '16' } });
+    userPreferencesDb.patchPreferences(USER_ID, {}, { codeEditorSettings: { wordWrap: true } });
+
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), {
+      codeEditorSettings: { fontSize: '16', wordWrap: true },
+    });
+  });
+});
+
+test('a null field removes that field, and a first write stores no null', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.patchPreferences(USER_ID, {}, { uiPreferences: { sidebarVisible: false, voiceEnabled: null } });
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), { uiPreferences: { sidebarVisible: false } });
+
+    userPreferencesDb.patchPreferences(USER_ID, {}, { uiPreferences: { sidebarVisible: null } });
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), { uiPreferences: {} });
+  });
+});
+
+test('a stored value that is not an object, or does not parse, is merged as {}', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.savePreferences(USER_ID, { codeEditorSettings: 'corrupt' });
+    getConnection()
+      .prepare('INSERT INTO user_preferences (user_id, preference_key, preference_value) VALUES (?, ?, ?)')
+      .run(USER_ID, 'uiPreferences', 'not json');
+
+    userPreferencesDb.patchPreferences(USER_ID, {}, {
+      codeEditorSettings: { wordWrap: true },
+      uiPreferences: { showThinking: false },
+    });
+
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), {
+      codeEditorSettings: { wordWrap: true },
+      uiPreferences: { showThinking: false },
+    });
+  });
+});
+
+test('set keys are replaced and merge keys merged in one call', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.savePreferences(USER_ID, {
+      theme: 'dark',
+      claudePermissions: { allowedTools: ['Read'], skipPermissions: true },
+      codeEditorSettings: { fontSize: '16' },
+    });
+
+    userPreferencesDb.patchPreferences(
+      USER_ID,
+      { theme: 'light', claudePermissions: { allowedTools: [] } },
+      { codeEditorSettings: { textWordWrap: false } },
+    );
+
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), {
+      theme: 'light',
+      claudePermissions: { allowedTools: [] },
+      codeEditorSettings: { fontSize: '16', textWordWrap: false },
+    });
+  });
+});
+
+test('a batch that fails part way writes none of its keys', async () => {
+  await withDatabase(() => {
+    userPreferencesDb.savePreferences(USER_ID, { theme: 'dark', codeEditorSettings: { fontSize: '16' } });
+
+    // JSON.stringify throws on a BigInt, so the second merge key fails after the
+    // set key and the first merge key have been written inside the transaction.
+    assert.throws(() => userPreferencesDb.patchPreferences(
+      USER_ID,
+      { theme: 'light' },
+      { codeEditorSettings: { wordWrap: true }, uiPreferences: { sidebarVisible: BigInt(1) } },
+    ), /BigInt/);
+
+    assert.deepEqual(userPreferencesDb.getPreferences(USER_ID), {
+      theme: 'dark',
+      codeEditorSettings: { fontSize: '16' },
+    });
+  });
+});
+
 test('drafts round-trip text and queued message per scope', async () => {
   await withDatabase(() => {
     sessionDraftsDb.saveDraft(USER_ID, 'session-a', { text: 'half typed', queuedMessage: null });
@@ -300,5 +390,26 @@ test('a claim restored after its emptied row was removed is written back', async
     sessionDraftsDb.restoreQueuedMessage(claimed);
 
     assert.deepEqual(queuedIn('session-a'), { content: 'A', attachments: [] });
+  });
+});
+
+test('hasQueuedMessage tells whether anyone has a message queued for the scope', async () => {
+  await withDatabase(() => {
+    sessionDraftsDb.saveDraftText(USER_ID, 'session-a', 'only typed, not queued');
+    assert.equal(sessionDraftsDb.hasQueuedMessage('session-a'), false);
+
+    sessionDraftsDb.appendQueuedMessage(USER_ID, 'session-a', { content: 'A', attachments: [] });
+    assert.equal(sessionDraftsDb.hasQueuedMessage('session-a'), true);
+    assert.equal(sessionDraftsDb.hasQueuedMessage('session-b'), false);
+
+    sessionDraftsDb.clearQueuedMessage(USER_ID, 'session-a');
+    assert.equal(sessionDraftsDb.hasQueuedMessage('session-a'), false);
+
+    // The dispatcher sends whoever's message it is, so another user's counts too.
+    getConnection()
+      .prepare('INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)')
+      .run(2, 'other', 'hash');
+    sessionDraftsDb.appendQueuedMessage(2, 'session-a', { content: 'B', attachments: [] });
+    assert.equal(sessionDraftsDb.hasQueuedMessage('session-a'), true);
   });
 });

@@ -1869,6 +1869,147 @@ test('user turns carry the transcript uuid so they can be edited', { concurrency
   }
 });
 
+const INSERT_SESSION_ID = 'claude-insert-session';
+const INSERT_ID = '6f1c2d3e-4b5a-4c6d-8e7f-90a1b2c3d4e5';
+const NEXT_TURN_INSERT_ID = '0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3';
+
+/** A `queued_command` attachment row as the CLI writes one for a message read mid-turn. */
+const queuedCommandRow = (uuid: string, parentUuid: string, second: number, attachment: Record<string, unknown>) => ({
+  type: 'attachment', uuid, parentUuid, sessionId: INSERT_SESSION_ID,
+  timestamp: `2026-10-28T09:27:${String(second).padStart(2, '0')}.000Z`,
+  attachment: { type: 'queued_command', commandMode: 'prompt', ...attachment },
+});
+
+test('a message read mid-turn reads back from history as an inserted message after the tool result', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-insert-history-'));
+
+  try {
+    const transcriptPath = path.join(tempRoot, `${INSERT_SESSION_ID}.jsonl`);
+    const at = (second: number) => `2026-10-28T09:27:${String(second).padStart(2, '0')}.000Z`;
+    const rows = [
+      {
+        type: 'user', uuid: 'iu1', parentUuid: null, sessionId: INSERT_SESSION_ID, timestamp: at(0),
+        message: { role: 'user', content: 'run the tests' },
+      },
+      {
+        type: 'assistant', uuid: 'ia1', parentUuid: 'iu1', sessionId: INSERT_SESSION_ID, timestamp: at(1),
+        message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'tool_use', id: 'toolu_tests', name: 'Bash', input: { command: 'npm test' } }] },
+      },
+      {
+        type: 'user', uuid: 'ir1', parentUuid: 'ia1', sessionId: INSERT_SESSION_ID, timestamp: at(2),
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_tests', content: 'all green' }] },
+      },
+      queuedCommandRow('iat1', 'ir1', 3, { prompt: 'also check lint', source_uuid: INSERT_ID, origin: { kind: 'human' } }),
+      // Queued the same way, but none of them is a message the user sent.
+      queuedCommandRow('iat2', 'iat1', 4, {
+        prompt: '<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>',
+        commandMode: 'task-notification',
+      }),
+      queuedCommandRow('iat3', 'iat2', 5, { prompt: 'an injected note', isMeta: true }),
+      queuedCommandRow('iat4', 'iat3', 6, { prompt: 'from a channel', origin: { kind: 'channel' } }),
+      queuedCommandRow('iat6', 'iat4', 6, { prompt: '<system-reminder>internal</system-reminder>' }),
+      {
+        type: 'attachment', uuid: 'iat5', parentUuid: 'iat6', sessionId: INSERT_SESSION_ID, timestamp: at(7),
+        attachment: { type: 'edited_text_file', filename: '/repo/a.ts', snippet: 'x' },
+      },
+      {
+        type: 'assistant', uuid: 'ia2', parentUuid: 'iat5', sessionId: INSERT_SESSION_ID, timestamp: at(8),
+        message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text: 'Tests pass, lint too.' }] },
+      },
+      // An insert that ran as the next turn is that turn's prompt row.
+      {
+        type: 'user', uuid: NEXT_TURN_INSERT_ID, parentUuid: 'ia2', sessionId: INSERT_SESSION_ID, timestamp: at(9),
+        message: { role: 'user', content: 'and the docs' },
+      },
+      {
+        type: 'assistant', uuid: 'ia3', parentUuid: NEXT_TURN_INSERT_ID, sessionId: INSERT_SESSION_ID, timestamp: at(10),
+        message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text: 'Docs done.' }] },
+      },
+    ];
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+
+    await withIsolatedDatabase(async () => {
+      const now = new Date().toISOString();
+      sessionsDb.createSession(INSERT_SESSION_ID, 'claude', tempRoot, 'Insert session', now, now, transcriptPath);
+
+      const provider = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null, listLiveCliRuns: async () => [] });
+      const history = await provider.fetchHistory(INSERT_SESSION_ID, { providerSessionId: INSERT_SESSION_ID });
+      const drawn = history.messages
+        .filter((message) => message.kind === 'text' || message.kind === 'tool_use')
+        .map((message) => (message.kind === 'tool_use' ? `tool_use:${message.toolName}` : `${message.role}:${message.content}`));
+      assert.deepEqual(drawn, [
+        'user:run the tests',
+        'tool_use:Bash',
+        'user:also check lint',
+        'assistant:Tests pass, lint too.',
+        'user:and the docs',
+        'assistant:Docs done.',
+      ]);
+
+      const inserted = history.messages.find((message) => message.content === 'also check lint');
+      assert.equal(inserted?.id, INSERT_ID, 'the id the insert was sent under, as the live message has it');
+      assert.equal(inserted?.inserted, true);
+      assert.equal(inserted?.transcriptAnchorId, undefined, 'an attachment row is no edit or fork anchor');
+
+      const nextTurn = history.messages.find((message) => message.content === 'and the docs');
+      assert.equal(nextTurn?.transcriptAnchorId, NEXT_TURN_INSERT_ID);
+      assert.equal(nextTurn?.inserted, undefined);
+    });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('a queued_command row normalizes the same live as in history, with its pasted images', () => {
+  const provider = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null, listLiveCliRuns: async () => [] });
+
+  const [message, ...rest] = provider.normalizeMessage(
+    queuedCommandRow('row-uuid', 'parent', 1, {
+      source_uuid: INSERT_ID,
+      prompt: [
+        { type: 'text', text: 'look at this' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } },
+      ],
+    }),
+    'app-session',
+  );
+  assert.equal(rest.length, 0);
+  assert.equal(message.id, INSERT_ID);
+  assert.equal(message.kind, 'text');
+  assert.equal(message.role, 'user');
+  assert.equal(message.content, 'look at this');
+  assert.deepEqual(message.images, [{ data: 'data:image/jpeg;base64,AAAA' }]);
+  assert.equal(message.inserted, true);
+  assert.equal(message.transcriptAnchorId, undefined, 'not even the row\'s own uuid');
+
+  // A row without the queued message's uuid falls back to its own; one with
+  // no origin at all is still the user's.
+  const [fallback] = provider.normalizeMessage(
+    { type: 'attachment', uuid: 'row-only', timestamp: '2026-10-28T09:27:01.000Z', attachment: { type: 'queued_command', prompt: 'typed in a terminal' } },
+    'app-session',
+  );
+  assert.equal(fallback.id, 'row-only');
+  assert.equal(fallback.inserted, true);
+
+  // Files go to the message, not into its text, as on a prompt row.
+  const [withFiles] = provider.normalizeMessage(
+    queuedCommandRow('row-files', 'parent', 2, {
+      source_uuid: INSERT_ID,
+      prompt: [
+        'see attached',
+        '',
+        '<files_input>',
+        'The user attached 1 file(s) to this message.',
+        '1. /home/u/.cloudcli/assets/spec-1.pdf (original name: spec.pdf)',
+        '</files_input>',
+      ].join('\n'),
+    }),
+    'app-session',
+  );
+  assert.equal(withFiles.content, 'see attached');
+  assert.equal(Array.isArray(withFiles.files) && withFiles.files.length === 1, true);
+});
+
 test('resolving an edit anchor skips rows that are not conversation turns', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-anchor-skip-'));
   const sessionId = 'claude-anchor-skip-session';

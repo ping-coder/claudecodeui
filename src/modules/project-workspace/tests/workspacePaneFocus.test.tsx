@@ -100,7 +100,6 @@ vi.mock('@/modules/code-editor', async () => {
       editingFile: null,
       editorWidth: 0,
       editorExpanded: false,
-      hasManualWidth: false,
       resizeHandleRef: { current: null },
       handleFileOpen: (filePath: string) => {
         openedFiles.push(`${selectedProject?.projectId}:${filePath}`);

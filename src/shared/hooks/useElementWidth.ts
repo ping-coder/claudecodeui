@@ -13,8 +13,9 @@ const readWholePixels = (width: number): number => width;
  * anything else `select` reads (a pane's view count) and for whether the element is shown: when it
  * changes, the width is measured and selected again before paint. Left to the ResizeObserver, an element
  * coming into view would first paint with its hidden value: the observer's update renders a frame late.
- * Attach the ref to an element that stays mounted. Used by ProjectWorkspaceShell (whether two panes fit)
- * and by each workspace pane (where its view bar goes and which views it labels).
+ * Attach the ref to an element that stays mounted. Used by project-workspace's ProjectWorkspaceShell
+ * (whether two panes fit) and WorkspacePane (where its view bar goes and which views it labels), and
+ * by file-tree's FileTree (which detailed columns fit).
  */
 export function useElementWidth<T = number>(
   ref: RefObject<HTMLElement | null>,

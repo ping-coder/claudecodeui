@@ -26,6 +26,7 @@ vi.mock('@/shared/api', () => ({
   api: {
     user: {
       savePreferences: () => Promise.resolve({ ok: true }),
+      patchPreferences: () => Promise.resolve({ ok: true }),
     },
   },
 }));
@@ -298,4 +299,38 @@ test('in Chinese each permission note reads correctly', async () => {
     assert.equal(hasText(note), true, pushPermission);
     cleanup();
   }
+});
+
+const LOAD_FAILED_NOTE = "Couldn't load your notification settings. Close Settings and open it again to retry.";
+
+const isDisabled = (element: HTMLElement) => (element as HTMLButtonElement | HTMLInputElement).disabled;
+
+test('until the server preferences arrive, the switches that save them are disabled', () => {
+  renderTab({ notificationPreferencesStatus: 'loading' });
+
+  assert.equal(isDisabled(switchNamed('Sound')), true);
+  for (const name of ['Action required', 'Run stopped', 'Run failed']) {
+    assert.equal(isDisabled(screen.getByRole('checkbox', { name })), true, `${name} is disabled`);
+  }
+  // Stored with the UI preferences, not part of the notification preferences being read.
+  assert.equal(isDisabled(switchNamed('Banner')), false);
+  assert.equal(hasText(LOAD_FAILED_NOTE), false);
+});
+
+test('a failed read keeps them disabled and says so', () => {
+  renderTab({ notificationPreferencesStatus: 'failed' });
+
+  assert.equal(isDisabled(switchNamed('Sound')), true);
+  assert.equal(isDisabled(screen.getByRole('checkbox', { name: 'Run stopped' })), true);
+  assert.equal(hasText(LOAD_FAILED_NOTE), true);
+});
+
+test('once they have arrived the switches work', () => {
+  const props = renderTab({ notificationPreferencesStatus: 'ready' });
+
+  assert.equal(isDisabled(switchNamed('Sound')), false);
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Run stopped' }));
+
+  assert.equal(vi.mocked(props.onNotificationPreferencesChange).mock.calls.length, 1);
+  assert.equal(hasText(LOAD_FAILED_NOTE), false);
 });

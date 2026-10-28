@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
-import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
+import type { InsertStatus, InsertStatusEvent, SendRefusedEvent, ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
 import { playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
@@ -45,6 +45,30 @@ const WIDE_WINDOW_REFRESH_EVERY_TICKS = 3;
  * chat-run-registry.service.ts), so no replay resends more.
  */
 const REPLAY_FRAME_KEYS_PER_SESSION = 5_000;
+
+/** How many inserts' statuses one chat remembers; inserts are rare, and the oldest are forgotten first. */
+const REMEMBERED_INSERT_STATUSES = 1_000;
+
+/**
+ * How far along an insert each status is. An insert only moves forward, so a
+ * status no further than the last one handled is a replay or a late copy: a
+ * replayed `pending` after the live `delivered` must not list it again.
+ */
+const INSERT_STATUS_PROGRESS: Record<InsertStatus, number> = {
+  pending: 1,
+  cancel_failed: 2,
+  delivered: 3,
+  next_turn: 3,
+  cancelled: 3,
+  failed: 3,
+  refused: 3,
+};
+
+const readInsertStatus = (value: unknown): InsertStatus | null => (
+  typeof value === 'string' && Object.prototype.hasOwnProperty.call(INSERT_STATUS_PROGRESS, value)
+    ? value as InsertStatus
+    : null
+);
 
 /** Text one session has streamed that is not in the store yet, and the timer that will write it there. */
 type StreamBuffer = {
@@ -100,6 +124,25 @@ type UseChatRealtimeHandlersArgs = {
   onSessionBackground?: MarkSessionBackground;
   getSessionActivity?: GetSessionActivity;
   onWebSocketReconnect?: () => void;
+  /**
+   * Hands over a mid-run insert's status, once per insert and status, from
+   * any session: the composer lists the insert and acts on its own ones.
+   * These frames never reach the transcript store.
+   */
+  onInsertStatus?: (event: InsertStatusEvent) => void;
+  /**
+   * Says a session's run is over, so its inserts report nothing more: at its
+   * `complete` (`sentBefore` null), and at an idle subscribe ack, which speaks
+   * only for inserts sent before that subscribe (`sentBefore` is when it was
+   * sent, or null when unknown).
+   */
+  onInsertRunEnded?: (sessionId: string, sentBefore: number | null) => void;
+  /**
+   * Hands over a `send_refused`: the server did not start a `chat.send` this
+   * page sent with `keepBackgroundWork`, as it would have stopped the
+   * session's background work. Never a transcript row.
+   */
+  onSendRefused?: (event: SendRefusedEvent) => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
   sessionStore: SessionStore;
 };
@@ -152,6 +195,9 @@ export function useChatRealtimeHandlers({
   onSessionBackground,
   getSessionActivity,
   onWebSocketReconnect,
+  onInsertStatus,
+  onInsertRunEnded,
+  onSendRefused,
   requestLatestMessages,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
@@ -201,6 +247,10 @@ export function useChatRealtimeHandlers({
   // frames numbered past this set no lastSeq record; the next run counts from
   // 1 again, so its first frame comes in at or below it and clears it.
   const endedRunSeqRef = useRef(new Map<string, number>());
+  // The last status handled for each insert. An insert's frames reach a chat
+  // more than once and out of order (live, then in the replay a subscribe asks
+  // for), and the composer must act on each status once.
+  const insertStatusesRef = useRef(new Map<string, InsertStatus>());
 
   // A flush still pending when the chat goes away has no transcript to write.
   useEffect(() => {
@@ -337,6 +387,26 @@ export function useChatRealtimeHandlers({
       return true;
     };
 
+    // Records an insert's status as handled; false when the insert has
+    // already got this far, so this frame is a replay or a late copy.
+    const rememberInsertStatus = (insertId: string, insertStatus: InsertStatus): boolean => {
+      const statuses = insertStatusesRef.current;
+      const previous = statuses.get(insertId);
+      if (previous && INSERT_STATUS_PROGRESS[insertStatus] <= INSERT_STATUS_PROGRESS[previous]) {
+        return false;
+      }
+      // Re-inserted, so the most recently moved insert is the last forgotten.
+      statuses.delete(insertId);
+      statuses.set(insertId, insertStatus);
+      if (statuses.size > REMEMBERED_INSERT_STATUSES) {
+        const oldestInsertId = statuses.keys().next().value;
+        if (oldestInsertId !== undefined) {
+          statuses.delete(oldestInsertId);
+        }
+      }
+      return true;
+    };
+
     const handleEvent = (msg: ServerEvent) => {
       if (!msg.kind) {
         return;
@@ -445,6 +515,9 @@ export function useChatRealtimeHandlers({
             if (typeof msg.lastSeq === 'number' && msg.lastSeq > 0) {
               endedRunSeqRef.current.set(sid, msg.lastSeq);
             }
+            // No run is going on, so an insert sent before this subscribe has
+            // ended, whether or not this page heard how.
+            onInsertRunEnded?.(sid, statusCheckSentAtRef.current.get(sid) ?? null);
           }
 
           const isViewedSession = sid === activeViewSessionId;
@@ -467,6 +540,22 @@ export function useChatRealtimeHandlers({
                 void playNotificationSound();
               }
             }
+          }
+          return;
+        }
+
+        // The answer to this page's own `chat.send`, before any run began: no
+        // seq, nothing to store, and the session is left as it was. Only the
+        // composer that sent the message acts on it.
+        case 'send_refused': {
+          if (frameSessionId) {
+            onSendRefused?.({
+              sessionId: frameSessionId,
+              reason: typeof msg.reason === 'string' ? msg.reason : '',
+              changes: Array.isArray(msg.changes)
+                ? msg.changes.filter((change): change is string => typeof change === 'string')
+                : [],
+            });
           }
           return;
         }
@@ -558,12 +647,15 @@ export function useChatRealtimeHandlers({
       }
 
       // --- All other messages: route to store ---
+      // An insert's status is no transcript row: the card above the composer
+      // shows a pending insert, and the message itself arrives as a `text`.
       const shouldPersist =
         msg.kind !== 'complete'
         && msg.kind !== 'status'
         && msg.kind !== 'permission_request'
         && msg.kind !== 'permission_resolved'
-        && msg.kind !== 'permission_cancelled';
+        && msg.kind !== 'permission_cancelled'
+        && msg.kind !== 'insert_status';
 
       if (sid && shouldPersist && storesFrame) {
         sessionStore.appendRealtime(sid, msg as unknown as NormalizedMessage);
@@ -606,6 +698,11 @@ export function useChatRealtimeHandlers({
           if (sid === activeViewSessionId) {
             pendingPermissionRequestsRef.current = [];
             setPendingPermissionRequests([]);
+          }
+          // A turn's `complete` waits for every insert it took to end, so
+          // none of them reports anything after it.
+          if (sid) {
+            onInsertRunEnded?.(sid, null);
           }
 
           if (msg.aborted) {
@@ -715,6 +812,25 @@ export function useChatRealtimeHandlers({
           break;
         }
 
+        // Handled whether or not this chat stores the run's frames: the
+        // replay its own subscribe asks for repeats them, which the status
+        // record drops.
+        case 'insert_status': {
+          const insertId = typeof msg.insertId === 'string' ? msg.insertId : '';
+          const insertStatus = readInsertStatus(msg.insertStatus);
+          if (!insertId || !insertStatus || !rememberInsertStatus(insertId, insertStatus)) {
+            break;
+          }
+          onInsertStatus?.({
+            sessionId: sid,
+            insertId,
+            insertStatus,
+            content: typeof msg.content === 'string' ? msg.content : '',
+            ...(typeof msg.insertReason === 'string' && msg.insertReason ? { insertReason: msg.insertReason } : {}),
+          });
+          break;
+        }
+
         // text, tool_use, tool_result, thinking, task_notification
         // → already routed to store above, no UI side effects needed
         default:
@@ -740,6 +856,9 @@ export function useChatRealtimeHandlers({
     onSessionBackground,
     getSessionActivity,
     onWebSocketReconnect,
+    onInsertStatus,
+    onInsertRunEnded,
+    onSendRefused,
     requestLatestMessages,
     sessionStore,
   ]);

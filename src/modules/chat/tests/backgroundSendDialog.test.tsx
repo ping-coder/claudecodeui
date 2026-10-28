@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import BackgroundSendDialog from '@/modules/chat/composer/BackgroundSendDialog';
 
 const PROMPT = { work: ['Workflow frontend-architecture-audit', 'Agent Survey the repo'] };
@@ -38,6 +38,62 @@ describe('the background-work send dialog', () => {
     fireEvent.click(overlay as Element);
 
     expect(onResolve.mock.calls).toEqual([['cancel'], ['cancel']]);
+  });
+
+  it('names what only a new process can apply, for a send that cannot go into the process the work runs in', () => {
+    render(<BackgroundSendDialog prompt={{ ...PROMPT, changes: ['model', 'effort', 'permissionMode', 'somethingNew'] }} onResolve={() => {}} />);
+
+    expect(screen.getByText(
+      'This message changes the model, the reasoning effort and the permission mode, which only a new process can apply. Change them back to send it without stopping the work.',
+    )).toBeTruthy();
+    expect(screen.getByText(/^Sending it anyway starts a new process, which stops that work/)).toBeTruthy();
+    expect(screen.queryByText(/^A new message starts a new turn/)).toBeNull();
+    // A screen reader hears why along with what sending anyway does.
+    const describedBy = screen.getByRole('dialog').getAttribute('aria-describedby') ?? '';
+    const description = describedBy.split(' ').map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    expect(description.startsWith('This message changes the model')).toBe(true);
+    expect(description.includes('Sending it anyway starts a new process')).toBe(true);
+  });
+
+  it('says it for one change, or for a send the server could not prepare, and says nothing it does not know', () => {
+    const { unmount } = render(<BackgroundSendDialog prompt={{ ...PROMPT, changes: ['model'] }} onResolve={() => {}} />);
+    expect(screen.getByText(/^This message changes the model, which only a new process can apply\. Change it back/)).toBeTruthy();
+    unmount();
+
+    render(<BackgroundSendDialog prompt={{ ...PROMPT, changes: ['lookup', 'somethingNew'] }} onResolve={() => {}} />);
+    expect(screen.getByText('The message could not be handed to the process the work runs in.')).toBeTruthy();
+    expect(screen.queryByText(/^This message changes/)).toBeNull();
+    expect(screen.getByText(/^Sending it anyway starts a new process/)).toBeTruthy();
+  });
+
+  it('keeps the plain wording where every new turn stops the work', () => {
+    render(<BackgroundSendDialog prompt={PROMPT} onResolve={() => {}} />);
+
+    expect(screen.getByText(/^A new message starts a new turn, which stops that work/)).toBeTruthy();
+    expect(screen.queryByText(/^This message changes/)).toBeNull();
+  });
+
+  it('has its new strings in English and Simplified Chinese', () => {
+    const keys = [
+      'claudeStatus.backgroundTask.prompt.descriptionNewProcess',
+      'claudeStatus.backgroundTask.prompt.changes_one',
+      'claudeStatus.backgroundTask.prompt.changes_other',
+      'claudeStatus.backgroundTask.prompt.changeSeparator',
+      'claudeStatus.backgroundTask.prompt.changeLastSeparator',
+      'claudeStatus.backgroundTask.prompt.change.model',
+      'claudeStatus.backgroundTask.prompt.change.effort',
+      'claudeStatus.backgroundTask.prompt.change.ultracode',
+      'claudeStatus.backgroundTask.prompt.change.permissionMode',
+      'claudeStatus.backgroundTask.prompt.change.tools',
+      'claudeStatus.backgroundTask.prompt.change.cwd',
+      'claudeStatus.backgroundTask.prompt.lookupFailed',
+    ];
+    // Read from each language's own strings: a lookup would fall back to English.
+    const missing = ['en', 'zh-CN'].flatMap((language) => keys
+      .filter((key) => language !== 'zh-CN' || key !== 'claudeStatus.backgroundTask.prompt.changes_one')
+      .filter((key) => typeof i18n.getResource(language, 'chat', key) !== 'string')
+      .map((key) => `${language} ${key}`));
+    expect(missing).toEqual([]);
   });
 
   it('renders nothing while no prompt is open', () => {

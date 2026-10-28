@@ -6,8 +6,7 @@ import { ChevronUp } from 'lucide-react';
 
 import { Shimmer } from '@/shared/ui';
 import type { ActivityDetails, ActivityProgress, BackgroundTaskSummary, SessionActivity } from '@/shared/types';
-import { cn } from '@/shared/utils';
-import { describeBackgroundTask, ownBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
+import { cn, describeBackgroundTask, ownBackgroundTasks } from '@/shared/utils';
 import {
   computeProgressPercent,
   estimateRemainingMs,

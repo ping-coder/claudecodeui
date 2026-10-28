@@ -337,3 +337,19 @@ export const NO_PALETTE_OPS = Object.freeze({});
  * tell a tab (moves, Alt copies) from a sidebar row.
  */
 export const PANE_TAB_DRAG_EFFECT = 'copyMove';
+
+// ---------------------------
+
+//----------------- DOCKED CODE EDITOR ------------
+
+/** Narrowest the content beside a docked code editor (the file tree, the chat) gets; a pane without room for both expands or pops out the editor. */
+export const EDITOR_SIDE_CONTENT_MIN_WIDTH_PX = 200;
+
+/** Narrowest a docked code editor gets, not counting the divider in front of it. */
+export const EDITOR_PANEL_MIN_WIDTH_PX = 280;
+
+/** Layout width of the divider in front of a docked code editor (Tailwind w-1). */
+export const EDITOR_DIVIDER_WIDTH_PX = 4;
+
+/** The file tree's share of the pane beside a docked editor in the Files view: before the first drag, for a stored value that does not parse, and after Home or a double-click on the divider. */
+export const FILES_TREE_RATIO_DEFAULT = 0.4;

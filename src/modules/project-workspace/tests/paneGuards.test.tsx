@@ -68,7 +68,6 @@ vi.mock('@/modules/code-editor', () => ({
     editingFile: null,
     editorWidth: 0,
     editorExpanded: false,
-    hasManualWidth: false,
     resizeHandleRef: { current: null },
     handleFileOpen: () => true,
     handleCloseEditor: noop,

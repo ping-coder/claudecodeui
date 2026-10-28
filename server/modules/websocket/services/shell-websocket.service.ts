@@ -5,7 +5,10 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
+import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import type { ProviderRuntimeGateway } from '@/modules/websocket/services/chat-websocket.service.js';
 import { resolveAgyCliPath } from '@/shared/agy-cli-path.js';
+import type { BackgroundTaskSummary, ProviderProcessState, SessionHold } from '@/shared/types.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -24,6 +27,13 @@ type ShellIncomingMessage = {
   colorScheme?: string;
   // The model chosen for the session's provider; only the agy launch uses it.
   model?: string;
+  // Set when the user chose to stop what CloudCLI still runs on the session
+  // (see takeOverSession) so the CLI can start on it: what their busy notice
+  // showed, read by readTakeOverSnapshot.
+  takeOver?: unknown;
+  // The client's number for this init, echoed on the `session_busy` that
+  // answers it: a takeover's answer can arrive after an earlier init's.
+  initId?: unknown;
 };
 
 type ShellColorScheme = 'light' | 'dark';
@@ -117,13 +127,182 @@ function shouldAutoOpenUrlFromOutput(value: string): boolean {
   );
 }
 
+/**
+ * What the Shell handler needs from the provider runtime gateway: what
+ * CloudCLI's own processes still hold for a session, and stopping them when
+ * the user takes the session over for the terminal.
+ */
+type ShellSessionRuntime = Pick<ProviderRuntimeGateway, 'abort'> & {
+  describeSessionHold(sessionId: string): SessionHold | null;
+  releaseSession(sessionId: string): Promise<void>;
+};
+
 type ShellWebSocketDependencies = {
   resolveProviderSessionId: (
     sessionId: string,
     provider: string,
   ) => string | null | undefined;
   spawnPty?: typeof pty.spawn;
+  /**
+   * The provider runtimes. Without them only a chat turn under way or a
+   * queued message holds a CLI back, and a session cannot be taken over.
+   */
+  runtime?: ShellSessionRuntime;
+  /** Whether a chat message is queued for the app session, which the dispatcher sends once it is idle. */
+  hasQueuedMessage?: (appSessionId: string) => boolean;
 };
+
+/**
+ * Why CloudCLI itself still holds a session, and what it runs there: sent as
+ * `session_busy` instead of starting a CLI on it. `tasks` are the background
+ * tasks still outstanding; `turnStartedAt` is when the chat turn under way
+ * started (its run's `startedAt`, null when none is), which tells that turn
+ * from a later one; `hasQueuedMessage` rules out a takeover, as the
+ * dispatcher would send the message, in a new process, as soon as the
+ * session is free.
+ */
+type ShellSessionBusy = {
+  reason: 'turn' | 'exiting' | 'background' | 'held' | 'queued';
+  tasks: BackgroundTaskSummary[];
+  turnStartedAt: number | null;
+  hasQueuedMessage: boolean;
+};
+
+/**
+ * What the busy notice the user acted on showed, sent back with a takeover:
+ * the chat turn then under way (`turnStartedAt`, null for none) and the id of
+ * every task its frame carried, nested and unlisted ones included. A takeover
+ * stops nothing beyond it (see hasChangedSinceSnapshot).
+ */
+type ShellTakeOverSnapshot = {
+  turnStartedAt: number | null;
+  taskIds: string[];
+};
+
+/**
+ * The ids a session's runs may be registered under: the app session id, and
+ * the provider-native id when it differs (a run started without an app
+ * session id is keyed by the provider's).
+ */
+function listSessionIds(appSessionId: string, providerSessionId: string | null): string[] {
+  return providerSessionId && providerSessionId !== appSessionId
+    ? [appSessionId, providerSessionId]
+    : [appSessionId];
+}
+
+/**
+ * Whether CloudCLI itself still holds the session a CLI would open, and why.
+ * A CLI started on it now would be a second process writing the same
+ * transcript, and the Claude CLI would record the background tasks still
+ * running in CloudCLI's process as stopped (it only knows its own).
+ *
+ * The first reason that applies wins: a chat turn under way, for any
+ * provider (`turn`); a Claude process on its way out (`exiting`); one held
+ * open for background tasks (`background`) or for work no task stands for,
+ * such as a Monitor or a scheduled wake-up (`held`); or only a queued chat
+ * message (`queued`). Null when nothing holds it.
+ */
+function readSessionBusy(
+  appSessionId: string,
+  providerSessionId: string | null,
+  dependencies: ShellWebSocketDependencies,
+): ShellSessionBusy | null {
+  let processState: ProviderProcessState | null = null;
+  const tasks: BackgroundTaskSummary[] = [];
+  for (const sessionId of listSessionIds(appSessionId, providerSessionId)) {
+    const hold = dependencies.runtime?.describeSessionHold(sessionId) ?? null;
+    if (hold?.processState === 'running' || (hold?.processState === 'exiting' && processState === null)) {
+      processState = hold.processState;
+    }
+    tasks.push(...(hold?.tasks ?? []));
+  }
+  const hasQueuedMessage = dependencies.hasQueuedMessage?.(appSessionId) ?? false;
+  const run = chatRunRegistry.getRun(appSessionId);
+  const turnStartedAt = run?.status === 'running' ? run.startedAt : null;
+
+  let reason: ShellSessionBusy['reason'] | null = null;
+  if (turnStartedAt !== null) {
+    reason = 'turn';
+  } else if (processState === 'exiting') {
+    reason = 'exiting';
+  } else if (tasks.length > 0) {
+    reason = 'background';
+  } else if (processState === 'running') {
+    reason = 'held';
+  } else if (hasQueuedMessage) {
+    reason = 'queued';
+  }
+  return reason ? { reason, tasks, turnStartedAt, hasQueuedMessage } : null;
+}
+
+/**
+ * Reads an init's `takeOver`: the snapshot of the notice the user acted on,
+ * or null when the init asks for no takeover. A malformed field reads as a
+ * notice that showed nothing.
+ *
+ * A bare `true` is what clients from before the snapshot send, from a page
+ * loaded before an upgrade. It reads as that empty notice too: such a client
+ * can still take over a process held with no turn and no tasks, but gets
+ * `session_busy` with `changed` for a turn or tasks, which it cannot show it
+ * saw, until the page is reloaded.
+ */
+function readTakeOverSnapshot(value: unknown): ShellTakeOverSnapshot | null {
+  if (value === true) {
+    return { turnStartedAt: null, taskIds: [] };
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const snapshot = value as Record<string, unknown>;
+  return {
+    turnStartedAt:
+      typeof snapshot.turnStartedAt === 'number' && Number.isFinite(snapshot.turnStartedAt)
+        ? snapshot.turnStartedAt
+        : null,
+    taskIds: Array.isArray(snapshot.taskIds)
+      ? snapshot.taskIds.filter((taskId): taskId is string => typeof taskId === 'string')
+      : [],
+  };
+}
+
+/**
+ * Whether CloudCLI has started something on the session since the notice a
+ * takeover comes from: a chat turn other than the one it showed (a session's
+ * next run starts after the last one ended, so with a later `startedAt`), or
+ * a task it did not carry. Its turn or tasks having ended since is no change,
+ * there is only less to stop; nor is the process going from held to exiting
+ * or back, as a process carries no identity here.
+ */
+function hasChangedSinceSnapshot(busy: ShellSessionBusy, snapshot: ShellTakeOverSnapshot): boolean {
+  if (busy.turnStartedAt !== null && busy.turnStartedAt !== snapshot.turnStartedAt) {
+    return true;
+  }
+  const shownTaskIds = new Set(snapshot.taskIds);
+  return busy.tasks.some((task) => !shownTaskIds.has(task.taskId));
+}
+
+/**
+ * Stops what CloudCLI runs on a session the user takes over for the
+ * terminal: the chat turn under way, if any, is aborted and completed as
+ * `chat.abort` does, then every runtime lets go of the session under either
+ * id, which waits for its process to exit. A failure is only logged: the
+ * caller checks the session again either way.
+ */
+async function takeOverSession(
+  appSessionId: string,
+  providerSessionId: string | null,
+  runtime: ShellSessionRuntime,
+): Promise<void> {
+  try {
+    await chatRunRegistry.abortRun(appSessionId, (provider, sessionId) => runtime.abort(provider, sessionId));
+    for (const sessionId of listSessionIds(appSessionId, providerSessionId)) {
+      await runtime.releaseSession(sessionId);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[ERROR] Shell: taking session ${appSessionId} over failed: ${message}`);
+  }
+}
 
 /**
  * Reads a string field from untyped payloads and falls back when absent.
@@ -594,6 +773,41 @@ export function handleShellConnection(
   let ptySessionKey: string | null = null;
   let urlDetectionBuffer = '';
   const announcedAuthUrls = new Set<string>();
+  // How many init frames this socket has sent. A takeover waits for
+  // CloudCLI's processes to exit; an init that arrives meanwhile replaces
+  // it, so the takeover then starts nothing.
+  let initCount = 0;
+
+  // Gives this socket a pty that is already running: replays its output and
+  // takes its live output over from whichever socket had it.
+  const attachToExistingPty = (existingSession: PtySessionEntry): void => {
+    shellProcess = existingSession.pty;
+    if (existingSession.timeoutId) {
+      clearTimeout(existingSession.timeoutId);
+      existingSession.timeoutId = null;
+    }
+
+    ws.send(
+      JSON.stringify({
+        type: 'output',
+        data: '\x1b[36m[Reconnected to existing session]\x1b[0m\r\n',
+      })
+    );
+
+    if (existingSession.buffer.length > 0) {
+      existingSession.buffer.forEach((bufferedData) => {
+        ws.send(
+          JSON.stringify({
+            type: 'output',
+            data: bufferedData,
+          })
+        );
+      });
+    }
+
+    existingSession.ws = ws;
+    sendClaudeColorScheme(ws, existingSession.claudeColorScheme);
+  };
 
   ws.on('message', async (rawMessage) => {
     try {
@@ -603,6 +817,8 @@ export function handleShellConnection(
       }
 
       if (data.type === 'init') {
+        initCount += 1;
+        const initNumber = initCount;
         const projectPath = readString(data.projectPath, process.cwd());
         const sessionId = readString(data.sessionId) || null;
         const hasSession = readBoolean(data.hasSession);
@@ -628,48 +844,24 @@ export function handleShellConnection(
           isPlainShell && initialCommand
             ? `_cmd_${Buffer.from(initialCommand).toString('base64').slice(0, 16)}`
             : '';
-        ptySessionKey = `${projectPath}_${sessionId ?? 'default'}${commandSuffix}`;
+        const sessionKey = `${projectPath}_${sessionId ?? 'default'}${commandSuffix}`;
+        ptySessionKey = sessionKey;
 
         if (isLoginCommand || forceRestart) {
-          const oldSession = ptySessionsMap.get(ptySessionKey);
+          const oldSession = ptySessionsMap.get(sessionKey);
           if (oldSession) {
             if (oldSession.timeoutId) {
               clearTimeout(oldSession.timeoutId);
             }
             oldSession.pty.kill();
-            ptySessionsMap.delete(ptySessionKey);
+            ptySessionsMap.delete(sessionKey);
           }
         }
 
         const existingSession =
-          isLoginCommand || forceRestart ? null : ptySessionsMap.get(ptySessionKey);
+          isLoginCommand || forceRestart ? null : ptySessionsMap.get(sessionKey);
         if (existingSession) {
-          shellProcess = existingSession.pty;
-          if (existingSession.timeoutId) {
-            clearTimeout(existingSession.timeoutId);
-            existingSession.timeoutId = null;
-          }
-
-          ws.send(
-            JSON.stringify({
-              type: 'output',
-              data: '\x1b[36m[Reconnected to existing session]\x1b[0m\r\n',
-            })
-          );
-
-          if (existingSession.buffer.length > 0) {
-            existingSession.buffer.forEach((bufferedData) => {
-              ws.send(
-                JSON.stringify({
-                  type: 'output',
-                  data: bufferedData,
-                })
-              );
-            });
-          }
-
-          existingSession.ws = ws;
-          sendClaudeColorScheme(ws, existingSession.claudeColorScheme);
+          attachToExistingPty(existingSession);
           return;
         }
 
@@ -688,6 +880,61 @@ export function handleShellConnection(
         if (sessionId && !safeSessionIdPattern.test(sessionId)) {
           ws.send(JSON.stringify({ type: 'error', message: 'Invalid session ID' }));
           return;
+        }
+
+        // A provider CLI on a session CloudCLI itself still runs would be a
+        // second process on it (see readSessionBusy), so the socket is told
+        // why instead, and stays open for another init. Checked whether or
+        // not the provider id is known yet: a new session's first turn has
+        // none, and the launch would then start an unrelated CLI.
+        if (!isPlainShell && hasSession && sessionId) {
+          const providerSessionId = resolveResumeSessionId(data, dependencies) || null;
+          let busy = readSessionBusy(sessionId, providerSessionId, dependencies);
+          const takeOver = readTakeOverSnapshot(data.takeOver);
+          // Set when a takeover is refused, having stopped nothing, because
+          // the session now runs more than the user's notice showed.
+          let changed = false;
+          if (busy && takeOver && !busy.hasQueuedMessage && dependencies.runtime) {
+            // Compared with the read just above, with no await in between, and
+            // takeOverSession picks the run it aborts in this same tick: nothing
+            // can start on the session between the check and the stop.
+            changed = hasChangedSinceSnapshot(busy, takeOver);
+            if (!changed) {
+              console.log(`[INFO] Shell: taking session ${sessionId} over for the terminal (${busy.reason})`);
+              await takeOverSession(sessionId, providerSessionId, dependencies.runtime);
+              // A later init replaced this one, or the socket went away:
+              // CloudCLI has let go, but nobody waits for this CLI any more.
+              if (initNumber !== initCount || ws.readyState !== WebSocket.OPEN) {
+                return;
+              }
+              // Another tab started the CLI meanwhile: share it, as a reconnect does.
+              const startedMeanwhile = ptySessionsMap.get(sessionKey);
+              if (startedMeanwhile) {
+                attachToExistingPty(startedMeanwhile);
+                return;
+              }
+              busy = readSessionBusy(sessionId, providerSessionId, dependencies);
+            }
+          }
+          if (busy) {
+            console.log(
+              changed
+                ? `[INFO] Shell: not taking session ${sessionId} over, CloudCLI started more on it since the notice (${busy.reason})`
+                : `[INFO] Shell: not starting a CLI on session ${sessionId}, CloudCLI still holds it (${busy.reason})`,
+            );
+            // The init's own number goes back with the answer, so the client
+            // can tell it from the answer to an earlier init.
+            const initId = typeof data.initId === 'number' && Number.isFinite(data.initId) ? data.initId : null;
+            ws.send(JSON.stringify({
+              type: 'session_busy',
+              sessionId,
+              provider,
+              ...busy,
+              changed,
+              ...(initId === null ? {} : { initId }),
+            }));
+            return;
+          }
         }
 
         const { command: shellCommand, claudeFollowsAppTheme } = buildShellCommand(
@@ -728,7 +975,7 @@ export function handleShellConnection(
           },
         });
 
-        ptySessionsMap.set(ptySessionKey, {
+        ptySessionsMap.set(sessionKey, {
           pty: shellProcess,
           ws,
           buffer: [],

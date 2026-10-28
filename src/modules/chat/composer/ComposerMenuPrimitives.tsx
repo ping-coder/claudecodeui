@@ -5,11 +5,11 @@ import { cn } from '@/shared/utils';
 import type { ComposerMenuAnchor } from '@/shared/types';
 
 /**
- * Shared shell for the composer popovers (model/effort, permissions and
- * scheduling) so every menu shares one surface, one heading style and one row
- * style.
+ * Shared shell for the composer popovers (model/effort, permissions,
+ * scheduling and the send button's Insert/Queue menu) so every menu shares one
+ * surface, one heading style and one row style.
  *
- * Used by chat's ComposerModelMenu, ComposerPermissionMenu and ScheduleMessagePopover.
+ * Used by chat's ComposerModelMenu, ComposerPermissionMenu, ScheduleMessagePopover and BusySendMenu.
  */
 export function ComposerMenuSurface({
   anchor,
@@ -40,7 +40,7 @@ export function ComposerMenuSurface({
   );
 }
 
-/** Used by chat's ComposerModelMenu, ComposerPermissionMenu and ScheduleMessagePopover to label a section of the popover. */
+/** Used by chat's ComposerModelMenu, ComposerPermissionMenu, ScheduleMessagePopover and BusySendMenu to label a section of the popover. */
 export function ComposerMenuHeading({ children }: { children: ReactNode }) {
   return (
     <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground">{children}</p>
@@ -53,13 +53,16 @@ export function ComposerMenuSeparator() {
 }
 
 /**
- * Used by chat's ComposerModelMenu, ComposerPermissionMenu and
- * ScheduleMessagePopover to render one selectable row with its checked state.
+ * Used by chat's ComposerModelMenu, ComposerPermissionMenu,
+ * ScheduleMessagePopover and BusySendMenu to render one selectable row with
+ * its checked state.
  *
  * `menuitemradio` rows pick one value of a group, `menuitemcheckbox` rows flip
  * an independent on/off option, and plain `menuitem` rows act without a
  * checked state. A `trailing` element replaces the default check mark, e.g.
- * with a chevron or a switch.
+ * with a chevron or a switch. A `disabled` row is dimmed and ignores clicks
+ * but stays focusable and hoverable, so its `title` and description can say
+ * why it is off.
  */
 export function ComposerMenuItem({
   label,
@@ -70,6 +73,8 @@ export function ComposerMenuItem({
   role = 'menuitemradio',
   trailing,
   className,
+  disabled = false,
+  title,
 }: {
   label: ReactNode;
   description?: ReactNode;
@@ -79,17 +84,22 @@ export function ComposerMenuItem({
   role?: 'menuitemradio' | 'menuitemcheckbox' | 'menuitem';
   trailing?: ReactNode;
   className?: string;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
       type="button"
       role={role}
       aria-checked={role === 'menuitem' ? undefined : isSelected}
-      onClick={onSelect}
+      aria-disabled={disabled || undefined}
+      title={title}
+      onClick={disabled ? undefined : onSelect}
       className={cn(
         'flex w-full items-start gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
         'hover:bg-accent focus-visible:bg-accent focus-visible:outline-none',
         isSelected ? 'text-foreground' : 'text-foreground/90',
+        disabled && 'cursor-not-allowed opacity-50 hover:bg-transparent',
         className,
       )}
     >

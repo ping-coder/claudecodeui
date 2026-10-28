@@ -1,6 +1,6 @@
 import { CODE_EDITOR_DEFAULTS } from '@/shared/constants';
 import type { CodeEditorSettingsState } from '@/shared/types';
-import { readUserPreference, writeUserPreference } from '@/shared/userSettings';
+import { patchUserPreference, readUserPreference } from '@/shared/userSettings';
 
 /**
  * The single reader and writer for the code-editor display settings.
@@ -17,7 +17,7 @@ import { readUserPreference, writeUserPreference } from '@/shared/userSettings';
 type StoredCodeEditorSettings = Partial<Record<keyof CodeEditorSettingsState, unknown>>;
 
 // The server stores the blob without checking its shape, so anything but a
-// plain object counts as nothing set rather than being spread into a write.
+// plain object counts as nothing set.
 const readStoredSettings = (): StoredCodeEditorSettings => {
   const stored = readUserPreference<unknown>('codeEditorSettings', {});
   return typeof stored === 'object' && stored !== null && !Array.isArray(stored)
@@ -56,23 +56,19 @@ export const readCodeEditorSettings = (): CodeEditorSettingsState => {
 };
 
 /**
- * Merges the given settings into the stored blob. A key not passed keeps its
- * stored value, or stays absent and keeps following CODE_EDITOR_DEFAULTS, so a
- * later change to a default still reaches everyone who never chose that
- * setting.
+ * Changes only the given settings. A key not passed keeps its stored value, or
+ * stays absent and keeps following CODE_EDITOR_DEFAULTS, so a later change to a
+ * default still reaches everyone who never chose that setting.
  *
- * The merge only protects writers in the same tab, the settings dialog and the
- * editor header's wrap toggle, from writing back a stale copy of each other's
- * keys. Its base is this tab's copy, fetched from the server when the page
- * loaded or the user signed in, and the server replaces the whole blob on every
- * write. Across tabs and devices the last writer therefore still wins: a write
- * from this tab drops any key changed elsewhere since it loaded. The fix for
- * that belongs in the preference store and on the server, not here.
+ * Only the given keys are sent, and the server merges them into its copy, so a
+ * key changed in another tab or on another device since this tab loaded is not
+ * written back over. The two writers in one tab, the settings dialog and the
+ * editor header's wrap toggle, leave each other's keys alone the same way.
  *
  * The preference store notifies its subscribers synchronously, including in
  * the writing tab, so the editor re-reads without a separate same-tab event.
  * Called only from a user edit.
  */
 export const writeCodeEditorSettings = (settings: Partial<CodeEditorSettingsState>) => {
-  writeUserPreference('codeEditorSettings', { ...readStoredSettings(), ...settings });
+  patchUserPreference('codeEditorSettings', settings);
 };

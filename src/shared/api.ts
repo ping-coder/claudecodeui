@@ -450,6 +450,12 @@ export const api = {
       projectPath: string;
       initialMessage?: unknown;
     }) => post('/api/providers/sessions', payload),
+    // Whether a `chat.send` with these options would run in the process the
+    // session holds open for its background work, and if not, what keeps it
+    // out: `{ heldWork, canHandOver, changes }`. Read only; nothing starts or
+    // stops. A server older than the route answers 404.
+    handOverPlan: (sessionId: string, options: Record<string, unknown>, requestOptions: ApiRequestOptions = {}) =>
+      post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/hand-over-plan`, { options }, requestOptions),
     sessionMessages: (
       sessionId: string,
       pagination: { limit?: number | null; offset?: number } = {},
@@ -541,11 +547,19 @@ export const api = {
     completeOnboarding: () => post('/api/user/complete-onboarding'),
 
     // Preferences and chat drafts live server-side so they follow the user
-    // from one device to another. `savePreferences` is a merge-patch: only the
-    // keys it is given are written.
-    preferences: () => get('/api/user/preferences'),
-    savePreferences: (updates: Record<string, unknown>) =>
-      patch('/api/user/preferences', updates),
+    // from one device to another. `savePreferences` writes only the keys it is
+    // given and replaces each of them whole. `patchPreferences` replaces its
+    // `set` keys the same way and merges each `merge` value field by field (a
+    // null field is removed), so fields changed elsewhere survive; a server
+    // older than that route answers 404. `signal` lets the preference store
+    // give up on a request that hangs.
+    preferences: (options?: { signal?: AbortSignal }) => get('/api/user/preferences', options),
+    savePreferences: (updates: Record<string, unknown>, options?: { signal?: AbortSignal }) =>
+      patch('/api/user/preferences', updates, options),
+    patchPreferences: (
+      changes: { set: Record<string, unknown>; merge: Record<string, Record<string, unknown>> },
+      options?: { signal?: AbortSignal },
+    ) => patch('/api/user/preferences/merge', changes, options),
     drafts: () => get('/api/user/drafts'),
     // Without `queuedMessage` only the text is written; the stored queued
     // message is left as it is.

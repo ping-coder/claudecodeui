@@ -225,6 +225,11 @@ export type ProviderSessionModel = {
  * Message/event variants emitted by provider adapters and normalized transports.
  *
  * Keep this union in sync with event kinds produced by provider session adapters.
+ *
+ * `insert_status` is the one kind both sides send: a runtime reports an
+ * accepted insert's progress through the run's writer, and the chat gateway
+ * answers a refused insert or a failed cancel straight to the asking socket
+ * (see `InsertStatus`).
  */
 export type MessageKind =
   | 'text'
@@ -242,7 +247,8 @@ export type MessageKind =
   | 'session_created'
   | 'history_truncated'
   | 'task_notification'
-  | 'task_status';
+  | 'task_status'
+  | 'insert_status';
 
 /**
  * Event kinds added by the chat gateway layer on top of provider message kinds.
@@ -252,13 +258,18 @@ export type MessageKind =
  * any provider adapter. Together with `MessageKind` they form the complete set of
  * `kind` values a websocket client can receive, so the frontend only ever
  * needs one kind-based switch.
+ *
+ * `send_refused` answers a `chat.send` that asked to keep the session's
+ * background work and could not: the gateway started no run, and tells only
+ * the asking socket, without `seq` (see `ProviderHandOverPlan`).
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
   | 'session_upserted'
   | 'run_ended'
   | 'loading_progress'
-  | 'protocol_error';
+  | 'protocol_error'
+  | 'send_refused';
 
 /**
  * Complete set of `kind` values emitted to websocket clients.
@@ -480,6 +491,38 @@ export type NormalizedMessage = {
   outputFile?: string;
   /** A workflow's `progress` only: where each agent the run spawned stands. */
   agents?: WorkflowAgentProgress[];
+  /**
+   * `insert_status` only: the client-generated UUID naming the insert, which
+   * is also the uuid the CLI writes for the message. Every status of one
+   * insert carries the same id, and the client that sent it matches on it.
+   */
+  insertId?: string;
+  /** `insert_status` only: where the insert stands (see `InsertStatus`). */
+  insertStatus?: InsertStatus;
+  /**
+   * `insert_status` only, optional: why. A `refused` status always carries
+   * one of `NO_ACTIVE_RUN` (no turn in progress; an idle session takes a
+   * normal send), `UNSUPPORTED` (the provider cannot insert; queue it),
+   * `SLASH_COMMAND` (never read mid-turn; queue it) or `INVALID` (malformed,
+   * unknown session, attachments, reused insertId). The gateway's
+   * `cancel_failed` carries `NOT_FOUND`, `UNSUPPORTED`, `INVALID` or
+   * `INTERNAL_ERROR`, or nothing when the CLI is already delivering the
+   * insert, and its `failed` carries `INTERNAL_ERROR`. On the runtime's
+   * statuses it is the runtime's own word, so clients may show it but must
+   * not branch on values they do not know.
+   */
+  insertReason?: string;
+  /**
+   * Set on the user `text` message of an insert the model read in the middle
+   * of a turn, live and in history, where Claude records it as a
+   * `queued_command` attachment row (a message typed into a terminal CLI
+   * mid-turn reads back the same way). Its `id` is the row's `source_uuid`,
+   * which for an insert sent from here is the insertId, and it has no
+   * `transcriptAnchorId`: a conversation cannot be resumed from that row, so
+   * the message cannot be edited or forked from. An insert that ran as the
+   * next turn is an ordinary user message instead, anchored at the insertId.
+   */
+  inserted?: boolean;
   [key: string]: unknown;
 };
 
@@ -517,6 +560,30 @@ export type BackgroundTaskSummary = {
    * it can still be stopped; not counted as the session's own work.
    */
   nested?: boolean;
+};
+
+/**
+ * Whether a provider runtime's own process still holds a session (see
+ * `IProviderRuntime.processState`): `running` while a run owns it, starting,
+ * mid-turn or held open past its turn; `exiting` while a process that let go
+ * of it, or was retired or aborted, is on its way out. Only a runtime that
+ * keeps a process past its turn reports it (Claude).
+ */
+export type ProviderProcessState = 'running' | 'exiting';
+
+/**
+ * What this server's own provider processes still hold for one session,
+ * merged across runtimes by the provider runtime service
+ * (`describeSessionHold`): the process state, `running` winning over
+ * `exiting` and null when no runtime reports a process, and every runtime's
+ * outstanding background tasks for the session (nested ones included). The
+ * Shell tab reads it before starting a CLI on the session, which would report
+ * those tasks as orphans and write to the same transcript. It says nothing
+ * about other CloudCLI instances or CLIs started outside this server.
+ */
+export type SessionHold = {
+  processState: ProviderProcessState | null;
+  tasks: BackgroundTaskSummary[];
 };
 
 /**
@@ -724,6 +791,15 @@ export type ProviderRuntimeWriter = {
    */
   reportBackgroundWorkFinished?(): void;
   /**
+   * The session's next run took over the process this writer's turn ran in, with the background work it
+   * is held for, instead of stopping that work. Optional: SSE writers leave it out.
+   *
+   * The Claude runtime calls it on the writer of the turn that left the work running when it runs a new
+   * turn in that process. The chat gateway's writer records the next run as this run's successor, so the
+   * work's later `reportBackgroundWorkFinished` on this writer still counts.
+   */
+  reportProcessHandedOver?(): void;
+  /**
    * When the run this writer belongs to started, in ms, or null when unknown.
    * The chat gateway's writer sets it to the run registry's `startedAt`; other
    * writers leave it out.
@@ -773,6 +849,12 @@ export type ProviderRuntimeContext = {
     stopTask?(taskId: string): Promise<void>;
     /** Ends the query and its CLI process: stdin first, then SIGTERM and SIGKILL. */
     close?(): void;
+    /**
+     * Switch the live process's model and permission mode, for a turn the runtime runs in a process it
+     * held for background work. Without them, a turn that changes either starts a process of its own.
+     */
+    setModel?(model?: string): Promise<void>;
+    setPermissionMode?(mode: string): Promise<void>;
   };
 };
 
@@ -813,6 +895,159 @@ export type FetchHistoryResult = {
   offset: number;
   limit: number | null;
   tokenUsage?: unknown;
+};
+
+// ---------------------------
+//----------------- MID-RUN INSERT TYPES ------------
+/**
+ * Where one mid-run insert stands, as `insert_status` frames report it.
+ *
+ * The provider runtime sends these through the run's writer, so they are
+ * sequenced, replayed by `chat.subscribe` and seen by every tab and pane on
+ * the session: `pending` once it has accepted the insert (it may still be
+ * waiting its turn to be written to the CLI), then exactly one of
+ * `delivered` (the model read it in the middle of the turn), `next_turn`
+ * (the turn ended first, so it ran as the next turn in the same process),
+ * `cancelled` (withdrawn, or taken back by an abort before the model read
+ * it) or `failed` (it never reached the model: the run ended, or the CLI
+ * refused or lost it).
+ *
+ * The chat gateway sends the rest straight back to the socket that asked,
+ * without `seq`, so no other tab sees them: `refused` (the insert was not
+ * taken; see `insertReason`) and `cancel_failed` (nothing was withdrawn; the
+ * insert carries on and still reports how it ends). A runtime that throws
+ * while accepting an insert is answered the same way, as `failed`.
+ */
+export type InsertStatus =
+  | 'pending'
+  | 'delivered'
+  | 'next_turn'
+  | 'cancelled'
+  | 'failed'
+  | 'refused'
+  | 'cancel_failed';
+
+/**
+ * What a `chat.insert` hands to a provider runtime. `insertId` is the
+ * client-generated UUID, already validated by the gateway; the runtime uses
+ * it as the uuid of the message it writes to the CLI, so the live message and
+ * the transcript row carry the same id. `content` is plain text, never empty
+ * and never a slash command.
+ */
+export type ProviderInsertInput = {
+  insertId: string;
+  content: string;
+};
+
+/**
+ * A provider runtime's answer to `IProviderRuntime.insert`. A refusal emits
+ * nothing on the run's writer; the gateway answers the asking socket.
+ */
+export type ProviderInsertResult =
+  | { accepted: true }
+  | { accepted: false; reason: 'NO_ACTIVE_RUN' | 'INVALID' | 'DUPLICATE' };
+
+/** A provider runtime's answer to `IProviderRuntime.cancelInsert`. */
+export type ProviderCancelInsertResult = {
+  status: 'cancelled' | 'cancel_failed' | 'not_found';
+};
+
+/**
+ * The provider runtime gateway's answer to an insert: the runtime's own, or
+ * UNSUPPORTED when the session's provider runtime has no `insert`.
+ */
+export type ProviderInsertGatewayResult =
+  | ProviderInsertResult
+  | { accepted: false; reason: 'UNSUPPORTED' };
+
+/**
+ * The provider runtime gateway's answer to a withdrawal: the runtime's own, or
+ * `unsupported` when the session's provider runtime has no `cancelInsert`.
+ */
+export type ProviderCancelInsertGatewayResult =
+  | ProviderCancelInsertResult
+  | { status: 'unsupported' };
+
+// ---------------------------
+//----------------- HELD PROCESS HAND-OVER TYPES ------------
+/**
+ * What keeps a turn out of the process a provider runtime holds open for a
+ * session's background work, where it would keep that work running. The CLI
+ * takes some settings only at launch, so a turn that changes them needs a
+ * process of its own, and starting one stops the work: `cwd`, `effort`,
+ * `ultracode`, and `tools` (allowing fewer tools than the process was
+ * launched with, or denying others). `model` and `permissionMode` count only
+ * when the live process cannot switch to them (bypassPermissions, for a
+ * process not launched with it). `lookup`: the runtime could not resolve the
+ * turn's options, so it cannot tell.
+ */
+export type HandOverChange = 'model' | 'effort' | 'ultracode' | 'permissionMode' | 'tools' | 'cwd' | 'lookup';
+
+/**
+ * What a turn handed to the held process would switch in that process before
+ * its prompt: its `model` or its `permissionMode`, when the turn's differ and
+ * the live process can switch to them. The switch outlasts the turn: the
+ * background work runs on with it, which is why the scheduled-messages
+ * dispatcher keeps a message that would switch anything out of the process.
+ * A difference the process cannot switch is a `HandOverChange` instead.
+ */
+export type HandOverSwitch = Extract<HandOverChange, 'model' | 'permissionMode'>;
+
+/**
+ * How `IProviderRuntime.planHandOver`, and the provider runtime gateway's
+ * `planHandOver`, read a turn's options. Optional; leaving it out plans the
+ * turn exactly as its run options say.
+ *
+ * - `inheritUnset`: a setting the options leave out (no or a blank `model`,
+ *   `effort`, `permissionMode` or `cwd`, no `toolsSettings` or one of its
+ *   fields) counts as the live process's own value, so it is neither a change
+ *   nor a switch. For a message that carries only some settings: the
+ *   scheduled-messages dispatcher plans queued and due messages with it, as a
+ *   scheduled one stores no tool rules. A run whose options set
+ *   `inheritUnset: true` hands its turn over the same way, so a caller that
+ *   plans with it sends the turn with it too; without it the run judges the
+ *   turn as its options say, which the plan would not have predicted.
+ */
+export type ProviderHandOverPlanOptions = {
+  inheritUnset?: boolean;
+};
+
+/**
+ * Whether a session's next turn would keep the background work its last
+ * turn left running, worked out without side effects. The answer of
+ * `IProviderRuntime.planHandOver`, of the provider runtime gateway's
+ * `planHandOver`, which the chat gateway asks before a `chat.send` that set
+ * `keepBackgroundWork` and the scheduled-messages dispatcher before it sends
+ * a queued or due message, and of POST
+ * /api/providers/sessions/:sessionId/hand-over-plan, which the composer asks
+ * before it sends over background work (that route answers the first three
+ * fields).
+ *
+ * - `heldWork`: the session's process is held open after its turn for
+ *   background work of its own that is still going, or that the runtime
+ *   cannot track (a Monitor, a wake-up) and has not reported back. Also true
+ *   while a turn runs in a process with such work: tasks of the session's own
+ *   still outstanding, or, for a turn handed to the process while it was
+ *   held, work of that hold the runtime cannot track or has yet to relay.
+ *   Interrupting that turn would stop the work.
+ * - `canHandOver`: a `chat.send` with these options would run as that
+ *   process's next turn, so the work keeps running. Never while a turn runs.
+ * - `changes`: what would keep it out (see `HandOverChange`); empty when it
+ *   would go in, or when nothing is held.
+ * - `switches`: what handing the turn over would switch in the live process
+ *   (see `HandOverSwitch`), listed whether or not `changes` keep the turn
+ *   out; empty when nothing differs, when there is no process to hand the
+ *   turn to (nothing held, a turn under way, an edited message), and when
+ *   the turn's options could not be resolved (`lookup`).
+ *
+ * A session with no held process, and every runtime that never holds one,
+ * answer `{ heldWork: false, canHandOver: false, changes: [], switches: [] }`.
+ */
+export type ProviderHandOverPlan = {
+  heldWork: boolean;
+  canHandOver: boolean;
+  changes: HandOverChange[];
+  switches: HandOverSwitch[];
 };
 
 // ---------------------------

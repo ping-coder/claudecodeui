@@ -32,6 +32,13 @@ type ChatSessionWriterOptions = {
    * built without it ignores the report.
    */
   onBackgroundWorkFinished?: () => void;
+  /**
+   * Invoked when the provider runtime hands the process this run's turn ran
+   * in, with the background work it is held for, to the session's next run
+   * instead of stopping it. The registry records that run as this one's
+   * successor. A writer built without it ignores the report.
+   */
+  onProcessHandedOver?: () => void;
   /** The run's `startedAt`, exposed as `runStartedAt`; null when unknown. */
   runStartedAt: number | null;
 };
@@ -52,8 +59,9 @@ type ChatSessionWriterOptions = {
  * - `setSessionId(...)` calls (used by runtimes to label captured ids) are
  *   intercepted and recorded as the provider-id mapping as well.
  *
- * Its additions, `reportBackgroundWorkFinished` and `runStartedAt`, are
- * optional on `ProviderRuntimeWriter`, so runtimes use them only when present.
+ * Its additions, `reportBackgroundWorkFinished`, `reportProcessHandedOver`
+ * and `runStartedAt`, are optional on `ProviderRuntimeWriter`, so runtimes
+ * use them only when present.
  */
 export class ChatSessionWriter {
   userId: string | number | null;
@@ -161,6 +169,17 @@ export class ChatSessionWriter {
    */
   reportBackgroundWorkFinished(): void {
     this.options.onBackgroundWorkFinished?.();
+  }
+
+  /**
+   * Called by a provider runtime (today only Claude's) on this run's writer
+   * when it runs the session's next turn in the process this run's turn left
+   * running for background work, rather than in a process of its own: the
+   * work goes on, and its later end still belongs to this run. Hands the news
+   * to the registry.
+   */
+  reportProcessHandedOver(): void {
+    this.options.onProcessHandedOver?.();
   }
 
   /**

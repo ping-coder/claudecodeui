@@ -4,7 +4,7 @@ import type { FitAddon } from '@xterm/addon-fit';
 import type { Terminal } from '@xterm/xterm';
 
 import { useTheme } from '@/shared/context/ThemeContext';
-import type { Project, ProjectSession } from '@/shared/types';
+import type { Project, ProjectSession, ShellSessionBusy } from '@/shared/types';
 import { useShellConnection } from '@/modules/shell/hooks/useShellConnection';
 import { useShellTerminal } from '@/modules/shell/hooks/useShellTerminal';
 
@@ -33,8 +33,18 @@ type UseShellRuntimeResult = {
   // A live Claude CLI was launched in the other theme and keeps those colours
   // until it is restarted.
   isClaudeThemeOutdated: boolean;
+  // Set while the server holds the CLI back because CloudCLI still runs the
+  // session, and what runs there; the Shell shows its busy notice for it.
+  sessionBusy: ShellSessionBusy | null;
+  // A takeover was sent and the server has not answered yet.
+  isTakingOver: boolean;
   connectToShell: (options?: { forceRestart?: boolean }) => void;
   disconnectFromShell: (options?: { suppressAutoConnect?: boolean }) => void;
+  // Asks the server again whether the CLI can start on the session.
+  retrySessionInit: () => void;
+  // Asks the server to stop what the busy notice shows CloudCLI running on
+  // the session and start the CLI; the server stops nothing if more started.
+  takeOverSession: () => void;
 };
 
 export function useShellRuntime({
@@ -109,8 +119,12 @@ export function useShellRuntime({
     isConnected,
     isConnecting,
     claudeLaunchColorScheme,
+    sessionBusy,
+    isTakingOver,
     connectToShell,
     disconnectFromShell,
+    retrySessionInit,
+    takeOverSession,
   } = useShellConnection({
     wsRef,
     terminalRef,
@@ -170,7 +184,11 @@ export function useShellRuntime({
     isInitialized,
     isConnecting,
     isClaudeThemeOutdated,
+    sessionBusy,
+    isTakingOver,
     connectToShell,
     disconnectFromShell,
+    retrySessionInit,
+    takeOverSession,
   };
 }

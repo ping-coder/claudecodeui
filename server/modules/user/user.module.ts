@@ -48,6 +48,7 @@ const userService = createUserService({
   preferences: {
     getPreferences: (userId) => userPreferencesDb.getPreferences(userId),
     savePreferences: (userId, updates) => userPreferencesDb.savePreferences(userId, updates),
+    patchPreferences: (userId, set, merge) => userPreferencesDb.patchPreferences(userId, set, merge),
   },
   drafts: {
     getDrafts: (userId) => sessionDraftsDb.getDrafts(userId),

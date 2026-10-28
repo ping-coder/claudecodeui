@@ -50,6 +50,15 @@ test('a deferred-work tool holds the process open', () => {
   assert.equal(startsBackgroundWork(turn({ name: 'Monitor' })), true);
 });
 
+test('a TaskCreate does not: it only adds an item to the to-do list', () => {
+  // Nothing runs for it, so holding for it would keep an idle process up, and
+  // a send that needs a new process would be refused over work that is not there.
+  assert.equal(
+    startsBackgroundWork(turn({ name: 'TaskCreate', input: { subject: 'Wire the route', description: 'Add the route and its test' } })),
+    false,
+  );
+});
+
 test('a turn that starts nothing lasting does not', () => {
   assert.equal(startsBackgroundWork(turn({ name: 'Read' })), false);
 });

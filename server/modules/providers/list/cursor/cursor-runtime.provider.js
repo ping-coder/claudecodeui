@@ -14,6 +14,19 @@ const spawnFunction = crossSpawn;
 
 let activeCursorProcesses = new Map(); // Track active processes by session ID
 
+/**
+ * Removes `cursorProcess` from the process map, but only while `key` still
+ * points at it. The session's next run can register the same key before this
+ * process exits: the `result` line ends a run while its process lingers, and
+ * an aborted process exits after the abort returned. Removing that run's entry
+ * would leave it impossible to abort.
+ */
+function unregisterCursorProcess(key, cursorProcess) {
+  if (activeCursorProcesses.get(key) === cursorProcess) {
+    activeCursorProcesses.delete(key);
+  }
+}
+
 const WORKSPACE_TRUST_PATTERNS = [
   /workspace trust required/i,
   /do you trust the contents of this directory/i,
@@ -297,7 +310,7 @@ async function spawnCursor(command, options = {}, ws, context) {
         // The process map is keyed by the app session id when one was given,
         // otherwise by the captured provider id (or the timestamp fallback).
         const finalSessionId = sessionId || capturedSessionId || processKey;
-        activeCursorProcesses.delete(finalSessionId);
+        unregisterCursorProcess(finalSessionId, cursorProcess);
 
         // Flush any final unterminated stdout line before completion handling.
         if (stdoutLineBuffer.trim()) {
@@ -305,9 +318,13 @@ async function spawnCursor(command, options = {}, ws, context) {
           stdoutLineBuffer = '';
         }
 
+        // A stopped run is never retried: SIGTERM closes it with code null,
+        // which would otherwise pass for a trust failure and start the turn
+        // over with --trust.
         if (
           runSawWorkspaceTrustPrompt &&
           code !== 0 &&
+          !cursorProcess.aborted &&
           !hasRetriedWithTrust &&
           !args.includes('--trust')
         ) {
@@ -338,7 +355,7 @@ async function spawnCursor(command, options = {}, ws, context) {
 
         // Clean up process reference on error
         const finalSessionId = sessionId || capturedSessionId || processKey;
-        activeCursorProcesses.delete(finalSessionId);
+        unregisterCursorProcess(finalSessionId, cursorProcess);
 
         // Check if Cursor CLI is installed for a clearer error message
         const installed = await context.isProviderInstalled();

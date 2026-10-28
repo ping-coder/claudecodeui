@@ -5,6 +5,7 @@ import { claudeSettingsPermissionsService } from '@/modules/providers/services/c
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { providerRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
 import { providerTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
@@ -349,6 +350,27 @@ const parseSessionForkPayload = (payload: unknown): { upToAnchorId?: string; tit
     ...(upToAnchorId ? { upToAnchorId } : {}),
     ...(title ? { title } : {}),
   };
+};
+
+/**
+ * The `options` of a hand-over plan request: the options the client would
+ * send with its `chat.send`. Missing means none; anything but an object is
+ * refused.
+ */
+const parseHandOverPlanOptions = (payload: unknown): Record<string, unknown> => {
+  const options = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>).options
+    : undefined;
+  if (options === undefined || options === null) {
+    return {};
+  }
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new AppError('options must be an object.', {
+      code: 'INVALID_HAND_OVER_OPTIONS',
+      statusCode: 400,
+    });
+  }
+  return options as Record<string, unknown>;
 };
 
 const parseSessionRenameSummary = (payload: unknown): string => {
@@ -1001,6 +1023,23 @@ router.post(
     const sessionId = parseSessionId(req.params.sessionId);
     const result = await sessionsService.forkSessionById(sessionId, parseSessionForkPayload(req.body));
     res.status(201).json(createApiSuccessResponse(result));
+  }),
+);
+
+/**
+ * Whether a `chat.send` with these options would go into the process the
+ * session's provider holds open for its background work, keeping that work,
+ * or would start a process of its own and stop it (`ProviderHandOverPlan`).
+ * The composer asks before it sends to a session whose turn ended with
+ * background work left. Changes nothing.
+ */
+router.post(
+  '/sessions/:sessionId/hand-over-plan',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const options = parseHandOverPlanOptions(req.body);
+    const { heldWork, canHandOver, changes } = await providerRuntimeService.planSessionHandOver(sessionId, options);
+    res.json(createApiSuccessResponse({ heldWork, canHandOver, changes }));
   }),
 );
 

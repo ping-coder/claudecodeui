@@ -14,6 +14,8 @@ type LanguageSelectorProps = {
  *
  * A dropdown component for selecting the application language.
  * Automatically updates the i18n language and persists it as a user preference.
+ * Each language name carries its own `lang`, so a screen reader reads "Deutsch"
+ * in German and "עברית" in Hebrew rather than in the UI language (WCAG 3.1.2).
  *
  * Used by the settings module (appearance tab) and the quick-settings-panel module
  * so the user can switch language from either surface.
@@ -43,7 +45,7 @@ export default function LanguageSelector({ compact = false }: LanguageSelectorPr
           className="w-auto min-w-[120px] max-w-[160px] rounded-lg border border-input bg-card p-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
         >
           {languages.map((lang) => (
-            <option key={lang.value} value={lang.value}>
+            <option key={lang.value} value={lang.value} lang={lang.value}>
               {lang.nativeName}
             </option>
           ))}
@@ -69,7 +71,7 @@ export default function LanguageSelector({ compact = false }: LanguageSelectorPr
         className="w-36 rounded-lg border border-input bg-card p-2 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary"
       >
         {languages.map((lang) => (
-          <option key={lang.value} value={lang.value}>
+          <option key={lang.value} value={lang.value} lang={lang.value}>
             {lang.nativeName}
           </option>
         ))}

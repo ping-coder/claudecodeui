@@ -35,8 +35,11 @@ type AgentRouterDependencies = {
     getSessionByProviderSessionId(providerSessionId: string): AgentSessionRow | null;
     createAppSession(provider: string, projectPath: string, initialMessage: string): { sessionId: string };
   };
-  /** The live-run registry the chat socket uses; registering here is what puts an API run on the running-sessions list. */
-  runs: Pick<typeof import('../websocket/index.js').chatRunRegistry, 'startRun' | 'completeRunIfCurrent' | 'isProcessing'>;
+  /**
+   * The live-run registry the chat socket uses; registering here is what puts an API run on the running-sessions list.
+   * `pendingAbort` covers a tab's abort that is still on its way when the runtime returns.
+   */
+  runs: Pick<typeof import('../websocket/index.js').chatRunRegistry, 'startRun' | 'completeRunIfCurrent' | 'isProcessing' | 'pendingAbort'>;
   /**
    * The provider runtime service's runner for one provider. Only called for
    * providers in AGENT_RUN_PROVIDERS, so a new provider needs no new wiring.
@@ -1113,7 +1116,14 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
 
       // A tab can now abort the run (`chat.abort`), on which the runtime
       // returns as it does on completion. What the interrupted agent left
-      // behind is not a result to branch or open a PR from.
+      // behind is not a result to branch or open a PR from. The runtime can
+      // return before the abort has sent the run's terminal `complete` (a
+      // turn handed to a process held for background work returns as soon
+      // as the abort reaches it), so an abort under way is waited for first.
+      const pendingAbort = runRegistry.pendingAbort(run);
+      if (pendingAbort) {
+        await pendingAbort;
+      }
       const aborted = run.events.some((event) => event.kind === 'complete' && event.aborted === true);
       if (aborted) {
         writer.send({ type: 'status', message: 'Run aborted', aborted: true });

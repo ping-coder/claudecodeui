@@ -7,7 +7,7 @@ import { useBrowserUseEnabled } from '@/modules/browser-use';
 import { usePaletteOps, usePaletteOpsRegister } from '@/modules/command-palette';
 import { useTasksSettings } from '@/modules/task-master';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
-import { useElementWidth } from '@/modules/project-workspace/hooks/useElementWidth';
+import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { useWorkspaceViews } from '@/modules/project-workspace/hooks/useWorkspaceViews';
 import { getActiveTab } from '@/modules/project-workspace/utils/workspaceLayout';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';

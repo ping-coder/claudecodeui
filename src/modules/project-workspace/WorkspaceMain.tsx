@@ -167,7 +167,6 @@ function WorkspaceMain({
     editingFile,
     editorWidth,
     editorExpanded,
-    hasManualWidth,
     resizeHandleRef,
     handleFileOpen,
     handleCloseEditor,
@@ -395,7 +394,6 @@ function WorkspaceMain({
             isMobile={isMobile}
             editorExpanded={editorExpanded}
             editorWidth={editorWidth}
-            hasManualWidth={hasManualWidth}
             resizeHandleRef={resizeHandleRef}
             onResizeStart={handleResizeStart}
             onCloseEditor={handleCloseEditor}

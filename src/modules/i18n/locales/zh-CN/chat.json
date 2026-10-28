@@ -134,7 +134,10 @@
       "ctrlEnter": "Ctrl+Enter 发送 • Shift+Enter 换行 • Tab 切换模式 • / 斜杠命令",
       "enter": "Enter 发送 • Shift+Enter 换行 • Tab 切换模式 • / 斜杠命令",
       "queue": "Enter 排队发送下一条消息",
-      "appendQueued": "Enter 添加到排队消息"
+      "appendQueued": "Enter 添加到排队消息",
+      "insert": "{{insertKey}} 插入 • {{queueKey}} 排队",
+      "insertAppendQueued": "{{insertKey}} 插入 • {{queueKey}} 添加到排队消息",
+      "sendBesideBackgroundWork": "{{sendKey}} 发送 • {{queueKey}} 排队，后台工作结束后再发"
     },
     "clickToChangeMode": "点击更改权限模式（或在输入框中按 Tab）",
     "showAllCommands": "显示所有命令",
@@ -148,6 +151,34 @@
       "willSend": "将在当前完成后发送",
       "edit": "编辑排队消息",
       "delete": "删除排队消息"
+    },
+    "insert": {
+      "send": "插入消息",
+      "moreOptions": "更多发送方式",
+      "menuLabel": "{{provider}} 工作时发送",
+      "insert": "插入",
+      "willRead": "{{provider}} 下一步读到",
+      "queue": "排队",
+      "queueDescription": "本轮和后台工作都结束后发送",
+      "queueAppend": "添加到排队消息",
+      "unsupported": "{{provider}} 不支持插入，将排队",
+      "slashCommand": "斜杠命令不能插入，将排队",
+      "attachments": "带附件的消息暂不能插入，将排队",
+      "unavailable": "现在无法插入，将排队",
+      "label": "插入中",
+      "afterApproval": "处理完上面的请求后送达",
+      "withdraw": "撤回插入的消息",
+      "delivering": "已在送达，无法撤回",
+      "withdrawFailed": "无法撤回",
+      "notDelivered": "插入未送达，消息已放回输入框。",
+      "noResponse": "插入没有收到回应，消息已放回输入框。",
+      "deliveredLate": "这条插入其实已经送达，不用再发送。"
+    },
+    "backgroundSend": {
+      "menuLabel": "后台工作运行时发送",
+      "send": "发送",
+      "sendDescription": "开始新一轮，后台工作继续运行",
+      "queueDescription": "后台工作结束后发送"
     }
   },
   "providerSelection": {
@@ -219,7 +250,24 @@
     "resumeSession": "恢复会话：{{displayName}}...",
     "runCommand": "在 {{projectName}} 中运行 {{command}}",
     "startCli": "在 {{projectName}} 中启动 Claude CLI",
-    "defaultCommand": "命令"
+    "defaultCommand": "命令",
+    "sessionBusy": {
+      "title": "CloudCLI 还在用这个会话",
+      "changed": "你上次看过之后，这个会话又开始了新的工作，所以什么都没停。先看清现在在跑什么，再决定要不要停。",
+      "reason": {
+        "turn": "聊天里这一轮还没结束。",
+        "background": "后台还有任务在跑：",
+        "held": "CloudCLI 的 Claude 进程还开着这个会话，多半在等 Monitor 或定时唤醒。",
+        "exiting": "CloudCLI 的 Claude 进程正在退出，一般几秒，最长约 6 分钟。",
+        "queued": "聊天里有一条排队消息，会话一空就会发出。"
+      },
+      "consequence": "现在在终端里打开，会有两个进程同时写这个会话，还在跑的任务也会被记成已停止。",
+      "queuedHint": "先在聊天里发出或撤回这条排队消息。",
+      "moreTasks": "还有 {{count}} 个",
+      "retry": "再试一次",
+      "takeOver": "停掉它，在这里打开",
+      "takingOver": "正在停止…"
+    }
   },
   "claudeStatus": {
     "actions": {
@@ -246,7 +294,29 @@
       "workflow": "工作流 {{name}}",
       "agent": "智能体 {{description}}",
       "command": "命令 {{description}}",
-      "count": "{{count}} 个任务"
+      "count": "{{count}} 个任务",
+      "stopped": "后台工作已停止：这条消息改了{{changes}}，只有新的 Claude 进程才能生效。",
+      "stoppedLookupFailed": "后台工作已停止：无法把这条消息交给后台工作所在的进程。",
+      "prompt": {
+        "title": "这个会话还有后台工作在运行",
+        "description": "新消息会开始新的一轮，并停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
+        "descriptionNewProcess": "仍然发送会启动新进程，停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
+        "changes_other": "这条消息改了{{changes}}，只有新进程才能生效。改回原来的设置再发送，后台工作就不会停。",
+        "changeSeparator": "、",
+        "changeLastSeparator": "和",
+        "change": {
+          "model": "模型",
+          "effort": "推理级别",
+          "ultracode": "Ultracode",
+          "permissionMode": "权限模式",
+          "tools": "工具权限",
+          "cwd": "工作目录"
+        },
+        "lookupFailed": "无法把这条消息交给后台工作所在的进程。",
+        "cancel": "取消",
+        "queue": "排队",
+        "sendAnyway": "仍然发送"
+      }
     },
     "controls": {
       "stopGeneration": "Stop Generation",
@@ -301,7 +371,9 @@
   "message": {
     "editAndResend": "编辑并重新发送",
     "forkFromHere": "从此处派生",
-    "answeredBy": "由 {{model}} 回答"
+    "answeredBy": "由 {{model}} 回答",
+    "inserted": "插入",
+    "insertedHint": "在 Claude 工作时发送，在它的下一步读到"
   },
   "composer": {
     "ultracode": "Ultracode",

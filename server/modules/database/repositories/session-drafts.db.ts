@@ -213,6 +213,20 @@ export const sessionDraftsDb = {
     })();
   },
 
+  /**
+   * Whether anyone has a message queued for the scope. The dispatcher sends a
+   * session's queued message whoever queued it, within 30 s of the session
+   * going idle, so the Shell tab counts one as the session still being in
+   * CloudCLI's hands: a CLI started on it would race that send. A stored
+   * value that no longer parses counts too, until the dispatcher drops it.
+   */
+  hasQueuedMessage(scope: string): boolean {
+    const row = getConnection()
+      .prepare('SELECT 1 FROM session_drafts WHERE draft_scope = ? AND queued_message IS NOT NULL LIMIT 1')
+      .get(scope);
+    return row !== undefined;
+  },
+
   /** Removes a scope's queued message (edited back into the composer or deleted), keeping its text. */
   clearQueuedMessage(userId: number, scope: string): void {
     const db = getConnection();

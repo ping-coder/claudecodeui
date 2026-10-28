@@ -6,11 +6,13 @@ import { useTranslation } from 'react-i18next';
 import { useSetUiPreference, useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { Button } from '@/shared/ui';
 import { playChatCompletionSound } from '@/shared/utils';
-import type { NotificationPreferencesState } from '@/shared/types';
+import type { NotificationPreferencesState, NotificationPreferencesStatus } from '@/shared/types';
 import SettingsToggle from '@/modules/settings/SettingsToggle';
 
 type NotificationsSettingsTabProps = {
   notificationPreferences: NotificationPreferencesState;
+  /** Until 'ready' the values shown are defaults, not the user's: the switches that save them stay disabled. */
+  notificationPreferencesStatus?: NotificationPreferencesStatus;
   onNotificationPreferencesChange: (value: NotificationPreferencesState) => void;
   pushPermission: NotificationPermission | 'unsupported';
   isPushSubscribed: boolean;
@@ -60,6 +62,7 @@ function PageAlertRow({ icon: Icon, label, description, toggle, children }: Page
 /** Rendered by Settings for the "notifications" tab, covering the alerts shown while CloudCLI is open, notification channels and events. */
 export default function NotificationsSettingsTab({
   notificationPreferences,
+  notificationPreferencesStatus = 'ready',
   onNotificationPreferencesChange,
   pushPermission,
   isPushSubscribed,
@@ -76,6 +79,7 @@ export default function NotificationsSettingsTab({
   const preferences = useUiPreferences();
   const setPreference = useSetUiPreference();
 
+  const notificationPreferencesReady = notificationPreferencesStatus === 'ready';
   const pushSupported = pushPermission !== 'unsupported';
   const pushDenied = pushPermission === 'denied';
   // Page-sent system notifications need the permission; until it is granted the switch
@@ -117,6 +121,13 @@ export default function NotificationsSettingsTab({
           <h3 className="text-lg font-medium text-foreground">{t('notifications.title')}</h3>
         </div>
         <p className="text-sm text-muted-foreground">{t('notifications.description')}</p>
+        {notificationPreferencesStatus === 'failed' && (
+          <p className="text-sm text-red-600 dark:text-red-400">
+            {t('notifications.loadFailed', {
+              defaultValue: "Couldn't load your notification settings. Close Settings and open it again to retry.",
+            })}
+          </p>
+        )}
       </div>
 
       <div className="space-y-4 rounded-lg border border-border bg-card p-4">
@@ -141,6 +152,7 @@ export default function NotificationsSettingsTab({
             toggle={
               <SettingsToggle
                 checked={notificationPreferences.channels.sound}
+                disabled={!notificationPreferencesReady}
                 onChange={(value) =>
                   onNotificationPreferencesChange({
                     ...notificationPreferences,
@@ -335,6 +347,7 @@ export default function NotificationsSettingsTab({
             <input
               type="checkbox"
               checked={notificationPreferences.events.actionRequired}
+              disabled={!notificationPreferencesReady}
               onChange={(event) =>
                 onNotificationPreferencesChange({
                   ...notificationPreferences,
@@ -353,6 +366,7 @@ export default function NotificationsSettingsTab({
             <input
               type="checkbox"
               checked={notificationPreferences.events.stop}
+              disabled={!notificationPreferencesReady}
               onChange={(event) =>
                 onNotificationPreferencesChange({
                   ...notificationPreferences,
@@ -371,6 +385,7 @@ export default function NotificationsSettingsTab({
             <input
               type="checkbox"
               checked={notificationPreferences.events.error}
+              disabled={!notificationPreferencesReady}
               onChange={(event) =>
                 onNotificationPreferencesChange({
                   ...notificationPreferences,

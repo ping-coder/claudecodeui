@@ -113,6 +113,15 @@ const FALLBACK_PROVIDER_ATTACHMENT_SUPPORT: Partial<Record<LLMProvider, boolean>
   agy: false,
 };
 
+/**
+ * Fallback mid-run insert support, used only until the backend capability
+ * matrix has loaded (or when it fails). A matrix that loaded without the flag
+ * comes from a server that predates `chat.insert`, so there the answer is no.
+ */
+const FALLBACK_PROVIDER_MID_RUN_INSERT_SUPPORT: Partial<Record<LLMProvider, boolean>> = {
+  claude: true,
+};
+
 type ProviderCapabilities = {
   provider: LLMProvider;
   permissionModes: string[];
@@ -127,6 +136,8 @@ type ProviderCapabilities = {
   supportsUltracode?: boolean;
   supportsMessageEditing?: boolean;
   supportsSessionForking?: boolean;
+  /** Whether a message sent while a turn runs can go into that turn; absent from servers that predate `chat.insert`. */
+  supportsMidRunInsert?: boolean;
 };
 
 type ProviderCapabilitiesApiResponse = {
@@ -645,7 +656,8 @@ export function useChatProviderState({
   // opened in the other pane must not change what new chats start with. A
   // pane that gains focus writes its provider once, as what it synced while
   // in the background was not written; when that commit also brings a session
-  // of another provider, the session's provider is the one written.
+  // of another provider, the session's provider is the one written. Both
+  // writes follow the pane rather than a pick, so they are automatic.
   useEffect(() => {
     const gainedFocus = isFocusedPane && !wasFocusedPaneRef.current;
     wasFocusedPaneRef.current = isFocusedPane;
@@ -654,13 +666,13 @@ export function useChatProviderState({
     if (sessionProvider && sessionProvider !== provider) {
       setProvider(sessionProvider);
       if (isFocusedPane) {
-        writeSelectedProvider(sessionProvider);
+        writeSelectedProvider(sessionProvider, { automatic: true });
       }
       return;
     }
 
     if (gainedFocus) {
-      writeSelectedProvider(provider);
+      writeSelectedProvider(provider, { automatic: true });
     }
   }, [isFocusedPane, provider, selectedSession]);
 
@@ -717,6 +729,15 @@ export function useChatProviderState({
   const supportsFileAttachments = providerCapabilities?.[provider]?.supportsFiles
     ?? FALLBACK_PROVIDER_ATTACHMENT_SUPPORT[provider]
     ?? true;
+
+  /**
+   * Whether a message sent while a turn runs may go into that turn. The
+   * fallback map covers only the time before the matrix loads, so Enter does
+   * not change meaning mid-load; once loaded the matrix alone decides.
+   */
+  const supportsMidRunInsert = providerCapabilities
+    ? providerCapabilities[provider]?.supportsMidRunInsert === true
+    : FALLBACK_PROVIDER_MID_RUN_INSERT_SUPPORT[provider] ?? false;
 
   const resolvePermissionModeForProvider = useCallback((
     targetProvider: LLMProvider,
@@ -1146,5 +1167,6 @@ export function useChatProviderState({
     supportsSessionForking,
     supportsImageAttachments,
     supportsFileAttachments,
+    supportsMidRunInsert,
   };
 }

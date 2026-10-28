@@ -762,3 +762,56 @@ test('the workflow agent route reads an agent\'s timeline and status from its ru
     assert.equal(missing.error.code, 'WORKFLOW_AGENT_NOT_FOUND');
   }));
 });
+
+test('the hand-over plan route answers whether a send with these options keeps the session\'s background work', async () => {
+  // The composer asks this before it sends to a session whose turn ended
+  // with background work left; the runtime plans with the run options the
+  // send would get.
+  const planned: Array<{ sessionId: string; options: Record<string, unknown> }> = [];
+  const realResolveProvider = providerRegistry.resolveProvider;
+  providerRegistry.resolveProvider = ((provider: string) => {
+    if (provider !== 'claude') {
+      return realResolveProvider(provider);
+    }
+    return {
+      id: 'claude',
+      runtime: {
+        planHandOver: async (sessionId: string, options: Record<string, unknown>) => {
+          planned.push({ sessionId, options });
+          return { heldWork: true, canHandOver: false, changes: ['effort'] };
+        },
+      },
+    } as unknown as IProvider;
+  }) as typeof providerRegistry.resolveProvider;
+
+  try {
+    await withProviderServer(async (baseUrl, workspacePath) => {
+      sessionsDb.createAppSession('held-session', 'claude', workspacePath, 'Background build');
+      const ask = (sessionId: string, body: unknown) => fetch(
+        `${baseUrl}/api/providers/sessions/${sessionId}/hand-over-plan`,
+        { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+      );
+
+      const response = await ask('held-session', { options: { model: 'opus', effort: 'max' } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        success: true,
+        data: { heldWork: true, canHandOver: false, changes: ['effort'] },
+      });
+      assert.equal(planned.length, 1);
+      assert.equal(planned[0]?.sessionId, 'held-session');
+      assert.equal(planned[0]?.options.cwd, workspacePath, 'the session\'s project is the turn\'s directory');
+      assert.equal(planned[0]?.options.effort, 'max');
+
+      const unknown = await ask('no-such-session', { options: {} });
+      assert.equal(unknown.status, 404);
+      assert.equal((await unknown.json() as { error: { code: string } }).error.code, 'SESSION_NOT_FOUND');
+
+      const malformed = await ask('held-session', { options: ['effort'] });
+      assert.equal(malformed.status, 400);
+      assert.equal(planned.length, 1, 'neither reaches the runtime');
+    });
+  } finally {
+    providerRegistry.resolveProvider = realResolveProvider;
+  }
+});

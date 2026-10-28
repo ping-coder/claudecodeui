@@ -29,7 +29,7 @@ vi.mock('@/modules/command-palette/hooks/useSessionsSource', () => ({
   useSessionsSource: (projectId: string | undefined, enabled: boolean) => (projectId && enabled ? SESSIONS : []),
 }));
 vi.mock('@/modules/command-palette/hooks/useSessionMessageSearch', () => ({ useSessionMessageSearch: () => [] }));
-vi.mock('@/modules/command-palette/hooks/useFilesSource', () => ({ useFilesSource: () => [] }));
+vi.mock('@/modules/command-palette/hooks/useFilesSource', () => ({ useFilesSource: () => ({ files: [], tooLarge: false }) }));
 vi.mock('@/modules/command-palette/hooks/useCommitsSource', () => ({ useCommitsSource: () => [] }));
 vi.mock('@/modules/command-palette/hooks/useBranchesSource', () => ({ useBranchesSource: () => [] }));
 vi.mock('@/modules/command-palette/hooks/useGitActions', () => ({

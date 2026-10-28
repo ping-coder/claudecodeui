@@ -182,7 +182,8 @@
       "actionRequired": "Action required",
       "stop": "Run stopped",
       "error": "Run failed"
-    }
+    },
+    "loadFailed": "Couldn't load your notification settings. Close Settings and open it again to retry."
   },
   "appearanceSettings": {
     "darkMode": {

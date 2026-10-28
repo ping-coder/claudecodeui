@@ -15,11 +15,20 @@ import {
 import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
+  GatewayEventKind,
+  HandOverChange,
+  InsertStatus,
   LLMProvider,
+  MessageKind,
+  ProviderCancelInsertGatewayResult,
+  ProviderHandOverPlan,
+  ProviderHandOverPlanOptions,
+  ProviderInsertGatewayResult,
+  ProviderInsertInput,
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
 } from '@/shared/types.js';
-import { parseIncomingJsonObject, splitLegacyUltracodeEffort } from '@/shared/utils.js';
+import { buildTurnRunOptions, generateMessageId, parseIncomingJsonObject } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -63,7 +72,11 @@ export function filterImagesToUploadStore(
   return filterAttachmentsToUploadStore(images, assetsRootOverride);
 }
 
-/** Application boundary for dispatching provider runs and approvals. */
+/**
+ * Application boundary for dispatching provider runs, approvals and mid-run
+ * inserts. The scheduled-messages module types its dispatcher's runtime with
+ * it too, since a queued or scheduled message runs through the same gateway.
+ */
 export type ProviderRuntimeGateway = {
   hasRuntime(provider: string): boolean;
   run(
@@ -78,6 +91,32 @@ export type ProviderRuntimeGateway = {
   hasBackgroundWork(sessionId: string): boolean;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
+  /**
+   * Writes a user message into the session's running turn (see
+   * `IProviderRuntime.insert`). UNSUPPORTED when the provider's runtime
+   * cannot insert.
+   */
+  insert(provider: LLMProvider, sessionId: string, input: ProviderInsertInput): Promise<ProviderInsertGatewayResult>;
+  /**
+   * Withdraws an insert the model has not read yet (see
+   * `IProviderRuntime.cancelInsert`). `unsupported` when the provider's
+   * runtime cannot insert.
+   */
+  cancelInsert(provider: LLMProvider, sessionId: string, insertId: string): Promise<ProviderCancelInsertGatewayResult>;
+  /**
+   * Whether a turn of the session run with `options` (its run options) would
+   * go into the process the provider's runtime holds for the session's
+   * background work, keeping it, and what it would switch there (see
+   * `ProviderHandOverPlan`). Nothing is held, for a runtime that never holds
+   * a process. `planOptions` go to the runtime as given (see
+   * `ProviderHandOverPlanOptions`).
+   */
+  planHandOver(
+    provider: LLMProvider,
+    sessionId: string,
+    options: AnyRecord,
+    planOptions?: ProviderHandOverPlanOptions,
+  ): Promise<ProviderHandOverPlan>;
 };
 
 type ChatWebSocketDependencies = {
@@ -145,6 +184,12 @@ function readRequiredSessionId(data: AnyRecord): string | null {
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
  * registers the run, and dispatches to the provider runtime.
+ *
+ * A send that sets `options.keepBackgroundWork` is not started when it would
+ * stop the session's background work (see `refuseSendThatStopsBackgroundWork`).
+ * Only such a send waits for that check, and only while no turn is under way
+ * (a busy session refuses it as RUN_IN_PROGRESS below): every other send
+ * reserves its run at once, before the socket's next frame is handled.
  */
 async function handleChatSend(
   ws: WebSocket,
@@ -156,6 +201,13 @@ async function handleChatSend(
   if (!resolved) {
     return;
   }
+  if (
+    (data.options as AnyRecord | undefined)?.keepBackgroundWork === true
+    && !chatRunRegistry.isProcessing(resolved.sessionId)
+    && await refuseSendThatStopsBackgroundWork(ws, resolved, data, dependencies)
+  ) {
+    return;
+  }
 
   await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies);
 }
@@ -165,6 +217,84 @@ type ResolvedSendTarget = {
   session: NonNullable<ReturnType<typeof sessionsDb.getSessionById>>;
   provider: LLMProvider;
 };
+
+/**
+ * The gateway's answer to a `chat.send` it did not start because the turn
+ * would stop the session's background work, sent to the asking socket alone
+ * in the envelope of the insert refusals: no `seq`, and never a
+ * `protocol_error`, which the client takes as the session's run failing.
+ * `changes` says why the turn cannot go into the held process; `content` is
+ * the message as sent, for the composer to put back.
+ */
+type SendRefusedFrame = {
+  kind: Extract<GatewayEventKind, 'send_refused'>;
+  id: string;
+  sessionId: string;
+  provider: LLMProvider;
+  reason: 'BACKGROUND_WORK_WOULD_STOP';
+  changes: HandOverChange[];
+  content: string;
+  timestamp: string;
+};
+
+/**
+ * Refuses a `chat.send` that set `options.keepBackgroundWork` when its turn
+ * would stop the session's background work: the session's process is held
+ * for that work, and the turn cannot run in it (it changes what only a new
+ * process can apply), so the run would start a process of its own and retire
+ * the held one. The socket gets `send_refused` and no run starts; the client
+ * then asks the user. Returns whether it refused.
+ *
+ * Called by `handleChatSend` for such a send only: one without the flag stops
+ * the work as it always did, which is also what the client sends once the
+ * user chose to. A plan the runtime fails to make refuses too, since nothing
+ * says the work would survive the send.
+ */
+async function refuseSendThatStopsBackgroundWork(
+  ws: WebSocket,
+  target: ResolvedSendTarget,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): Promise<boolean> {
+  const clientOptions = (data.options ?? {}) as AnyRecord;
+  let plan: ProviderHandOverPlan;
+  try {
+    plan = await dependencies.runtime.planHandOver(
+      target.provider,
+      target.sessionId,
+      // The options the turn's run would get (see dispatchRun), so the plan
+      // judges the very turn that would run.
+      buildTurnRunOptions({
+        sessionId: target.sessionId,
+        projectPath: target.session.project_path,
+        clientOptions,
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${target.provider}" could not plan a send over background work`, {
+      sessionId: target.sessionId,
+      error: message,
+    });
+    plan = { heldWork: true, canHandOver: false, changes: ['lookup'], switches: [] };
+  }
+  if (!plan.heldWork || plan.canHandOver) {
+    return false;
+  }
+
+  const frame: SendRefusedFrame = {
+    kind: 'send_refused',
+    id: generateMessageId('send_refused'),
+    sessionId: target.sessionId,
+    provider: target.provider,
+    reason: 'BACKGROUND_WORK_WOULD_STOP',
+    changes: plan.changes,
+    content: typeof data.content === 'string' ? data.content : '',
+    timestamp: new Date().toISOString(),
+  };
+  sendJson(ws, frame);
+  return true;
+}
 
 /**
  * Shared front half of `chat.send` and `chat.edit-send`: the session row and
@@ -244,15 +374,16 @@ async function dispatchRun(
   const command = typeof data.content === 'string' ? data.content : '';
 
   // Older clients and replayed queued or scheduled messages can still carry the
-  // legacy `ultracode` effort, which now means xhigh with ultracode on. Split it
-  // once here so neither the session row nor the runtime ever sees the token.
-  // `ultracode` is only a choice when it is a real boolean; clients omit it for
-  // models that cannot run ultracode.
-  const requestedEffort = typeof clientOptions.effort === 'string' ? clientOptions.effort.trim() : '';
-  const { effort, ultracode } = splitLegacyUltracodeEffort({
-    effort: requestedEffort || undefined,
-    ultracode: typeof clientOptions.ultracode === 'boolean' ? clientOptions.ultracode : undefined,
+  // legacy `ultracode` effort, which now means xhigh with ultracode on. It is
+  // split here (buildTurnRunOptions), so neither the session row nor the
+  // runtime ever sees the token.
+  const turnOptions = buildTurnRunOptions({
+    sessionId,
+    projectPath: session.project_path,
+    clientOptions,
+    extraOptions: extraRuntimeOptions,
   });
+  const { effort, ultracode } = turnOptions;
 
   // Record what this turn runs with so reopening the session later restores the
   // same model, reasoning effort and ultracode switch, and so the resume path
@@ -284,18 +415,12 @@ async function dispatchRun(
   // and announces one, which the gateway writer captures and maps back to the
   // app session id.
   const runtimeOptions: AnyRecord = {
-    ...clientOptions,
-    ...extraRuntimeOptions,
-    effort,
-    ultracode,
+    ...turnOptions,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
-    sessionId,
-    cwd: clientOptions.cwd ?? session.project_path ?? undefined,
-    projectPath: session.project_path ?? clientOptions.projectPath,
   };
 
   let failure: string | null = null;
@@ -442,18 +567,13 @@ async function handleChatAbort(
     return;
   }
 
-  const run = chatRunRegistry.getRun(sessionId);
-  if (!run || run.status !== 'running') {
+  const hadRunningRun = await chatRunRegistry.abortRun(
+    sessionId,
+    (provider, appSessionId) => dependencies.runtime.abort(provider, appSessionId),
+  );
+  if (!hadRunningRun) {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
-    return;
   }
-
-  const success = await dependencies.runtime.abort(run.provider, sessionId);
-
-  chatRunRegistry.completeRun(sessionId, {
-    exitCode: success ? 0 : 1,
-    aborted: true,
-  });
 }
 
 /**
@@ -499,6 +619,229 @@ async function handleChatStopTask(
       `Session "${sessionId}" has no running background task "${taskId}".`,
       sessionId,
     );
+  }
+}
+
+/**
+ * Why a `chat.insert` was refused, which tells the client how to fall back
+ * (see `NormalizedMessage['insertReason']`).
+ */
+type InsertRefusalReason = 'NO_ACTIVE_RUN' | 'UNSUPPORTED' | 'SLASH_COMMAND' | 'INVALID';
+
+/**
+ * How a client names an insert: a UUID it generates, which the runtime also
+ * writes to the CLI as the message's uuid.
+ */
+const INSERT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The reason a `cancel_failed` carries for a withdrawal the runtime did not
+ * make. Its own `cancel_failed` (the CLI is already delivering the insert)
+ * carries none, and so does a status this table does not know: the client
+ * keeps the card until the insert reports how it ended.
+ */
+const CANCEL_FAILURE_REASONS: Partial<Record<ProviderCancelInsertGatewayResult['status'], string>> = {
+  not_found: 'NOT_FOUND',
+  unsupported: 'UNSUPPORTED',
+};
+
+/**
+ * Answers a `chat.insert` or `chat.insert-cancel` straight back to the socket
+ * that sent it, as an `insert_status` without `seq`: only the asking client
+ * needs to hear that its request went nowhere. Every pane sharing the socket
+ * gets it, so the client matches it to the composer that sent it by
+ * `insertId`.
+ *
+ * Never a `protocol_error`: the client handles one that names a session by
+ * marking the session idle and adding an error bubble, which would break the
+ * very run the insert was meant for.
+ */
+function sendInsertReply(
+  ws: WebSocket,
+  reply: {
+    sessionId: string | null;
+    insertId: string | null;
+    insertStatus: Extract<InsertStatus, 'refused' | 'cancel_failed' | 'failed'>;
+    insertReason?: string;
+    content?: string;
+    provider?: LLMProvider;
+  },
+): void {
+  sendJson(ws, {
+    kind: 'insert_status' satisfies MessageKind,
+    id: generateMessageId('insert_status'),
+    ...reply,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/** Whether an insert frame carries attachments, which inserts do not take. */
+function carriesAttachments(data: AnyRecord): boolean {
+  const options = (data.options ?? {}) as AnyRecord;
+  return [options.images, options.files, options.attachments]
+    .some((candidates) => normalizeAttachmentDescriptors(candidates).length > 0);
+}
+
+/**
+ * Narrows a runtime's refusal to the reasons the client acts on. DUPLICATE
+ * (the insertId was used before in this run) is a malformed request from the
+ * client's side, as is any reason a runtime made up.
+ */
+function readInsertRefusalReason(reason: string): InsertRefusalReason {
+  return reason === 'NO_ACTIVE_RUN' || reason === 'UNSUPPORTED' ? reason : 'INVALID';
+}
+
+/**
+ * Handles `chat.insert`: writes a user message into the session's running
+ * turn, which the model reads once its current tool batch ends instead of
+ * after the turn (see `IProviderRuntime.insert`; Claude only today).
+ *
+ * Everything the client has to fall back on is answered here as a `refused`
+ * `insert_status`: a malformed frame or unknown session (INVALID), no turn in
+ * progress (NO_ACTIVE_RUN), a slash command (SLASH_COMMAND), a provider that
+ * cannot insert (UNSUPPORTED). An accepted insert is reported by the runtime
+ * through the run's writer, starting with `pending`, so nothing is echoed.
+ */
+async function handleChatInsert(
+  ws: WebSocket,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): Promise<void> {
+  const sessionId = readRequiredSessionId(data);
+  const insertId = typeof data.insertId === 'string' ? data.insertId : null;
+  const content = typeof data.content === 'string' ? data.content : null;
+  const refuse = (insertReason: InsertRefusalReason, provider?: LLMProvider) => {
+    sendInsertReply(ws, {
+      sessionId,
+      insertId,
+      insertStatus: 'refused',
+      insertReason,
+      content: content ?? undefined,
+      provider,
+    });
+  };
+
+  if (
+    !sessionId
+    || !insertId
+    || !INSERT_ID_PATTERN.test(insertId)
+    || !content?.trim()
+    // Text only: the composer queues a message with attachments instead.
+    || carriesAttachments(data)
+  ) {
+    refuse('INVALID');
+    return;
+  }
+
+  const session = sessionsDb.getSessionById(sessionId);
+  if (!session) {
+    refuse('INVALID');
+    return;
+  }
+
+  const provider = session.provider as LLMProvider;
+  if (!dependencies.runtime.hasRuntime(provider)) {
+    refuse('UNSUPPORTED', provider);
+    return;
+  }
+
+  // Only a turn in progress takes an insert. A turn that has ended with only
+  // background work left does not: the client sends normally instead.
+  const run = chatRunRegistry.getRun(sessionId);
+  if (!run || run.status !== 'running') {
+    refuse('NO_ACTIVE_RUN', provider);
+    return;
+  }
+
+  // After the run check, because an idle session takes a slash command as a
+  // normal send, which is what NO_ACTIVE_RUN leads to. A busy one queues it:
+  // the CLI would only run it once the turn is over. Leading whitespace does
+  // not keep a command from counting.
+  if (content.trimStart().startsWith('/')) {
+    refuse('SLASH_COMMAND', provider);
+    return;
+  }
+
+  // Before the runtime is called: it reports `pending` through the run's
+  // writer while it accepts, and the asking socket has to hear that even if
+  // it never subscribed to this run.
+  chatRunRegistry.attachConnection(sessionId, ws);
+
+  let result: ProviderInsertGatewayResult;
+  try {
+    result = await dependencies.runtime.insert(provider, sessionId, { insertId, content });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" failed to take an insert`, { sessionId, insertId, error: message });
+    // Reported as the insert's end, so the client puts the text back in the
+    // composer it came from.
+    sendInsertReply(ws, { sessionId, insertId, insertStatus: 'failed', insertReason: 'INTERNAL_ERROR', content, provider });
+    return;
+  }
+
+  if (!result.accepted) {
+    refuse(readInsertRefusalReason(result.reason), provider);
+  }
+}
+
+/**
+ * Handles `chat.insert-cancel`: withdraws an insert the model has not read.
+ *
+ * A withdrawn insert is reported by the runtime through the run's writer as
+ * a `cancelled` `insert_status`, so every tab drops its card and nothing is
+ * echoed here. Anything else comes straight back as `cancel_failed`, with no
+ * reason when the CLI is already delivering the insert, NOT_FOUND when the
+ * session's run does not hold it (it has ended, or never existed),
+ * UNSUPPORTED when the provider cannot insert, INVALID for a malformed frame
+ * or unknown session, and INTERNAL_ERROR when the runtime threw.
+ *
+ * Unlike `chat.insert` there is no run check: the runtime is what knows
+ * which inserts are still pending.
+ */
+async function handleChatInsertCancel(
+  ws: WebSocket,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): Promise<void> {
+  const sessionId = readRequiredSessionId(data);
+  const insertId = typeof data.insertId === 'string' ? data.insertId : null;
+  const fail = (insertReason?: string, provider?: LLMProvider) => {
+    sendInsertReply(ws, { sessionId, insertId, insertStatus: 'cancel_failed', insertReason, provider });
+  };
+
+  if (!sessionId || !insertId || !INSERT_ID_PATTERN.test(insertId)) {
+    fail('INVALID');
+    return;
+  }
+
+  const session = sessionsDb.getSessionById(sessionId);
+  if (!session) {
+    fail('INVALID');
+    return;
+  }
+
+  const provider = session.provider as LLMProvider;
+  if (!dependencies.runtime.hasRuntime(provider)) {
+    fail('UNSUPPORTED', provider);
+    return;
+  }
+
+  // The runtime reports `cancelled` through the run's writer; the asking
+  // socket has to hear it.
+  chatRunRegistry.attachConnection(sessionId, ws);
+
+  let result: ProviderCancelInsertGatewayResult;
+  try {
+    result = await dependencies.runtime.cancelInsert(provider, sessionId, insertId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" failed to withdraw an insert`, { sessionId, insertId, error: message });
+    fail('INTERNAL_ERROR', provider);
+    return;
+  }
+
+  if (result.status !== 'cancelled') {
+    fail(CANCEL_FAILURE_REASONS[result.status], provider);
   }
 }
 
@@ -591,21 +934,6 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
 }
 
 /**
- * Handles authenticated chat websocket messages used by the main chat panel.
- *
- * Inbound protocol (client to server):
- * - `chat.send`                { sessionId, content, options? }
- * - `chat.abort`               { sessionId }
- * - `chat.stop-task`           { sessionId, taskId }
- * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
- * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
- *
- * Outbound protocol (server to client): every frame is `kind`-based — either
- * a provider `NormalizedMessage` (with `seq`) or a gateway event
- * (`chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
- * `protocol_error`).
- */
-/**
  * Runs a turn for a session with no client attached.
  *
  * Used by scheduled messages, which fire from a timer: there is no socket to
@@ -614,9 +942,15 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * subscribes and replays it from the start, and the session shows as busy
  * everywhere in the meantime.
  *
- * Resolves when the provider run settles. Returns false when the session has
- * gone away or is busy without `interruptActiveRun`, which the caller reports
- * on the schedule.
+ * Resolves when the provider run settles, which for a turn that leaves
+ * background work going is when its process exits, or as soon as the turn is
+ * over and the provider has handed that process to the session's next run
+ * (the user sent a message, which went into the process as its next turn and
+ * keeps the work going): the dispatcher waits for its own turn, not for a
+ * process the user has taken on. The run itself still finishes in the
+ * background, safety net included. Returns false when the session has gone
+ * away or is busy without `interruptActiveRun`, which the caller reports on
+ * the schedule.
  */
 export async function runDetachedChatTurn(
   input: {
@@ -627,7 +961,9 @@ export async function runDetachedChatTurn(
     /**
      * Aborts a run already in progress instead of refusing to start. A
      * scheduled message sets this: the user picked the time knowing it might
-     * land mid-run, so the timer outranks whatever is running.
+     * land mid-run, so the timer outranks a running turn. The dispatcher
+     * waits instead while the session holds background work of its own,
+     * which the abort would stop.
      */
     interruptActiveRun?: boolean;
   },
@@ -648,28 +984,62 @@ export async function runDetachedChatTurn(
     if (!input.interruptActiveRun) {
       return { started: false, error: 'A run was already in progress for this session.' };
     }
-    // Same shape as `chat.abort`: cancel the provider run and emit the
-    // terminal `complete` on its behalf, so every watching client sees the
+    // Same as `chat.abort`: cancel the provider run and emit the terminal
+    // `complete` on its behalf, so every watching client sees the
     // interrupted run end before this turn's stream begins. The interrupted
     // run's own dispatch settles later through completeRunIfCurrent, which is
     // scoped to that run and cannot touch the one started here.
-    const aborted = await dependencies.runtime.abort(activeRun.provider, input.sessionId);
-    chatRunRegistry.completeRun(input.sessionId, {
-      exitCode: aborted ? 0 : 1,
-      aborted: true,
-    });
+    await chatRunRegistry.abortRun(
+      input.sessionId,
+      (provider, appSessionId) => dependencies.runtime.abort(provider, appSessionId),
+    );
   }
 
-  return dispatchRun(
+  // Settles only if the turn's process goes on to the session's next run; the
+  // run is known once dispatchRun has reserved the session.
+  let settleOnHandOver: (result: { started: boolean; error: string | null }) => void = () => {};
+  const handedOver = new Promise<{ started: boolean; error: string | null }>((resolve) => {
+    settleOnHandOver = resolve;
+  });
+  const dispatched = dispatchRun(
     null,
     input.userId,
     input.sessionId,
     session,
     { sessionId: input.sessionId, content: input.content, options: input.options ?? {} },
     dependencies,
+    {},
+    (run) => {
+      void chatRunRegistry.whenHandedOver(run).then(() => settleOnHandOver({ started: true, error: null }));
+    },
   );
+  return Promise.race([dispatched, handedOver]);
 }
 
+/**
+ * Handles authenticated chat websocket messages used by the main chat panel.
+ * Used by the websocket server service for every chat connection.
+ *
+ * Inbound protocol (client to server):
+ * - `chat.send`                { sessionId, content, options? } (`options.keepBackgroundWork`: refuse
+ *                              rather than stop the session's background work)
+ * - `chat.edit-send`           { sessionId, anchorId, content, options? }
+ * - `chat.insert`              { sessionId, insertId, content }
+ * - `chat.insert-cancel`       { sessionId, insertId }
+ * - `chat.abort`               { sessionId }
+ * - `chat.stop-task`           { sessionId, taskId }
+ * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
+ * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
+ *
+ * Outbound protocol (server to client): every frame is `kind`-based — either
+ * a provider `NormalizedMessage` (with `seq`) or a gateway event
+ * (`chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
+ * `protocol_error`, `send_refused`). `insert_status` comes both ways: a
+ * runtime's go out through the run's writer with `seq`, while the gateway
+ * answers a refused insert or a failed cancel to the asking socket alone,
+ * without one. `send_refused` goes the same way, for a `chat.send` with
+ * `keepBackgroundWork` that would have stopped the session's background work.
+ */
 export function handleChatConnection(
   ws: WebSocket,
   request: AuthenticatedWebSocketRequest,
@@ -696,6 +1066,12 @@ export function handleChatConnection(
           return;
         case 'chat.send':
           await handleChatSend(ws, userId, data, dependencies);
+          return;
+        case 'chat.insert':
+          await handleChatInsert(ws, data, dependencies);
+          return;
+        case 'chat.insert-cancel':
+          await handleChatInsertCancel(ws, data, dependencies);
           return;
         case 'chat.abort':
           await handleChatAbort(ws, data, dependencies);

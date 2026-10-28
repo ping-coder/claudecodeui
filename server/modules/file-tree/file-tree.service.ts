@@ -715,10 +715,12 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
       try {
         const projectRoot = await resolveProjectRoot(input.projectId);
-        const resolvedTargetDirectory = !input.targetPath
-          || input.targetPath === '.'
-          || input.targetPath === './'
-          ? path.resolve(projectRoot)
+        const normalizedProjectRoot = path.resolve(projectRoot);
+        // The root itself is a valid destination however it is written: empty, `.`, or its
+        // absolute path, which older clients send for a file dropped onto a top-level row.
+        // resolvePathInsideProject accepts only paths below the root.
+        const resolvedTargetDirectory = path.resolve(normalizedProjectRoot, input.targetPath) === normalizedProjectRoot
+          ? normalizedProjectRoot
           : resolvePathInsideProject(projectRoot, input.targetPath);
 
         try {

@@ -33,10 +33,10 @@ Benefits:
 |---|---|
 | `services/websocket-server.service.ts` | Creates `WebSocketServer`, binds `verifyClient`, routes connection by pathname |
 | `services/websocket-auth.service.ts` | Authenticates upgrade requests and attaches `request.user` |
-| `services/chat-websocket.service.ts` | Handles the `/ws` chat protocol (`chat.send` / `chat.abort` / `chat.stop-task` / `chat.subscribe` / `chat.permission-response`) |
+| `services/chat-websocket.service.ts` | Handles the `/ws` chat protocol (`chat.send` / `chat.edit-send` / `chat.insert` / `chat.insert-cancel` / `chat.abort` / `chat.stop-task` / `chat.subscribe` / `chat.permission-response`) |
 | `services/chat-run-registry.service.ts` | Tracks live provider runs per app session id: seq numbering, event replay buffer, provider-id mapping, completion state |
 | `services/chat-session-writer.service.ts` | Gateway writer handed to provider runtimes: remaps provider session ids to app ids, swallows `session_created`, assigns `seq` |
-| `services/shell-websocket.service.ts` | Handles `/shell` PTY lifecycle, reconnect buffering, auth URL detection |
+| `services/shell-websocket.service.ts` | Handles `/shell` PTY lifecycle, reconnect buffering, auth URL detection, holding a CLI back while CloudCLI still runs the session |
 | `services/plugin-websocket-proxy.service.ts` | Bridges client socket to plugin socket |
 | `services/websocket-writer.service.ts` | Adapts raw WebSocket to writer interface (`send`, `setSessionId`, `getSessionId`) for non-chat writer consumers |
 | `services/websocket-state.service.ts` | Holds shared chat client set and open-state constant |
@@ -108,7 +108,7 @@ When a chat socket connects:
 
 1. Add socket to `connectedClients`.
 2. Parse each incoming message with `parseIncomingJsonObject`.
-3. Dispatch by `data.type` (six message types, none provider-specific).
+3. Dispatch by `data.type` (eight message types, none provider-specific).
 4. On close, remove socket from `connectedClients`.
 
 ### Session identity model
@@ -131,6 +131,8 @@ flowchart TD
 
   D -->|chat.send| E[resolve session row -> startRun -> providerRuntimeService.run]
   D -->|chat.edit-send| E2[history_truncated -> rewind or resume at the anchor -> same as chat.send]
+  D -->|chat.insert| J[running run required -> attach socket -> providerRuntimeService.insert]
+  D -->|chat.insert-cancel| K[providerRuntimeService.cancelInsert]
   D -->|chat.abort| F[providerRuntimeService.abort + synthetic complete]
   D -->|chat.stop-task| F2[providerRuntimeService.stopBackgroundTask]
   D -->|chat.subscribe| G[chat_subscribed ack + attach socket + replay events seq > lastSeq]
@@ -144,6 +146,9 @@ flowchart TD
 2. **Unified terminal lifecycle**: every provider run ends with exactly one `complete` message built by `createCompleteMessage()` (`server/shared/utils.ts`): `{ kind: "complete", sessionId, actualSessionId, exitCode, success, aborted }`. The chat handler emits a synthetic `complete` for runs that crash or get aborted, and the run registry drops duplicate completes.
 3. **Per-run event log**: every live event gets a monotonically increasing `seq`. `chat.subscribe { sessions: [{ sessionId, lastSeq }] }` re-attaches the live stream to the requesting socket (any provider, not just Claude) and replays events with `seq > lastSeq`. If the buffer no longer covers `lastSeq`, the client refreshes over REST.
 4. `chat_subscribed` includes `isProcessing` (replaces `check-session-status`) and `pendingPermissions` (replaces `get-pending-permissions`).
+5. **Mid-run inserts**: the runtime reports an accepted `chat.insert` as `insert_status` frames through the run's writer (sequenced, replayed). A refused insert (`NO_ACTIVE_RUN`, `UNSUPPORTED`, `SLASH_COMMAND`, `INVALID`) and a failed withdrawal (`cancel_failed`) go back to the asking socket only, without `seq`, and never as `protocol_error`.
+6. **Keeping background work**: a `chat.send` with `options.keepBackgroundWork: true` is not started when the session's process is held for background work and the turn cannot go into it (`providerRuntimeService.planHandOver`; the same plan is `POST /api/providers/sessions/:sessionId/hand-over-plan`). The asking socket gets `{ kind: "send_refused", sessionId, reason: "BACKGROUND_WORK_WOULD_STOP", changes }` the way insert refusals go. Without the flag the send starts as before and the work stops.
+7. **Aborts**: `chatRunRegistry.abortRun` marks the run before it calls the runtime and always sends the aborted `complete` itself; the dispatch safety net holds off meanwhile, so a turn whose promise settles before the abort returns still ends as `aborted`.
 
 ## `/shell` Terminal Flow
 
@@ -161,8 +166,14 @@ stateDiagram-v2
   WaitingInit --> ValidateInit: message.type == init
   ValidateInit --> ReconnectExisting: session key exists and not login reset
   ValidateInit --> SpawnNewPTY: valid path + valid sessionId
+  ValidateInit --> SessionBusy: CloudCLI still holds the session, or more than takeOver showed
+  ValidateInit --> TakingOver: held, nothing beyond takeOver, nothing queued
   ValidateInit --> EmitError: invalid payload/path/sessionId
 
+  SessionBusy --> WaitingInit: send session_busy, socket stays open
+  TakingOver --> SpawnNewPTY: let go, still the latest init
+  TakingOver --> ReconnectExisting: another socket started the pty meanwhile
+  TakingOver --> SessionBusy: still held
   ReconnectExisting --> Running: attach ws, replay buffer
   SpawnNewPTY --> Running: pty.spawn + wire onData/onExit
 
@@ -182,18 +193,20 @@ stateDiagram-v2
 ### Shell Behaviors in Detail
 
 1. `init`:
-Reads `projectPath`, `sessionId`, `provider`, `hasSession`, `initialCommand`, `isPlainShell`.
+Reads `projectPath`, `sessionId`, `provider`, `hasSession`, `initialCommand`, `isPlainShell`, `forceRestart`, `takeOver`, `initId`.
 2. Login reset:
 For login-like commands, existing keyed PTY session is killed and recreated.
 3. Validation:
 Path must exist and be a directory; `sessionId` must match safe pattern.
-4. Command build:
+4. Session check:
+A provider CLI is not started on a session CloudCLI itself still holds: a chat turn under way (any provider), a Claude process held for background work or still exiting, or a queued chat message. The socket gets `{ type: "session_busy", sessionId, provider, reason, tasks, turnStartedAt, hasQueuedMessage, changed, initId }` (`reason`: `turn`, `exiting`, `background`, `held` or `queued`; `turnStartedAt`: the running turn's `startedAt`, or null; `initId`: the answered init's, when it sent one) and stays open for another `init`. `takeOver` is `{ turnStartedAt, taskIds }` from the last `session_busy`, every task id included. With no queued message, the handler compares it with what it has just read: a running turn with another `startedAt`, or a task whose id it lacks, stops nothing and gets a fresh `session_busy` with `changed: true`. Otherwise it aborts the turn and has the runtimes let go of the session (waiting for the process to exit), then checks again. A bare `takeOver: true` (a page loaded before the snapshot) counts as an empty snapshot. Plain shells, sessionless launches and reconnects to a running PTY are never held back. A restart still kills the old PTY.
+5. Command build:
 Provider-specific command construction with resume semantics.
-5. PTY output buffering:
+6. PTY output buffering:
 Stores up to 5000 chunks for replay on reconnect.
-6. URL detection:
+7. URL detection:
 Strips ANSI, accumulates text buffer, extracts URLs, emits `auth_url` once per normalized URL, supports `autoOpen`.
-7. Close behavior:
+8. Close behavior:
 Socket disconnect does not instantly kill PTY; session is kept alive and terminated on timeout.
 
 ## `/plugin-ws/:pluginName` Proxy Flow

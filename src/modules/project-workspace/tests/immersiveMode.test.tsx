@@ -20,6 +20,9 @@ let requestFullscreen = vi.fn<(options?: FullscreenOptions) => Promise<void>>();
 let exitFullscreen = vi.fn<() => Promise<void>>();
 let keyboard = { lock: vi.fn<(keyCodes?: string[]) => Promise<void>>(), unlock: vi.fn<() => void>() };
 
+// The matchMedia stand-in vitest.setup.ts installs; tests that replace it put it back.
+const setupMatchMedia = window.matchMedia;
+
 const defineOwn = (target: object, key: string, value: unknown) => {
   Object.defineProperty(target, key, { configurable: true, writable: true, value });
 };
@@ -57,12 +60,16 @@ afterEach(() => {
     [document.documentElement, 'requestFullscreen'],
     [document.documentElement, 'webkitRequestFullscreen'],
     [navigator, 'keyboard'],
+    [navigator, 'userAgent'],
     [window, 'isSecureContext'],
     [window, 'cloudcliDesktopNotifications'],
   ];
   for (const [target, key] of stubbed) {
     Reflect.deleteProperty(target, key);
   }
+  defineOwn(window, 'matchMedia', setupMatchMedia);
+  // The window-check tests fake the clock and leave switching back to here, failed or not.
+  vi.useRealTimers();
 });
 
 const enterOrLeave = async (toggle: () => void) => {
@@ -98,6 +105,8 @@ test('inside the desktop app immersive mode comes without the browser fullscreen
   assert.equal(requestFullscreen.mock.calls.length, 0);
   assert.equal(result.current.isImmersive, true);
   assert.equal(result.current.isBrowserFullscreen, false);
+  // Nothing was asked of the browser, so there is nothing to explain.
+  assert.equal(result.current.browserFullscreenIssue, null);
 });
 
 test('where the Fullscreen API is off (iPhone) immersive mode comes alone', async () => {
@@ -108,12 +117,14 @@ test('where the Fullscreen API is off (iPhone) immersive mode comes alone', asyn
 
   assert.equal(requestFullscreen.mock.calls.length, 0);
   assert.equal(result.current.isImmersive, true);
+  assert.equal(result.current.browserFullscreenIssue, null);
 });
 
-test('a refused request leaves immersive mode on, quietly', async () => {
+test('a refused request leaves immersive mode on and says why', async () => {
   requestFullscreen.mockImplementation(async () => {
-    throw new TypeError('Permissions check failed');
+    throw new TypeError('not granted');
   });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   const { result } = renderHook(() => useImmersiveMode());
 
   // An unhandled rejection here would fail the run.
@@ -122,6 +133,9 @@ test('a refused request leaves immersive mode on, quietly', async () => {
   assert.equal(result.current.isImmersive, true);
   assert.equal(result.current.isBrowserFullscreen, false);
   assert.equal(keyboard.lock.mock.calls.length, 0);
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'refused', detail: 'not granted' });
+  // Chromium logs nothing for a refusal by the browser itself, so the hook does.
+  assert.equal(warn.mock.calls.length, 1);
 
   // The refused fullscreen is not ours, so another element's fullscreen ending changes nothing.
   act(() => {
@@ -129,6 +143,136 @@ test('a refused request leaves immersive mode on, quietly', async () => {
     showFullscreen(null);
   });
   assert.equal(result.current.isImmersive, true);
+
+  // Leaving immersive mode takes the reason away, though no fullscreen of ours was left to undo.
+  await enterOrLeave(result.current.exitImmersive);
+  assert.equal(result.current.browserFullscreenIssue, null);
+  assert.equal(exitFullscreen.mock.calls.length, 0);
+});
+
+test('a refusal without a message is named by its error', async () => {
+  requestFullscreen.mockImplementation(async () => {
+    throw new TypeError();
+  });
+  vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'refused', detail: 'TypeError' });
+});
+
+test('a refusal that arrives after immersive mode was left, or after a newer request, reports nothing', async () => {
+  const pending: Deferred[] = [];
+  requestFullscreen.mockImplementation(() => new Promise<void>((resolve, reject) => {
+    pending.push({
+      resolve: () => {
+        showFullscreen(document.documentElement);
+        resolve();
+      },
+      reject,
+    });
+  }));
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  // Refused after immersive mode was left.
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  await act(async () => {
+    pending[0].reject(new TypeError('not granted'));
+  });
+  assert.equal(result.current.browserFullscreenIssue, null);
+
+  // Refused after a newer request was made and granted.
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  await act(async () => {
+    pending[2].resolve();
+  });
+  await act(async () => {
+    pending[1].reject(new TypeError('not granted'));
+  });
+  assert.equal(result.current.browserFullscreenIssue, null);
+  assert.equal(result.current.isBrowserFullscreen, true);
+  assert.equal(warn.mock.calls.length, 0);
+  // Still ours: the browser ending it ends immersive mode.
+  act(() => {
+    showFullscreen(null);
+  });
+  assert.equal(result.current.isImmersive, false);
+});
+
+test('retry asks again within the same call and clears the reason once granted', async () => {
+  requestFullscreen.mockImplementationOnce(async () => {
+    throw new TypeError('not granted');
+  });
+  vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const { result } = renderHook(() => useImmersiveMode());
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(result.current.browserFullscreenIssue?.reason, 'refused');
+
+  act(() => {
+    result.current.retryBrowserFullscreen();
+  });
+  // Inside the notice's click, so synchronously, and on the root element again.
+  assert.equal(requestFullscreen.mock.calls.length, 2);
+  assert.equal(requestFullscreen.mock.contexts[1] === document.documentElement, true);
+
+  await act(async () => undefined);
+  assert.equal(result.current.browserFullscreenIssue, null);
+  assert.equal(result.current.isBrowserFullscreen, true);
+  assert.equal(keyboard.lock.mock.calls.length, 1);
+  // The retried fullscreen is ours like the first would have been: its end ends immersive mode.
+  act(() => {
+    showFullscreen(null);
+  });
+  assert.equal(result.current.isImmersive, false);
+});
+
+test('retry does nothing outside immersive mode, while the document is fullscreen or while a retry is pending', async () => {
+  const pending: Deferred[] = [];
+  const { result } = renderHook(() => useImmersiveMode());
+
+  act(() => {
+    result.current.retryBrowserFullscreen();
+  });
+  assert.equal(requestFullscreen.mock.calls.length, 0);
+
+  await enterOrLeave(result.current.toggleImmersive);
+  act(() => {
+    result.current.retryBrowserFullscreen();
+  });
+  assert.equal(requestFullscreen.mock.calls.length, 1);
+  await enterOrLeave(result.current.exitImmersive);
+
+  // Refused, then retried twice before the browser answered the first retry.
+  vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  requestFullscreen.mockImplementationOnce(async () => {
+    throw new TypeError('not granted');
+  });
+  requestFullscreen.mockImplementation(() => new Promise<void>((resolve, reject) => {
+    pending.push({ resolve, reject });
+  }));
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(result.current.browserFullscreenIssue?.reason, 'refused');
+
+  // Not while something else (a video) is fullscreen.
+  const video = document.createElement('video');
+  act(() => {
+    showFullscreen(video);
+    result.current.retryBrowserFullscreen();
+    showFullscreen(null);
+  });
+  assert.equal(requestFullscreen.mock.calls.length, 2);
+
+  act(() => {
+    result.current.retryBrowserFullscreen();
+    result.current.retryBrowserFullscreen();
+  });
+  assert.equal(requestFullscreen.mock.calls.length, 3);
+  assert.equal(pending.length, 1);
 });
 
 test('the browser ending the fullscreen (Escape held, F11) ends immersive mode with it', async () => {
@@ -281,4 +425,223 @@ test('immersive mode is not persisted: a new workspace starts outside it', async
   assert.equal(sessionStorage.length, 0);
   const second = renderHook(() => useImmersiveMode());
   assert.equal(second.result.current.isImmersive, false);
+});
+
+// ---- The window check: a grant the window does not show (this tab captured, an extension's stand-in)
+
+const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
+const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
+
+/**
+ * Installs a user agent and a `(display-mode: fullscreen)` query that follows a stand-in browser
+ * window, as Chromium's does. Records the queries asked for and the change listeners attached.
+ */
+const stubWindowDisplayMode = (userAgent: string, matches: boolean) => {
+  defineOwn(navigator, 'userAgent', userAgent);
+  const queries: string[] = [];
+  const listeners = new Set<() => void>();
+  const query = {
+    matches,
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === 'change') {
+        listeners.add(listener);
+      }
+    },
+    removeEventListener: (type: string, listener: () => void) => {
+      if (type === 'change') {
+        listeners.delete(listener);
+      }
+    },
+  };
+  defineOwn(window, 'matchMedia', (text: string) => {
+    queries.push(text);
+    return query;
+  });
+  return {
+    queries,
+    listeners,
+    setWindowFullscreen: (next: boolean) => {
+      query.matches = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+};
+
+const advanceTime = (ms: number) => {
+  act(() => {
+    vi.advanceTimersByTime(ms);
+  });
+};
+
+test('a grant the window never shows is reported as full screen kept inside the window', async () => {
+  vi.useFakeTimers();
+  const displayMode = stubWindowDisplayMode(CHROME_UA, false);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(result.current.isBrowserFullscreen, true);
+  assert.deepEqual(displayMode.queries, ['(display-mode: fullscreen)']);
+  assert.equal(displayMode.listeners.size, 1);
+  advanceTime(2999);
+  assert.equal(result.current.browserFullscreenIssue, null);
+  advanceTime(1);
+
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow' });
+  assert.equal(displayMode.listeners.size, 0);
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(result.current.isImmersive, true);
+  // The document already holds the fullscreen: asking again would change nothing.
+  act(() => {
+    result.current.retryBrowserFullscreen();
+  });
+  assert.equal(requestFullscreen.mock.calls.length, 1);
+
+  await enterOrLeave(result.current.exitImmersive);
+  assert.equal(result.current.browserFullscreenIssue, null);
+});
+
+test('a window that turns fullscreen in time, or one already fullscreen, is not reported', async () => {
+  vi.useFakeTimers();
+  const displayMode = stubWindowDisplayMode(CHROME_UA, false);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+  advanceTime(1000);
+  act(() => {
+    displayMode.setWindowFullscreen(true);
+  });
+  assert.equal(displayMode.listeners.size, 0);
+  assert.equal(vi.getTimerCount(), 0);
+  advanceTime(5000);
+  assert.equal(result.current.browserFullscreenIssue, null);
+
+  // Already showing when the grant arrives: nothing to wait for.
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(result.current.isBrowserFullscreen, true);
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(displayMode.listeners.size, 0);
+});
+
+test('leaving, unmounting or the browser ending the fullscreen before the window shows it stops the check', async () => {
+  vi.useFakeTimers();
+  const displayMode = stubWindowDisplayMode(CHROME_UA, false);
+  const { result, unmount } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(vi.getTimerCount(), 1);
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(displayMode.listeners.size, 0);
+  assert.equal(result.current.browserFullscreenIssue, null);
+
+  await enterOrLeave(result.current.toggleImmersive);
+  act(() => {
+    showFullscreen(null);
+  });
+  assert.equal(result.current.isImmersive, false);
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(displayMode.listeners.size, 0);
+
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(vi.getTimerCount(), 1);
+  unmount();
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(displayMode.listeners.size, 0);
+});
+
+test('outside Chromium a granted fullscreen element is taken as the whole screen', async () => {
+  vi.useFakeTimers();
+  const displayMode = stubWindowDisplayMode(SAFARI_UA, false);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+
+  // Safari's display-mode does not follow the window, so it is not even asked.
+  assert.deepEqual(displayMode.queries, []);
+  assert.equal(vi.getTimerCount(), 0);
+  advanceTime(3000);
+  assert.equal(result.current.browserFullscreenIssue, null);
+});
+
+test('a grant that leaves nothing fullscreen (an extension\'s stand-in) is reported after the wait', async () => {
+  vi.useFakeTimers();
+  stubWindowDisplayMode(SAFARI_UA, false);
+  requestFullscreen.mockImplementation(async () => undefined);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+  advanceTime(2999);
+  assert.equal(result.current.browserFullscreenIssue, null);
+  advanceTime(1);
+
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow' });
+});
+
+test('the prefixed request (Safari before 16.4) is not checked: only webkitfullscreenchange reports it', async () => {
+  vi.useFakeTimers();
+  stubWindowDisplayMode(SAFARI_UA, false);
+  Reflect.deleteProperty(document.documentElement, 'requestFullscreen');
+  defineOwn(document, 'webkitFullscreenEnabled', true);
+  // Answers later, if at all.
+  const webkitRequestFullscreen = vi.fn();
+  defineOwn(document.documentElement, 'webkitRequestFullscreen', webkitRequestFullscreen);
+  const { result } = renderHook(() => useImmersiveMode());
+
+  await enterOrLeave(result.current.toggleImmersive);
+  assert.equal(webkitRequestFullscreen.mock.calls.length, 1);
+  assert.equal(vi.getTimerCount(), 0);
+  advanceTime(3000);
+  assert.equal(result.current.browserFullscreenIssue, null);
+  assert.equal(result.current.isImmersive, true);
+});
+
+test('the browser ending a fullscreen kept inside the window ends immersive mode and its reason', async () => {
+  vi.useFakeTimers();
+  stubWindowDisplayMode(CHROME_UA, false);
+  const { result } = renderHook(() => useImmersiveMode());
+  await enterOrLeave(result.current.toggleImmersive);
+  advanceTime(3000);
+  assert.equal(result.current.browserFullscreenIssue?.reason, 'inWindow');
+
+  // Escape held: the browser leaves the fullscreen it kept inside the window.
+  act(() => {
+    showFullscreen(null);
+  });
+
+  assert.equal(result.current.isImmersive, false);
+  assert.equal(result.current.browserFullscreenIssue, null);
+});
+
+test('a stale grant neither waits on the window nor clears anything for the newer request', async () => {
+  vi.useFakeTimers();
+  const displayMode = stubWindowDisplayMode(CHROME_UA, false);
+  const pending: Deferred[] = [];
+  requestFullscreen.mockImplementation(() => new Promise<void>((resolve, reject) => {
+    pending.push({
+      resolve: () => {
+        showFullscreen(document.documentElement);
+        resolve();
+      },
+      reject,
+    });
+  }));
+  const { result } = renderHook(() => useImmersiveMode());
+
+  // Left and entered again before the browser answered the first request.
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  await enterOrLeave(result.current.toggleImmersive);
+  await act(async () => {
+    pending[0].resolve();
+  });
+  assert.equal(vi.getTimerCount(), 0);
+  assert.equal(displayMode.listeners.size, 0);
+
+  // The newer request's own grant starts the wait.
+  await act(async () => {
+    pending[1].resolve();
+  });
+  assert.equal(vi.getTimerCount(), 1);
+  assert.equal(displayMode.listeners.size, 1);
 });

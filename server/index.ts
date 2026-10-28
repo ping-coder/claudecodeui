@@ -53,7 +53,7 @@ import { fileTreeRoutes } from './modules/file-tree/index.js';
 import { worktreesRoutes } from './modules/worktrees/index.js';
 import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js';
 import { browserUseService } from './modules/browser-use/browser-use.service.js';
-import { initializeDatabase, sessionsDb } from './modules/database/index.js';
+import { initializeDatabase, sessionDraftsDb, sessionsDb } from './modules/database/index.js';
 import { configureWebPush, setNotificationRunLookup } from './modules/notifications/index.js';
 
 const __dirname = getModuleDirectory(import.meta.url);
@@ -121,6 +121,10 @@ createWebSocketServer(server, {
 
             return null;
         },
+        // What CloudCLI still runs on a session, so the Shell tab never starts
+        // a second CLI on it, and stopping that when the user takes it over.
+        runtime: providerRuntimeService,
+        hasQueuedMessage: (sessionId) => sessionDraftsDb.hasQueuedMessage(sessionId),
     },
     getPluginPort,
 });

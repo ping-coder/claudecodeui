@@ -25,6 +25,7 @@ function createDependencies(overrides: Partial<UserDependencies> = {}): UserDepe
     preferences: {
       getPreferences: () => ({}),
       savePreferences: () => undefined,
+      patchPreferences: () => undefined,
     },
     drafts: noDrafts,
     readSystemGitConfig: async () => ({ git_name: null, git_email: null }),
@@ -80,6 +81,7 @@ test('savePreferences forwards only the keys the client sent', () => {
     preferences: {
       getPreferences: () => ({ theme: 'dark' }),
       savePreferences: (_id, updates) => saved.push(updates),
+      patchPreferences: () => undefined,
     },
   }));
 
@@ -100,6 +102,84 @@ test('savePreferences rejects an over-long preference key', () => {
   const service = createUserService(createDependencies());
 
   assert.throws(() => service.savePreferences(3, { ['k'.repeat(201)]: 1 }), /1-200/);
+});
+
+test('patchPreferences forwards the set and merge groups and returns every stored preference', () => {
+  const calls: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    preferences: {
+      getPreferences: () => ({ theme: 'light', codeEditorSettings: { fontSize: '16', wordWrap: true } }),
+      savePreferences: () => undefined,
+      patchPreferences: (...args) => { calls.push(args); },
+    },
+  }));
+
+  const result = service.patchPreferences(3, {
+    set: { theme: 'light' },
+    merge: { codeEditorSettings: { wordWrap: true } },
+  });
+
+  assert.deepEqual(calls, [[3, { theme: 'light' }, { codeEditorSettings: { wordWrap: true } }]]);
+  assert.deepEqual(result, {
+    success: true,
+    preferences: { theme: 'light', codeEditorSettings: { fontSize: '16', wordWrap: true } },
+  });
+});
+
+test('patchPreferences treats an absent group as empty', () => {
+  const calls: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    preferences: {
+      getPreferences: () => ({}),
+      savePreferences: () => undefined,
+      patchPreferences: (...args) => { calls.push(args); },
+    },
+  }));
+
+  service.patchPreferences(3, { merge: { uiPreferences: { sidebarVisible: false } } });
+  service.patchPreferences(3, { set: { theme: 'dark' } });
+
+  assert.deepEqual(calls, [
+    [3, {}, { uiPreferences: { sidebarVisible: false } }],
+    [3, { theme: 'dark' }, {}],
+  ]);
+});
+
+test('patchPreferences refuses a malformed body with a 400 and stores nothing', () => {
+  const calls: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    preferences: {
+      getPreferences: () => ({}),
+      savePreferences: () => undefined,
+      patchPreferences: (...args) => { calls.push(args); },
+    },
+  }));
+  const rejects = (body: unknown, code: string) => {
+    assert.throws(() => service.patchPreferences(3, body), (error: unknown) => {
+      const appError = error as { code?: string; statusCode?: number };
+      assert.equal(appError.statusCode, 400, JSON.stringify(body));
+      assert.equal(appError.code, code, JSON.stringify(body));
+      return true;
+    });
+  };
+
+  rejects(['set'], 'INVALID_PREFERENCES');
+  rejects('set', 'INVALID_PREFERENCES');
+  rejects(null, 'INVALID_PREFERENCES');
+  rejects({ set: ['theme'] }, 'INVALID_PREFERENCES');
+  rejects({ set: 'dark' }, 'INVALID_PREFERENCES');
+  rejects({ merge: ['codeEditorSettings'] }, 'INVALID_PREFERENCES');
+  rejects({ merge: { codeEditorSettings: 'x' } }, 'INVALID_PREFERENCES');
+  rejects({ merge: { codeEditorSettings: ['x'] } }, 'INVALID_PREFERENCES');
+  rejects({ merge: { codeEditorSettings: null } }, 'INVALID_PREFERENCES');
+  // A body for the old route sent here by mistake: its keys are not groups.
+  rejects({ theme: 'dark' }, 'INVALID_PREFERENCES');
+  rejects({ set: {}, merge: {}, extra: {} }, 'INVALID_PREFERENCES');
+  // The same key rule, and the same error, as PATCH /preferences.
+  rejects({ set: { ['k'.repeat(201)]: 1 } }, 'INVALID_PREFERENCE_KEY');
+  rejects({ merge: { ['k'.repeat(201)]: {} } }, 'INVALID_PREFERENCE_KEY');
+
+  assert.deepEqual(calls, []);
 });
 
 test('saveDraft stores the text and queued message under the given scope', () => {

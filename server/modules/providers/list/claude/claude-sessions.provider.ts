@@ -1305,6 +1305,88 @@ function readTaskStatusEvent(raw: AnyRecord): ClaudeTaskStatusEvent | null {
   }
 }
 
+/**
+ * The images a user message carries as base64 `image` blocks (how the SDK
+ * persists image attachments next to the prompt text), as the data URLs the
+ * client draws on the user bubble.
+ */
+function readImageAttachments(parts: unknown[]): Array<{ data: string }> {
+  const images: Array<{ data: string }> = [];
+  for (const part of parts as AnyRecord[]) {
+    if (part?.type === 'image' && part.source?.type === 'base64' && typeof part.source.data === 'string') {
+      const mediaType = typeof part.source.media_type === 'string' ? part.source.media_type : 'image/png';
+      images.push({ data: `data:${mediaType};base64,${part.source.data}` });
+    }
+  }
+  return images;
+}
+
+/**
+ * The user message a `queued_command` attachment row records, or null when
+ * the row is another attachment or nothing a person sent.
+ *
+ * The CLI queues a person's mid-turn message (CloudCLI's insert, or text
+ * typed into a terminal CLI) and its own task notifications the same way;
+ * only the former is a message. A notification is folded onto the call that
+ * launched its work, a meta row is the CLI's own, and an origin other than a
+ * person (a channel, another agent) is not the user's. The message's id is
+ * the queued message's own uuid (`source_uuid`): the id the client sent the
+ * insert under, which the live message carries too.
+ */
+function readInsertedMessage(
+  raw: AnyRecord,
+  sessionId: string | null,
+  timestamp: string,
+  rowId: string,
+): NormalizedMessage | null {
+  const attachment = readObjectRecord(raw.attachment);
+  if (
+    !attachment
+    || attachment.type !== 'queued_command'
+    || attachment.commandMode === 'task-notification'
+    || attachment.isMeta === true
+  ) {
+    return null;
+  }
+  // `{ kind }` as the CLI writes it; no origin, or none named, counts as a person.
+  const originRecord = readObjectRecord(attachment.origin);
+  const originKind = originRecord ? originRecord.kind : attachment.origin;
+  if (originKind !== undefined && originKind !== null && originKind !== 'human') {
+    return null;
+  }
+
+  // A plain string, or content blocks when images were pasted with it.
+  const prompt = attachment.prompt;
+  const blocks: AnyRecord[] = Array.isArray(prompt) ? prompt : [];
+  const text = typeof prompt === 'string'
+    ? prompt
+    : blocks
+      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('\n');
+  const images = readImageAttachments(blocks);
+  const parsedFiles = parseFilesInputTag(text);
+  if (!parsedFiles.text && parsedFiles.attachments.length === 0 && images.length === 0) {
+    return null;
+  }
+  if (parsedFiles.text && isInternalContent(parsedFiles.text)) {
+    return null;
+  }
+
+  return createNormalizedMessage({
+    id: readOptionalString(attachment.source_uuid) ?? rowId,
+    sessionId,
+    timestamp,
+    provider: PROVIDER,
+    kind: 'text',
+    role: 'user',
+    content: parsedFiles.text,
+    images: images.length > 0 ? images : undefined,
+    files: parsedFiles.attachments.length > 0 ? parsedFiles.attachments : undefined,
+    inserted: true,
+  });
+}
+
 type ClaudeSessionsProviderOptions = {
   /**
    * When CloudCLI's own SDK run behind a session started, or null when none
@@ -1377,12 +1459,14 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       }
     }
     // A synthesized id is useless as an anchor — it changes on every read — so
-    // a row without its own uuid produces messages with no anchor at all.
+    // a row without its own uuid produces messages with no anchor at all. Nor
+    // does an inserted message get one: it stands on an attachment row, which
+    // no resume can address (see `NormalizedMessage.inserted`).
     const raw = readObjectRecord(rawMessage);
     const anchorId = typeof raw?.uuid === 'string' && raw.uuid ? raw.uuid : null;
     if (anchorId) {
       for (const message of messages) {
-        if (message.role === 'user') {
+        if (message.role === 'user' && message.inserted !== true) {
           message.transcriptAnchorId = anchorId;
         }
       }
@@ -1488,18 +1572,22 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       return [];
     }
 
+    // A message the user sent while a turn ran, which the CLI read after a
+    // tool batch: a mid-run insert, or text typed into a terminal CLI
+    // mid-turn. The transcript keeps it as a `queued_command` attachment, not
+    // a user row. The runtime builds the live message for a delivered insert
+    // from the same row shape, so live and history agree on its id.
+    if (raw.type === 'attachment') {
+      const inserted = readInsertedMessage(raw, sessionId, ts, baseId);
+      return inserted ? [inserted] : [];
+    }
+
     if (raw.message?.role === 'user' && raw.message?.content && raw.isMeta !== true) {
       if (Array.isArray(raw.message.content)) {
         // Image attachments sent through the SDK are persisted as base64
         // `image` blocks next to the prompt text. Collect them so the UI can
         // render them on the user bubble.
-        const imageAttachments: Array<{ data: string }> = [];
-        for (const part of raw.message.content) {
-          if (part?.type === 'image' && part.source?.type === 'base64' && typeof part.source.data === 'string') {
-            const mediaType = typeof part.source.media_type === 'string' ? part.source.media_type : 'image/png';
-            imageAttachments.push({ data: `data:${mediaType};base64,${part.source.data}` });
-          }
-        }
+        const imageAttachments = readImageAttachments(raw.message.content);
         let imagesAttached = false;
         let filesAttached = false;
 

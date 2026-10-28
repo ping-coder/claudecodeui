@@ -500,6 +500,49 @@ test('createEntry performs filesystem mutation only through the injected adapter
   assert.deepEqual(writtenFiles, [{ filePath: targetPath, content: '' }]);
 });
 
+test('storeUploadedFiles takes the project root itself as a target, however it is written', async () => {
+  // A file dropped onto a top-level row of the tree is uploaded next to it, into the root: older
+  // clients send the root's absolute path, which used to fail with a 403.
+  const projectRoot = path.resolve('file-tree-test-project');
+  const copiedFiles: Array<{ source: string; destination: string }> = [];
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    copyFile: async (source, destination) => {
+      copiedFiles.push({ source, destination });
+    },
+    unlink: async () => undefined,
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+  const upload = (targetPath: string) => service.storeUploadedFiles({
+    projectId: 'project-1',
+    targetPath,
+    relativePaths: ['notes.txt'],
+    requestedFileCount: 1,
+    files: [{ originalName: 'notes.txt', temporaryPath: '/uploads/tmp-1', size: 6, mimeType: 'text/plain' }],
+  });
+
+  for (const targetPath of [projectRoot, `${projectRoot}${path.sep}`, '', '.', './']) {
+    copiedFiles.length = 0;
+    const result = await upload(targetPath);
+    assert.equal(result.targetPath, projectRoot, `target ${JSON.stringify(targetPath)}`);
+    assert.equal(result.uploadedCount, 1, `target ${JSON.stringify(targetPath)}`);
+    assert.deepEqual(copiedFiles, [{ source: '/uploads/tmp-1', destination: path.join(projectRoot, 'notes.txt') }]);
+  }
+
+  // Only the root itself is let through: its parent and a sibling sharing its name as a prefix stay outside.
+  for (const targetPath of [path.dirname(projectRoot), `${projectRoot}-other`, '..']) {
+    copiedFiles.length = 0;
+    await assert.rejects(
+      upload(targetPath),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'PATH_OUTSIDE_PROJECT'
+        && error.statusCode === 403,
+      `target ${JSON.stringify(targetPath)}`,
+    );
+    assert.deepEqual(copiedFiles, []);
+  }
+});
+
 /**
  * Builds the service against the real filesystem and the real workspace policy,
  * which is the only way to exercise the read-only roots: the whole guarantee

@@ -2,7 +2,7 @@ import type { DragEvent, ReactNode, RefObject } from 'react';
 import { AlertTriangle, Folder, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { FileTreeNode, FileTreeViewMode } from '@/shared/types';
+import type { FileTreeDetailedColumn, FileTreeNode, FileTreeViewMode } from '@/shared/types';
 import FileTreeEmptyState from '@/modules/file-tree/FileTreeEmptyState';
 import FileTreeList from '@/modules/file-tree/FileTreeList';
 
@@ -12,6 +12,9 @@ type FileTreeBodyProps = {
   error?: string | null;
   searchQuery: string;
   viewMode: FileTreeViewMode;
+  // Detailed view only: the metadata columns that fit and the grid they share with the header.
+  detailedColumns: readonly FileTreeDetailedColumn[];
+  detailedGridTemplate: string;
   expandedDirs: Set<string>;
   onItemClick: (item: FileTreeNode) => void;
   renderFileIcon: (filename: string) => ReactNode;
@@ -45,6 +48,8 @@ export default function FileTreeBody({
   error,
   searchQuery,
   viewMode,
+  detailedColumns,
+  detailedGridTemplate,
   expandedDirs,
   onItemClick,
   renderFileIcon,
@@ -94,6 +99,8 @@ export default function FileTreeBody({
         <FileTreeList
           items={filteredFiles}
           viewMode={viewMode}
+          detailedColumns={detailedColumns}
+          detailedGridTemplate={detailedGridTemplate}
           expandedDirs={expandedDirs}
           onItemClick={onItemClick}
           renderFileIcon={renderFileIcon}

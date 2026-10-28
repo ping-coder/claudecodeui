@@ -48,17 +48,18 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
     setActiveTab,
     saveStatus,
     projectSortOrder,
-    setProjectSortOrder,
+    updateProjectSortOrder,
     codeEditorSettings,
     updateCodeEditorSetting,
     claudePermissions,
-    setClaudePermissions,
+    updateClaudePermissions,
     notificationPreferences,
-    setNotificationPreferences,
+    notificationPreferencesStatus,
+    updateNotificationPreferences,
     cursorPermissions,
-    setCursorPermissions,
+    updateCursorPermissions,
     codexPermissionMode,
-    setCodexPermissionMode,
+    updateCodexPermissionMode,
     providerAuthStatus,
     openLoginForProvider,
     showLoginModal,
@@ -82,19 +83,19 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
   const handleEnablePush = async () => {
     await pushSubscribe();
     // Server sets webPush: true in preferences on subscribe; sync local state
-    setNotificationPreferences({
-      ...notificationPreferences,
-      channels: { ...notificationPreferences.channels, webPush: true },
-    });
+    updateNotificationPreferences((current) => ({
+      ...current,
+      channels: { ...current.channels, webPush: true },
+    }));
   };
 
   const handleDisablePush = async () => {
     await pushUnsubscribe();
     // Server sets webPush: false in preferences on unsubscribe; sync local state
-    setNotificationPreferences({
-      ...notificationPreferences,
-      channels: { ...notificationPreferences.channels, webPush: false },
-    });
+    updateNotificationPreferences((current) => ({
+      ...current,
+      channels: { ...current.channels, webPush: false },
+    }));
   };
 
   useEffect(() => {
@@ -120,20 +121,20 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
     if (!desktopNotificationsBridge) return;
     const state = await desktopNotificationsBridge.update({ enabled: true });
     setDesktopNotificationsState(state?.desktopNotifications || null);
-    setNotificationPreferences({
-      ...notificationPreferences,
-      channels: { ...notificationPreferences.channels, desktop: true },
-    });
+    updateNotificationPreferences((current) => ({
+      ...current,
+      channels: { ...current.channels, desktop: true },
+    }));
   };
 
   const handleDisableDesktopNotifications = async () => {
     if (!desktopNotificationsBridge) return;
     const state = await desktopNotificationsBridge.update({ enabled: false });
     setDesktopNotificationsState(state?.desktopNotifications || null);
-    setNotificationPreferences({
-      ...notificationPreferences,
-      channels: { ...notificationPreferences.channels, desktop: false },
-    });
+    updateNotificationPreferences((current) => ({
+      ...current,
+      channels: { ...current.channels, desktop: false },
+    }));
   };
 
   // Escape closes Settings, matching the other modals in the app. Layers that open
@@ -224,7 +225,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
               {activeTab === 'appearance' && (
                 <AppearanceSettingsTab
                   projectSortOrder={projectSortOrder}
-                  onProjectSortOrderChange={setProjectSortOrder}
+                  onProjectSortOrderChange={updateProjectSortOrder}
                   codeEditorSettings={codeEditorSettings}
                   onCodeEditorTextWordWrapChange={(value) => updateCodeEditorSetting('textWordWrap', value)}
                   onCodeEditorWordWrapChange={(value) => updateCodeEditorSetting('wordWrap', value)}
@@ -241,11 +242,11 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
                   providerAuthStatus={providerAuthStatus}
                   onProviderLogin={openLoginForProvider}
                   claudePermissions={claudePermissions}
-                  onClaudePermissionsChange={setClaudePermissions}
+                  onClaudePermissionsChange={updateClaudePermissions}
                   cursorPermissions={cursorPermissions}
-                  onCursorPermissionsChange={setCursorPermissions}
+                  onCursorPermissionsChange={updateCursorPermissions}
                   codexPermissionMode={codexPermissionMode}
-                  onCodexPermissionModeChange={setCodexPermissionMode}
+                  onCodexPermissionModeChange={updateCodexPermissionMode}
                   projects={projects}
                 />
               )}
@@ -257,7 +258,8 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
               {activeTab === 'notifications' && (
                 <NotificationsSettingsTab
                   notificationPreferences={notificationPreferences}
-                  onNotificationPreferencesChange={setNotificationPreferences}
+                  notificationPreferencesStatus={notificationPreferencesStatus}
+                  onNotificationPreferencesChange={updateNotificationPreferences}
                   pushPermission={pushPermission}
                   isPushSubscribed={isPushSubscribed}
                   isPushLoading={isPushLoading}

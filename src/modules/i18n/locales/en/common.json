@@ -330,7 +330,10 @@
     "browseAllFiles": "Browse all files ({{count}})",
     "browseAllCommits": "Browse all commits ({{count}})",
     "browseAllBranches": "Browse all branches ({{count}})",
-    "switchTo": "Switch to: {{name}}"
+    "switchTo": "Switch to: {{name}}",
+    "filesShownOf": "Showing {{shown}} of {{total}} files. Type to find the rest.",
+    "filesBestMatches": "Showing the {{shown}} best matches. Keep typing to narrow them down.",
+    "filesTooLarge": "Files are not listed for projects with more than 10,000 entries. Open a smaller folder as the project, or ignore build output in the root .gitignore."
   },
   "folderBrowser": {
     "title": "Select Folder",
@@ -432,6 +435,10 @@
     "tabsButton": "Tabs ({{count}})",
     "fullscreen": "Full screen",
     "exitFullscreen": "Exit full screen",
+    "fullscreenRefused": "The browser refused full screen ({{detail}}); the workspace only fills the window.",
+    "fullscreenInWindow": "The browser kept full screen inside the window: this tab may be shared, cast or recorded by an extension, or an extension may be handling full screen.",
+    "fullscreenWindowTipApple": "Press ⌃⌘F for a full-screen window; to hide the toolbar, turn off View > Always Show Toolbar in Full Screen (⇧⌘F).",
+    "fullscreenWindowTip": "Press F11 for a full-screen window.",
     "showSidebar": "Show sidebar",
     "emptyTitle": "No conversation open",
     "emptyOtherTitle": "This side is empty",

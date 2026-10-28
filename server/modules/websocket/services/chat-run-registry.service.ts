@@ -25,6 +25,20 @@ type ChatRunStatus = 'running' | 'completed';
  * - `lastSeq` / `events`: the per-run event log. Every live event gets a
  *   monotonically increasing `seq` and is buffered so a reconnecting client
  *   can replay exactly the events it missed via `chat.subscribe`.
+ * - `handedOverTo`: the session's next run, when the provider ran that run's
+ *   turn in the process this run's turn left running for background work
+ *   instead of stopping it. That work goes on, so its end, reported later,
+ *   still counts as this run's even though the next run holds the slot.
+ * - `handedOver` / `settleHandedOver`: settles once this run's turn has
+ *   completed and its process went on to another run (`handedOverTo`), and
+ *   never for a run whose process is not handed over. The scheduled-messages
+ *   dispatcher stops holding the session for a run it started from then on
+ *   (see `whenHandedOver`).
+ * - `abortInFlight`: set by `abortRun` before it calls the runtime and
+ *   cleared, settled, once it has sent the run's terminal `complete`. A
+ *   runtime can let the run's promise settle before its abort returns, so
+ *   the safety net's `complete` holds off meanwhile (`completeRunIfCurrent`),
+ *   and a caller that reads how the run ended waits for it (`pendingAbort`).
  */
 type ChatRun = {
   appSessionId: string;
@@ -36,6 +50,10 @@ type ChatRun = {
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
+  handedOverTo: ChatRun | null;
+  handedOver: Promise<void>;
+  settleHandedOver: () => void;
+  abortInFlight: Promise<void> | null;
 };
 
 /**
@@ -154,6 +172,18 @@ function readSessionName(run: ChatRun): string | null {
   }
 }
 
+/**
+ * Settles `run.handedOver` once both halves hold: the run's turn has
+ * completed and its process went on to another run. Checked as each half
+ * comes in; the turn's `complete` comes first in practice, since a provider
+ * only hands a process on once the turn in it is over.
+ */
+function settleHandedOverIfDone(run: ChatRun): void {
+  if (run.status === 'completed' && run.handedOverTo !== null && run.handedOverTo !== run) {
+    run.settleHandedOver();
+  }
+}
+
 /** Drops ends older than the retention window, then all but the newest MAX_RECENT_RUN_ENDS. */
 function pruneRecentRunEnds(now: number): void {
   const cutoff = now - RECENT_RUN_ENDS_RETENTION_MS;
@@ -249,6 +279,7 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     // turn ends: the runtime has already counted the tasks this turn started.
     const outcome = readRunEndOutcome(message);
     recordRunEnded(run, outcome, outcome === 'done' && retainCompletedRun(run.appSessionId));
+    settleHandedOverIfDone(run);
   }
 
   run.events.push(outbound);
@@ -331,6 +362,7 @@ export const chatRunRegistry = {
       return null;
     }
 
+    let settleHandedOver = () => {};
     const run: ChatRun = {
       appSessionId: input.appSessionId,
       provider: input.provider,
@@ -341,6 +373,10 @@ export const chatRunRegistry = {
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
+      handedOverTo: null,
+      handedOver: new Promise<void>((resolve) => { settleHandedOver = resolve; }),
+      settleHandedOver: () => settleHandedOver(),
+      abortInFlight: null,
     };
 
     run.writer = new ChatSessionWriter({
@@ -356,13 +392,22 @@ export const chatRunRegistry = {
       onBackgroundWorkFinished: () => {
         // Only news about a turn that has ended and still is the session's
         // latest run counts. A newer run in the slot stopped this run's work
-        // when it started, so a late report from it is stale. An empty slot
+        // when it started, so a late report from it is stale, unless that run
+        // took this run's process over and kept the work going. An empty slot
         // still counts: eviction only asks whether tasks are outstanding, and
         // the follow-up turn that reports the last of them can outlast that.
         const current = runs.get(run.appSessionId);
-        if (run.status === 'completed' && (current === undefined || current === run)) {
+        if (
+          run.status === 'completed'
+          && (current === undefined || current === run || current === run.handedOverTo)
+        ) {
           recordRunEnded(run, 'backgroundDone', false);
         }
+      },
+      onProcessHandedOver: () => {
+        // The run the provider is handing the process to has just taken the slot.
+        run.handedOverTo = runs.get(run.appSessionId) ?? null;
+        settleHandedOverIfDone(run);
       },
     });
 
@@ -433,17 +478,16 @@ export const chatRunRegistry = {
   },
 
   /**
-   * Emits a synthetic terminal `complete` if (and only if) the run is still
-   * marked running. Used when a provider runtime throws or resolves without
-   * having produced its own terminal event, and by the abort path.
+   * Emits a synthetic terminal `complete` if (and only if) the session's run,
+   * whichever it is, is still marked running, on the terms of
+   * `completeRunIfCurrent`. The gateway's safety net and abort path use the
+   * run-scoped completeRunIfCurrent and abortRun instead.
    */
   completeRun(appSessionId: string, opts: { exitCode: number; aborted?: boolean }): void {
     const run = runs.get(appSessionId);
-    if (!run || run.status !== 'running') {
-      return;
+    if (run) {
+      chatRunRegistry.completeRunIfCurrent(run, opts);
     }
-
-    run.writer.sendComplete(opts);
   },
 
   /**
@@ -453,13 +497,99 @@ export const chatRunRegistry = {
    * run has replaced it in the registry (a queued message sends within
    * milliseconds of the previous turn ending) — the session-keyed
    * `completeRun` would terminate that newer run.
+   *
+   * Also a no-op for a `complete` without `aborted` while `abortRun` is
+   * aborting the run: the abort sends the run's `complete` itself, as
+   * aborted, once the runtime has answered. A runtime may let the run's
+   * promise settle before that (a turn handed to a held process returns as
+   * soon as the abort reaches it, and a process can exit while its interrupt
+   * is pending), and the safety net's would otherwise end the run as failed.
    */
   completeRunIfCurrent(run: ChatRun, opts: { exitCode: number; aborted?: boolean }): void {
     if (runs.get(run.appSessionId) !== run || run.status !== 'running') {
       return;
     }
+    if (run.abortInFlight && opts.aborted !== true) {
+      return;
+    }
 
     run.writer.sendComplete(opts);
+  },
+
+  /**
+   * Aborts the session's running run through `abort` (the provider runtime
+   * gateway's) and emits its terminal `complete`, with `aborted: true`, on
+   * the runtime's behalf: runtimes skip their own for an aborted run, and a
+   * late one is dropped as a duplicate. `exitCode` is 1 when the runtime
+   * could not abort it, or threw; a throw is passed on once the `complete`
+   * is out. The `complete` is scoped to the aborted run, which may have
+   * ended on its own while the abort was under way and given its slot to a
+   * newer run. Until it is out, the run is marked (`abortInFlight`) so the
+   * safety net cannot end it first. A second abort of a run already being
+   * aborted waits for the first rather than calling the runtime again.
+   * Resolves false, calling nothing, when no run is running. Used by the
+   * chat gateway's `chat.abort`, by `runDetachedChatTurn` when a scheduled
+   * message interrupts a run, and by the Shell handler when the user takes
+   * the session over for the terminal.
+   */
+  async abortRun(
+    appSessionId: string,
+    abort: (provider: LLMProvider, appSessionId: string) => Promise<boolean>,
+  ): Promise<boolean> {
+    const run = runs.get(appSessionId);
+    if (!run || run.status !== 'running') {
+      return false;
+    }
+    if (run.abortInFlight) {
+      await run.abortInFlight;
+      return true;
+    }
+
+    // Marked before the runtime is called: its abort can settle the run's
+    // promise, and the dispatch's safety net run, before it returns here.
+    // The mark holds that safety net off, which relies on every runtime's
+    // abort returning in bounded time (Claude's waits out the interrupt
+    // reply for a few seconds at most, agy's its kill delay).
+    let settleAbort = () => {};
+    run.abortInFlight = new Promise<void>((resolve) => { settleAbort = resolve; });
+    let aborted = false;
+    try {
+      aborted = await abort(run.provider, appSessionId);
+    } finally {
+      // On every path, a throw included: a safety net that fired meanwhile
+      // held off for this `complete`, so without it the run would never end.
+      run.abortInFlight = null;
+      try {
+        chatRunRegistry.completeRunIfCurrent(run, { exitCode: aborted ? 0 : 1, aborted: true });
+      } finally {
+        settleAbort();
+      }
+    }
+    return true;
+  },
+
+  /**
+   * The abort under way for `run` (see `abortRun`), which settles once it has
+   * sent the run's terminal `complete`; null when none is. Used by the agent
+   * routes, which read how an API run ended off its events as soon as its
+   * runtime returns, and a runtime can return while a tab's abort of the run
+   * is still on its way.
+   */
+  pendingAbort(run: ChatRun): Promise<void> | null {
+    return run.abortInFlight;
+  },
+
+  /**
+   * Settles once `run`'s turn has completed and its provider handed the
+   * process it ran in, with the background work that process is held for,
+   * to another run of the session instead of stopping it; never for a run
+   * whose process is not handed over. `runDetachedChatTurn` races it with
+   * the run's own promise, which settles only once that process exits, so
+   * the scheduled-messages dispatcher stops holding the session for a turn
+   * it started once the user's next turn has taken the process over.
+   */
+  whenHandedOver(run: ChatRun): Promise<void> {
+    return run.handedOver;
   },
 
   /**

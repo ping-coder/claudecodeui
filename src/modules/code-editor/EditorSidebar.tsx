@@ -3,14 +3,20 @@ import type { MouseEvent, MutableRefObject } from 'react';
 
 import type { CodeEditorFile } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
+import {
+  EDITOR_DIVIDER_WIDTH_PX,
+  EDITOR_PANEL_MIN_WIDTH_PX,
+  EDITOR_SIDE_CONTENT_MIN_WIDTH_PX,
+  FILES_TREE_RATIO_DEFAULT,
+} from '@/shared/constants';
 import CodeEditor from '@/modules/code-editor/CodeEditor';
+import FilesTreeDivider from '@/modules/code-editor/FilesTreeDivider';
 
 type EditorSidebarProps = {
   editingFile: CodeEditorFile | null;
   isMobile: boolean;
   editorExpanded: boolean;
   editorWidth: number;
-  hasManualWidth: boolean;
   resizeHandleRef: MutableRefObject<HTMLDivElement | null>;
   onResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onCloseEditor: () => void;
@@ -22,10 +28,14 @@ type EditorSidebarProps = {
   fillSpace?: boolean;
 };
 
-// Minimum width for the left content (file tree, chat, etc.)
-const MIN_LEFT_CONTENT_WIDTH = 200;
-// Minimum width for the editor sidebar
-const MIN_EDITOR_WIDTH = 280;
+// The narrowest docked editor box: the editor and the divider in front of it.
+const MIN_DOCKED_WIDTH = EDITOR_PANEL_MIN_WIDTH_PX + EDITOR_DIVIDER_WIDTH_PX;
+
+/**
+ * The docked editor's box in the Files view: what the tree's share leaves, kept between both minimums.
+ * A definite basis, so nothing the editor shows (a long line, a long path, a wide image) sizes it.
+ */
+const FILES_EDITOR_FLEX = `0 0 clamp(${MIN_DOCKED_WIDTH}px, calc((1 - var(--files-tree-ratio, ${FILES_TREE_RATIO_DEFAULT})) * 100%), calc(100% - ${EDITOR_SIDE_CONTENT_MIN_WIDTH_PX}px))`;
 
 /** Used by the project-workspace module to dock the code editor beside a pane's content, with drag-to-resize; an editor that does not fit pops out, or fills its pane when that pane sits beside another. */
 export default function EditorSidebar({
@@ -33,7 +43,6 @@ export default function EditorSidebar({
   isMobile,
   editorExpanded,
   editorWidth,
-  hasManualWidth,
   resizeHandleRef,
   onResizeStart,
   onCloseEditor,
@@ -60,7 +69,7 @@ export default function EditorSidebar({
   const narrowPaneExpandedRef = useRef(false);
 
   // Track how much room the container can spare so the left content keeps at
-  // least MIN_LEFT_CONTENT_WIDTH as the window resizes.
+  // least EDITOR_SIDE_CONTENT_MIN_WIDTH_PX as the window resizes.
   useEffect(() => {
     if (!editingFile) {
       // The next file opened in a narrow pane is expanded again.
@@ -79,9 +88,11 @@ export default function EditorSidebar({
       // the real width once the pane is shown again.
       if (parentElement.clientWidth === 0) return;
 
-      const availableWidth = parentElement.clientWidth - MIN_LEFT_CONTENT_WIDTH;
+      const availableWidth = parentElement.clientWidth - EDITOR_SIDE_CONTENT_MIN_WIDTH_PX;
 
-      if (availableWidth < MIN_EDITOR_WIDTH) {
+      // The divider counts: CSS keeps the docked box at MIN_DOCKED_WIDTH, so a narrower
+      // remainder would push the row past the pane.
+      if (availableWidth < MIN_DOCKED_WIDTH) {
         if (isSplitPane) {
           // Fill this pane instead of popping out over both.
           if (!narrowPaneExpandedRef.current) {
@@ -137,8 +148,9 @@ export default function EditorSidebar({
   // change, so switching layouts never remounts it and drops the buffer.
   const isFloating = isMobile || poppedOut;
 
-  // In files tab, fill the remaining width unless user has dragged manually.
-  const useFlexLayout = editorExpanded || (fillSpace && !hasManualWidth);
+  // The Files view splits the pane by the tree's share; every other view docks the editor at its own width.
+  const isFilesSplit = Boolean(fillSpace) && !editorExpanded && !isFloating;
+  const useFlexLayout = editorExpanded || isFilesSplit;
 
   // The resize handle sits in a fixed child slot, so dropping it never shifts
   // the editor's position and remounts it. `contents` makes the wrappers give
@@ -147,8 +159,9 @@ export default function EditorSidebar({
     <div
       ref={containerRef}
       className={isFloating ? 'contents' : `flex h-full min-w-0 ${editorExpanded ? 'flex-1' : ''}`}
+      style={isFilesSplit ? { flex: FILES_EDITOR_FLEX } : undefined}
     >
-      {!isFloating && !editorExpanded && (
+      {isFilesSplit ? <FilesTreeDivider /> : !isFloating && !editorExpanded && (
         <div
           ref={resizeHandleRef}
           onMouseDown={onResizeStart}
@@ -163,7 +176,7 @@ export default function EditorSidebar({
         className={isFloating
           ? 'contents'
           : `h-full overflow-hidden border-l border-gray-200 dark:border-gray-700 ${useFlexLayout ? 'min-w-0 flex-1' : ''}`}
-        style={isFloating || useFlexLayout ? undefined : { width: `${effectiveWidth}px`, minWidth: `${MIN_EDITOR_WIDTH}px` }}
+        style={isFloating || useFlexLayout ? undefined : { width: `${effectiveWidth}px`, minWidth: `${EDITOR_PANEL_MIN_WIDTH_PX}px` }}
       >
         <CodeEditor
           file={editingFile}

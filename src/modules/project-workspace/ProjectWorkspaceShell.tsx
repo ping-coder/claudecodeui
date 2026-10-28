@@ -3,11 +3,12 @@ import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'r
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
 import { useProjectPanesState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import { WorkspaceChromeProvider } from '@/modules/project-workspace/context/WorkspaceChromeContext';
-import { useElementWidth } from '@/modules/project-workspace/hooks/useElementWidth';
+import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { useImmersiveMode } from '@/modules/project-workspace/hooks/useImmersiveMode';
 import { useWorkspaceShortcuts } from '@/modules/project-workspace/hooks/useWorkspaceShortcuts';
 import { PANE_MIN_WIDTH_PX, PANE_SPLITTER_WIDTH_PX } from '@/shared/constants';
 import type { ProjectWorkspaceShellProps } from '@/shared/types';
+import BrowserFullscreenNotice from '@/modules/project-workspace/BrowserFullscreenNotice';
 import ImmersiveExitControl from '@/modules/project-workspace/ImmersiveExitControl';
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
@@ -30,7 +31,15 @@ function ProjectWorkspaceShell({
   navigate,
 }: ProjectWorkspaceShellProps) {
   const { layout, actions, setSidebarOpen, setCanShowBothPanes } = useProjectPanesState();
-  const { isImmersive, isBrowserFullscreen, toggleImmersive, exitImmersive } = useImmersiveMode();
+  const {
+    isImmersive,
+    isBrowserFullscreen,
+    browserFullscreenIssue,
+    toggleImmersive,
+    exitImmersive,
+    retryBrowserFullscreen,
+    dismissBrowserFullscreenIssue,
+  } = useImmersiveMode();
   // Whether the sidebar is out as an overlay drawer in desktop immersive mode, where its docked
   // column is hidden. Held here because a pane's "Show sidebar" button opens it and the sidebar
   // region closes it; memory only, like immersive mode itself.
@@ -101,6 +110,14 @@ function ProjectWorkspaceShell({
           />
         </div>
 
+        {/* Desktop only: says why immersive mode came without the whole screen. Phones keep the console warning. */}
+        {!isMobile && isImmersive && browserFullscreenIssue && (
+          <BrowserFullscreenNotice
+            issue={browserFullscreenIssue}
+            onRetry={retryBrowserFullscreen}
+            onDismiss={dismissBrowserFullscreenIssue}
+          />
+        )}
         {/* Phones hide the header while immersive, so this capsule is the way back out. */}
         {isMobile && isImmersive && (
           <ImmersiveExitControl onOpenMenu={openSidebarDrawer} onExit={exitImmersive} />

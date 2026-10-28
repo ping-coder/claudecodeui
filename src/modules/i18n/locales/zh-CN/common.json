@@ -309,6 +309,10 @@
     "tabsButton": "标签 ({{count}})",
     "fullscreen": "全屏",
     "exitFullscreen": "退出全屏",
+    "fullscreenRefused": "浏览器拒绝了全屏（{{detail}}），工作区只铺满了窗口。",
+    "fullscreenInWindow": "浏览器只在窗口内全屏：这个标签页可能正被共享、投放或被扩展录制，也可能有扩展接管了全屏。",
+    "fullscreenWindowTipApple": "可以按 ⌃⌘F 让窗口全屏；要收起工具栏，在「显示」菜单里取消勾选「在全屏模式下始终显示工具栏」（⇧⌘F）。",
+    "fullscreenWindowTip": "可以按 F11 让窗口全屏。",
     "showSidebar": "显示侧栏",
     "emptyTitle": "没有打开的对话",
     "emptyOtherTitle": "这一侧还空着",
@@ -374,7 +378,10 @@
     "browseAllFiles": "浏览全部文件（{{count}}）",
     "browseAllCommits": "浏览全部提交（{{count}}）",
     "browseAllBranches": "浏览全部分支（{{count}}）",
-    "switchTo": "切换到：{{name}}"
+    "switchTo": "切换到：{{name}}",
+    "filesShownOf": "显示 {{total}} 个文件中的 {{shown}} 个，输入关键词查找其余文件。",
+    "filesBestMatches": "只显示最相关的 {{shown}} 个结果，继续输入可缩小范围。",
+    "filesTooLarge": "项目超过 10,000 个条目，这里不列出文件。可以把更小的目录作为项目打开，或在根目录的 .gitignore 里忽略构建产物。"
   },
   "misc": {
     "projectFallback": "项目",

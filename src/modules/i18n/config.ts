@@ -176,6 +176,18 @@ const getSavedLanguage = (): string => {
   return 'en';
 };
 
+// <html lang> follows the language on screen: screen readers pick their voice
+// from it, and the browser its CJK glyph forms, case mapping and hyphenation.
+// Registered before init on purpose: the resources are bundled, so init
+// announces the start-up language synchronously, and a listener added after it
+// would leave the first paint labelled with index.html's "en".
+// resolvedLanguage is the language whose strings are actually shown.
+// dir is left alone: the layout uses physical left/right classes, so dir="rtl"
+// would only half-mirror it.
+i18n.on('languageChanged', (lng: string) => {
+  document.documentElement.lang = i18n.resolvedLanguage ?? lng;
+});
+
 // Initialize i18next
 i18n
   .use(initReactI18next) // Pass i18n instance to react-i18next
@@ -360,7 +372,9 @@ git: enGit,
     },
   });
 
-// Save language preference when it changes
+// Save language preference when it changes. Registered after init on purpose:
+// storing the start-up language would push this device's default over the
+// language chosen on another one.
 i18n.on('languageChanged', (lng: string) => {
   writeUserPreference('userLanguage', lng);
 });

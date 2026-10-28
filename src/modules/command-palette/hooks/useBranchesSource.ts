@@ -13,5 +13,5 @@ export function useBranchesSource(projectId: string | undefined, enabled: boolea
     deps: [projectId],
     fetcher: (signal) => api.git.branches(projectId!, { signal }),
     parse: (data) => (data.localBranches ?? []).map((name) => ({ name })),
-  });
+  }).items;
 }

@@ -4,6 +4,7 @@ import { twMerge } from 'tailwind-merge';
 
 import type {
   AppTab,
+  BackgroundTaskSummary,
   DocumentTitleStatus,
   LLMProvider,
   Project,
@@ -518,6 +519,78 @@ export const buildModelRunOptions = (selection: {
   effort: selection.effort,
   ...(typeof selection.ultracode === 'boolean' ? { ultracode: selection.ultracode } : {}),
 });
+
+// ---------------------------
+
+//----------------- BACKGROUND TASKS ------------
+
+/**
+ * The tasks a session runs for itself. A workflow agent's own backgrounded
+ * commands are listed too (so they can be stopped), but they are that agent's
+ * business; the session's work is the workflow. Only when nothing but nested
+ * tasks remain are they what is running. Used by the chat module wherever it
+ * lists or counts a session's background work, and by the shell module's
+ * notice that a session is still busy.
+ */
+export function ownBackgroundTasks(allTasks: BackgroundTaskSummary[]): BackgroundTaskSummary[] {
+  const own = allTasks.filter((task) => !task.nested);
+  return own.length > 0 ? own : allTasks;
+}
+
+/**
+ * One background task by kind and name: "Workflow audit", "Agent Survey the
+ * repo", "Command npm test". Takes a `t` bound to the chat namespace, which
+ * holds the labels; used by the chat and shell modules.
+ */
+export function describeBackgroundTask(task: BackgroundTaskSummary, t: TFunction): string {
+  switch (task.taskType) {
+    case 'local_workflow':
+      return t('claudeStatus.backgroundTask.workflow', { name: task.workflowName ?? task.description, defaultValue: 'Workflow {{name}}' });
+    case 'local_bash':
+      return t('claudeStatus.backgroundTask.command', { description: task.description, defaultValue: 'Command {{description}}' });
+    default:
+      return t('claudeStatus.backgroundTask.agent', { description: task.description, defaultValue: 'Agent {{description}}' });
+  }
+}
+
+/** The English label of each setting a Claude hand-over can name (see describeHandOverChanges). */
+const HAND_OVER_SETTING_LABELS = {
+  model: 'the model',
+  effort: 'the reasoning effort',
+  ultracode: 'Ultracode',
+  permissionMode: 'the permission mode',
+  tools: 'the tool permissions',
+  cwd: 'the working directory',
+} as const;
+
+/**
+ * The settings a Claude hand-over names as needing a new process (the
+ * server's labels other than `lookup`; see BackgroundSendPrompt's `changes`)
+ * in the user's language, joined as a sentence lists them: "the model", "the
+ * model and the reasoning effort", "the model, the reasoning effort and
+ * Ultracode". Labels it does not know are skipped; `count` is how many it
+ * names. Takes a `t` bound to the chat namespace; used by chat's
+ * background-send dialog and by its transcript row for the run's notice that
+ * a send stopped the background work.
+ */
+export function describeHandOverChanges(changes: string[], t: TFunction): { count: number; text: string } {
+  const labels = changes
+    .filter((change): change is keyof typeof HAND_OVER_SETTING_LABELS => (
+      Object.prototype.hasOwnProperty.call(HAND_OVER_SETTING_LABELS, change)
+    ))
+    .map((change) => t(`claudeStatus.backgroundTask.prompt.change.${change}`, {
+      defaultValue: HAND_OVER_SETTING_LABELS[change],
+    }));
+  if (labels.length < 2) {
+    return { count: labels.length, text: labels.join('') };
+  }
+  const separator = t('claudeStatus.backgroundTask.prompt.changeSeparator', { defaultValue: ', ' });
+  const lastSeparator = t('claudeStatus.backgroundTask.prompt.changeLastSeparator', { defaultValue: ' and ' });
+  return {
+    count: labels.length,
+    text: `${labels.slice(0, -1).join(separator)}${lastSeparator}${labels[labels.length - 1]}`,
+  };
+}
 
 // ---------------------------
 

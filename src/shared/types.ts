@@ -563,6 +563,20 @@ export type ChatMessage = {
   memoryCitations?: MemoryCitation[];
   /** Lifecycle the provider reported for this tool call, when it reports one; otherwise the status is inferred from whether a result has arrived. */
   toolStatus?: string;
+  /**
+   * Set on a user turn the model read in the middle of a turn: a message sent
+   * with Insert while it worked, or typed into a terminal CLI mid-turn. Drawn
+   * with an "Inserted" label, and never offered for editing or forking.
+   */
+  inserted?: boolean;
+  /**
+   * An `error` row's code, from its store row (see NormalizedMessage's
+   * `code`): for one the transcript knows, it draws its own text in the
+   * user's language instead of `content`, which stays the English fallback.
+   */
+  errorCode?: string;
+  /** With `errorCode` BACKGROUND_WORK_STOPPED: the store row's `changes`. */
+  errorChanges?: string[];
   [key: string]: unknown;
 };
 
@@ -757,6 +771,40 @@ export type NormalizedMessage = {
   outputFile?: string;
   /** A workflow's `progress` only: where each agent the run spawned stands. */
   agents?: WorkflowAgentProgress[];
+  /**
+   * `insert_status` only: the client-generated UUID naming a mid-run insert,
+   * which is also the uuid of the message the CLI writes. Every status of one
+   * insert carries it; the composer that sent the insert matches on it.
+   */
+  insertId?: string;
+  /** `insert_status` only: where the insert stands. */
+  insertStatus?: InsertStatus;
+  /**
+   * `insert_status` only, optional: why. A `refused` status carries
+   * `NO_ACTIVE_RUN`, `UNSUPPORTED`, `SLASH_COMMAND` or `INVALID`; any other
+   * value is the server's own word, shown rather than branched on.
+   */
+  insertReason?: string;
+  /**
+   * Set on the user `text` message of an insert the model read in the middle
+   * of a turn, live and in history. Its `id` is the insertId, and it has no
+   * `transcriptAnchorId`: a conversation cannot resume from that row.
+   */
+  inserted?: boolean;
+  /**
+   * `error` only, optional: a code for an error the transcript words itself,
+   * in the user's language, with `content` the English fallback. Today only
+   * BACKGROUND_WORK_STOPPED: the Claude runtime replaced the process it held
+   * for the session's background work, stopping that work, because the turn
+   * needed a new process (see `changes`).
+   */
+  code?: string;
+  /**
+   * With `code` BACKGROUND_WORK_STOPPED: the server's labels for what needed
+   * the new process (see BackgroundSendPrompt's `changes`), or `lookup` when
+   * the turn could not be handed to the held process at all.
+   */
+  changes?: string[];
 };
 
 /** What a background task has spent so far — tokens, tool calls and wall time — as the CLI reports it while the task runs and when it ends. */
@@ -851,7 +899,7 @@ export type WorkflowAgentRow = Omit<WorkflowAgentProgress, 'state'> & {
   status: BackgroundTaskStatus | 'queued';
 };
 
-/** Discriminator on NormalizedMessage naming which kind of transcript event it carries — plain text, tool use or result, thinking, stream delta or end, error, completion, status, permission request/resolution/cancellation, session creation, interactive prompt, or task notification. */
+/** Discriminator on NormalizedMessage naming which kind of transcript event it carries — plain text, tool use or result, thinking, stream delta or end, error, completion, status, permission request/resolution/cancellation, session creation, interactive prompt, task notification, or a mid-run insert's status (which the realtime handler keeps out of the store). */
 type MessageKind =
   | 'text'
   | 'tool_use'
@@ -868,7 +916,8 @@ type MessageKind =
   | 'session_created'
   | 'history_truncated'
   | 'task_notification'
-  | 'task_status';
+  | 'task_status'
+  | 'insert_status';
 
 // ---------------------------
 
@@ -950,12 +999,48 @@ export type QueuedDraft = {
   options?: QueuedSendOptions;
 };
 
-/** The answer to the prompt shown when sending over a session's background work: send now (stopping that work), queue the message until the work finishes, or do nothing. */
+/** The answer to the prompt shown when sending would stop a session's background work: send now (stopping that work), queue the message until the work finishes, or do nothing. */
 export type BackgroundSendChoice = 'send' | 'queue' | 'cancel';
 
-/** An open background-work send prompt, listing the session's own background tasks as display strings. */
+/**
+ * An open background-work send prompt, listing the session's own background
+ * tasks as display strings. `changes` is set when the provider runs a new
+ * turn in the process the work runs in but cannot run this one there (the
+ * server's hand-over plan, or its `send_refused`): the server's labels for
+ * what only a new process can apply (`model`, `effort`, `ultracode`,
+ * `permissionMode`, `tools`, `cwd`, or `lookup` when it could not prepare the
+ * turn for that process), possibly none. Absent when every new turn replaces
+ * that process (another provider, or an edit).
+ */
 export type BackgroundSendPrompt = {
   work: string[];
+  changes?: string[];
+};
+
+/**
+ * A `send_refused` frame as chat's realtime handler hands it to the composer:
+ * the server did not start a `chat.send` sent with `keepBackgroundWork`,
+ * because the session's process still holds background work and the turn
+ * cannot go into it. It answers only the socket that sent it, with no request
+ * id, so the composer that sent the session's latest such send takes it.
+ * `reason` is the server's code (BACKGROUND_WORK_WOULD_STOP); `changes` holds
+ * its labels for what keeps the turn out (see BackgroundSendPrompt).
+ */
+export type SendRefusedEvent = {
+  sessionId: string;
+  reason: string;
+  changes: string[];
+};
+
+/**
+ * Options for chat's `addMessage`. `rowId` names the store row the message is
+ * written under, so the composer can take that row out again: the echo of a
+ * send the server refused, or a notice that turned out wrong. A user echo's id
+ * must start with `local_`, the prefix the history refresh matches the
+ * persisted turn against.
+ */
+export type AddChatMessageOptions = {
+  rowId?: string;
 };
 
 /** Viewport-relative placement box (right/bottom offsets plus max height and width) computed for a composer popover so the model and permission menus stay inside the window. */
@@ -979,6 +1064,91 @@ export type SlashCommand = {
 
 /** Discriminator naming which slash-command result the chat command modal is showing: 'help', 'models', 'cost' or 'status'. */
 type CommandModalKind = 'help' | 'models' | 'cost' | 'status';
+
+// ---------------------------
+
+//----------------- CHAT MID-RUN INSERTS ------------
+
+/**
+ * Where a mid-run insert stands, as `insert_status` frames report it. The run
+ * sends `pending` once the server has taken the insert, then exactly one of
+ * `delivered` (the model read it mid-turn), `next_turn` (it ran as the next
+ * turn of the same process), `cancelled` (withdrawn, or taken back by a stop)
+ * or `failed` (it never reached the model). `refused` (the server did not take
+ * the `chat.insert`) and `cancel_failed` (a withdrawal came too late) come back
+ * only to the socket that asked.
+ */
+export type InsertStatus = 'pending' | 'delivered' | 'next_turn' | 'cancelled' | 'failed' | 'refused' | 'cancel_failed';
+
+/**
+ * One `insert_status` frame as chat's realtime handler hands it to the
+ * composer, once per insert and status. `sessionId` is the frame's session,
+ * or the one on screen for a frame that names none; `insertReason` is set as
+ * the server sent it (see NormalizedMessage).
+ */
+export type InsertStatusEvent = {
+  sessionId: string | null;
+  insertId: string;
+  insertStatus: InsertStatus;
+  content: string;
+  insertReason?: string;
+};
+
+/**
+ * A mid-run insert the model has not read yet, as the card above chat's
+ * composer lists it, in every pane and tab on the session. `state` drives the
+ * withdraw control: `sending` while this composer's request is on its way (no
+ * withdrawing before the server has it), `pending` once the server holds it,
+ * `withdrawing` while a withdrawal is on its way, `delivering` when the server
+ * said the CLI is already reading it, and `withdrawFailed` when a withdrawal
+ * failed for any other reason. Either of the last two still ends with the
+ * insert's own final status.
+ */
+export type PendingInsert = {
+  insertId: string;
+  sessionId: string;
+  content: string;
+  state: 'sending' | 'pending' | 'withdrawing' | 'delivering' | 'withdrawFailed';
+};
+
+/**
+ * An insert this tab sent that has not ended, as the composer that sent it
+ * keeps it, mirrored to sessionStorage so a reload can still give its text
+ * back. `sentAt` (epoch ms) orders texts given back and bounds which inserts a
+ * subscribe ack settles; `accepted` turns true once the server has answered
+ * `pending`.
+ */
+export type OwnInsert = {
+  insertId: string;
+  sessionId: string;
+  content: string;
+  sentAt: number;
+  accepted: boolean;
+};
+
+/**
+ * How an insert the composer sent ended, which decides what the composer does
+ * with its text: nothing once `delivered`; give it back when `returned`
+ * (withdrawn or stopped, failed, unanswered, or not found in the transcript
+ * once the run was over); fall back as the server's reason says when
+ * `refused` (see NormalizedMessage's `insertReason`).
+ */
+export type OwnInsertOutcome =
+  | { kind: 'delivered' }
+  | { kind: 'returned'; reason: 'cancelled' | 'failed' | 'noResponse' | 'notDelivered' }
+  | { kind: 'refused'; reason: string };
+
+/** What a message submitted while a turn runs does: go into that turn (Insert) or wait for it to end (Queue). */
+export type BusySubmitMode = 'insert' | 'queue';
+
+/**
+ * Why the composer cannot insert the message it holds into the running turn
+ * and queues it instead: the provider cannot take messages mid-turn, the
+ * message is a slash command or carries attachments, or (`unavailable`) no
+ * run CloudCLI drives is going on over an open socket, or a sent message is
+ * being replaced.
+ */
+export type InsertUnavailableReason = 'provider' | 'slashCommand' | 'attachments' | 'unavailable';
 
 // ---------------------------
 
@@ -1113,6 +1283,9 @@ export type FileTreeUploadProgressState = {
 
 /** Which density the file tree renders its rows at (simple, compact or detailed), chosen in the file tree header and persisted in local storage. */
 export type FileTreeViewMode = 'simple' | 'compact' | 'detailed';
+
+/** A metadata column of the file tree's detailed view; FileTree picks which ones fit its width and passes them to the header and every row, so both share one grid. */
+export type FileTreeDetailedColumn = 'size' | 'modified' | 'permissions';
 
 /** One request to reveal a directory in the file tree, coming from a `path/` reference in a chat message. The workspace builds a new object per click so the tree re-reveals a folder the user collapsed again in the meantime. */
 export type DirectoryRevealRequest = {
@@ -1505,6 +1678,16 @@ export type KeyboardLockNavigator = Navigator & {
   };
 };
 
+/**
+ * Why workspace full screen came without the whole screen: 'refused' when the browser rejected the
+ * request (detail: its error message), 'inWindow' when it granted the request but kept the full
+ * screen inside the window (this tab being captured, an extension standing in for the API). Set by
+ * project-workspace's useImmersiveMode, shown by its BrowserFullscreenNotice.
+ */
+export type BrowserFullscreenIssue =
+  | { reason: 'refused'; detail: string }
+  | { reason: 'inWindow' };
+
 /** One side of the split workspace; 'right' exists only while the workspace is split. */
 export type WorkspacePaneSide = 'left' | 'right';
 
@@ -1877,6 +2060,9 @@ export type NotificationPreferencesState = {
   };
 };
 
+/** Where the settings dialog's read of the server's notification preferences stands; until it is 'ready' the values shown are defaults, so the notifications tab keeps the switches that save them disabled and the controller sends nothing. */
+export type NotificationPreferencesStatus = 'loading' | 'ready' | 'failed';
+
 /** Cursor's persisted permission settings: the allowed and disallowed command patterns and whether permission prompts are skipped; read and written as one unit by the settings controller. */
 export type CursorPermissionsState = {
   allowedCommands: string[];
@@ -1934,6 +2120,36 @@ export type GithubCredentialItem = {
 export type MobileTerminalSelectionManager = {
   dispose: () => void;
   updateHandles: () => void;
+};
+
+/**
+ * Why the server would not start the Shell tab's CLI on a session CloudCLI
+ * itself still runs (its `session_busy` frame), and what runs there: a chat
+ * turn (`turn`), a Claude process shutting down (`exiting`), background tasks
+ * (`background`), a process held open for work no task stands for, such as a
+ * Monitor (`held`), or only a queued chat message (`queued`). `tasks` lists
+ * the outstanding background tasks, nested ones included; `hasQueuedMessage`
+ * rules out taking the session over; `changed` says a takeover was refused,
+ * nothing stopped, because more had started than the notice showed. Held by
+ * the shell module's connection hook and shown by its busy notice.
+ */
+export type ShellSessionBusy = {
+  reason: 'turn' | 'exiting' | 'background' | 'held' | 'queued';
+  tasks: BackgroundTaskSummary[];
+  hasQueuedMessage: boolean;
+  changed: boolean;
+};
+
+/**
+ * What the Shell's last `session_busy` frame showed, sent back as the init's
+ * `takeOver` so the server stops only that: the chat turn then under way (its
+ * start time, null for none) and the id of every task in the frame, nested and
+ * unlisted ones included. Built by the shell module's connection hook, typed
+ * on its outgoing init in the module's socket utilities.
+ */
+export type ShellTakeOverSnapshot = {
+  turnStartedAt: number | null;
+  taskIds: string[];
 };
 
 // ---------------------------

@@ -45,5 +45,6 @@
   "unsavedChanges": {
     "confirmClose": "您有未保存的更改。关闭此文件并放弃这些更改？",
     "indicator": "未保存的更改"
-  }
+  },
+  "resizeFileTree": "调整文件树宽度"
 }

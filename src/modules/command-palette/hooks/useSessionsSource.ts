@@ -27,5 +27,5 @@ export function useSessionsSource(projectId: string | undefined, enabled: boolea
         provider: (s.__provider || s.provider) as LLMProvider | undefined,
       }));
     },
-  });
+  }).items;
 }

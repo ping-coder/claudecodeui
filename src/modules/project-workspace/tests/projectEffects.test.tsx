@@ -10,6 +10,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 import { i18n } from '@/modules/i18n';
 import type * as ProjectsStateContextModule from '@/modules/project-workspace/context/ProjectsStateContext';
 import { createInitialLayout } from '@/modules/project-workspace/utils/workspaceLayout';
+import type * as SelectedProviderModule from '@/shared/selectedProvider';
 import type {
   Project,
   ProjectSession,
@@ -70,6 +71,14 @@ vi.mock('@/shared/context/WebSocketContext', () => ({
 }));
 vi.mock('@/shared/hooks/useDeviceSettings', () => ({ useDeviceSettings: () => ({ isMobile: false }) }));
 vi.mock('@/modules/project-workspace/ProjectWorkspaceShell', () => ({ default: () => <div data-testid="workspace-shell" /> }));
+// The page-wide provider writes, each with whether it was marked automatic; reading stays real.
+const providerWrites: Array<{ provider: string; automatic: boolean }> = [];
+vi.mock('@/shared/selectedProvider', async (importOriginal) => ({
+  ...(await importOriginal<typeof SelectedProviderModule>()),
+  writeSelectedProvider: (provider: string, options?: { automatic?: boolean }) => {
+    providerWrites.push({ provider, automatic: options?.automatic === true });
+  },
+}));
 
 const { default: ProjectEffects } = await import('@/modules/project-workspace/controllers/ProjectEffects');
 const { default: ProjectWorkspaceRoute } = await import('@/modules/project-workspace/ProjectWorkspaceRoute');
@@ -140,6 +149,7 @@ vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) })
 beforeEach(() => {
   registeredPaletteOps.length = 0;
   processing.activities = new Map();
+  providerWrites.length = 0;
 });
 
 afterEach(async () => {
@@ -297,6 +307,20 @@ test('a notification click opens its session kept, on the Chat view, and closes 
     serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'notification:navigate' } }));
   });
   assert.equal(vi.mocked(state.openSessionById).mock.calls.length, 1);
+});
+
+test('a notification click writes its session\'s provider as an automatic write', () => {
+  effects.state = makeState();
+  render(<ProjectEffects />);
+
+  act(() => {
+    serviceWorker.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'notification:navigate', sessionId: 'notified-1', provider: 'codex' },
+    }));
+  });
+
+  // The user picked a notification, not a provider: a hydrate that answers after it keeps the stored choice.
+  assert.deepEqual(providerWrites, [{ provider: 'codex', automatic: true }]);
 });
 
 test('the palette gets the page-wide operations from here', () => {

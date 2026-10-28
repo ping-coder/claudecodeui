@@ -53,13 +53,19 @@ const activeSessions = new Map();
 const backgroundWork = createBackgroundWorkTracker();
 const pendingToolApprovals = new Map();
 // Entries whose CLI process is on its way out, keyed like activeSessions: one a
-// newer run took the session from (retireSession), or one the user aborted. An
+// newer run took the session from (retireSession), one the user aborted, or one
+// closed for outliving its released input (ABANDONED_PROCESS_CLOSE_MS). An
 // entry stays until its message loop ends, or, once its query is closed, until
 // its `closed` settles: closing ends the loop seconds before the SDK kills the
 // process (see closeRun). The session's next run waits for it before starting
 // a CLI of its own (waitForExitingProcess), whichever run did the retiring or
 // aborting, so two processes never append to one transcript.
 const exitingSessions = new Map();
+// A new turn on its way into the process a session's previous run holds for
+// background work (handTurnToHeldProcess), keyed like activeSessions, while
+// it makes its lookups: the entry under the key is still the held run's. An
+// abort in that window stops only the new turn (abortClaudeSDKSession).
+const pendingHandOvers = new Map();
 
 const TOOL_APPROVAL_TIMEOUT_MS = parseInt(process.env.CLAUDE_TOOL_APPROVAL_TIMEOUT_MS, 10) || 55000;
 
@@ -129,8 +135,8 @@ function resolveHoldDurations(env) {
 // HOLD_IDLE_MS: released after this much silence on the stream, unless the
 // session's own tasks (not nested ones) are still outstanding: a backgrounded
 // command emits nothing until it ends, so silence proves nothing about it. A
-// hold kept only for nested tasks, or for Monitor, ScheduleWakeup, CronCreate
-// or TaskCreate, ends here.
+// hold kept only for nested tasks, or for Monitor, ScheduleWakeup or
+// CronCreate, ends here.
 //
 // HOLD_MAX_MS: the backstop for tasks that never report. Pushed back by every
 // `result` and every main-thread assistant message during the hold; when it
@@ -156,6 +162,18 @@ const INTERRUPT_REPLY_TIMEOUT_MS = 5 * 1000;
 // How long a stop request waits for its reply. The task's `stopped`
 // notification is the real outcome either way.
 const STOP_TASK_REPLY_TIMEOUT_MS = 5 * 1000;
+
+// Mid-run inserts (see createInsertController). A turn whose `result` comes
+// while inserts are still on their way waits this long for the CLI to start
+// the next turn with them, counted from the CLI's last message; after that
+// they are reported lost and the turn completes.
+const INSERT_NEXT_TURN_WAIT_MS = 30 * 1000;
+// How long a withdrawal waits for the CLI's answer to cancel_async_message.
+const INSERT_CANCEL_REPLY_TIMEOUT_MS = 5 * 1000;
+// How long an abort waits for that answer before it interrupts anyway.
+const INSERT_ABORT_CANCEL_WAIT_MS = 1000;
+// The uuid of a message written to the CLI. An insert's id is one.
+const MESSAGE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const TOOLS_REQUIRING_INTERACTION = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
@@ -434,6 +452,13 @@ function mapCliOptionsToSDK(options = {}) {
 
   sdkOptions.settingSources = ['project', 'user', 'local'];
 
+  // The CLI echoes every user message it takes from stdin back on stdout
+  // (`isReplay`), which is how the run learns that the CLI has read an insert
+  // (see createInsertController). The run drops the echoes of what it wrote
+  // itself; local command output comes as such an echo with or without the
+  // flag and is still shown.
+  sdkOptions.extraArgs = { 'replay-user-messages': null };
+
   // The SDK resumes with the provider-native session id, never the app id.
   // `resumeFromScratch` is set when the very first prompt of a conversation was
   // edited: there is nothing before it to resume through, so the turn has to
@@ -504,10 +529,15 @@ function sendStopTask(instance, taskId) {
  * appending to the same transcript, alive for up to CLI_BG_WAIT_GRACE_MS.
  * Nothing is awaited; each request is written before this returns. A process
  * whose input is already released is sent nothing, as the requests would be
- * dropped.
+ * dropped. Inserts the run still had pending are reported failed first, as
+ * its loop says nothing once silenced, and the caller of a turn handed to the
+ * process is let go.
  * @param {string} sessionKey - Session key
+ * @param {string} [reason] - Why the run lets go, for the release's log line:
+ *   `superseded` when a newer run takes the session, `shell-takeover` when
+ *   the Shell tab takes it for a CLI (releaseClaudeSDKSession)
  */
-function retireSession(sessionKey) {
+function retireSession(sessionKey, reason = 'superseded') {
   const entry = activeSessions.get(sessionKey);
   if (!entry) {
     return;
@@ -515,6 +545,8 @@ function retireSession(sessionKey) {
   // Read before removeSession forgets them.
   const outstanding = backgroundWork.outstanding(sessionKey);
   removeSession(sessionKey);
+  entry.inserts.failAll('SUPERSEDED');
+  entry.settleTurn();
 
   const { instance } = entry;
   if (!instance) {
@@ -536,7 +568,7 @@ function retireSession(sessionKey) {
       sendStopTask(instance, task.taskId);
     }
   }
-  entry.releaseInput('superseded');
+  entry.releaseInput(reason);
 }
 
 /**
@@ -880,8 +912,11 @@ function extractCumulativeTokenBudget(sdkMessage, reportedContextWindow) {
 // count when they are backgrounded; the rest defer or watch work by nature.
 // Workflow belongs here rather than in a branch of its own: its input schema has
 // no foreground option at all, so every call returns a task id immediately and
-// reports back in a later turn.
-const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 'TaskCreate', 'Workflow']);
+// reports back in a later turn. TaskCreate stays out despite its name: it only
+// adds an item to the to-do list (CLI 2.1.312) and starts nothing, so holding
+// for it kept an idle process up as if it had background work, and a send
+// that needs a new process was refused over work that never existed.
+const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 'Workflow']);
 
 /**
  * Detects tool calls that keep working after the turn's `result` arrives.
@@ -1093,9 +1128,11 @@ export function createBackgroundWorkTracker() {
  * @param {Array} images - Image descriptors ({ path, name?, mimeType? })
  * @param {Array} files - Non-image attachment descriptors
  * @param {string} cwd - Project working directory attachment paths resolve against
+ * @param {string} uuid - The uuid the CLI records the prompt under, and echoes
+ *   it back with (see createInsertController)
  * @returns {Promise<Array<Object>>} SDKUserMessage records for the turn
  */
-async function buildPromptMessages(command, images, files, cwd) {
+async function buildPromptMessages(command, images, files, cwd, uuid) {
   const promptWithFiles = appendFilesInputTag(command, files);
   const content = normalizeImageDescriptors(images).length === 0
     ? promptWithFiles
@@ -1103,6 +1140,7 @@ async function buildPromptMessages(command, images, files, cwd) {
 
   return [{
     type: 'user',
+    uuid,
     message: {
       role: 'user',
       content
@@ -1113,29 +1151,655 @@ async function buildPromptMessages(command, images, files, cwd) {
 }
 
 /**
- * Wraps prompt messages in an async iterable that yields them and then parks.
+ * Wraps prompt messages in an async iterable that yields them, then waits for
+ * more until it is released.
  *
  * The SDK closes the CLI's stdin as soon as its input iterable is exhausted (and
  * immediately on `result` for string prompts). The CLI reads that EOF as the end
  * of the run and kills anything still going in the background, so the iterable
- * has to stay pending until we actually want the process gone.
+ * has to stay pending until we actually want the process gone. While it does,
+ * `push` writes another message to the CLI (a mid-run insert). Releasing drops
+ * whatever was pushed and not yet taken, so nothing reaches the CLI after it.
  *
- * @param {Array<Object>} messages - SDKUserMessage records to send
- * @returns {{ stream: AsyncIterable, release: () => void }} Stream plus its closer
+ * @param {Array<Object>} messages - SDKUserMessage records to send first
+ * @returns {{ stream: AsyncIterable, push: (message: Object) => boolean, release: () => void }}
+ *   The stream, a writer that returns false once the stream is released, and its closer
  */
 function createHeldPromptStream(messages) {
-  let release;
-  const held = new Promise((resolve) => { release = resolve; });
+  const queued = [...messages];
+  let released = false;
+  let wake = null;
 
   const stream = (async function* () {
-    for (const message of messages) {
-      yield message;
+    for (;;) {
+      if (released) {
+        return;
+      }
+      if (queued.length > 0) {
+        yield queued.shift();
+        continue;
+      }
+      // Keeps stdin open: the CLI stays alive until release() is called.
+      await new Promise((resolve) => { wake = resolve; });
+      wake = null;
     }
-    // Keeps stdin open — the CLI stays alive until release() is called.
-    await held;
   })();
 
-  return { stream, release };
+  return {
+    stream,
+    push(message) {
+      if (released) {
+        return false;
+      }
+      queued.push(message);
+      wake?.();
+      return true;
+    },
+    release() {
+      released = true;
+      queued.length = 0;
+      wake?.();
+    },
+  };
+}
+
+/**
+ * Whether an insert request names an insert the CLI can take: a UUID id, as
+ * the CLI records the message under it, and some text.
+ * @param {unknown} input - What the caller passed as `{ insertId, content }`
+ * @returns {boolean}
+ */
+function isValidInsertInput(input) {
+  return typeof input?.insertId === 'string'
+    && MESSAGE_UUID_PATTERN.test(input.insertId)
+    && typeof input.content === 'string'
+    && input.content.trim().length > 0;
+}
+
+/**
+ * True for the CLI's echo of a task notification it fed itself: background
+ * work reporting back, which the client shows on the task's card instead.
+ * @param {Object} message - An `isReplay` user message
+ * @returns {boolean}
+ */
+function isTaskNotificationEcho(message) {
+  if (message.origin?.kind === 'task-notification') {
+    return true;
+  }
+  const content = message.message?.content;
+  const text = Array.isArray(content)
+    ? content.find((part) => part?.type === 'text')?.text
+    : content;
+  return typeof text === 'string' && text.trimStart().startsWith('<task-notification>');
+}
+
+/**
+ * The uuids of the prompts a turn consumed, as the CLI names them on the
+ * turn's `result`: `user_message_uuids` (every prompt it took, the turn's own
+ * and any folded in), and `user_message_uuid` (the one that started it, the
+ * last of a merged batch). A turn the CLI starts on its own, such as a
+ * wake-up or a task notification's, names none; an older CLI never does.
+ * @param {Object} result - A `result` message
+ * @returns {Array<string>|null} Null when the result names nothing
+ */
+function readConsumedPromptUuids(result) {
+  const list = Array.isArray(result.user_message_uuids) ? result.user_message_uuids : null;
+  const single = typeof result.user_message_uuid === 'string' ? result.user_message_uuid : null;
+  if (!list && !single) {
+    return null;
+  }
+  return [...(list ?? []), ...(single ? [single] : [])].filter((uuid) => typeof uuid === 'string');
+}
+
+/**
+ * Keeps one run's mid-run inserts: user messages written to the CLI while
+ * the turn runs. The CLI reads one after its current tool batch, or, when
+ * the turn ends first, runs it as the next turn of the same process.
+ *
+ * - One insert is written at a time, the rest wait in order. The CLI runs
+ *   adjacent queued prompts as one turn under the last one's uuid, so two
+ *   written together would read back from the transcript as one message. For
+ *   the same reason nothing is written before the run's own prompt has
+ *   started.
+ * - A written insert is read at its first receipt: the CLI's echo of it
+ *   (`--replay-user-messages`) or its `command_lifecycle` `started`. Read
+ *   during the turn it is `delivered`, and the transcript keeps it as a
+ *   `queued_command` attachment; read once the turn has ended, it is
+ *   `next_turn`, the next turn's prompt row. Either way the client gets the
+ *   message the normalizer makes of that row, so it carries the id history
+ *   will give it. `cancelled`, `refused` or `discarded` from the CLI ends it
+ *   unread. One that starts the next turn while the user is stopping the run
+ *   is the abort's instead (see receive).
+ * - A turn whose `result` comes while inserts are pending is not over:
+ *   deferTurnEnd holds the result until the next turn takes them. When they
+ *   end unread instead (withdrawn, refused, or lost after
+ *   INSERT_NEXT_TURN_WAIT_MS of silence), the held result is finished after
+ *   all (finishDeferredTurn). The run thus completes once, however many
+ *   turns its inserts run as.
+ * - It echoes back what the run wrote itself, which the client already
+ *   shows: the first prompt, every insert, and the task notifications the
+ *   CLI feeds itself. `observe` reports those so the run drops them.
+ * - A later send can hand the process a turn of its own while it is held for
+ *   background work (see handTurnToHeldProcess). beginHandedOverTurn makes
+ *   that turn's prompt the one inserts wait for; its echo is dropped too.
+ *   The CLI queues the prompt until it is idle, and an interrupt does not
+ *   clear that queue, so an abort takes back a prompt that has not started.
+ *   Until it starts, the CLI may run turns of its own (relaying background
+ *   work, a wake-up or a scheduled task firing); isAheadOfHandedOverPrompt
+ *   tells their results from the prompt's.
+ *
+ * Each insert's statuses go through the run's writer as `insert_status`
+ * (see `InsertStatus`): `pending`, then one of `delivered`, `next_turn`,
+ * `cancelled` or `failed`. A `cancelled` or `failed` one says why in
+ * `insertReason`: ABORTED (the user stopped the run), LOST (no receipt by
+ * the time the next turn should have started), CLI_REFUSED, CLI_DISCARDED or
+ * CLI_CANCELLED (the CLI ended it unread), RUN_ENDED, RUN_FAILED, or
+ * SUPERSEDED (a newer run took the session over). A withdrawal the user
+ * asked for carries none.
+ *
+ * @param {Object} deps
+ * @param {string} deps.firstPromptUuid - The uuid the run's own prompt went out with
+ * @param {(message: Object) => boolean} deps.push - Writes a message to the CLI
+ *   (the held prompt stream); false once it no longer can
+ * @param {() => boolean} deps.inputOpen - Whether control requests still reach the CLI
+ * @param {() => boolean} deps.stopping - Whether the run is being aborted or
+ *   superseded: nothing more is written then
+ * @param {() => boolean} deps.acceptsInserts - Whether the run's turn takes a new insert
+ * @param {() => Object|null} deps.getInstance - The SDK query, for cancel_async_message
+ * @param {(message: Object) => void} deps.send - The run's writer
+ * @param {(raw: Object) => Array<Object>} deps.normalize - The provider's normalizer
+ * @param {() => string|null} deps.getSessionId - The session id the run's messages carry
+ * @param {(result: Object) => void} deps.finishDeferredTurn - Finishes a `result`
+ *   deferTurnEnd held back, as if it had just arrived
+ * @param {() => string} deps.logPrefix - Names the session in log lines
+ */
+function createInsertController({
+  firstPromptUuid,
+  push,
+  inputOpen,
+  stopping,
+  acceptsInserts,
+  getInstance,
+  send,
+  normalize,
+  getSessionId,
+  finishDeferredTurn,
+  logPrefix,
+}) {
+  // Every insert the run accepted, by insertId, whatever became of it.
+  const inserts = new Map();
+  // Accepted inserts not written yet, oldest first.
+  const waiting = [];
+  // The insert written to the CLI and not yet read or ended.
+  let written = null;
+  // The uuid of every prompt written to the process: the run's own and those
+  // of the turns handed to it later. The CLI acts on a uuid once.
+  const promptUuids = new Set([firstPromptUuid]);
+  // The prompt of the turn under way, whose echo or `started` begins it, and
+  // whose echo is dropped (the CLI echoes a prompt as it takes it).
+  let currentPromptUuid = firstPromptUuid;
+  // Set once the CLI has started the current prompt (or ended its turn).
+  let promptTurnStarted = false;
+  // Set while the current prompt is one a later send handed to the process.
+  let promptHandedOver = false;
+  // Set once the CLI has been seen reporting a prompt the run wrote as it
+  // takes it (an echo, or a `started`): such a CLI reports a handed-over
+  // prompt before that prompt's turn can end (isAheadOfHandedOverPrompt).
+  let announcesPrompts = false;
+  // Set once the turn the written insert waits for has ended (its `result`
+  // came, held back or not), until an insert starts the next turn: a receipt
+  // meanwhile is that insert starting it (see receive).
+  let turnEnded = false;
+  // The turn's `result` while deferTurnEnd holds it back, and the timer that
+  // gives up on the next turn.
+  let deferredResult = null;
+  let nextTurnTimer = null;
+
+  const isPending = (entry) => entry.state === 'waiting' || entry.state === 'written';
+  const hasPending = () => written !== null || waiting.length > 0;
+  const pendingEntries = () => (written ? [written, ...waiting] : [...waiting]);
+
+  const sendStatus = (entry, insertStatus, insertReason) => {
+    send(createNormalizedMessage({
+      kind: 'insert_status',
+      sessionId: getSessionId(),
+      provider: 'claude',
+      insertId: entry.insertId,
+      insertStatus,
+      content: entry.content,
+      ...(insertReason ? { insertReason } : {}),
+    }));
+  };
+
+  // Ends an insert: `delivered`, `next_turn`, `cancelled` or `failed`.
+  const settle = (entry, state, insertReason) => {
+    entry.state = state;
+    if (written === entry) {
+      written = null;
+    }
+    const index = waiting.indexOf(entry);
+    if (index !== -1) {
+      waiting.splice(index, 1);
+    }
+    sendStatus(entry, state, insertReason);
+  };
+
+  const armNextTurnTimer = () => {
+    if (nextTurnTimer) {
+      clearTimeout(nextTurnTimer);
+    }
+    nextTurnTimer = setTimeout(onNextTurnTimeout, INSERT_NEXT_TURN_WAIT_MS);
+    nextTurnTimer.unref?.();
+  };
+
+  // Ends a deferral, handing back the result it held.
+  const endDeferral = () => {
+    if (nextTurnTimer) {
+      clearTimeout(nextTurnTimer);
+      nextTurnTimer = null;
+    }
+    const result = deferredResult;
+    deferredResult = null;
+    return result;
+  };
+
+  const sendCancel = async (insertId, timeoutMs) => {
+    const instance = getInstance();
+    let reply;
+    try {
+      if (typeof instance?.cancelAsyncMessage === 'function') {
+        reply = instance.cancelAsyncMessage(insertId);
+      } else if (typeof instance?.request === 'function') {
+        // The same control request, for an SDK without the method.
+        reply = Promise.resolve(instance.request({ subtype: 'cancel_async_message', message_uuid: insertId }))
+          .then((answer) => answer?.response?.cancelled);
+      } else {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+    let cancelled = false;
+    const answered = await resolvesWithin(
+      Promise.resolve(reply).then((value) => { cancelled = value === true; }, () => {}),
+      timeoutMs,
+    );
+    return answered && cancelled;
+  };
+
+  const flush = () => {
+    if (written || waiting.length === 0 || !promptTurnStarted || !inputOpen() || stopping()) {
+      return;
+    }
+    const entry = waiting[0];
+    const wrote = push({
+      type: 'user',
+      uuid: entry.insertId,
+      // Read after the current tool batch; 'now' would interrupt the turn
+      // and 'later' would wait for its end.
+      priority: 'next',
+      // Some of the CLI's checks for a person's message do not count one
+      // that names no origin.
+      origin: { kind: 'human' },
+      message: { role: 'user', content: entry.content },
+      parent_tool_use_id: null,
+      timestamp: new Date().toISOString(),
+    });
+    if (!wrote) {
+      settle(entry, 'failed', 'RUN_ENDED');
+      return;
+    }
+    waiting.shift();
+    entry.state = 'written';
+    written = entry;
+    if (deferredResult) {
+      // A fresh wait for the insert the next turn should start with.
+      armNextTurnTimer();
+    }
+  };
+
+  // An insert ended unread. A turn held back for it is over after all,
+  // unless another insert takes its place.
+  const afterUnreadEnd = () => {
+    if (deferredResult && !hasPending()) {
+      finishDeferredTurn(endDeferral());
+      return;
+    }
+    flush();
+  };
+
+  const receive = (entry) => {
+    announcesPrompts = true;
+    if (turnEnded && stopping()) {
+      // It started the next turn just as the user stopped the run, and the
+      // abort interrupts that turn. The CLI reports a prompt consumed into
+      // an aborted turn as cancelled, and its row may never reach the
+      // transcript, so it is the abort's like every insert still pending:
+      // the text goes back to the composer, and no message is shown for it.
+      settle(entry, 'cancelled', 'ABORTED');
+      return;
+    }
+    const nextTurn = turnEnded;
+    settle(entry, nextTurn ? 'next_turn' : 'delivered');
+    const timestamp = new Date().toISOString();
+    const row = nextTurn
+      ? { type: 'user', uuid: entry.insertId, timestamp, message: { role: 'user', content: entry.content } }
+      : {
+        type: 'attachment',
+        timestamp,
+        attachment: {
+          type: 'queued_command',
+          prompt: entry.content,
+          source_uuid: entry.insertId,
+          commandMode: 'prompt',
+          origin: { kind: 'human' },
+        },
+      };
+    for (const message of normalize(row)) {
+      send(message);
+    }
+    if (nextTurn) {
+      // Its turn has started; that turn's own `result` ends it.
+      turnEnded = false;
+      endDeferral();
+    }
+    flush();
+  };
+
+  // Asks the CLI to take back the written insert. The CLI's own `cancelled`
+  // lifecycle may settle it first; a receipt means it came too late.
+  const withdrawWritten = async (entry) => {
+    const cancelled = inputOpen() && await sendCancel(entry.insertId, INSERT_CANCEL_REPLY_TIMEOUT_MS);
+    if (cancelled && entry.state === 'written') {
+      settle(entry, 'cancelled');
+      afterUnreadEnd();
+    }
+    if (entry.state === 'cancelled') {
+      return { status: 'cancelled' };
+    }
+    return { status: entry.state === 'failed' ? 'not_found' : 'cancel_failed' };
+  };
+
+  // The CLI reported taking the current prompt (its echo or `started`).
+  const startPromptTurn = () => {
+    announcesPrompts = true;
+    if (!promptTurnStarted) {
+      promptTurnStarted = true;
+      flush();
+    }
+  };
+
+  const onLifecycle = (message) => {
+    const uuid = message.command_uuid;
+    if (uuid === currentPromptUuid) {
+      if (message.state === 'started') {
+        startPromptTurn();
+      }
+      return;
+    }
+    const entry = typeof uuid === 'string' ? inserts.get(uuid) : undefined;
+    if (!entry || entry !== written) {
+      return;
+    }
+    if (message.state === 'started') {
+      receive(entry);
+    } else if (message.state === 'cancelled' || message.state === 'refused' || message.state === 'discarded') {
+      if (message.state === 'cancelled' && entry.cancelRequested) {
+        settle(entry, 'cancelled', entry.cancelReason);
+      } else {
+        console.warn(`${logPrefix()}: the CLI ended insert ${entry.insertId} unread (${message.state})`);
+        settle(entry, 'failed', `CLI_${message.state.toUpperCase()}`);
+      }
+      afterUnreadEnd();
+    }
+  };
+
+  const onNextTurnTimeout = () => {
+    nextTurnTimer = null;
+    if (!deferredResult) {
+      return;
+    }
+    const lost = pendingEntries();
+    console.warn(`${logPrefix()}: no turn started for ${lost.length} insert(s) within ${INSERT_NEXT_TURN_WAIT_MS} ms of the CLI's last message; reporting them lost`);
+    if (written && inputOpen()) {
+      // In case the CLI still holds it; it is reported lost either way.
+      void sendCancel(written.insertId, INSERT_CANCEL_REPLY_TIMEOUT_MS);
+    }
+    for (const entry of lost) {
+      settle(entry, 'failed', 'LOST');
+    }
+    finishDeferredTurn(endDeferral());
+  };
+
+  return {
+    hasPending,
+
+    /**
+     * Takes a new insert: reported `pending`, then written to the CLI as
+     * soon as it is its turn.
+     * @param {{ insertId: string, content: string }} input - Already
+     *   validated (isValidInsertInput)
+     * @returns {{ accepted: true } | { accepted: false, reason: 'NO_ACTIVE_RUN' | 'DUPLICATE' }}
+     */
+    accept(input) {
+      if (!acceptsInserts()) {
+        return { accepted: false, reason: 'NO_ACTIVE_RUN' };
+      }
+      // The CLI acts on a message uuid once.
+      if (promptUuids.has(input.insertId) || inserts.has(input.insertId)) {
+        return { accepted: false, reason: 'DUPLICATE' };
+      }
+      const entry = {
+        insertId: input.insertId,
+        content: input.content,
+        state: 'waiting',
+        // Set once a withdrawal was asked for, with the reason it reports.
+        cancelRequested: false,
+        cancelReason: undefined,
+        // The CLI's answer to a withdrawal still out.
+        cancelling: null,
+      };
+      inserts.set(entry.insertId, entry);
+      waiting.push(entry);
+      sendStatus(entry, 'pending');
+      flush();
+      return { accepted: true };
+    },
+
+    /**
+     * Withdraws an insert the model has not read. One still waiting is simply
+     * dropped; a written one only the CLI can take back. `cancel_failed` means
+     * the CLI kept it, or is already delivering it; it still reports how it
+     * ends. `not_found` is an insert this run does not hold, or one that has
+     * already ended.
+     * @param {string} insertId
+     * @returns {Promise<{ status: 'cancelled' | 'cancel_failed' | 'not_found' }>}
+     */
+    cancel(insertId) {
+      const entry = inserts.get(insertId);
+      if (!entry || !isPending(entry)) {
+        return Promise.resolve({ status: 'not_found' });
+      }
+      if (entry.state === 'waiting') {
+        settle(entry, 'cancelled');
+        afterUnreadEnd();
+        return Promise.resolve({ status: 'cancelled' });
+      }
+      // A second request while the first is out shares its answer.
+      if (!entry.cancelling) {
+        entry.cancelRequested = true;
+        entry.cancelling = withdrawWritten(entry).finally(() => { entry.cancelling = null; });
+      }
+      return entry.cancelling;
+    },
+
+    /**
+     * Looks at one message from the CLI before the run handles it: notes the
+     * receipts above, and restarts the wait for the next turn while there is
+     * one.
+     * @param {Object} message - SDK stream message
+     * @returns {boolean} True for an echo of what the run wrote itself, which
+     *   the run drops
+     */
+    observe(message) {
+      if (deferredResult) {
+        armNextTurnTimer();
+      }
+      if (message?.type === 'command_lifecycle') {
+        onLifecycle(message);
+        return false;
+      }
+      if (message?.type !== 'user' || message.isReplay !== true) {
+        return false;
+      }
+      const uuid = typeof message.uuid === 'string' ? message.uuid : null;
+      if (uuid && uuid === currentPromptUuid) {
+        startPromptTurn();
+        return true;
+      }
+      const entry = uuid ? inserts.get(uuid) : undefined;
+      if (entry) {
+        if (entry === written) {
+          receive(entry);
+        }
+        return true;
+      }
+      return isTaskNotificationEcho(message);
+    },
+
+    /**
+     * Called with each `result` of the run's turn. With inserts pending, the
+     * CLI runs them as the next turn, so the result is held back (see above).
+     * @param {Object} result - The `result` message
+     * @returns {boolean} True when the result is held back
+     */
+    deferTurnEnd(result) {
+      promptTurnStarted = true;
+      turnEnded = true;
+      if (!hasPending()) {
+        return false;
+      }
+      console.log(`${logPrefix()}: the turn ended with ${pendingEntries().length} insert(s) unread; they run as the next turn`);
+      deferredResult = result;
+      armNextTurnTimer();
+      flush();
+      return true;
+    },
+
+    /**
+     * Called instead of deferTurnEnd with a `result` of the run's turn that
+     * comes while an abort is under way: nothing is held back then, but an
+     * insert read from now on started the next turn (see receive).
+     */
+    noteTurnEnded() {
+      turnEnded = true;
+    },
+
+    /**
+     * Makes a prompt a later send handed to the process the current one (see
+     * handTurnToHeldProcess): inserts wait for its turn to start, and its
+     * echo is dropped. Called just before the prompt is written, with no
+     * insert pending: the turn before it has completed.
+     * @param {string} promptUuid - The uuid the handed-over prompt goes out with
+     */
+    beginHandedOverTurn(promptUuid) {
+      promptUuids.add(promptUuid);
+      currentPromptUuid = promptUuid;
+      promptTurnStarted = false;
+      promptHandedOver = true;
+      turnEnded = false;
+    },
+
+    /**
+     * Whether a `result` that comes before the handed-over prompt's turn has
+     * started is that of a turn the CLI ran ahead of it, rather than the
+     * prompt's own: one relaying background work, or one the CLI starts on
+     * its own (a ScheduleWakeup or /loop wake-up, a CronCreate task). Such a
+     * turn neither ends the handed-over turn nor lets inserts out. False
+     * outside that wait.
+     *
+     * Decided by what the result says first: a turn that names the prompts
+     * it consumed (readConsumedPromptUuids) is the prompt's when they include
+     * it. A turn that names none is one of the CLI's own: ahead of the prompt
+     * when this CLI has been seen reporting the prompts it takes, as it would
+     * have reported this one first. A CLI that does neither leaves only the
+     * `origin`: a task notification's turn is ahead, any other is taken for
+     * the prompt's, so that the turn cannot hang.
+     * @param {Object} result - The `result` message
+     * @returns {boolean}
+     */
+    isAheadOfHandedOverPrompt(result) {
+      if (!promptHandedOver || promptTurnStarted) {
+        return false;
+      }
+      const consumed = readConsumedPromptUuids(result);
+      if (consumed) {
+        return !consumed.includes(currentPromptUuid);
+      }
+      if (announcesPrompts) {
+        return true;
+      }
+      return result.origin?.kind === 'task-notification';
+    },
+
+    /**
+     * Whether an abort has something to take back first: an insert not read
+     * yet, or a handed-over prompt still in the CLI's queue.
+     * @returns {boolean}
+     */
+    needsWithdrawalOnAbort: () => hasPending() || (promptHandedOver && !promptTurnStarted),
+
+    /**
+     * Withdraws everything pending before an abort interrupts the turn: the
+     * CLI keeps queued messages across an interrupt and runs them once it is
+     * handled. That includes a handed-over prompt whose turn has not started.
+     * Every insert the turn has not read is reported cancelled, even one
+     * whose withdrawal the CLI did not confirm, or one that starts the next
+     * turn meanwhile (see receive), so the client puts the text back rather
+     * than lose it. Any held result is dropped: the abort ends the turn.
+     * @returns {Promise<void>}
+     */
+    async cancelAllForAbort() {
+      endDeferral();
+      for (const entry of [...waiting]) {
+        settle(entry, 'cancelled', 'ABORTED');
+      }
+      const withdrawals = [];
+      if (promptHandedOver && !promptTurnStarted && inputOpen()) {
+        withdrawals.push(sendCancel(currentPromptUuid, INSERT_ABORT_CANCEL_WAIT_MS));
+      }
+      const target = written;
+      if (target) {
+        target.cancelRequested = true;
+        target.cancelReason = 'ABORTED';
+        if (inputOpen()) {
+          withdrawals.push(sendCancel(target.insertId, INSERT_ABORT_CANCEL_WAIT_MS));
+        }
+      }
+      await Promise.all(withdrawals);
+      // A receipt may have come in meanwhile.
+      if (target?.state === 'written') {
+        settle(target, 'cancelled', 'ABORTED');
+      }
+    },
+
+    /**
+     * Reports everything pending failed, for a run that can no longer
+     * deliver it. Any held result is dropped: the caller ends the turn.
+     * @param {string} reason - The `insertReason`
+     */
+    failAll(reason) {
+      endDeferral();
+      for (const entry of pendingEntries()) {
+        settle(entry, 'failed', reason);
+      }
+    },
+
+    /** Stops the wait for a next turn, once the run's loop has ended. */
+    dispose() {
+      endDeferral();
+    },
+  };
 }
 
 /**
@@ -1195,16 +1859,357 @@ async function loadMcpConfig(cwd) {
   }
 }
 
+// How the log, and the English text of the run's notice (see
+// reportBackgroundWorkStopped), name a change that keeps a turn out of a live
+// process (planTurnHandOver). The client names them the same way.
+const HAND_OVER_CHANGE_LABELS = {
+  cwd: 'the working directory',
+  effort: 'the reasoning effort',
+  ultracode: 'Ultracode',
+  tools: 'the tool permissions',
+  model: 'the model',
+  permissionMode: 'the permission mode',
+};
+
 /**
- * Executes a Claude query using the SDK
+ * Whether two lists hold the same entries, in any order.
+ * @param {Array<string>} first
+ * @param {Array<string>} second
+ * @returns {boolean}
+ */
+function haveSameEntries(first, second) {
+  const firstSet = new Set(first);
+  const secondSet = new Set(second);
+  return firstSet.size === secondSet.size && [...firstSet].every((entry) => secondSet.has(entry));
+}
+
+/**
+ * What it takes to run a new turn in a live process rather than a new one:
+ * the switches to send first, and what only a new process can apply.
+ *
+ * The CLI takes its working directory, tool rules, effort and settings
+ * (ultracode) at launch. The SDK switches the model (setModel) and the
+ * permission mode (setPermissionMode) of a live process with a control
+ * request, except into bypassPermissions for a process not launched in it,
+ * which the CLI refuses. A turn may allow tools the process was not launched
+ * with, as the run's canUseTool grants them (entering plan mode adds some);
+ * one that allows fewer, or denies others, needs a new process.
+ *
+ * Ultracode counts only when the turn makes a choice: a model that cannot
+ * run it, such as the catalog's default, gets none (resolveClaudeEffortSelection),
+ * and a process launched without one runs with it off. A plain model switch
+ * to or from such a model therefore changes nothing here.
+ *
+ * @param {Object} launched - The live process's configuration (see `launched` in queryClaudeSDK)
+ * @param {Object} next - SDK options a new process would get for the turn (mapCliOptionsToSDK)
+ * @param {Object|null} instance - The live SDK query
+ * @returns {{ changes: Array<Exclude<import('@/shared/types.js').HandOverChange, 'lookup'>>, switches: Array<import('@/shared/types.js').HandOverSwitch>, model: string|null, permissionMode: string|null }}
+ *   `changes` is empty when the turn can go in; `model` and `permissionMode`
+ *   are the switches to make before its prompt, if any, and `switches` names
+ *   the ones the process can make, whatever else `changes` holds
+ */
+function planTurnHandOver(launched, next, instance) {
+  const changes = [];
+  const switches = [];
+  if ((next.cwd ?? null) !== launched.cwd) {
+    changes.push('cwd');
+  }
+  if ((next.effort ?? null) !== launched.effort) {
+    changes.push('effort');
+  }
+  const nextUltracode = next.settings?.ultracode;
+  if (typeof nextUltracode === 'boolean' && nextUltracode !== launched.ultracode) {
+    changes.push('ultracode');
+  }
+  const nextAllowedTools = new Set(next.allowedTools ?? []);
+  if (
+    launched.allowedTools.some((entry) => !nextAllowedTools.has(entry))
+    || !haveSameEntries(next.disallowedTools ?? [], launched.disallowedTools)
+  ) {
+    changes.push('tools');
+  }
+  const model = next.model !== launched.model ? next.model : null;
+  if (model) {
+    (typeof instance?.setModel === 'function' ? switches : changes).push('model');
+  }
+  const nextPermissionMode = next.permissionMode ?? 'default';
+  const permissionMode = nextPermissionMode !== launched.permissionMode ? nextPermissionMode : null;
+  if (permissionMode) {
+    const canSwitch = typeof instance?.setPermissionMode === 'function'
+      && (permissionMode !== 'bypassPermissions' || launched.canBypass);
+    (canSwitch ? switches : changes).push('permissionMode');
+  }
+  return { changes, switches, model, permissionMode };
+}
+
+/**
+ * Whether a run option names a setting: a string with something in it. A
+ * blank one names none, as the chat gateway reads a blank model or effort.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function namesSetting(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * A turn's run options with every setting they leave out taken from the live
+ * process (see `ProviderHandOverPlanOptions.inheritUnset`), so that setting
+ * is neither a change nor a switch (planTurnHandOver): `cwd`, `model`,
+ * `effort` and `permissionMode` when not named (namesSetting), and each of
+ * `toolsSettings`' `allowedTools`, `disallowedTools` and `skipPermissions`
+ * the options do not carry. What the options carry is kept, so a
+ * `permissionMode` they name still meets the live `skipPermissions`, as
+ * mapCliOptionsToSDK combines the two. Ultracode is left as is: a turn that
+ * makes no ultracode choice already changes nothing.
+ *
+ * Used by a run's planHandOver, and through the run's entry by
+ * handTurnToHeldProcess, for a plan or a run that inherits unset settings.
+ * @param {Object} turnOptions - The turn's run options
+ * @param {{ cwd: string|null, model: string, effort: string|null, permissionMode: string, allowedTools: Array<string>, disallowedTools: Array<string>, skipPermissions: boolean }} live
+ *   The live process's own settings (see `liveSettings` in queryClaudeSDK)
+ * @returns {Object}
+ */
+function inheritUnsetSettings(turnOptions, live) {
+  const given = turnOptions.toolsSettings && typeof turnOptions.toolsSettings === 'object'
+    ? turnOptions.toolsSettings
+    : {};
+  return {
+    ...turnOptions,
+    cwd: namesSetting(turnOptions.cwd) ? turnOptions.cwd : live.cwd ?? undefined,
+    model: namesSetting(turnOptions.model) ? turnOptions.model : live.model,
+    effort: namesSetting(turnOptions.effort) ? turnOptions.effort : live.effort ?? undefined,
+    permissionMode: namesSetting(turnOptions.permissionMode) ? turnOptions.permissionMode : live.permissionMode,
+    toolsSettings: {
+      ...given,
+      allowedTools: Array.isArray(given.allowedTools) ? given.allowedTools : [...live.allowedTools],
+      disallowedTools: Array.isArray(given.disallowedTools) ? given.disallowedTools : [...live.disallowedTools],
+      skipPermissions: typeof given.skipPermissions === 'boolean' ? given.skipPermissions : live.skipPermissions,
+    },
+  };
+}
+
+/**
+ * The model catalog a turn's effort is checked against: the provider's own,
+ * or the built-in one when it cannot be read.
+ * @param {Object} context - Provider-scoped lookups
+ * @returns {Promise<Object>}
+ */
+async function loadEffortModels(context) {
+  try {
+    return await context.getProviderModels();
+  } catch (error) {
+    console.warn('[Claude SDK] Unable to load provider models for effort validation:', error);
+    return CLAUDE_PREDEFINED_MODELS;
+  }
+}
+
+/**
+ * Tells a turn's run that the process its session held for background work
+ * is being replaced by one of the turn's own, which stops that work, and why:
+ * what only a new process can apply (planTurnHandOver), or `lookup` alone when
+ * the turn's options could not be resolved. An `error` the client translates
+ * by its `code`, BACKGROUND_WORK_STOPPED, and its `changes` (HandOverChange
+ * labels); `content` says the same in English for a client that cannot.
+ * @param {Object} writer - The writer of the turn's run
+ * @param {string} key - Session key, for the log
+ * @param {string} sessionId - The session id the message carries
+ * @param {Array<import('@/shared/types.js').HandOverChange>} changes
+ */
+function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
+  const labels = changes.filter((change) => change !== 'lookup').map((change) => HAND_OVER_CHANGE_LABELS[change]);
+  const named = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}` : labels.join('');
+  const why = changes.includes('lookup')
+    ? 'the message could not be handed to the process the work ran in'
+    : `this message changes ${named}, which only a new Claude process can apply`;
+  console.log(`[Claude SDK] Session ${key}: ${why}; replacing the process held for background work`);
+  writer.send(createNormalizedMessage({
+    kind: 'error',
+    code: 'BACKGROUND_WORK_STOPPED',
+    changes: [...changes],
+    content: `Background work stopped: ${why}.`,
+    sessionId,
+    provider: 'claude',
+  }));
+}
+
+/**
+ * Hands a new turn to the process the session's previous run holds open for
+ * background work, as that process's next turn, instead of starting a CLI of
+ * its own: the work keeps running. Called by queryClaudeSDK first.
+ *
+ * Makes the lookups a new run makes (model, catalog, prompt), then checks
+ * again that the process still takes a turn, as it may have let go
+ * meanwhile. Returns null when the turn has to start a process of its own,
+ * which then retires the held one as before: for an edited message, when the
+ * turn's options need a new process (planTurnHandOver), and when a lookup
+ * fails. In the last two cases it says so in the turn's stream
+ * (reportBackgroundWorkStopped), so the user knows why the work stopped. A
+ * client asks first (planClaudeSDKHandOver), and the chat gateway refuses a
+ * send that asked to keep the work when it would not go in; the client also
+ * asks before sending an edit over background work.
+ *
+ * Options that set `inheritUnset: true` (a message the scheduled-messages
+ * dispatcher planned that way) take every setting they leave out from the
+ * live process first (inheritUnsetSettings), the model included: the one the
+ * session last recorded is the composer's latest pick, not what the process
+ * runs. Only for the hand-over: a turn that starts a process of its own runs
+ * with its options as they are.
+ *
+ * @param {string} command - The turn's prompt
+ * @param {Object} options - The turn's run options; `sessionId` names the session
+ * @param {Object} writer - The writer of the turn's run
+ * @param {Object} context - Provider-scoped lookups
+ * @returns {Promise<{ settled: Promise<void> }|null>} `settled` settles once
+ *   the handed-over turn is over (see `settleHandedOverTurn` in
+ *   queryClaudeSDK); null when the turn starts a process of its own. Wrapped,
+ *   as an async function would wait out a promise it returned.
+ */
+async function handTurnToHeldProcess(command, options, writer, context) {
+  const key = options.sessionId;
+  // An edited message resumes the conversation partway, which only a new
+  // process can; the client asks before sending one over background work.
+  if (options.resumeAnchorId || options.resumeFromScratch || !getSession(key)?.takesHandedOverTurn?.()) {
+    return null;
+  }
+  const inheritsModel = options.inheritUnset === true && !namesSetting(options.model);
+  const turnOptions = options.inheritUnset === true
+    ? getSession(key).inheritUnsetSettings(options)
+    : options;
+
+  // Until the turn is handed over, an abort is for it alone (see
+  // pendingHandOvers): it must neither reach the held process nor let the
+  // turn start a process of its own afterwards.
+  const pending = {
+    aborted: false,
+    abort: () => {
+      pending.aborted = true;
+      notifyRunStopped({
+        userId: writer?.userId || null,
+        provider: 'claude',
+        sessionId: key,
+        sessionName: options.sessionSummary,
+        stopReason: 'aborted',
+        runStartedAt: writer?.runStartedAt ?? null
+      });
+    },
+  };
+  pendingHandOvers.set(key, pending);
+  let outcome;
+  let providerSessionId;
+  try {
+    providerSessionId = context.resolveProviderSessionId(key);
+    const resolvedModel = inheritsModel
+      ? turnOptions.model
+      : await context.resolveResumeModel(key, options.model);
+    const sdkOptions = mapCliOptionsToSDK({
+      ...turnOptions,
+      providerSessionId,
+      model: resolvedModel || turnOptions.model,
+      effortModels: await loadEffortModels(context),
+    });
+    const [promptMessage] = await buildPromptMessages(command, options.images, options.files, turnOptions.cwd, crypto.randomUUID());
+
+    if (pending.aborted) {
+      // The abort reported the stop, and its caller sends the `complete`.
+      return { settled: Promise.resolve() };
+    }
+    // The process may have let go, or ended, meanwhile: handOverTurn checks.
+    outcome = getSession(key)?.handOverTurn({
+      writer,
+      sessionName: options.sessionSummary,
+      sdkOptions,
+      skipPermissions: Boolean(turnOptions.toolsSettings?.skipPermissions),
+      promptMessage,
+    }) ?? { taken: false, changes: [] };
+  } catch (error) {
+    if (pending.aborted) {
+      return { settled: Promise.resolve() };
+    }
+    // A new run makes the same lookups, and reports what fails; it retires
+    // the held process first, unless that has let go meanwhile.
+    console.warn(`[Claude SDK] Session ${key}: could not hand the new turn to the process held for background work:`, error?.message || error);
+    if (getSession(key)?.takesHandedOverTurn?.()) {
+      reportBackgroundWorkStopped(writer, key, providerSessionId || key, ['lookup']);
+    }
+    return null;
+  } finally {
+    if (pendingHandOvers.get(key) === pending) {
+      pendingHandOvers.delete(key);
+    }
+  }
+  if (outcome.taken) {
+    return { settled: outcome.settled };
+  }
+  if (outcome.changes.length > 0) {
+    reportBackgroundWorkStopped(writer, key, providerSessionId || key, outcome.changes);
+  }
+  return null;
+}
+
+/**
+ * What a turn of the session run with these options would make of the
+ * process the session's previous run holds open for background work, worked
+ * out without sending it anything or switching anything (see
+ * `IProviderRuntime.planHandOver` and `ProviderHandOverPlan`): `heldWork`
+ * when that process is held, its turn over, for work of the session's own;
+ * `canHandOver` when the turn would go into it (handTurnToHeldProcess);
+ * `changes` for what keeps it out otherwise (planTurnHandOver), or `lookup`
+ * when the lookups a run makes first failed; `switches` for the model and
+ * permission mode it would switch there. An edited message never goes in,
+ * and names no change. A session with no such process, or whose process is
+ * starting or has let go, has nothing held. One whose process is in a turn
+ * takes no other: `heldWork` then says whether that process has work of the
+ * session's own, which interrupting the turn would stop.
+ *
+ * The lookups are the held run's, with its provider-scoped context, except
+ * that a model the turn names comes first: the chat gateway records it for
+ * the session before the turn's run looks the model up. With
+ * `planOptions.inheritUnset`, or `inheritUnset: true` in the options (the
+ * run then hands the turn over that way too), a setting the options leave
+ * out is the live process's own (inheritUnsetSettings).
+ * @param {string} sessionId - Session key (the app session id for a chat run)
+ * @param {Object} options - The run options the turn's run would get
+ *   (`buildTurnRunOptions`): `cwd` already defaulted to the session's
+ *   project, `effort` and `ultracode` already split
+ * @param {import('@/shared/types.js').ProviderHandOverPlanOptions} [planOptions]
+ * @returns {Promise<import('@/shared/types.js').ProviderHandOverPlan>}
+ */
+async function planClaudeSDKHandOver(sessionId, options, planOptions) {
+  const entry = typeof sessionId === 'string' ? getSession(sessionId) : undefined;
+  if (!entry) {
+    return { heldWork: false, canHandOver: false, changes: [], switches: [] };
+  }
+  return entry.planHandOver(
+    options && typeof options === 'object' ? options : {},
+    planOptions && typeof planOptions === 'object' ? planOptions : {},
+  );
+}
+
+/**
+ * Executes a Claude query using the SDK.
+ *
+ * A session whose previous run still holds its process open for background
+ * work takes the turn in that process instead (handTurnToHeldProcess), so the
+ * work keeps running; otherwise the run starts a CLI of its own, retiring
+ * whatever held the session.
  * @param {string} command - User prompt/command
  * @param {Object} options - Query options
- * @param {Object} ws - WebSocket connection
+ * @param {Object} ws - The writer of the turn's run
  * @param {Object} context - Provider-scoped model, session, and auth lookups
- * @returns {Promise<void>}
+ * @returns {Promise<void>} Settles when the run's CLI process has exited; for
+ *   a turn handed to a held process, once that turn is over (its `complete`
+ *   is out, the user aborted it, or the process ended)
  */
 async function queryClaudeSDK(command, options = {}, ws, context) {
   const { sessionId, sessionSummary } = options;
+  if (sessionId) {
+    const handedOver = await handTurnToHeldProcess(command, options, ws, context);
+    if (handedOver) {
+      await handedOver.settled;
+      return;
+    }
+  }
   // Callers pass the stable app session id; the SDK only understands the
   // provider-native id recorded on the session row.
   const providerSessionId = context.resolveProviderSessionId(sessionId);
@@ -1216,17 +2221,60 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // the provider-native id once captured (legacy/direct API callers).
   const sessionKey = () => sessionId || capturedSessionId || null;
 
+  // The writer the turn under way reports through, and the session name its
+  // notifications carry. A turn a later send hands to this process brings its
+  // own (handOverTurn): the run registry gave that send a run of its own.
+  let writer = ws;
+  let turnSessionName = sessionSummary;
+  // Resolves the promise a handed-over turn's caller waits on (see the
+  // return value above), once that turn is over.
+  let settleHandedOverTurn = null;
+  // Who hears that the work the process is held for has finished: the writer
+  // and session name of the turn that last completed with work outstanding.
+  // A handed-over turn takes this over once it completes; work that reports
+  // back before then is still the previous turn's.
+  let backgroundReport = null;
+  // Set while a handed-over turn runs (handOverTurn): what of the hold it
+  // ended its own end has to keep. `untracked`: the process was held for work
+  // the tracker cannot see (Monitor, ScheduleWakeup, ...), cleared once that
+  // work has reported back. `taskIds`: the tasks outstanding at the hand-over.
+  // `relayPending`: one of those finished after the hand-over, so the CLI
+  // relays it in a turn after this one, which needs stdin open.
+  let handedOverHold = null;
+  // What the process was launched with (cwd, tool rules, effort, ultracode),
+  // and the model and permission mode it runs with now, which control
+  // requests may have switched since, with the `skipPermissions` of the tool
+  // settings its current turn came with. Set once the query exists; a turn
+  // handed over later is compared with it (planTurnHandOver).
+  let launched = null;
+  // The SDK options the run's canUseTool reads. A handed-over turn's tool
+  // rules and permission mode are written here.
+  let liveSdkOptions = null;
+
   const emitNotification = (event) => {
     notifyUserIfEnabled({
-      userId: ws?.userId || null,
-      writer: ws,
+      userId: writer?.userId || null,
+      writer,
       event
     });
+  };
+
+  // Settles the handed-over turn's promise, once.
+  const settleTurn = () => {
+    const settle = settleHandedOverTurn;
+    settleHandedOverTurn = null;
+    settle?.();
   };
 
   // Ends the held prompt stream. Replaced once the stream exists; only
   // releaseInput below calls it for the live stream.
   let releasePromptStream = () => {};
+  // Writes one more message to the CLI through the held prompt stream (a
+  // mid-run insert); false until the stream exists and once it is released.
+  let pushPrompt = () => false;
+  // The uuid the run's prompt goes out with: the CLI records the prompt's row
+  // under it and echoes the prompt back with it (see createInsertController).
+  const firstPromptUuid = crypto.randomUUID();
   // The post-turn hold's silence countdown (HOLD_IDLE_MS) and its backstop
   // (HOLD_MAX_MS). Both run only while the process is held for background work.
   let holdIdleTimer = null;
@@ -1235,16 +2283,22 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // input was released.
   let abandonedCloseTimer = null;
   // The client is told the turn is over as soon as `result` lands, even though
-  // the process lingers, so the UI never waits out the idle hold.
+  // the process lingers, so the UI never waits out the idle hold. A `result`
+  // that comes while inserts are pending is held back instead (see
+  // createInsertController), so this can stay false across several turns.
   let turnCompleteSent = false;
+  // Set by the first `result` of the run's own turn, held back or not. Any
+  // task-notification `result` before it ends a batch the CLI ran ahead of the
+  // prompt; one after it is background work reporting back.
+  let promptResultSeen = false;
   // Set when a turn starts background work, cleared when the next `result`
   // arrives — only turns with work still outstanding hold their process open.
   let backgroundWorkPending = false;
   // Set when the stream reports a task starting during this turn. Task events
   // are the exact word on what is still running, so when the turn produced
   // any, the tracker decides the hold; `startsBackgroundWork` is the fallback
-  // for tools that emit none (Monitor, ScheduleWakeup, CronCreate, TaskCreate)
-  // and for an SDK that does not report tasks at all.
+  // for tools that emit none (Monitor, ScheduleWakeup, CronCreate) and for an
+  // SDK that does not report tasks at all.
   let sawTaskEventThisTurn = false;
   // True while the process is being held open for background work, so a later
   // `result` can be recognised as that work reporting back.
@@ -1295,11 +2349,48 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // Set by closeRun when the query is closed; settles once the process can
     // be taken to be gone.
     closed: null,
+    // The run's mid-run inserts (createInsertController), set right below.
+    inserts: null,
     releaseInput: (reason) => releaseInput(reason),
     reportAborted: () => reportAborted(),
+    // Whether a later send's turn can go into this process (handOverTurn).
+    takesHandedOverTurn: () => takesHandedOverTurn(),
+    // Runs a later send's turn in this process (handTurnToHeldProcess).
+    handOverTurn: (turn) => handOverTurn(turn),
+    // A later send's run options with what they leave out taken from this
+    // process (handTurnToHeldProcess, for options that inherit unset settings).
+    inheritUnsetSettings: (turnOptions) => (launched ? inheritUnsetSettings(turnOptions, liveSettings()) : turnOptions),
+    // What a later send's turn would make of this process (planClaudeSDKHandOver).
+    planHandOver: (turnOptions, planOptions) => planHandOver(turnOptions, planOptions),
+    // Releases the caller of a handed-over turn the run will not finish.
+    settleTurn: () => settleTurn(),
   };
   // The key runEntry is registered under. A session key never changes once known.
   let registeredKey = null;
+
+  runEntry.inserts = createInsertController({
+    firstPromptUuid,
+    push: (message) => pushPrompt(message),
+    inputOpen: () => Boolean(runEntry.instance) && !runEntry.inputReleased,
+    stopping: () => runEntry.abortRequested || runEntry.silenced,
+    // A turn under way: the CLI is up, the turn has not completed, and the run
+    // is neither being stopped nor letting its process go.
+    acceptsInserts: () => Boolean(runEntry.instance)
+      && !turnCompleteSent
+      && !runEntry.inputReleased
+      && !runEntry.abortRequested
+      && !runEntry.silenced,
+    getInstance: () => runEntry.instance,
+    send: (message) => writer.send(message),
+    normalize: (raw) => context.normalizeMessage(raw, capturedSessionId || sessionId || null),
+    getSessionId: () => capturedSessionId || sessionId || null,
+    finishDeferredTurn: (result) => {
+      if (!runEntry.silenced) {
+        finishTurn(result);
+      }
+    },
+    logPrefix: () => `[Claude SDK] Session ${sessionKey() || 'NEW'}`,
+  });
 
   // The run's one report that the user stopped it. Sent by
   // abortClaudeSDKSession, or by the run itself when its loop ends while the
@@ -1310,14 +2401,16 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       return;
     }
     turnCompleteSent = true;
+    handedOverHold = null;
     notifyRunStopped({
-      userId: ws?.userId || null,
+      userId: writer?.userId || null,
       provider: 'claude',
       sessionId: sessionId || capturedSessionId || null,
-      sessionName: sessionSummary,
+      sessionName: turnSessionName,
       stopReason: 'aborted',
-      runStartedAt: ws?.runStartedAt ?? null
+      runStartedAt: writer?.runStartedAt ?? null
     });
+    settleTurn();
   };
 
   const clearHoldTimers = () => {
@@ -1349,6 +2442,13 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       abandonedCloseTimer = setTimeout(() => {
         abandonedCloseTimer = null;
         console.warn(`[Claude SDK] Session ${sessionKey() || 'NEW'}: the process is still running ${ABANDONED_PROCESS_CLOSE_MS} ms after its input was closed (${reason}); closing it`);
+        // Closing ends the loop at once and the process seconds later, so the
+        // entry waits in exitingSessions like a superseded or aborted one, and
+        // the session's next run waits for it. One a newer run retired or an
+        // abort let go is there already.
+        if (registeredKey && getSession(registeredKey) === runEntry) {
+          exitingSessions.set(registeredKey, runEntry);
+        }
         closeRun(runEntry, sessionKey());
       }, ABANDONED_PROCESS_CLOSE_MS);
       abandonedCloseTimer.unref?.();
@@ -1397,6 +2497,309 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     holdMaxTimer.unref?.();
   };
 
+  // The work the process is held for has all reported back: one report, to
+  // the turn that left it running (backgroundReport), else the current one.
+  const reportBackgroundWorkDone = () => {
+    const report = backgroundReport ?? { writer, sessionName: turnSessionName };
+    backgroundReport = null;
+    notifyBackgroundWorkCompleted({
+      userId: report.writer?.userId || null,
+      provider: 'claude',
+      sessionId: sessionId || capturedSessionId || null,
+      sessionName: report.sessionName,
+      runStartedAt: report.writer?.runStartedAt ?? null
+    });
+    report.writer.reportBackgroundWorkFinished?.();
+  };
+
+  // A `result` of a turn the CLI ran ahead of a handed-over prompt (see
+  // isAheadOfHandedOverPrompt): one relaying background work that finished
+  // before the hand-over, or one it started on its own (a wake-up that
+  // ScheduleWakeup or /loop set, a CronCreate task firing). The handed-over
+  // turn goes on. What the earlier turn started is carried into the hold the
+  // handed-over turn's end decides on: tasks by the tracker, and work the
+  // tracker cannot see (the loop's next wake-up, a Monitor) by `untracked`;
+  // then nothing has finished. Otherwise, when it relayed the last of the
+  // work (none outstanding, none still to be relayed after the handed-over
+  // turn), that work is done.
+  const onWorkReportedAheadOfTurn = () => {
+    // Read like finishTurn's hold rule: with task events, the tracker decides.
+    const startedUntrackedWork = !sawTaskEventThisTurn && backgroundWorkPending;
+    backgroundWorkPending = false;
+    sawTaskEventThisTurn = false;
+    if (startedUntrackedWork) {
+      handedOverHold.untracked = true;
+      return;
+    }
+    if (backgroundWork.hasOutstanding(sessionKey()) || handedOverHold.relayPending) {
+      return;
+    }
+    handedOverHold.untracked = false;
+    if (backgroundReport) {
+      reportBackgroundWorkDone();
+    }
+  };
+
+  // Handles a `result` of the run's turn, or of the turns after it: on the
+  // first, the turn is over as far as the client is concerned, unless the
+  // user is aborting it (then it is the interrupted turn's). Called by the
+  // loop, or by the insert controller for a result it held back. A turn
+  // handed to the process later (handOverTurn) completes here the same way.
+  const finishTurn = (message) => {
+    const abortPending = runEntry.abortRequested;
+    const stillOutstanding = backgroundWork.hasOutstanding(sessionKey());
+    let releaseReason = 'background-done';
+    const completesTurn = !turnCompleteSent && !abortPending;
+    // What a handed-over turn keeps of the hold it ended.
+    const inheritedHold = completesTurn ? handedOverHold : null;
+    if (completesTurn) {
+      turnCompleteSent = true;
+      handedOverHold = null;
+      releaseReason = 'turn-done';
+      if (message.num_turns === 0 && message.origin === undefined) {
+        // The prompt's own model-free turn (a local command, a prompt a
+        // hook blocked). Logged because an orphan batch from a CLI that
+        // stopped sending `origin` looks just like it, and would end the
+        // turn early again.
+        console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: a result with num_turns 0 and no origin ended the turn`);
+      }
+      writer.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
+      notifyRunStopped({
+        userId: writer?.userId || null,
+        provider: 'claude',
+        sessionId: sessionId || capturedSessionId || null,
+        sessionName: turnSessionName,
+        stopReason: 'completed',
+        runStartedAt: writer?.runStartedAt ?? null
+      });
+    } else if (heldForBackgroundWork && !abortPending && !stillOutstanding) {
+      // A result after the turn already reported complete means the work we
+      // held the process open for has finished and pushed a follow-up turn
+      // — the last of it, when nothing else is still running.
+      reportBackgroundWorkDone();
+    }
+    // Work started during this turn, or work from an earlier turn that
+    // has not settled yet (a follow-up turn reports one task in while
+    // another is still going), is still running. Hold the process open
+    // so it can finish and report back in a follow-up turn; the hold
+    // timers are only a backstop for work that never reports.
+    //
+    // The release when the last task settles is this same branch on the
+    // follow-up turn the CLI pushes for it, not the settling event
+    // itself: closing stdin at that moment would cut the turn that
+    // relays the task's result.
+    //
+    // When the turn reported its tasks, the tracker is the whole truth: an
+    // Agent call without `run_in_background` is scored as background by
+    // `startsBackgroundWork`, but the CLI runs it in the foreground and
+    // it has settled before this `result` — holding for it kept a process
+    // alive for the full ceiling with nothing outstanding.
+    //
+    // An input already released (the hold ran out, or an abort) is never
+    // held again.
+    //
+    // A handed-over turn also keeps what the hold it ended was for: work the
+    // tracker cannot see that has not reported back, or a task of that hold
+    // the CLI has yet to relay.
+    const holdForTurn = (sawTaskEventThisTurn ? stillOutstanding : backgroundWorkPending || stillOutstanding)
+      || Boolean(inheritedHold && (inheritedHold.untracked || inheritedHold.relayPending));
+    backgroundWorkPending = false;
+    sawTaskEventThisTurn = false;
+    if (holdForTurn && !runEntry.inputReleased) {
+      heldForBackgroundWork = true;
+      // A turn that completes with work outstanding is the one to hear when
+      // it is done, the work of the turns before it included.
+      if (completesTurn || !backgroundReport) {
+        backgroundReport = { writer, sessionName: turnSessionName };
+      }
+      armHoldIdleTimer();
+      armHoldMaxTimer();
+    } else {
+      // Either nothing was backgrounded, or the background work just
+      // reported in — let the CLI exit now, as it always has.
+      heldForBackgroundWork = false;
+      releaseInput(abortPending ? 'aborted' : releaseReason);
+    }
+    if (completesTurn) {
+      settleTurn();
+    }
+  };
+
+  // Whether a later send's turn can go into this process instead of one of
+  // its own (handOverTurn): the turn under way has completed, and the
+  // process is held open for background work, its input still open (a turn
+  // that completes with nothing to hold for releases it), and no abort is
+  // under way.
+  const takesHandedOverTurn = () => turnCompleteSent
+    && !runEntry.inputReleased
+    && !runEntry.abortRequested;
+
+  // Whether the process is held, its turn over, for work of the session's
+  // own: a task one of its turns started that is still outstanding, or work
+  // the tracker cannot see (a Monitor, a wake-up, a relay still to come),
+  // which is all a hold with no task outstanding can be for. A hold kept
+  // only for nested tasks is not.
+  const holdsOwnWork = () => takesHandedOverTurn()
+    && heldForBackgroundWork
+    && (backgroundWork.hasOwnOutstanding(sessionKey()) || !backgroundWork.hasOutstanding(sessionKey()));
+
+  // Whether a turn is under way in a process with work of the session's own
+  // that interrupting the turn would stop, as an abort stops every task and
+  // lets the process go (abortClaudeSDKSession): a task of the session's own
+  // still outstanding, or, for a turn handed over while the process was held,
+  // work of that hold the tracker cannot see or a task of it the CLI has yet
+  // to relay (handedOverHold).
+  const holdsOwnWorkInTurn = () => !turnCompleteSent
+    && Boolean(runEntry.instance)
+    && !runEntry.inputReleased
+    && !runEntry.abortRequested
+    && !runEntry.silenced
+    && (backgroundWork.hasOwnOutstanding(sessionKey())
+      || Boolean(handedOverHold && (handedOverHold.untracked || handedOverHold.relayPending)));
+
+  // The live process's own settings, which a later send's turn that leaves
+  // one out inherits (inheritUnsetSettings): its working directory, model,
+  // effort and permission mode, the tools canUseTool allows now (what the
+  // user allowed for good included), the tools it was launched denying, and
+  // the `skipPermissions` its current turn came with.
+  const liveSettings = () => ({
+    cwd: launched.cwd,
+    model: launched.model,
+    effort: launched.effort,
+    permissionMode: launched.permissionMode,
+    allowedTools: liveSdkOptions.allowedTools,
+    disallowedTools: launched.disallowedTools,
+    skipPermissions: launched.skipPermissions,
+  });
+
+  // What handOverTurn would make of a later send's turn with these options,
+  // worked out without writing or switching anything (planClaudeSDKHandOver).
+  // The lookups are the ones handTurnToHeldProcess makes, with this run's
+  // context, except that the turn's own model comes first: the chat gateway
+  // records it for the session before the turn's run looks the model up.
+  // With `inheritUnset`, asked or set in the options, a setting the options
+  // leave out is this process's own (inheritUnsetSettings), the model
+  // included, so there is no model to look up.
+  const planHandOver = async (turnOptions, planOptions = {}) => {
+    // A turn under way takes no other; whether interrupting it would stop
+    // work is all there is to say.
+    const inTurn = () => ({ heldWork: holdsOwnWorkInTurn(), canHandOver: false, changes: [], switches: [] });
+    if (!takesHandedOverTurn()) {
+      return inTurn();
+    }
+    // Only a new process resumes the conversation partway.
+    if (turnOptions.resumeAnchorId || turnOptions.resumeFromScratch) {
+      return { heldWork: holdsOwnWork(), canHandOver: false, changes: [], switches: [] };
+    }
+    const planned = planOptions.inheritUnset === true || turnOptions.inheritUnset === true
+      ? inheritUnsetSettings(turnOptions, liveSettings())
+      : turnOptions;
+    let next = null;
+    try {
+      const requestedModel = namesSetting(planned.model) ? planned.model.trim() : '';
+      const model = requestedModel || await context.resolveResumeModel(sessionKey(), planned.model);
+      next = mapCliOptionsToSDK({
+        ...planned,
+        model: model || planned.model,
+        effortModels: await loadEffortModels(context),
+      });
+    } catch (error) {
+      console.warn(`[Claude SDK] Session ${sessionKey()}: could not work out whether a new turn goes into the process held for background work:`, error?.message || error);
+    }
+    // The process may have let go, or taken another turn, meanwhile.
+    if (!takesHandedOverTurn()) {
+      return inTurn();
+    }
+    if (!next) {
+      return { heldWork: holdsOwnWork(), canHandOver: false, changes: ['lookup'], switches: [] };
+    }
+    const { changes, switches } = planTurnHandOver(launched, next, runEntry.instance);
+    return { heldWork: holdsOwnWork(), canHandOver: changes.length === 0, changes, switches };
+  };
+
+  // Sends one switch to the live process; `onSwitched` runs once the CLI has
+  // confirmed it. A switch the CLI refuses leaves the process as it was, and
+  // is logged: the turn runs on what the process had.
+  const sendSwitch = (send, onSwitched, description) => {
+    const logRefusal = (error) => {
+      console.warn(`[Claude SDK] Session ${sessionKey()}: could not switch ${description}: ${error?.message || error}`);
+    };
+    try {
+      Promise.resolve(send()).then(onSwitched, logRefusal);
+    } catch (error) {
+      logRefusal(error);
+    }
+  };
+
+  // Runs a later send's turn in this process as its next turn (see
+  // handTurnToHeldProcess), when its options allow (planTurnHandOver):
+  // the model and permission mode are switched first, and the prompt goes
+  // out with priority `later`, so the CLI runs it as a turn of its own once
+  // it is idle, after any turn it runs first: one relaying background work,
+  // or one it starts on its own (a wake-up, a CronCreate task). Those turns'
+  // results are not this turn's (isAheadOfHandedOverPrompt). From then on
+  // the turn reports through its own writer and completes once, like any
+  // turn; the work the process was held for keeps running and reports back.
+  // The hold ends: HOLD_IDLE stops, as a long tool call is silent, and
+  // HOLD_MAX stays the backstop. `skipPermissions` is that of the tool
+  // settings the turn came with, which a later turn that brings none inherits.
+  const handOverTurn = ({ writer: turnWriter, sessionName, sdkOptions: next, skipPermissions, promptMessage }) => {
+    if (!takesHandedOverTurn()) {
+      return { taken: false, changes: [] };
+    }
+    const plan = planTurnHandOver(launched, next, runEntry.instance);
+    if (plan.changes.length > 0) {
+      return { taken: false, changes: plan.changes };
+    }
+
+    // Written ahead of the prompt, which the CLI reads after them.
+    if (plan.model) {
+      const model = plan.model;
+      sendSwitch(() => runEntry.instance.setModel(model), () => { launched.model = model; }, `the model to ${model}`);
+    }
+    if (plan.permissionMode) {
+      const mode = plan.permissionMode;
+      // canUseTool follows once the CLI confirms, which it does ahead of
+      // any tool request of the turn.
+      sendSwitch(() => runEntry.instance.setPermissionMode(mode), () => {
+        launched.permissionMode = mode;
+        liveSdkOptions.permissionMode = mode;
+      }, `the permission mode to ${mode}`);
+    }
+    if (!pushPrompt({ ...promptMessage, priority: 'later' })) {
+      return { taken: false, changes: [] };
+    }
+
+    // What a turn the CLI runs ahead of the prompt has started so far stays
+    // counted (backgroundWorkPending, sawTaskEventThisTurn) until that turn's
+    // `result`, which carries it into the hold (onWorkReportedAheadOfTurn).
+    const outstanding = backgroundWork.outstanding(sessionKey());
+    if (holdIdleTimer) {
+      clearTimeout(holdIdleTimer);
+      holdIdleTimer = null;
+    }
+    heldForBackgroundWork = false;
+    handedOverHold = {
+      untracked: outstanding.length === 0,
+      taskIds: new Set(outstanding.map((task) => task.taskId)),
+      relayPending: false,
+    };
+    // The turn's own tool rules; the remembered ones of earlier turns go.
+    liveSdkOptions.allowedTools = [...(next.allowedTools ?? [])];
+    launched.skipPermissions = skipPermissions === true;
+
+    // The previous turn's run hears that its process, and its work, go on.
+    writer.reportProcessHandedOver?.();
+    writer = turnWriter;
+    runEntry.writer = turnWriter;
+    turnSessionName = sessionName;
+    turnCompleteSent = false;
+    runEntry.inserts.beginHandedOverTurn(promptMessage.uuid);
+    const settled = new Promise((resolve) => { settleHandedOverTurn = resolve; });
+    console.log(`[Claude SDK] Session ${sessionKey()}: a new turn goes into the process held for background work (${outstanding.length} task(s) outstanding)`);
+    return { taken: true, settled };
+  };
+
   // Hoisted above the try so the catch's cleanup can tell whether this run
   // got as far as starting its CLI.
   let queryInstance = null;
@@ -1414,18 +2817,11 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }
 
     const resolvedModel = await context.resolveResumeModel(sessionId, options.model);
-    let effortModels = CLAUDE_PREDEFINED_MODELS;
-    try {
-      effortModels = await context.getProviderModels();
-    } catch (error) {
-      console.warn('[Claude SDK] Unable to load provider models for effort validation:', error);
-    }
-
     const sdkOptions = mapCliOptionsToSDK({
       ...options,
       providerSessionId,
       model: resolvedModel || options.model,
-      effortModels,
+      effortModels: await loadEffortModels(context),
     });
 
     const mcpServers = await loadMcpConfig(options.cwd);
@@ -1436,7 +2832,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // Every turn uses streaming input so stdin stays open past the turn's
     // `result`. The message list is reusable, but each query attempt needs its
     // own stream because an async generator cannot be replayed once consumed.
-    const promptMessages = await buildPromptMessages(command, options.images, options.files, options.cwd);
+    const promptMessages = await buildPromptMessages(command, options.images, options.files, options.cwd, firstPromptUuid);
 
     sdkOptions.hooks = {
       Notification: [{
@@ -1449,7 +2845,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
             sessionId: sessionId || capturedSessionId || null,
             kind: 'action_required',
             code: 'agent.notification',
-            meta: { message, sessionName: sessionSummary },
+            meta: { message, sessionName: turnSessionName },
             severity: 'warning',
             requiresUserAction: true,
             dedupeKey: `claude:hook:notification:${sessionId || capturedSessionId || 'none'}:${message}`
@@ -1491,13 +2887,13 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       }
 
       const requestId = createRequestId();
-      ws.send(createNormalizedMessage({ kind: 'permission_request', requestId, toolName, input, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+      writer.send(createNormalizedMessage({ kind: 'permission_request', requestId, toolName, input, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
       emitNotification(createNotificationEvent({
         provider: 'claude',
         sessionId: sessionId || capturedSessionId || null,
         kind: 'action_required',
         code: 'permission.required',
-        meta: { toolName, sessionName: sessionSummary },
+        meta: { toolName, sessionName: turnSessionName },
         severity: 'warning',
         requiresUserAction: true,
         dedupeKey: `claude:permission:${sessionId || capturedSessionId || 'none'}:${requestId}`
@@ -1515,7 +2911,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
           _receivedAt: new Date(),
         },
         onCancel: (reason) => {
-          ws.send(createNormalizedMessage({ kind: 'permission_cancelled', requestId, reason, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+          writer.send(createNormalizedMessage({ kind: 'permission_cancelled', requestId, reason, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
         }
       });
       if (!decision) {
@@ -1531,7 +2927,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       // the inbound socket only, so without this a mid-run page refresh
       // replays the `permission_request` with nothing to retract it and the
       // already-answered prompt resurrects.
-      ws.send(createNormalizedMessage({ kind: 'permission_resolved', requestId, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+      writer.send(createNormalizedMessage({ kind: 'permission_resolved', requestId, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
 
       if (decision.allow) {
         if (decision.rememberEntry && typeof decision.rememberEntry === 'string') {
@@ -1561,6 +2957,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     const createQuery = context.createQuery ?? query;
     let heldPrompt = createHeldPromptStream(promptMessages);
     releasePromptStream = heldPrompt.release;
+    pushPrompt = heldPrompt.push;
     try {
       queryInstance = createQuery({
         prompt: heldPrompt.stream,
@@ -1575,6 +2972,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       heldPrompt.release();
       heldPrompt = createHeldPromptStream(promptMessages);
       releasePromptStream = heldPrompt.release;
+      pushPrompt = heldPrompt.push;
       queryInstance = createQuery({
         prompt: heldPrompt.stream,
         options: sdkOptions
@@ -1589,6 +2987,22 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       // The history reader dates the live run by this start (see addSession).
       sessionHistoryCache.invalidate(registeredKey);
     }
+    // Copied: canUseTool adds the tools the user allows for good to the live
+    // options, but the CLI keeps the lists it was launched with.
+    launched = {
+      cwd: sdkOptions.cwd ?? null,
+      allowedTools: [...sdkOptions.allowedTools],
+      disallowedTools: [...sdkOptions.disallowedTools],
+      effort: sdkOptions.effort ?? null,
+      // Off unless the launch turned it on (see planTurnHandOver).
+      ultracode: sdkOptions.settings?.ultracode === true,
+      canBypass: sdkOptions.permissionMode === 'bypassPermissions',
+      model: sdkOptions.model,
+      permissionMode: sdkOptions.permissionMode ?? 'default',
+      // As mapCliOptionsToSDK reads it.
+      skipPermissions: Boolean(options.toolsSettings?.skipPermissions),
+    };
+    liveSdkOptions = sdkOptions;
 
     // Process streaming messages
     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
@@ -1604,8 +3018,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         // run's session id belongs to the newer run.
         if (runEntry.abortRequested && !capturedSessionId && typeof message.session_id === 'string') {
           capturedSessionId = message.session_id;
-          if (typeof ws.setSessionId === 'function') {
-            ws.setSessionId(capturedSessionId);
+          if (typeof writer.setSessionId === 'function') {
+            writer.setSessionId(capturedSessionId);
           }
         }
         continue;
@@ -1622,17 +3036,26 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         }
 
         // Set session ID on writer
-        if (ws.setSessionId && typeof ws.setSessionId === 'function') {
-          ws.setSessionId(capturedSessionId);
+        if (writer.setSessionId && typeof writer.setSessionId === 'function') {
+          writer.setSessionId(capturedSessionId);
         }
 
         // Send session-created event only once for sessions with nothing to resume
         if (!providerSessionId && !sessionCreatedSent) {
           sessionCreatedSent = true;
-          ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
+          writer.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
         }
       } else {
         // session_id already captured
+      }
+
+      // The CLI echoes back the prompts it takes (--replay-user-messages).
+      // The client already shows the ones this run wrote, and the task
+      // notifications the CLI feeds itself land on their cards, so those
+      // echoes go no further; the insert controller reads its receipts off
+      // them first. Any other echo, such as local command output, goes on.
+      if (runEntry.inserts.observe(message)) {
+        continue;
       }
 
       // A `result` for a batch of the CLI's own task notifications, not for
@@ -1644,10 +3067,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       // in and close stdin under the prompt's real turn, which the CLI's
       // wind-down then charges to that turn's background work. Only `origin`
       // tells it apart: a 0-turn `result` can be the prompt's own (a local
-      // command, a prompt a hook blocked). Once the turn has completed, a
+      // command, a prompt a hook blocked). Once the prompt's turn has ended, a
       // task-notification `result` is background work reporting back and goes
       // on below. A CLI that sends no `origin` keeps the old behaviour.
-      if (!turnCompleteSent && message.type === 'result' && message.origin?.kind === 'task-notification') {
+      if (!promptResultSeen && message.type === 'result' && message.origin?.kind === 'task-notification') {
         console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: skipped a result for the CLI's own task notifications (origin ${message.origin.kind}, num_turns ${message.num_turns})`);
         continue;
       }
@@ -1666,7 +3089,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         if (isSubagentPromptEcho(msg)) {
           continue;
         }
-        ws.send(msg);
+        writer.send(msg);
       }
 
       if (
@@ -1709,7 +3132,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
           assistantBudgetSent = true;
         }
         lastSentTokenBudget = tokenBudgetData;
-        ws.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: tokenBudgetData, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+        writer.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: tokenBudgetData, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
       }
 
       if (startsBackgroundWork(message)) {
@@ -1747,75 +3170,49 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         releaseInput('task-stopped');
       }
 
+      // A task the hand-over found outstanding finished during a handed-over
+      // turn. The CLI relays it in a turn queued behind that turn's prompt,
+      // so that turn's end must not close stdin. A stopped task is relayed
+      // in no turn.
+      if (
+        handedOverHold
+        && message.type === 'system'
+        && message.subtype === 'task_notification'
+        && handedOverHold.taskIds.delete(message.task_id)
+        && message.status !== 'stopped'
+      ) {
+        handedOverHold.relayPending = true;
+      }
+
       if (message.type === 'result') {
-        // The turn is done as far as the client is concerned, unless the user
-        // is aborting it: then this is the interrupted turn's `result`.
-        const abortPending = runEntry.abortRequested;
-        const stillOutstanding = backgroundWork.hasOutstanding(sessionKey());
-        let releaseReason = 'background-done';
-        if (!turnCompleteSent && !abortPending) {
-          turnCompleteSent = true;
-          releaseReason = 'turn-done';
-          if (message.num_turns === 0 && message.origin === undefined) {
-            // The prompt's own model-free turn (a local command, a prompt a
-            // hook blocked). Logged because an orphan batch from a CLI that
-            // stopped sending `origin` looks just like it, and would end the
-            // turn early again.
-            console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: a result with num_turns 0 and no origin ended the turn`);
-          }
-          ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
-          notifyRunStopped({
-            userId: ws?.userId || null,
-            provider: 'claude',
-            sessionId: sessionId || capturedSessionId || null,
-            sessionName: sessionSummary,
-            stopReason: 'completed',
-            runStartedAt: ws?.runStartedAt ?? null
-          });
-        } else if (heldForBackgroundWork && !abortPending && !stillOutstanding) {
-          // A result after the turn already reported complete means the work we
-          // held the process open for has finished and pushed a follow-up turn
-          // — the last of it, when nothing else is still running.
-          notifyBackgroundWorkCompleted({
-            userId: ws?.userId || null,
-            provider: 'claude',
-            sessionId: sessionId || capturedSessionId || null,
-            sessionName: sessionSummary,
-            runStartedAt: ws?.runStartedAt ?? null
-          });
-          ws.reportBackgroundWorkFinished?.();
+        if (
+          handedOverHold
+          && !runEntry.abortRequested
+          && runEntry.inserts.isAheadOfHandedOverPrompt(message)
+        ) {
+          // Ahead of a handed-over prompt, the CLI ran a turn of its own:
+          // relaying background work that finished before the hand-over, or
+          // a wake-up or scheduled task firing. Not the handed-over turn,
+          // which neither completes nor takes inserts on it.
+          onWorkReportedAheadOfTurn();
+          continue;
         }
-        // Work started during this turn, or work from an earlier turn that
-        // has not settled yet (a follow-up turn reports one task in while
-        // another is still going), is still running. Hold the process open
-        // so it can finish and report back in a follow-up turn; the hold
-        // timers are only a backstop for work that never reports.
-        //
-        // The release when the last task settles is this same branch on the
-        // follow-up turn the CLI pushes for it, not the settling event
-        // itself: closing stdin at that moment would cut the turn that
-        // relays the task's result.
-        //
-        // When the turn reported its tasks, the tracker is the whole truth: an
-        // Agent call without `run_in_background` is scored as background by
-        // `startsBackgroundWork`, but the CLI runs it in the foreground and
-        // it has settled before this `result` — holding for it kept a process
-        // alive for the full ceiling with nothing outstanding.
-        //
-        // An input already released (the hold ran out, or an abort) is never
-        // held again.
-        const holdForTurn = sawTaskEventThisTurn ? stillOutstanding : backgroundWorkPending || stillOutstanding;
-        backgroundWorkPending = false;
-        sawTaskEventThisTurn = false;
-        if (holdForTurn && !runEntry.inputReleased) {
-          heldForBackgroundWork = true;
-          armHoldIdleTimer();
-          armHoldMaxTimer();
-        } else {
-          // Either nothing was backgrounded, or the background work just
-          // reported in — let the CLI exit now, as it always has.
-          heldForBackgroundWork = false;
-          releaseInput(abortPending ? 'aborted' : releaseReason);
+        promptResultSeen = true;
+        // Inserts the CLI has not read yet run as the next turn of this same
+        // process, so the turn goes on: no `complete`, no release, and the
+        // background work this turn started still counts at the end. While
+        // an abort is under way nothing is held back, but an insert read
+        // from now on started the next turn all the same.
+        let heldBack = false;
+        if (!turnCompleteSent) {
+          if (runEntry.abortRequested) {
+            runEntry.inserts.noteTurnEnded();
+          } else {
+            heldBack = runEntry.inserts.deferTurnEnd(message);
+          }
+        }
+        if (!heldBack) {
+          finishTurn(message);
         }
       } else {
         if (holdIdleTimer) {
@@ -1836,6 +3233,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       removeSession(registeredKey);
     }
 
+    // The process is gone: inserts it never read never will be. (A silenced
+    // run has reported its own; an abort still under way reports them.)
+    if (!runEntry.silenced && !runEntry.abortRequested) {
+      runEntry.inserts.failAll('RUN_ENDED');
+    }
+
     // A silenced run winds down without a word: the run that took the session
     // over, or the abort and its caller, own the client-facing events. Nor
     // does a run whose `result` already completed the turn. Otherwise the
@@ -1847,14 +3250,14 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         reportAborted();
       } else {
         turnCompleteSent = true;
-        ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
+        writer.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
         notifyRunStopped({
-          userId: ws?.userId || null,
+          userId: writer?.userId || null,
           provider: 'claude',
           sessionId: sessionId || capturedSessionId || null,
-          sessionName: sessionSummary,
+          sessionName: turnSessionName,
           stopReason: 'completed',
-          runStartedAt: ws?.runStartedAt ?? null
+          runStartedAt: writer?.runStartedAt ?? null
         });
       }
     }
@@ -1890,6 +3293,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       return;
     }
 
+    // Ahead of the error and the terminal complete.
+    runEntry.inserts.failAll('RUN_FAILED');
+
     // Check if Claude CLI is installed for a clearer error message
     const installed = await context.isProviderInstalled();
     const errorContent = !installed
@@ -1899,23 +3305,24 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // Send error to WebSocket, then the terminal complete. A run that already
     // reported completion and then failed during its post-turn hold still
     // surfaces the error, but must not emit a second terminal complete.
-    ws.send(createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+    writer.send(createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
     if (!turnCompleteSent) {
-      ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 1 }));
+      writer.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 1 }));
     }
     notifyRunFailed({
-      userId: ws?.userId || null,
+      userId: writer?.userId || null,
       provider: 'claude',
       sessionId: sessionId || capturedSessionId || null,
-      sessionName: sessionSummary,
+      sessionName: turnSessionName,
       error,
-      runStartedAt: ws?.runStartedAt ?? null
+      runStartedAt: writer?.runStartedAt ?? null
     });
   } finally {
     if (abandonedCloseTimer) {
       clearTimeout(abandonedCloseTimer);
       abandonedCloseTimer = null;
     }
+    runEntry.inserts.dispose();
     // Always close stdin — otherwise an aborted or failed run leaves the CLI
     // process (and its MCP servers) alive until the server exits.
     releaseInput('loop-end');
@@ -1938,6 +3345,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         leaveExitingSessions();
       }
     }
+    // A handed-over turn the loop ended under is over too.
+    settleTurn();
     markExited();
   }
 }
@@ -1946,11 +3355,16 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
  * Aborts an active SDK session.
  *
  * A run still starting (waiting for an exiting process, or loading its
- * settings) is only marked: it stands down before spawning its CLI. A live
- * process is interrupted and told to stop its outstanding tasks while its
- * input is still held, then let go; it is closed instead when the CLI does
- * not answer the interrupt within INTERRUPT_REPLY_TIMEOUT_MS, or at once when
- * its input is already released and the requests could be dropped. From then
+ * settings) is only marked: it stands down before spawning its CLI. So is a
+ * turn still on its way into a held process (pendingHandOvers), which leaves
+ * that process and its background work alone. A live process first has its
+ * unread inserts, and a handed-over prompt it has not started, withdrawn,
+ * waiting up to INSERT_ABORT_CANCEL_WAIT_MS for the CLI to confirm, and every
+ * insert is reported cancelled. It is then interrupted and told to stop its
+ * outstanding tasks while its input is still held, then let go; it is closed
+ * instead when the CLI does not answer the interrupt within
+ * INTERRUPT_REPLY_TIMEOUT_MS, or at once when its input is already released
+ * and the requests could be dropped. From then
  * on its loop is silenced, and the entry stays in exitingSessions until the
  * process is gone (see exitingSessions), so the session's next run waits for
  * it. Once stdin has closed the CLI usually exits at once; a turn it starts
@@ -1964,6 +3378,14 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
  * @returns {Promise<boolean>} True if session was aborted, false if not found
  */
 async function abortClaudeSDKSession(sessionId) {
+  const pendingHandOver = pendingHandOvers.get(sessionId);
+  if (pendingHandOver) {
+    console.log(`Aborting a turn on its way into the held process of session ${sessionId}`);
+    pendingHandOvers.delete(sessionId);
+    pendingHandOver.abort();
+    return true;
+  }
+
   const session = getSession(sessionId);
 
   if (!session) {
@@ -1984,8 +3406,18 @@ async function abortClaudeSDKSession(sessionId) {
 
     // Marked before interrupting: a `result` that lands meanwhile is the
     // interrupted turn's, and the run loop must not complete the turn on it.
+    // It also stops the run taking or writing inserts.
     session.abortRequested = true;
 
+    // Inserts the CLI has not read, and a handed-over prompt it has not
+    // started, go first: it keeps queued messages across an interrupt and
+    // runs them once it is handled.
+    if (!session.inputReleased && session.inserts.needsWithdrawalOnAbort()) {
+      await session.inserts.cancelAllForAbort();
+    }
+
+    // Checked after that wait too: the turn may have ended and let go of the
+    // input meanwhile.
     if (session.inputReleased) {
       closeRun(session, sessionId);
     } else {
@@ -2131,6 +3563,86 @@ function reconnectSessionWriter(sessionId, newRawWs) {
   return true;
 }
 
+/**
+ * Writes a user message into the session's running turn (see
+ * createInsertController and `IProviderRuntime.insert`): reported `pending`
+ * through the run's writer at once, then written to the CLI when it is its
+ * turn.
+ * @param {string} sessionId - Session key (the app session id for a chat run)
+ * @param {{ insertId: string, content: string }} input - The insert: a UUID the
+ *   CLI records the message under, and plain text
+ * @returns {Promise<{ accepted: true } | { accepted: false, reason: 'NO_ACTIVE_RUN' | 'INVALID' | 'DUPLICATE' }>}
+ *   NO_ACTIVE_RUN when no turn is under way: the CLI has not started, the turn
+ *   has completed (background work may still run), or it is being aborted
+ */
+async function insertIntoClaudeSDKSession(sessionId, input) {
+  if (!isValidInsertInput(input)) {
+    return { accepted: false, reason: 'INVALID' };
+  }
+  const session = getSession(sessionId);
+  if (!session) {
+    return { accepted: false, reason: 'NO_ACTIVE_RUN' };
+  }
+  return session.inserts.accept(input);
+}
+
+/**
+ * Withdraws an insert the model has not read yet (see
+ * `IProviderRuntime.cancelInsert`).
+ * @param {string} sessionId - Session key
+ * @param {string} insertId - The insert's id
+ * @returns {Promise<{ status: 'cancelled' | 'cancel_failed' | 'not_found' }>}
+ *   `cancelled` once the run has reported it so; `cancel_failed` when the CLI
+ *   kept it; `not_found` when the session's run does not hold it, or it has
+ *   already ended
+ */
+async function cancelClaudeSDKInsert(sessionId, insertId) {
+  const session = getSession(sessionId);
+  if (!session || typeof insertId !== 'string') {
+    return { status: 'not_found' };
+  }
+  return session.inserts.cancel(insertId);
+}
+
+/**
+ * Whether a process of this server still holds the session (see
+ * `IProviderRuntime.processState`). `running` while a run owns the key: from
+ * its start, still waiting for an exiting process or loading its settings,
+ * through its turn and any hold for background work. `exiting` once that
+ * run has released the CLI's input, until its loop ends, and while a
+ * retired, aborted or abandoned run's process winds down (exitingSessions).
+ * Null when neither applies.
+ * @param {string} sessionKey - Session key (the app session id for a chat run)
+ * @returns {'running' | 'exiting' | null}
+ */
+function getClaudeSDKProcessState(sessionKey) {
+  const entry = getSession(sessionKey);
+  if (entry) {
+    return entry.inputReleased ? 'exiting' : 'running';
+  }
+  return exitingSessions.has(sessionKey) ? 'exiting' : null;
+}
+
+/**
+ * Lets go of the session for a CLI the Shell tab is about to start on it (see
+ * `IProviderRuntime.release`): the run holding it is retired the way a newer
+ * run would take it over (its turn interrupted, its outstanding tasks stopped,
+ * its input released; see retireSession), and the promise resolves once its
+ * process, or any other of the session's on its way out, is gone
+ * (waitForExitingProcess). Resolves at once when nothing holds the session.
+ * @param {string} sessionKey - Session key (the app session id for a chat run)
+ * @returns {Promise<void>}
+ */
+async function releaseClaudeSDKSession(sessionKey) {
+  retireSession(sessionKey, 'shell-takeover');
+  await waitForExitingProcess(sessionKey);
+}
+
+/**
+ * The Claude provider's runtime (`IProviderRuntime`), mounted by
+ * claude.provider.ts; the provider runtime gateway reaches every entry
+ * through it.
+ */
 export const claudeRuntime = {
   run: queryClaudeSDK,
   abort: abortClaudeSDKSession,
@@ -2140,6 +3652,11 @@ export const claudeRuntime = {
   },
   listBackgroundWork: listClaudeSDKBackgroundWork,
   stopBackgroundTask: stopClaudeSDKTask,
+  insert: insertIntoClaudeSDKSession,
+  cancelInsert: cancelClaudeSDKInsert,
+  processState: getClaudeSDKProcessState,
+  release: releaseClaudeSDKSession,
+  planHandOver: planClaudeSDKHandOver,
 };
 
 // Export public API

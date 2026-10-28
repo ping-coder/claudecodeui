@@ -38,6 +38,8 @@ const page = vi.hoisted(() => ({
   inputs: new Map<string, string>(),
   composerInserts: [] as Array<(text: string) => void>,
   providerWrites: [] as string[],
+  /** For each entry of providerWrites, whether it was marked automatic (the page's own write). */
+  automaticProviderWrites: [] as boolean[],
   composersBySession: new Map<string, ComposerStandIn>(),
 }));
 
@@ -87,8 +89,9 @@ vi.mock('@/modules/command-palette', async () => {
 
 vi.mock('@/shared/selectedProvider', () => ({
   readSelectedProvider: () => 'claude',
-  writeSelectedProvider: (provider: string) => {
+  writeSelectedProvider: (provider: string, options?: { automatic?: boolean }) => {
     page.providerWrites.push(provider);
+    page.automaticProviderWrites.push(options?.automatic === true);
   },
 }));
 
@@ -185,6 +188,7 @@ beforeEach(() => {
   page.inputs.clear();
   page.composerInserts.length = 0;
   page.providerWrites.length = 0;
+  page.automaticProviderWrites.length = 0;
   page.composersBySession.clear();
   localStorage.clear();
   vi.stubGlobal('requestAnimationFrame', () => 0);
@@ -434,6 +438,8 @@ describe('the page-wide selected provider', () => {
     view.rerender({ session: session('agy-session', 'agy'), focused: true });
     await settle();
     assert.deepEqual(page.providerWrites, ['codex', 'agy']);
+    // Both follow the pane, not a pick, so a hydrate that answers after them keeps the stored choice.
+    assert.deepEqual(page.automaticProviderWrites, [true, true]);
 
     view.rerender({ session: session('claude-session', 'claude'), focused: false });
     await settle();

@@ -147,7 +147,10 @@
       "ctrlEnter": "Ctrl+Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "queue": "Enter to queue your next message",
-      "appendQueued": "Enter to add to the queued message"
+      "appendQueued": "Enter to add to the queued message",
+      "insert": "{{insertKey}} to insert • {{queueKey}} to queue",
+      "insertAppendQueued": "{{insertKey}} to insert • {{queueKey}} to add to the queued message",
+      "sendBesideBackgroundWork": "{{sendKey}} to send • {{queueKey}} to queue until background work finishes"
     },
     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
     "showAllCommands": "Show all commands",
@@ -161,6 +164,34 @@
       "willSend": "Will send when this finishes",
       "edit": "Edit queued message",
       "delete": "Delete queued message"
+    },
+    "insert": {
+      "send": "Insert message",
+      "moreOptions": "More ways to send",
+      "menuLabel": "Send while {{provider}} is working",
+      "insert": "Insert",
+      "willRead": "{{provider}} reads it at its next step",
+      "queue": "Queue",
+      "queueDescription": "Send when this turn and any background work are done",
+      "queueAppend": "Add to the queued message",
+      "unsupported": "{{provider}} does not support insert, so it will be queued",
+      "slashCommand": "A slash command cannot be inserted, so it will be queued",
+      "attachments": "A message with attachments cannot be inserted yet, so it will be queued",
+      "unavailable": "Insert is not available right now, so it will be queued",
+      "label": "Inserting",
+      "afterApproval": "Delivered once the request above is answered",
+      "withdraw": "Withdraw inserted message",
+      "delivering": "Already being delivered, cannot withdraw",
+      "withdrawFailed": "Could not withdraw",
+      "notDelivered": "The insert was not delivered, so the message is back in the composer.",
+      "noResponse": "The insert got no answer, so the message is back in the composer.",
+      "deliveredLate": "The insert was delivered after all, so it does not need sending again."
+    },
+    "backgroundSend": {
+      "menuLabel": "Send while background work runs",
+      "send": "Send",
+      "sendDescription": "Starts a new turn; the background work keeps running",
+      "queueDescription": "Send when the background work finishes"
     }
   },
   "composer": {
@@ -258,7 +289,24 @@
     "resumeSession": "Resume session: {{displayName}}...",
     "runCommand": "Run {{command}} in {{projectName}}",
     "startCli": "Starting Claude CLI in {{projectName}}",
-    "defaultCommand": "command"
+    "defaultCommand": "command",
+    "sessionBusy": {
+      "title": "CloudCLI is still using this session",
+      "changed": "New work started on this session since you last looked, so nothing was stopped. Check what is running now before stopping it.",
+      "reason": {
+        "turn": "A chat turn is still running.",
+        "background": "Background tasks are still running:",
+        "held": "CloudCLI's Claude process still has this session open, most likely waiting on a Monitor or a scheduled wake-up.",
+        "exiting": "CloudCLI's Claude process is shutting down. This usually takes seconds, at most about 6 minutes.",
+        "queued": "A queued chat message goes out as soon as the session is free."
+      },
+      "consequence": "Opening it in the terminal now would have two processes writing to this session, and running tasks would be recorded as stopped.",
+      "queuedHint": "Send or withdraw the queued message in the chat first.",
+      "moreTasks": "+{{count}} more",
+      "retry": "Try again",
+      "takeOver": "Stop it and open here",
+      "takingOver": "Stopping…"
+    }
   },
   "claudeStatus": {
     "actions": {
@@ -286,9 +334,25 @@
       "agent": "Agent {{description}}",
       "command": "Command {{description}}",
       "count": "{{count}} tasks",
+      "stopped": "Background work stopped: this message changes {{changes}}, which only a new Claude process can apply.",
+      "stoppedLookupFailed": "Background work stopped: the message could not be handed to the process the work ran in.",
       "prompt": {
         "title": "This session still has background work running",
         "description": "A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.",
+        "descriptionNewProcess": "Sending it anyway starts a new process, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.",
+        "changes_one": "This message changes {{changes}}, which only a new process can apply. Change it back to send it without stopping the work.",
+        "changes_other": "This message changes {{changes}}, which only a new process can apply. Change them back to send it without stopping the work.",
+        "changeSeparator": ", ",
+        "changeLastSeparator": " and ",
+        "change": {
+          "model": "the model",
+          "effort": "the reasoning effort",
+          "ultracode": "Ultracode",
+          "permissionMode": "the permission mode",
+          "tools": "the tool permissions",
+          "cwd": "the working directory"
+        },
+        "lookupFailed": "The message could not be handed to the process the work runs in.",
         "cancel": "Cancel",
         "queue": "Queue",
         "sendAnyway": "Send anyway"
@@ -350,7 +414,9 @@
   "message": {
     "editAndResend": "Edit and resend",
     "forkFromHere": "Fork from here",
-    "answeredBy": "Answered by {{model}}"
+    "answeredBy": "Answered by {{model}}",
+    "inserted": "Inserted",
+    "insertedHint": "Sent while Claude was working, and read at its next step"
   },
   "export": {
     "trigger": "Export conversation",

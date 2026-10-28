@@ -1,11 +1,12 @@
 import { memo, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { GitBranchIcon, PencilIcon } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,Project } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
-import { getPaneScopedDomId } from '@/shared/utils';
+import { describeHandOverChanges, getPaneScopedDomId } from '@/shared/utils';
 import { formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
 import { ToolRenderer, ToolErrorDisplay, SubagentPanel, WorkflowPanel, shouldHideToolResult } from '@/modules/chat/tools';
 import { LLMProviderLogo } from '@/shared/ui';
@@ -70,6 +71,28 @@ function ToolResultAnchor({ toolId, isAnchor = true, children }: ToolResultAncho
 }
 
 /**
+ * The Claude runtime's notice that a send stopped the session's background
+ * work (an `error` row with code BACKGROUND_WORK_STOPPED), in the user's
+ * language: what needed a new process, or that the message could not be
+ * handed to the process the work ran in. The row's own English text stays
+ * when it names no change this client knows.
+ */
+const describeBackgroundWorkStopped = (changes: string[], fallback: string, t: TFunction): string => {
+  if (changes.includes('lookup')) {
+    return t('claudeStatus.backgroundTask.stoppedLookupFailed', {
+      defaultValue: 'Background work stopped: the message could not be handed to the process the work ran in.',
+    });
+  }
+  const changedSettings = describeHandOverChanges(changes, t);
+  return changedSettings.count > 0
+    ? t('claudeStatus.backgroundTask.stopped', {
+        changes: changedSettings.text,
+        defaultValue: 'Background work stopped: this message changes {{changes}}, which only a new Claude process can apply.',
+      })
+    : fallback;
+};
+
+/**
  * Rendered by chat's ChatMessagesPane and ToolGroupContainer to draw one
  * transcript entry — user turn, assistant turn, or a tool call and its result.
  */
@@ -84,12 +107,15 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
   const userCopyContent = String(message.content || '');
   const formattedMessageContent = useMemo(
     () => {
+      if (message.type === 'error' && message.errorCode === 'BACKGROUND_WORK_STOPPED') {
+        return describeBackgroundWorkStopped(message.errorChanges ?? [], String(message.content || ''), t);
+      }
       const content = formatUsageLimitText(String(message.content || ''));
       return provider === 'codex' && message.type === 'assistant' && !message.isThinking
         ? stripProposedPlanEnvelope(content)
         : content;
     },
-    [message.content, message.isThinking, message.type, provider]
+    [message.content, message.errorChanges, message.errorCode, message.isThinking, message.type, provider, t]
   );
   const assistantCopyContent = message.isToolUse
     ? String(message.displayText || message.content || '')
@@ -147,7 +173,19 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   </Markdown>
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                  {onEditMessage && message.transcriptAnchorId && (
+                  {/* Read in the middle of a turn: no conversation can resume
+                      from that point, so it offers no edit and no fork. */}
+                  {message.inserted && (
+                    <span
+                      className="rounded-full border border-primary/20 bg-primary/5 px-1.5 text-[10px] font-medium leading-4 text-primary/80"
+                      title={t('message.insertedHint', {
+                        defaultValue: 'Sent while Claude was working, and read at its next step',
+                      })}
+                    >
+                      {t('message.inserted', { defaultValue: 'Inserted' })}
+                    </span>
+                  )}
+                  {onEditMessage && message.transcriptAnchorId && !message.inserted && (
                     <button
                       type="button"
                       onClick={() => onEditMessage(message)}
@@ -158,7 +196,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                       <PencilIcon className="h-3.5 w-3.5" />
                     </button>
                   )}
-                  {onForkFromMessage && message.transcriptAnchorId && (
+                  {onForkFromMessage && message.transcriptAnchorId && !message.inserted && (
                     <button
                       type="button"
                       onClick={() => onForkFromMessage(message)}

@@ -61,6 +61,7 @@ function createDependencies({
       })) as unknown as AgentDependencies['runs']['startRun'],
       completeRunIfCurrent: () => undefined,
       isProcessing: () => false,
+      pendingAbort: () => null,
     },
     getRunner: (provider) => runners[provider] ?? unexpectedProviderCall,
     GithubClient: class {} as unknown as AgentDependencies['GithubClient'],

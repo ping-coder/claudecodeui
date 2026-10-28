@@ -63,8 +63,9 @@ export default function ProjectEffects() {
         return;
       }
 
+      // Follows the notified session's provider; the user picked a notification, not a provider.
       if (typeof message.provider === 'string' && message.provider.trim()) {
-        writeSelectedProvider(message.provider as LLMProvider);
+        writeSelectedProvider(message.provider as LLMProvider, { automatic: true });
       }
 
       setSidebarOpen(false);

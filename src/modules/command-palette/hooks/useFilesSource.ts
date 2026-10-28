@@ -13,23 +13,24 @@ export type FileResult = {
   isIgnored: boolean;
 };
 
-const MAX_FILES = 500;
+// The file tree answers 413 (FILE_TREE_TOO_LARGE) for a project of more than 10,000 entries.
+const FILE_TREE_TOO_LARGE_STATUS = 413;
 
 /**
- * Collects files one tree level at a time, so the root files people look for
- * most (CLAUDE.md, package.json) are in before one deep folder can use up the
- * whole budget.
+ * Lists every file one tree level at a time, so root files (CLAUDE.md,
+ * package.json) come first: they lead the list before anything is typed and
+ * win ties when a search scores files alike. The server's entry caps bound the
+ * list, so it needs no cap of its own.
  */
 function collectFiles(tree: FileTreeNode[]): FileResult[] {
   const files: FileResult[] = [];
   let level = tree.map((node) => ({ node, relativePath: node.name }));
 
-  while (level.length > 0 && files.length < MAX_FILES) {
+  while (level.length > 0) {
     const nextLevel: typeof level = [];
     for (const { node, relativePath } of level) {
       if (node.type === 'file') {
         files.push({ path: node.path, name: node.name, relativePath, isIgnored: node.isIgnored === true });
-        if (files.length >= MAX_FILES) break;
       } else {
         for (const child of node.children ?? []) {
           nextLevel.push({ node: child, relativePath: `${relativePath}/${child.name}` });
@@ -42,11 +43,13 @@ function collectFiles(tree: FileTreeNode[]): FileResult[] {
   return files;
 }
 
+/** Every file of the project, and whether the server refused to list them because the project is too large. */
 export function useFilesSource(projectId: string | undefined, enabled: boolean) {
-  return useApiSource<FileResult, unknown>({
+  const { items, status } = useApiSource<FileResult, unknown>({
     enabled: enabled && !!projectId,
     deps: [projectId],
     fetcher: (signal) => api.getFiles(projectId!, { markIgnored: true }, { signal }),
     parse: (data) => collectFiles(Array.isArray(data) ? (data as FileTreeNode[]) : []),
   });
+  return { files: items, tooLarge: status === FILE_TREE_TOO_LARGE_STATUS };
 }

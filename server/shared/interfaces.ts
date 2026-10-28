@@ -14,6 +14,12 @@ import type {
   ProviderMcpServer,
   ProviderSkillCreateInput,
   ProviderSkillRemoveInput,
+  ProviderCancelInsertResult,
+  ProviderHandOverPlan,
+  ProviderHandOverPlanOptions,
+  ProviderInsertInput,
+  ProviderInsertResult,
+  ProviderProcessState,
   ProviderRuntimeContext,
   ProviderRuntimePermissionGateway,
   ProviderRuntimeWriter,
@@ -30,6 +36,15 @@ import type {
  * execution context is supplied by the application service at call time.
  */
 export interface IProviderRuntime {
+  /**
+   * Runs one turn of a session, reporting through `writer`, and resolves
+   * when the runtime is done with the process it ran in. A runtime that keeps
+   * its process open past a turn for background work may run the session's
+   * next turn in that process instead of a new one, keeping the work going
+   * (Claude); that call resolves once its own turn is over. Options that set
+   * `inheritUnset: true` hand the turn over the way `planHandOver` plans it
+   * with that option (see `ProviderHandOverPlanOptions`).
+   */
   run(
     command: string,
     options: AnyRecord,
@@ -51,6 +66,73 @@ export interface IProviderRuntime {
    * settled, or the id was never one of its own.
    */
   stopBackgroundTask?(sessionId: string, taskId: string): Promise<boolean>;
+  /**
+   * Writes a user message into the session's running turn without stopping
+   * it: the model reads it once its current tool batch ends, or as the next
+   * turn of the same process when the turn ends first. Only a runtime whose
+   * CLI keeps reading prompts while a turn runs implements it; for the others
+   * the gateway answers UNSUPPORTED.
+   *
+   * `{ accepted: true }` means the runtime now owns the insert and reports it
+   * only through the run's writer, as `insert_status` frames carrying the
+   * content: `pending` first, then exactly one of `delivered`, `next_turn`,
+   * `cancelled` or `failed` (see `InsertStatus`). `delivered` also sends a
+   * user `text` message with `id` = insertId and `inserted: true`;
+   * `next_turn` sends an ordinary user message anchored at the insertId.
+   * While an accepted insert has not ended, the turn's `complete` waits.
+   *
+   * A refusal emits nothing: `NO_ACTIVE_RUN` when the session has no turn
+   * that can take it (not started, already complete, being aborted),
+   * `INVALID` for input it cannot use, `DUPLICATE` when the insertId was
+   * already used in this run (the CLI acts on a message uuid once).
+   */
+  insert?(sessionId: string, input: ProviderInsertInput): Promise<ProviderInsertResult>;
+  /**
+   * Withdraws an accepted insert before the model reads it. `cancelled`: it
+   * was withdrawn and the runtime has reported `insert_status cancelled`
+   * through the run's writer. `cancel_failed`: the CLI is already delivering
+   * it, so it carries on and still reports how it ends. `not_found`: the
+   * session's run does not hold that insert, because it has already ended or
+   * never existed. Nothing is emitted for the last two; the gateway answers
+   * the asking socket.
+   */
+  cancelInsert?(sessionId: string, insertId: string): Promise<ProviderCancelInsertResult>;
+  /**
+   * Whether this runtime's own process still holds the session (see
+   * `ProviderProcessState`): `running` from the moment a run starts, before
+   * its CLI is up, through its turn and any hold for background work;
+   * `exiting` while a process that let go of the session, or was retired or
+   * aborted, winds down; null when none does. Only a runtime that keeps a
+   * process past its turn implements it.
+   */
+  processState?(sessionId: string): ProviderProcessState | null;
+  /**
+   * Lets go of the session so a CLI can start on it: the run holding it is
+   * stopped the way a newer run of the session would replace it (its turn
+   * interrupted, its background tasks stopped), and the promise resolves once
+   * its process, and any other of the session's still exiting, is gone.
+   * Resolves at once when nothing holds the session. Only a runtime that
+   * implements `processState` implements it.
+   */
+  release?(sessionId: string): Promise<void>;
+  /**
+   * Whether a turn of the session run with `options` would go into the
+   * process this runtime holds open for the session's background work, as
+   * that process's next turn, keeping the work running, and what it would
+   * switch there (see `ProviderHandOverPlan`). Worked out without side
+   * effects: nothing is written to the process and nothing is switched.
+   * `options` are the run options `run` would get for the turn;
+   * `planOptions.inheritUnset` counts the settings they leave out as the live
+   * process's own (see `ProviderHandOverPlanOptions`), as does
+   * `inheritUnset: true` in `options`. Only a runtime that runs a new turn in
+   * a held process implements it (Claude); the gateway answers for the
+   * others that nothing is held.
+   */
+  planHandOver?(
+    sessionId: string,
+    options: AnyRecord,
+    planOptions?: ProviderHandOverPlanOptions,
+  ): Promise<ProviderHandOverPlan>;
 }
 
 /**

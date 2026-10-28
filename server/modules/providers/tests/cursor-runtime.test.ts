@@ -15,7 +15,11 @@ import type { ProviderRuntimeContext } from '@/shared/types.js';
  * PATH, so the real CLI is never run. The fake prints one stream-json `result`
  * line and exits 0. A prompt containing `fail` makes it exit 1 without a
  * result; one containing `linger` keeps it running after the result line
- * until FAKE_CURSOR_GATE_FILE exists (10 s at most).
+ * until FAKE_CURSOR_GATE_FILE exists (10 s at most); one containing `busy`
+ * keeps it mid-turn, with no result line, until it is killed (10 s at most).
+ * Without `--trust`, a prompt containing `trust` makes it print the workspace
+ * trust prompt and then its session's init line, and exit 1; with `hold` in
+ * the prompt as well, it waits instead until it is killed (10 s at most).
  */
 const FAKE_CURSOR_AGENT_SCRIPT = `
 const fs = require('node:fs');
@@ -24,6 +28,16 @@ const prompt = args[args.indexOf('-p') + 1] || '';
 if (prompt.includes('fail')) {
   process.stderr.write('Cursor failed\\n');
   process.exitCode = 1;
+} else if (prompt.includes('trust') && !args.includes('--trust')) {
+  process.stdout.write('Workspace Trust Required\\n');
+  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'cursor-native' }) + '\\n');
+  if (prompt.includes('hold')) {
+    setTimeout(() => undefined, 10000);
+  } else {
+    process.exitCode = 1;
+  }
+} else if (prompt.includes('busy')) {
+  setTimeout(() => undefined, 10000);
 } else {
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
   const gateFile = process.env.FAKE_CURSOR_GATE_FILE;
@@ -106,6 +120,16 @@ const writerOf = (userId: number, runStartedAt: number) => ({
   setSessionId: () => undefined,
 });
 
+/** A writer with no user behind it, so nothing is notified; it keeps what it was sent. */
+const recordingWriter = () => {
+  const sent: Array<{ kind?: unknown; exitCode?: unknown }> = [];
+  return {
+    sent,
+    send: (message: { kind?: unknown; exitCode?: unknown }) => { sent.push(message); },
+    setSessionId: () => undefined,
+  };
+};
+
 async function waitFor(condition: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (!condition()) {
@@ -169,5 +193,63 @@ test('a Cursor run whose process closes after the session\'s next run started is
         chatRunRegistry.clearAll();
       }
     });
+  });
+});
+
+test('a Cursor process that exits after the session\'s next run started leaves that run abortable', async () => {
+  await withFakeCursorAgent(async ({ projectDir, gateFile }) => {
+    const options = { sessionId: 'cursor-overlap-exit', cwd: projectDir };
+    const first = recordingWriter();
+    const firstTurn = cursorRuntime.run('linger', options, first, context);
+    // The `result` line ends the first run while its process keeps running.
+    await waitFor(() => first.sent.some((message) => message.kind === 'complete'), 'the first run\'s result line');
+
+    const secondTurn = cursorRuntime.run('busy', options, recordingWriter(), context);
+    // Only now, with the second run spawned, may the first process exit.
+    await writeFile(gateFile, '');
+    await firstTurn;
+
+    assert.equal(cursorRuntime.abort('cursor-overlap-exit'), true, 'the second run is still registered');
+    await assert.rejects(secondTurn, /exited with code null/);
+  });
+});
+
+test('a Cursor spawn failure reported after the session\'s next run started leaves that run abortable', async () => {
+  await withFakeCursorAgent(async ({ projectDir }) => {
+    const sessionId = 'cursor-overlap-error';
+    // A missing working directory fails the spawn, and Node reports that only
+    // after the second run, started right away, has spawned.
+    const firstTurn = cursorRuntime.run('busy', { sessionId, cwd: path.join(projectDir, 'missing') }, recordingWriter(), context);
+    const secondTurn = cursorRuntime.run('busy', { sessionId, cwd: projectDir }, recordingWriter(), context);
+    await assert.rejects(firstTurn, { code: 'ENOENT' });
+
+    assert.equal(cursorRuntime.abort(sessionId), true, 'the second run is still registered');
+    await assert.rejects(secondTurn, /exited with code null/);
+  });
+});
+
+test('a Cursor run that stops at the workspace trust prompt is retried with --trust', async () => {
+  await withFakeCursorAgent(async ({ projectDir }) => {
+    const writer = recordingWriter();
+    await cursorRuntime.run('trust me', { sessionId: 'cursor-trust-retry', cwd: projectDir }, writer, context);
+
+    const completes = writer.sent.filter((message) => message.kind === 'complete');
+    assert.deepEqual(completes.map((message) => message.exitCode), [0], 'the retry finished the turn');
+  });
+});
+
+test('a Cursor run stopped at the workspace trust prompt is not started over with --trust', async () => {
+  await withFakeCursorAgent(async ({ projectDir }) => {
+    const sessionId = 'cursor-trust-abort';
+    const writer = recordingWriter();
+    const turn = cursorRuntime.run('trust hold', { sessionId, cwd: projectDir }, writer, context);
+    // The init line comes after the trust prompt, so by the time the session
+    // is reported, the prompt has been read.
+    await waitFor(() => writer.sent.some((message) => message.kind === 'session_created'), 'the session after the trust prompt');
+
+    assert.equal(cursorRuntime.abort(sessionId), true);
+    await assert.rejects(turn, /exited with code null/);
+    // The abort handler reports the stopped run; a retry would report a finished one.
+    assert.equal(writer.sent.some((message) => message.kind === 'complete'), false);
   });
 });

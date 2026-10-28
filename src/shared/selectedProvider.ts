@@ -25,6 +25,14 @@ export function readSelectedProvider(): LLMProvider {
   return PROVIDERS.includes(stored as LLMProvider) ? (stored as LLMProvider) : DEFAULT_PROVIDER;
 }
 
-export function writeSelectedProvider(provider: LLMProvider): void {
-  writeUserPreference('selectedProvider', provider);
+/**
+ * `automatic` marks a write the page makes on its own (following the focused
+ * pane, opening a notification) rather than a provider the user picked; one made
+ * before the server's copy arrives does not overwrite the stored choice.
+ */
+export function writeSelectedProvider(
+  provider: LLMProvider,
+  options?: Parameters<typeof writeUserPreference>[2],
+): void {
+  writeUserPreference('selectedProvider', provider, options);
 }

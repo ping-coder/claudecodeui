@@ -80,3 +80,12 @@ test('Antigravity declares what its runtime implements', () => {
   assert.equal(capabilities.supportsMessageEditing, false);
   assert.equal(capabilities.supportsSessionForking, false);
 });
+
+test('only Claude can take a message into a running turn', () => {
+  const supportsMidRunInsert = Object.fromEntries(
+    providerCapabilitiesService.listAllProviderCapabilities()
+      .map((capabilities) => [capabilities.provider, capabilities.supportsMidRunInsert]),
+  );
+
+  assert.deepEqual(supportsMidRunInsert, { claude: true, cursor: false, codex: false, opencode: false, agy: false });
+});

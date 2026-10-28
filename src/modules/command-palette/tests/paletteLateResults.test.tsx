@@ -75,7 +75,7 @@ vi.mock('@/modules/command-palette/hooks/useFilesSource', async () => {
         },
         () => sources.files,
       );
-      return projectId && enabled ? files : [];
+      return { files: projectId && enabled ? files : [], tooLarge: false };
     },
   };
 });

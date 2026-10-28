@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { useLayoutEffect } from 'react';
+import { useEffect } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
@@ -75,7 +75,6 @@ vi.mock('@/modules/code-editor', () => ({
     editingFile: null,
     editorWidth: 0,
     editorExpanded: false,
-    hasManualWidth: false,
     resizeHandleRef: { current: null },
     handleFileOpen: (filePath: string) => {
       openedFiles.push(`${selectedProject?.projectId}:${filePath}`);
@@ -138,10 +137,13 @@ type PaletteOps = ReturnType<typeof usePaletteOps>;
 const harness: { panes: PanesState | null; ops: PaletteOps | null } = { panes: null, ops: null };
 const panes = () => harness.panes as PanesState;
 
+// Publishes a state only after its effects ran: the panes render before this probe, so their palette
+// registrations for it are in. Published at layout time, a long commit on a busy machine let a test click
+// before them (React runs those effects a task later), and the click did nothing.
 function HarnessProbe() {
   const panesState = useProjectPanesState();
   const ops = usePaletteOps();
-  useLayoutEffect(() => {
+  useEffect(() => {
     harness.panes = panesState;
     harness.ops = ops;
   });

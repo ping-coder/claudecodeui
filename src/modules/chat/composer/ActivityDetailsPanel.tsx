@@ -8,10 +8,10 @@ import type {
   ActivityDetailsWorkflow,
   BackgroundTaskStatus,
 } from '@/shared/types';
-import { cn } from '@/shared/utils';
+import { cn, describeBackgroundTask } from '@/shared/utils';
 import { Queue, QueueItem, QueueItemContent, QueueItemIndicator } from '@/modules/chat/tools/Queue';
 import { RunProgressBar } from '@/modules/chat/tools/RunProgressBar';
-import { describeBackgroundTask, formatTaskDuration } from '@/modules/chat/utils/backgroundTasks';
+import { formatTaskDuration } from '@/modules/chat/utils/backgroundTasks';
 import {
   computeProgressPercent,
   formatElapsed,

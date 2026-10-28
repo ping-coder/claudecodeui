@@ -94,6 +94,12 @@ type CommandPaletteProps = {
 /** Picks a session result for the other pane instead of the focused one. Handled here, inside the palette. */
 const OPEN_ON_OTHER_SIDE_SHORTCUT = ['mod', 'enter'] as const;
 
+/**
+ * Most file rows the files page renders. cmdk scores and re-sorts every rendered row on each
+ * keystroke, so the rest are reached by typing; a note below the list says some are left out.
+ */
+const FILES_PAGE_LIMIT = 100;
+
 const NAV_TABS: Array<{ id: AppTab; labelKey: string; keywords: string }> = [
   { id: 'chat', labelKey: 'commandPalette.navChat', keywords: 'chat messages conversation' },
   { id: 'files', labelKey: 'commandPalette.navFiles', keywords: 'files file tree explorer' },
@@ -156,7 +162,7 @@ function CommandPalette({
 
   const sessions = useSessionsSource(projectId, open && showSessions);
   const messageMatches = useSessionMessageSearch(projectId, search, open && showSessions);
-  const files = useFilesSource(projectId, open && showFiles);
+  const { files, tooLarge: filesTooLarge } = useFilesSource(projectId, open && showFiles);
   const commits = useCommitsSource(projectId, open && showCommits);
   const branches = useBranchesSource(projectId, open && showBranches);
   const git = useGitActions(projectId);
@@ -241,15 +247,34 @@ function CommandPalette({
   // Gitignored files (CLAUDE.md, .env, logs) are found by searching, but are not
   // listed while the search is empty, so the palette never opens on `.env`.
   const unignoredFiles = React.useMemo(() => files.filter((f) => !f.isIgnored), [files]);
-  const listedFiles = search ? files : unignoredFiles;
-  // The files page renders every file and lets cmdk search them. The root page
-  // renders only a few, and cmdk filters only what is rendered, so with a search
-  // it picks the few itself.
-  const filesShown = page === 'files'
-    ? listedFiles
-    : search
-      ? bestPathMatches(files, search, browseLimit)
-      : listedFiles.slice(0, browseLimit);
+  // cmdk filters only the rows it is given, so with a search the palette ranks every file itself,
+  // once per keystroke, and renders the best few (root page) or the best FILES_PAGE_LIMIT (files page).
+  const fileMatches = React.useMemo(() => (search ? rankPathMatches(files, search) : null), [files, search]);
+  const fileCandidates = fileMatches ?? unignoredFiles;
+  const filesShown = fileCandidates.slice(0, page === 'files' ? FILES_PAGE_LIMIT : browseLimit);
+  // Below the list: why no file can be found, or that the files page leaves some out.
+  let filesNote: string | null = null;
+  if (showFiles && projectId) {
+    if (filesTooLarge) {
+      // Not while the search is empty: the palette is often opened for its actions.
+      filesNote = search
+        ? t('commandPalette.filesTooLarge', {
+          defaultValue: 'Files are not listed for projects with more than 10,000 entries. Open a smaller folder as the project, or ignore build output in the root .gitignore.',
+        })
+        : null;
+    } else if (page === 'files' && fileCandidates.length > filesShown.length) {
+      filesNote = search
+        ? t('commandPalette.filesBestMatches', {
+          shown: filesShown.length,
+          defaultValue: 'Showing the {{shown}} best matches. Keep typing to narrow them down.',
+        })
+        : t('commandPalette.filesShownOf', {
+          shown: filesShown.length,
+          total: fileCandidates.length,
+          defaultValue: 'Showing {{shown}} of {{total}} files. Type to find the rest.',
+        });
+    }
+  }
   const commitsShown = page === 'commits' ? commits : commits.slice(0, browseLimit);
   const sessionsShown = page === 'sessions' ? sessionRows : sessionRows.slice(0, browseLimit);
   const branchesShown = page === 'branches' ? branches : branches.slice(0, browseLimit);
@@ -547,6 +572,9 @@ function CommandPalette({
               <React.Fragment key={group.id}>{group.node}</React.Fragment>
             ))}
           </CommandList>
+          {filesNote && (
+            <p className="border-t px-3 py-1.5 text-xs text-muted-foreground">{filesNote}</p>
+          )}
         </TopRowCommand>
       </DialogContent>
     </Dialog>
@@ -564,7 +592,7 @@ export default React.memo(CommandPalette);
  * runs the best row of whichever matching group is rendered first.
  */
 function rankGroupsByBestMatch(groups: PaletteGroup[], search: string, scoreRow: RowScorer): PaletteGroup[] {
-  // One group has nowhere to move, and the files page's one group holds hundreds of rows.
+  // One group has nowhere to move, and the files page's one group holds up to FILES_PAGE_LIMIT rows.
   if (groups.length < 2) {
     return groups;
   }
@@ -702,17 +730,16 @@ function scoreFile(file: FilePaths, search: string): number {
 }
 
 /**
- * Up to `limit` files that match `search`, best first. Scored the way cmdk
- * scores file rows (scoreFile), so cmdk keeps every file rendered from this
- * list and orders them the same way.
+ * Every file that matches `search`, best first. Scored the way cmdk scores file
+ * rows (scoreFile), so cmdk keeps every file rendered from this list and orders
+ * them the same way.
  */
-function bestPathMatches<T extends FilePaths>(files: T[], search: string, limit: number): T[] {
+function rankPathMatches<T extends FilePaths>(files: T[], search: string): T[] {
   return files
     .map((file) => ({ file, score: scoreFile(file, search) }))
     .filter(({ score }) => score > 0)
     // Array sort is stable, so equal scores keep the shallow-first order.
     .sort((left, right) => right.score - left.score)
-    .slice(0, limit)
     .map(({ file }) => file);
 }
 

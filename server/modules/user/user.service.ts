@@ -24,6 +24,11 @@ type UserDependencies = {
   preferences: {
     getPreferences(userId: number): Record<string, unknown>;
     savePreferences(userId: number, updates: Record<string, unknown>): void;
+    patchPreferences(
+      userId: number,
+      set: Record<string, unknown>,
+      merge: Record<string, Record<string, unknown>>,
+    ): void;
   };
   drafts: {
     getDrafts(userId: number): DraftRecord[];
@@ -109,6 +114,53 @@ const readPreferenceUpdates = (body: unknown): Record<string, unknown> => {
   return updates;
 };
 
+type PreferencePatchGroup = 'set' | 'merge';
+
+const PREFERENCE_PATCH_GROUPS: PreferencePatchGroup[] = ['set', 'merge'];
+
+const invalidPreferencePatch = (message: string) => new AppError(message, {
+  code: 'INVALID_PREFERENCES',
+  statusCode: 400,
+});
+
+/** Reads one group of a merge-route body; an absent group is empty. */
+const readPreferencePatchGroup = (body: Record<string, unknown>, group: PreferencePatchGroup) => {
+  const value = body[group];
+  if (value === undefined) {
+    return {};
+  }
+  if (!isPlainObject(value)) {
+    throw invalidPreferencePatch(`"${group}" must be an object`);
+  }
+  return readPreferenceUpdates(value);
+};
+
+/**
+ * Reads a PATCH /preferences/merge body: `{ set?: {...}, merge?: {...} }`.
+ * Keys follow the same 1-200 character rule as PATCH /preferences, and every
+ * `merge` value must be an object, because its fields are what get merged.
+ */
+const readPreferencePatch = (body: unknown) => {
+  if (!isPlainObject(body)) {
+    throw invalidPreferencePatch('Preferences must be sent as an object');
+  }
+  const unknownField = Object.keys(body).find(
+    (field) => !PREFERENCE_PATCH_GROUPS.includes(field as PreferencePatchGroup),
+  );
+  if (unknownField !== undefined) {
+    throw invalidPreferencePatch(`Unknown field "${unknownField}": only "set" and "merge" are accepted`);
+  }
+
+  const set = readPreferencePatchGroup(body, 'set');
+  const merge = readPreferencePatchGroup(body, 'merge');
+  for (const [key, patch] of Object.entries(merge)) {
+    if (!isPlainObject(patch)) {
+      throw invalidPreferencePatch(`The merge value for "${key}" must be an object`);
+    }
+  }
+  return { set, merge: merge as Record<string, Record<string, unknown>> };
+};
+
 /** Creates user-profile workflows with explicit repository and Git adapters. */
 export function createUserService(dependencies: UserDependencies) {
   return {
@@ -179,13 +231,28 @@ export function createUserService(dependencies: UserDependencies) {
     },
 
     /**
-     * Merge-patch: only the keys in the request body are touched, so two
-     * independent settings screens can save concurrently without one erasing
-     * the other's work.
+     * Only the keys in the request body are touched, and each of them is
+     * replaced whole, so two settings screens saving different keys never
+     * erase each other's work. Pages built before PATCH /preferences/merge
+     * save every key here, and current pages fall back to it for a server
+     * that does not have that route.
      */
     savePreferences(userId: number, body: unknown) {
       const updates = readPreferenceUpdates(body);
       dependencies.preferences.savePreferences(userId, updates);
+      return { success: true, preferences: dependencies.preferences.getPreferences(userId) };
+    },
+
+    /**
+     * `set` keys are replaced whole, as savePreferences does. Each `merge` key
+     * names some fields of an object preference: those fields are written (a
+     * null one removed) and the stored fields not named are kept, so a page
+     * that changed one editor setting cannot put back an older copy of the
+     * others.
+     */
+    patchPreferences(userId: number, body: unknown) {
+      const { set, merge } = readPreferencePatch(body);
+      dependencies.preferences.patchPreferences(userId, set, merge);
       return { success: true, preferences: dependencies.preferences.getPreferences(userId) };
     },
 

@@ -7,6 +7,7 @@ import test, { mock } from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { handleChatConnection } from '@/modules/websocket/services/chat-websocket.service.js';
+import type { ProviderRuntimeGateway } from '@/modules/websocket/services/chat-websocket.service.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 
@@ -32,6 +33,26 @@ function createFakeSocket() {
   socket.frames = [];
   socket.send = (data: string) => socket.frames.push(JSON.parse(data) as Record<string, unknown>);
   return socket;
+}
+
+/**
+ * A runtime gateway with nothing going on except what `overrides` says. Typed
+ * as the full gateway so a method added to it has to be answered here too.
+ */
+function createGateway(overrides: Partial<ProviderRuntimeGateway> = {}): ProviderRuntimeGateway {
+  return {
+    hasRuntime: () => true,
+    run: async () => undefined,
+    abort: async () => false,
+    stopBackgroundTask: async () => false,
+    hasBackgroundWork: () => false,
+    resolveToolApproval: () => {},
+    getPendingApprovalsForSession: () => [],
+    insert: async () => ({ accepted: true }),
+    cancelInsert: async () => ({ status: 'cancelled' }),
+    planHandOver: async () => ({ heldWork: false, canHandOver: false, changes: [], switches: [] }),
+    ...overrides,
+  };
 }
 
 async function withIsolatedDatabase(runTest: () => Promise<void>): Promise<void> {
@@ -82,7 +103,7 @@ test('a tab that subscribes during background work receives the run\'s later eve
     handleChatConnection(
       newTab as never,
       { user: { id: 1 } } as never,
-      { runtime: { hasBackgroundWork: (sessionId: string) => sessionId === SESSION_ID, getPendingApprovalsForSession: () => [] } as never },
+      { runtime: createGateway({ hasBackgroundWork: (sessionId) => sessionId === SESSION_ID }) },
     );
     newTab.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: SESSION_ID, lastSeq: 0 }] }));
     await settle();
@@ -107,13 +128,52 @@ test('a tab that subscribes to an idle session is not attached to its old run', 
     handleChatConnection(
       newTab as never,
       { user: { id: 1 } } as never,
-      { runtime: { hasBackgroundWork: () => false, getPendingApprovalsForSession: () => [] } as never },
+      { runtime: createGateway() },
     );
     newTab.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: SESSION_ID, lastSeq: 0 }] }));
     await settle();
 
     run.writer.send({ kind: 'task_status', provider: 'claude', sessionId: 'native-1', event: 'notification', taskId: 't1', status: 'completed' } as never);
     assert.ok(!newTab.frames.some((frame) => frame.kind === 'task_status'));
+  });
+});
+
+test('an insert while only background work is left is refused as NO_ACTIVE_RUN', async () => {
+  // The turn has ended, so there is nothing to insert into: the client sends
+  // the message normally, which Claude runs as a new turn of the process the
+  // work runs in.
+  await withIsolatedDatabase(async () => {
+    startAndCompleteRun(createFakeSocket());
+
+    const inserts: string[] = [];
+    const tab = createFakeSocket();
+    handleChatConnection(
+      tab as never,
+      { user: { id: 1 } } as never,
+      {
+        runtime: createGateway({
+          hasBackgroundWork: (sessionId) => sessionId === SESSION_ID,
+          insert: async (_provider, _sessionId, input) => {
+            inserts.push(input.insertId);
+            return { accepted: true };
+          },
+        }),
+      },
+    );
+    tab.emit('message', JSON.stringify({
+      type: 'chat.insert',
+      sessionId: SESSION_ID,
+      insertId: '0b9f3a52-7c1d-4e8a-a6b2-5d4c3b2a1f0e',
+      content: 'and run the linter',
+    }));
+    await settle();
+
+    assert.deepEqual(inserts, []);
+    // The turn's run_ended broadcast reaches every tab as well.
+    const replies = tab.frames.filter((frame) => frame.kind === 'insert_status');
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0]?.insertStatus, 'refused');
+    assert.equal(replies[0]?.insertReason, 'NO_ACTIVE_RUN');
   });
 });
 

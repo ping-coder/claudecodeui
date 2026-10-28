@@ -764,6 +764,19 @@ export function useSessionStore() {
   }, [getSlot, notify]);
 
   /**
+   * Takes one live row back out by id: a row this page wrote that turned out
+   * wrong, such as the echo of a send the server refused. Nothing happens when
+   * the row is gone already (a history refresh replaced it).
+   */
+  const removeRealtime = useCallback((sessionId: string, messageId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot || !slot.realtimeMessages.some((message) => message.id === messageId)) return;
+    slot.realtimeMessages = slot.realtimeMessages.filter((message) => message.id !== messageId);
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [notify]);
+
+  /**
    * Refreshes only the persisted tail and stitches it onto the contiguous
    * cached suffix. Large turns request a small offset bridge rather than the
    * whole transcript, and the final state is applied atomically.
@@ -886,6 +899,7 @@ export function useSessionStore() {
     fetchFromServer,
     fetchMore,
     appendRealtime,
+    removeRealtime,
     truncateAt,
     refreshLatestFromServer,
     setActiveSession,
@@ -896,7 +910,7 @@ export function useSessionStore() {
     getMessages,
     getSessionSlot,
   }), [
-    fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
+    fetchFromServer, fetchMore, appendRealtime, removeRealtime, truncateAt, refreshLatestFromServer,
     setActiveSession, isStale, updateStreaming, finalizeStreaming, discardStreaming,
     getMessages, getSessionSlot,
   ]);

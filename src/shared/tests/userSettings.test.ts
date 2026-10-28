@@ -15,8 +15,10 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 type SavedPayload = Record<string, unknown>;
 
 const saved: SavedPayload[] = [];
-let serverPreferences: Record<string, unknown> = {};
+let serverPreferences: Record<string, unknown> | null = {};
 let preferencesRequestFailed = false;
+// The status GET /api/user/preferences answers with; its body is the same either way.
+let preferencesStatus = 200;
 
 vi.mock('@/shared/api', () => ({
   api: {
@@ -26,12 +28,17 @@ vi.mock('@/shared/api', () => ({
           throw new Error('offline');
         }
         return new Response(JSON.stringify({ success: true, preferences: serverPreferences }), {
-          status: 200,
+          status: preferencesStatus,
           headers: { 'Content-Type': 'application/json' },
         });
       },
       savePreferences: async (updates: SavedPayload) => {
         saved.push(updates);
+        return new Response('{}', { status: 200 });
+      },
+      // Only field-level writes use this route; recorded so that any save shows.
+      patchPreferences: async (changes: SavedPayload) => {
+        saved.push(changes);
         return new Response('{}', { status: 200 });
       },
     },
@@ -48,6 +55,7 @@ beforeEach(() => {
   saved.length = 0;
   serverPreferences = {};
   preferencesRequestFailed = false;
+  preferencesStatus = 200;
   vi.useFakeTimers();
 });
 
@@ -193,21 +201,48 @@ test('a failed hydrate keeps the mirrored values instead of snapping back to def
   assert.equal(store.hasHydratedUserPreferences(), false);
 });
 
-test('hydrate cancels a write queued before it, so a second device cannot clobber the server', async () => {
-  // The failure this pins, observed end to end: on a device with an empty
-  // mirror, ThemeProvider started on the system default and queued
-  // `theme: light`; hydrate then delivered the stored `dark` and the component
-  // stopped writing because the in-memory value already matched — so the stale
-  // `light` flushed a moment later and reset the user's theme for every device.
-  serverPreferences = { theme: 'dark' };
+test('hydrate cancels a write the page made on its own before it, so a second device cannot clobber the server', async () => {
+  // The failure this pins: on a device with an empty mirror, the page starts
+  // on the default provider and the focused pane writes it on its own before
+  // the stored choice arrives. Flushed after the hydrate, that start-up value
+  // would reset the user's choice for every device.
+  serverPreferences = { selectedProvider: 'codex' };
   const store = await loadStore();
+  const { writeSelectedProvider } = await import('@/shared/selectedProvider');
 
-  store.writeUserPreference('theme', 'light');
+  writeSelectedProvider('claude', { automatic: true });
   await store.hydrateUserPreferences();
   await vi.advanceTimersByTimeAsync(500);
 
   assert.deepEqual(saved, [], 'the pre-hydrate write must not reach the server');
-  assert.equal(store.readUserPreference('theme', null), 'dark');
+  assert.equal(store.readUserPreference('selectedProvider', null), 'codex');
+});
+
+test('a choice the user made before the hydrate answered survives it and is sent', async () => {
+  serverPreferences = { theme: 'dark', projectSortOrder: 'name' };
+  const store = await loadStore();
+
+  store.writeUserPreference('theme', 'light');
+  store.writeUserPreferences({ projectSortOrder: 'date' });
+  await store.hydrateUserPreferences();
+
+  assert.equal(store.readUserPreference('theme', null), 'light');
+  assert.equal(store.readUserPreference('projectSortOrder', null), 'date');
+  await vi.advanceTimersByTimeAsync(500);
+  assert.deepEqual(saved, [{ theme: 'light', projectSortOrder: 'date' }]);
+});
+
+test('a migrated value not sent yet gives way to a later hydrate that finds the key on the server', async () => {
+  localStorage.setItem('theme', 'dark');
+  const store = await loadStore();
+  await store.hydrateUserPreferences();
+  // Another device stores a theme before the migrated one has gone out.
+  serverPreferences = { theme: 'light' };
+  await store.hydrateUserPreferences();
+  await vi.advanceTimersByTimeAsync(500);
+
+  assert.equal(store.readUserPreference('theme', null), 'light');
+  assert.deepEqual(saved, [], 'the legacy value never reaches the server');
 });
 
 test('hydrate leaves a queued write for a key the server has no answer for', async () => {
@@ -229,4 +264,51 @@ test('reset clears the copy so the next user does not inherit the previous one',
 
   assert.equal(store.readUserPreference('theme', 'light'), 'light');
   assert.equal(localStorage.getItem('user-preferences'), null);
+});
+
+/**
+ * Seeds a browser that has migrated: the mirror holds the server's copy, and
+ * the legacy keys the migration read from were never removed.
+ */
+const seedMigratedBrowser = (): string => {
+  localStorage.setItem('theme', 'light');
+  localStorage.setItem('claude-settings', JSON.stringify({ allowedTools: ['Read'], projectSortOrder: 'name' }));
+  const mirror = JSON.stringify({
+    theme: 'dark',
+    claudePermissions: { allowedTools: ['Read', 'Grep'], skipPermissions: true },
+  });
+  localStorage.setItem('user-preferences', mirror);
+  return mirror;
+};
+
+test('a hydrate answered with an error status keeps the mirror and migrates nothing', async () => {
+  // A 502 used to read as an empty server, so the long-replaced legacy values
+  // were adopted and pushed over the user's real settings.
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const mirror = seedMigratedBrowser();
+  preferencesStatus = 502;
+
+  const store = await loadStore();
+  await store.hydrateUserPreferences();
+
+  assert.equal(store.readUserPreference('theme', 'light'), 'dark');
+  assert.equal(localStorage.getItem('user-preferences'), mirror);
+  assert.equal(store.hasHydratedUserPreferences(), false);
+  await vi.advanceTimersByTimeAsync(500);
+  assert.equal(saved.length, 0, 'nothing is pushed up');
+});
+
+test('a hydrate whose answer carries no preferences object is a failed read too', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const mirror = seedMigratedBrowser();
+  serverPreferences = null;
+
+  const store = await loadStore();
+  await store.hydrateUserPreferences();
+
+  assert.equal(store.readUserPreference('theme', 'light'), 'dark');
+  assert.equal(localStorage.getItem('user-preferences'), mirror);
+  assert.equal(store.hasHydratedUserPreferences(), false);
+  await vi.advanceTimersByTimeAsync(500);
+  assert.equal(saved.length, 0, 'nothing is pushed up');
 });

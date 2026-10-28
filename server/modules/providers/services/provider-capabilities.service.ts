@@ -46,6 +46,13 @@ type ProviderCapabilities = {
    */
   supportsMessageEditing: boolean;
   /**
+   * Whether a message sent while a turn runs can go into that turn
+   * (`chat.insert`), read by the model once its current tool batch ends,
+   * instead of being queued for after the turn. Requires a CLI that keeps
+   * reading prompts while a turn runs.
+   */
+  supportsMidRunInsert: boolean;
+  /**
    * Whether a session's transcript can be branched into an independent one.
    */
   supportsSessionForking: boolean;
@@ -75,6 +82,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // `resumeSessionAt` re-runs a conversation truncated at a message, and
     // `forkSession` copies a transcript prefix into a new session file.
     supportsMessageEditing: true,
+    // The prompt stream stays open for the whole run, and the CLI reads a
+    // user message written mid-turn after the current tool batch.
+    supportsMidRunInsert: true,
     supportsSessionForking: true,
   },
   cursor: {
@@ -90,6 +100,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     effortLevels: [],
     supportsUltracode: false,
     supportsMessageEditing: false,
+    supportsMidRunInsert: false,
     supportsSessionForking: false,
   },
   codex: {
@@ -109,6 +120,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // thread up to a chosen turn. Editing is that fork plus a new prompt,
     // which is how Codex's own IDE clients do it.
     supportsMessageEditing: true,
+    // `codex exec` closes stdin once the prompt is written; app-server's
+    // turn/steer would be the way in.
+    supportsMidRunInsert: false,
     supportsSessionForking: true,
   },
   opencode: {
@@ -129,6 +143,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
     supportsUltracode: false,
     supportsMessageEditing: false,
+    supportsMidRunInsert: false,
     supportsSessionForking: false,
   },
   agy: {
@@ -150,6 +165,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
     supportsUltracode: false,
     supportsMessageEditing: false,
+    supportsMidRunInsert: false,
     supportsSessionForking: false,
   },
 };

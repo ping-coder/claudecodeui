@@ -4,11 +4,11 @@ import type { TFunction } from 'i18next';
 import { X } from 'lucide-react';
 
 import type { BackgroundTaskSummary, ChatMessage } from '@/shared/types';
+import { ownBackgroundTasks } from '@/shared/utils';
 import {
   describeWorkflowAgent,
   findCurrentWorkflowAgent,
   listRunningBackgroundLaunches,
-  ownBackgroundTasks,
   readBackgroundTaskId,
   readBackgroundTaskStatus,
 } from '@/modules/chat/utils/backgroundTasks';

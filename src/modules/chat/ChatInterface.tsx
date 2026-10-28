@@ -99,7 +99,7 @@ function ChatInterface({
   onShowAllTasks,
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
-  const { subscribe } = useWebSocket();
+  const { subscribe, isConnected } = useWebSocket();
   const { t } = useTranslation('chat');
   // Only the focused pane answers page-wide keys and takes text from other modules.
   const { isFocusedPane } = useWorkspacePane();
@@ -160,6 +160,7 @@ function ChatInterface({
     supportsSessionForking,
     supportsImageAttachments,
     supportsFileAttachments,
+    supportsMidRunInsert,
   } = useChatProviderState({
     selectedSession,
     selectedProject,
@@ -219,6 +220,26 @@ function ChatInterface({
     isFocusedPaneRef.current = isFocusedPane;
   });
 
+  // Which of the given message ids a session's transcript holds after its
+  // latest page is re-read: how the composer tells whether an insert whose run
+  // ended unheard landed. A delivered insert's message has the insertId as its
+  // id; one that ran as the next turn has it as its anchor. Read even while
+  // this chat is hidden, as the answer decides whether text comes back: one
+  // bounded request, made only for an insert that has not settled.
+  const findTranscriptMessages = useCallback(async (sessionId: string, messageIds: string[]) => {
+    await sessionStore.refreshLatestFromServer(sessionId);
+    const wanted = new Set(messageIds);
+    const found = new Set<string>();
+    for (const message of sessionStore.getMessages(sessionId)) {
+      for (const id of [message.id, message.transcriptAnchorId]) {
+        if (id && wanted.has(id)) {
+          found.add(id);
+        }
+      }
+    }
+    return found;
+  }, [sessionStore]);
+
   // Brand-new conversation: the composer allocated a stable session id via
   // the session gateway before the first send. Record it locally and put it
   // in the URL — this id never changes again, so there is no later handoff.
@@ -256,6 +277,13 @@ function ChatInterface({
     isDragActive,
     openAttachmentPicker,
     handleSubmit,
+    submitWithBusyMode,
+    insertUnavailableReason,
+    pendingInserts,
+    withdrawInsert,
+    handleInsertStatus,
+    handleInsertRunEnded,
+    handleSendRefused,
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,
@@ -295,6 +323,9 @@ function ChatInterface({
     isLoading: isProcessing,
     processingSessions,
     canAbortSession,
+    supportsMidRunInsert,
+    isConnected,
+    findTranscriptMessages,
     tokenBudget,
     sendMessage,
     sendByCtrlEnter,
@@ -304,6 +335,8 @@ function ChatInterface({
     onShowSettings,
     scrollToBottom,
     addMessage,
+    removeMessage: sessionStore.removeRealtime,
+    onSessionBackground,
     setIsUserScrolledUp,
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
@@ -345,6 +378,9 @@ function ChatInterface({
     onSessionBackground,
     getSessionActivity,
     onWebSocketReconnect: handleWebSocketReconnect,
+    onInsertStatus: handleInsertStatus,
+    onInsertRunEnded: handleInsertRunEnded,
+    onSendRefused: handleSendRefused,
     requestLatestMessages,
     sessionStore,
   });
@@ -715,6 +751,10 @@ function ChatInterface({
           onResolveBackgroundSendPrompt={resolveBackgroundSendPrompt}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
+          pendingInserts={pendingInserts}
+          onWithdrawInsert={withdrawInsert}
+          insertUnavailableReason={insertUnavailableReason}
+          onSubmitBusyMode={submitWithBusyMode}
           attachedFiles={attachedFiles}
           onRemoveAttachment={(index) =>
             setAttachedFiles((previous) =>

@@ -90,7 +90,6 @@ const sidebar = (isMobile: boolean) => (
       isMobile={isMobile}
       editorExpanded={false}
       editorWidth={600}
-      hasManualWidth={false}
       resizeHandleRef={{ current: null }}
       onResizeStart={() => undefined}
       onCloseEditor={() => undefined}

@@ -382,6 +382,9 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       // Carried through so a rendered user bubble can address its own
       // transcript row when the user edits or forks from it.
       transcriptAnchorId: msg.transcriptAnchorId,
+      // A message the model read mid-turn: labelled as inserted, and never
+      // offered for editing or forking.
+      inserted: msg.inserted,
       compact: msg.compact,
       // Set by the provider only on an assistant reply, and only when it knows
       // which model produced it, so every other row simply carries undefined.
@@ -513,6 +516,10 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
           type: 'error',
           content: msg.content || 'Unknown error',
           timestamp: msg.timestamp,
+          // A code the transcript words itself, in the user's language (see
+          // MessageComponent), with `content` the fallback.
+          ...(typeof msg.code === 'string' ? { errorCode: msg.code } : {}),
+          ...(Array.isArray(msg.changes) ? { errorChanges: msg.changes } : {}),
           ...sharedMetadata,
         });
         break;
@@ -540,8 +547,8 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
         }
         break;
 
-      // stream_end, complete, status, permission_*, session_created
-      // are control events — not rendered as messages
+      // stream_end, complete, status, permission_*, session_created and
+      // insert_status are control events — not rendered as messages
       case 'stream_end':
       case 'complete':
       case 'status':
@@ -549,6 +556,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       case 'permission_resolved':
       case 'permission_cancelled':
       case 'session_created':
+      case 'insert_status':
         // Skip — these are handled by useChatRealtimeHandlers
         break;
 

@@ -20,7 +20,6 @@ export const useEditorSidebar = ({
   const [editorWidth, setEditorWidth] = useState(initialWidth);
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-  const [hasManualWidth, setHasManualWidth] = useState(false);
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
   // Whether the open editor's buffer differs from disk, as reported by
   // CodeEditor. A ref rather than state or a dependency: it is only read inside
@@ -95,8 +94,6 @@ export const useEditorSidebar = ({
         return;
       }
 
-      // After first drag interaction, the editor width is user-controlled.
-      setHasManualWidth(true);
       setIsResizing(true);
       event.preventDefault();
     },
@@ -173,7 +170,6 @@ export const useEditorSidebar = ({
     editingFile,
     editorWidth,
     editorExpanded,
-    hasManualWidth,
     resizeHandleRef,
     handleFileOpen,
     handleCloseEditor,

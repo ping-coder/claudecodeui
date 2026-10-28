@@ -11,7 +11,8 @@ import { useFileTreeOperations } from '@/modules/file-tree/hooks/useFileTreeOper
 import { useFileTreeSearch } from '@/modules/file-tree/hooks/useFileTreeSearch';
 import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMode';
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
-import type { DirectoryRevealRequest, FileTreeImageSelection, FileTreeNode,Project } from '@/shared/types';
+import type { DirectoryRevealRequest, FileTreeDetailedColumn, FileTreeImageSelection, FileTreeNode,Project } from '@/shared/types';
+import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { formatFileSize, formatRelativeTime, isImageFile } from '@/modules/file-tree/utils/fileTreeUtils';
 import { directoryRevealFolders } from '@/modules/file-tree/utils/revealDirectory';
 import { ScrollArea, Input } from '@/shared/ui';
@@ -22,6 +23,25 @@ import FileTreeLoadingState from '@/modules/file-tree/FileTreeLoadingState';
 import FileTreeUploadProgress from '@/modules/file-tree/FileTreeUploadProgress';
 import ImageViewer from '@/modules/file-tree/ImageViewer';
 
+
+// Detailed-view columns that fit a tree this wide, widest tier first. A width of 0 (not measured yet,
+// or jsdom) keeps every column, as the tree always showed them.
+const DETAILED_COLUMN_TIERS: ReadonlyArray<{ minWidth: number; columns: readonly FileTreeDetailedColumn[] }> = [
+  { minWidth: 480, columns: ['size', 'modified', 'permissions'] },
+  { minWidth: 380, columns: ['size', 'modified'] },
+  { minWidth: 280, columns: ['size'] },
+  { minWidth: 1, columns: [] },
+];
+
+// Fixed tracks keep the header and every row on one grid; the name takes what is left.
+const DETAILED_COLUMN_TRACKS: Record<FileTreeDetailedColumn, string> = {
+  size: '4.5rem',
+  modified: '6.5rem',
+  permissions: '5.5rem',
+};
+
+const selectDetailedColumns = (width: number): readonly FileTreeDetailedColumn[] =>
+  (width === 0 ? DETAILED_COLUMN_TIERS[0] : DETAILED_COLUMN_TIERS.find((tier) => width >= tier.minWidth) ?? DETAILED_COLUMN_TIERS[0]).columns;
 
 type FileTreeProps = {
   selectedProject: Project | null;
@@ -98,6 +118,11 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
     showToast,
   });
   const operationLoading = operations.operationLoading || upload.operationLoading;
+
+  // Which detailed columns fit the tree's own width (a docked editor, a split pane or a phone narrows it).
+  // `loading` re-measures once the root replaces the loading state.
+  const detailedColumns = useElementWidth(treeRef, selectDetailedColumns, loading);
+  const detailedGridTemplate = ['minmax(0, 1fr)', ...detailedColumns.map((column) => DETAILED_COLUMN_TRACKS[column])].join(' ');
 
   // Folder-targeted uploads (context menu / hover button) share one hidden
   // input; the target path is remembered until the user picks the files.
@@ -234,9 +259,12 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
 
       <FileTreeUploadProgress upload={upload.uploadProgress} />
 
-      {viewMode === 'detailed' && filteredFiles.length > 0 && <FileTreeDetailedColumns />}
-
       <ScrollArea className="flex-1 px-2 py-1">
+        {/* Inside the scroller, so a vertical scrollbar narrows the labels and the rows alike. */}
+        {viewMode === 'detailed' && filteredFiles.length > 0 && (
+          <FileTreeDetailedColumns columns={detailedColumns} gridTemplate={detailedGridTemplate} />
+        )}
+
         {/* New item input */}
         {operations.isCreating && (
           <div
@@ -275,6 +303,8 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
           error={error}
           searchQuery={searchQuery}
           viewMode={viewMode}
+          detailedColumns={detailedColumns}
+          detailedGridTemplate={detailedGridTemplate}
           expandedDirs={expandedDirs}
           onItemClick={handleItemClick}
           renderFileIcon={renderFileIcon}

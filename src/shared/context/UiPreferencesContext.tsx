@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, useRef } from 'react';
+import { createContext, useContext, useEffect, useMemo, useReducer } from 'react';
 import type { ReactNode } from 'react';
 
 import {
@@ -6,7 +6,7 @@ import {
   uiPreferencesReducer,
 } from '@/shared/uiPreferences';
 import type { UiPreferenceKey, UiPreferences } from '@/shared/uiPreferences';
-import { subscribeToUserPreferences, writeUserPreference } from '@/shared/userSettings';
+import { patchUserPreference, subscribeToUserPreferences } from '@/shared/userSettings';
 
 type UiPreferenceActions = {
   setPreference: (key: UiPreferenceKey, value: boolean) => void;
@@ -25,7 +25,9 @@ const UiPreferencesActionsContext = createContext<UiPreferenceActions | null>(nu
  * tagged with a per-instance id — so one toggle produced four localStorage
  * writes and four DOM events. With a single owner that channel is unnecessary,
  * and the preferences themselves now live in `auth.db`, which is what carries a
- * change to another tab or another device.
+ * change to another tab or another device. A toggle sends only its own key,
+ * which the server merges in, so a page holding an older copy of the others
+ * never writes them back.
  */
 export function UiPreferencesProvider({ children }: { children: ReactNode }) {
   // The single copy of the preferences. Every consumer used to hold its own
@@ -37,31 +39,22 @@ export function UiPreferencesProvider({ children }: { children: ReactNode }) {
     readStoredUiPreferences,
   );
 
-  // Persisting from an effect keyed on the state would also fire on mount —
-  // pushing the defaults to the server before the user's real preferences had
-  // even been fetched — and again for every value that *arrived* from the
-  // store, echoing each hydrate straight back. Comparing by content, not by
-  // reference, keeps the write one-directional: the reducer returns a fresh
-  // object for an incoming change, so an identity check would not catch it.
-  const lastPersistedRef = useRef<string>(JSON.stringify(preferences));
-
+  // The store is the only copy that is written: a toggle patches its one key
+  // there, and this state follows the store, which notifies synchronously, so
+  // the toggle shows in the same frame. Nothing is written on mount, a value
+  // arriving from a hydrate is never echoed back, and the defaults filled in
+  // for keys the user never toggled are never sent.
   useEffect(() => {
-    const serialized = JSON.stringify(preferences);
-    if (lastPersistedRef.current === serialized) {
-      return;
-    }
-    lastPersistedRef.current = serialized;
-    writeUserPreference('uiPreferences', preferences);
-  }, [preferences]);
-
-  useEffect(() => subscribeToUserPreferences(() => {
-    const stored = readStoredUiPreferences();
-    lastPersistedRef.current = JSON.stringify(stored);
-    dispatch({ type: 'set_many', value: stored });
-  }), []);
+    const followStore = () => dispatch({ type: 'set_many', value: readStoredUiPreferences() });
+    const unsubscribe = subscribeToUserPreferences(followStore);
+    // Catches a write made between the first render and this subscription,
+    // such as one from a child's mount effect, which runs before this one.
+    followStore();
+    return unsubscribe;
+  }, []);
 
   const actions = useMemo<UiPreferenceActions>(() => ({
-    setPreference: (key, value) => dispatch({ type: 'set', key, value }),
+    setPreference: (key, value) => patchUserPreference('uiPreferences', { [key]: value }),
   }), []);
 
   return (

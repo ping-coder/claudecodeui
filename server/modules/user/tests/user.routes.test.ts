@@ -13,7 +13,7 @@ type DraftCall = [string, ...unknown[]];
 
 const USER_ID = 7;
 
-/** Serves the user routes over a service whose drafts store only records what it was asked to do. */
+/** Serves the user routes over a service whose drafts and preferences stores only record what they were asked to do. */
 async function withUserServer(run: (baseUrl: string, calls: DraftCall[]) => Promise<void>): Promise<void> {
   const calls: DraftCall[] = [];
   const unexpected = () => {
@@ -26,7 +26,11 @@ async function withUserServer(run: (baseUrl: string, calls: DraftCall[]) => Prom
       completeOnboarding: unexpected,
       hasCompletedOnboarding: unexpected,
     },
-    preferences: { getPreferences: unexpected, savePreferences: unexpected },
+    preferences: {
+      getPreferences: () => ({}),
+      savePreferences: unexpected,
+      patchPreferences: (...args) => { calls.push(['patchPreferences', ...args]); },
+    },
     drafts: {
       getDrafts: () => [],
       saveDraft: (...args) => { calls.push(['saveDraft', ...args]); },
@@ -134,5 +138,32 @@ test('PUT /drafts without a queued message writes only the text', async () => {
 
     assert.equal(response.status, 200);
     assert.deepEqual(calls, [['saveDraftText', USER_ID, 'session-a', 'typing']]);
+  });
+});
+
+test('PATCH /preferences/merge hands the set and merge groups to the store for the signed-in user', async () => {
+  await withUserServer(async (baseUrl, calls) => {
+    const response = await send(`${baseUrl}/api/user/preferences/merge`, 'PATCH', {
+      set: { theme: 'dark' },
+      merge: { codeEditorSettings: { wordWrap: true } },
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { success: true, preferences: {} });
+    assert.deepEqual(calls, [[
+      'patchPreferences', USER_ID, { theme: 'dark' }, { codeEditorSettings: { wordWrap: true } },
+    ]]);
+  });
+});
+
+test('PATCH /preferences/merge refuses a merge value that is not an object', async () => {
+  await withUserServer(async (baseUrl, calls) => {
+    const response = await send(`${baseUrl}/api/user/preferences/merge`, 'PATCH', {
+      merge: { codeEditorSettings: 'wrap' },
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { code: 'INVALID_PREFERENCES' });
+    assert.deepEqual(calls, []);
   });
 });

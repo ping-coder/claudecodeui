@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { MutableRefObject } from 'react';
 
 import { api } from '@/shared/api';
-import type { MarkSessionIdle, SessionActivityMap,Project,ProjectSession,LLMProvider,NormalizedMessage,ChatMessage,DiffCalculator } from '@/shared/types';
+import type { AddChatMessageOptions, MarkSessionIdle, SessionActivityMap,Project,ProjectSession,LLMProvider,NormalizedMessage,ChatMessage,DiffCalculator } from '@/shared/types';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { resolveLatestRefreshLimit, SESSION_MESSAGES_PAGE_SIZE } from '@/modules/chat/utils/sessionMessagePagination';
 import { createMessageHistoryRefreshCoordinator } from '@/modules/chat/utils/messageHistoryRefreshCoordinator';
@@ -141,8 +141,9 @@ function chatMessageToNormalized(
   msg: ChatMessage,
   sessionId: string,
   provider: LLMProvider,
+  rowId?: string,
 ): NormalizedMessage | null {
-  const id = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const id = rowId || `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = msg.timestamp instanceof Date
     ? msg.timestamp.toISOString()
     : typeof msg.timestamp === 'number'
@@ -437,13 +438,15 @@ export function useChatSessionState({
   /*  addMessage                                                       */
   /* ---------------------------------------------------------------- */
 
-  const addMessage = useCallback((msg: ChatMessage) => {
+  // `options.rowId` names the row, so its writer can take it out again; a
+  // message shown as pending (no session yet) gets an id of its own later.
+  const addMessage = useCallback((msg: ChatMessage, options?: AddChatMessageOptions) => {
     if (!activeSessionId) {
       // No session yet — show as pending until the backend creates one
       setPendingUserMessage(msg);
       return;
     }
-    const normalized = chatMessageToNormalized(msg, activeSessionId, provider);
+    const normalized = chatMessageToNormalized(msg, activeSessionId, provider, options?.rowId);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
     }

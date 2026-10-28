@@ -8,13 +8,13 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
-import type { WorkspaceLayout, WorkspaceLayoutActions } from '@/shared/types';
+import type { CommandPaletteWorkspaceCommands, WorkspaceLayout, WorkspaceLayoutActions } from '@/shared/types';
 
 /**
  * ProjectWorkspaceShell owns the workspace chrome every region reads: whether the main column can
  * hold two panes (measured, not guessed from the viewport), immersive mode and its sidebar drawer.
- * The regions are probes here, owned by other parts of the workspace; the shell is real, and so is
- * ProjectQuickSettingsRegion, whose panel is replaced by a probe.
+ * The regions are probes here, owned by other parts of the workspace; the shell is real, and so are
+ * ProjectQuickSettingsRegion and ProjectCommandPalette, whose panel and palette are probes.
  */
 
 const UNSPLIT: WorkspaceLayout = {
@@ -38,8 +38,18 @@ const PANES_STATE = {
   actions: { toggleSplit, focusPane: vi.fn(), split: vi.fn() } as unknown as WorkspaceLayoutActions,
   setSidebarOpen,
   setCanShowBothPanes,
+  projects: [],
+  paneProjects: { left: null, right: null },
 };
-const COMMAND_STATE = { selectedProject: null, setActiveTab: () => undefined, layout: UNSPLIT };
+const COMMAND_STATE = {
+  selectedProject: null,
+  handleNewSession: () => undefined,
+  openSettings: () => undefined,
+  setActiveTab: () => undefined,
+  openSessionById: () => undefined,
+  layout: UNSPLIT,
+  actions: PANES_STATE.actions,
+};
 
 vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
   useProjectPanesState: () => PANES_STATE,
@@ -49,11 +59,11 @@ vi.mock('@/modules/project-workspace/controllers/ProjectEffects', () => ({ defau
 // Run alerts need the socket, the activity map and the UI preferences, none of which this is about; a probe
 // stands in, so the shell is still seen to mount them.
 vi.mock('@/modules/project-workspace/ProjectRunNotifications', () => ({ default: RunNotificationsProbe }));
-vi.mock('@/modules/project-workspace/ProjectCommandPalette', () => ({ default: () => null }));
 vi.mock('@/modules/project-workspace/ProjectSidebarRegion', () => ({ default: SidebarRegionProbe }));
 vi.mock('@/modules/project-workspace/ProjectMainRegion', () => ({ default: MainRegionProbe }));
 vi.mock('@/modules/command-palette', () => ({
   usePaletteOps: () => ({ insertComposerText: () => undefined }),
+  CommandPalette: CommandPaletteProbe,
 }));
 vi.mock('@/modules/quick-settings-panel', () => ({ QuickSettingsPanel: QuickSettingsPanelProbe }));
 
@@ -116,7 +126,15 @@ function QuickSettingsPanelProbe({ allowDocking }: { allowDocking?: boolean }) {
   return <div data-testid="quick-settings" data-allow-docking={String(allowDocking)} />;
 }
 
+/** Stands in for the palette UI: its Full screen command runs the workspace command straight from the click, as the palette's run() does. */
+function CommandPaletteProbe({ workspace }: { workspace?: CommandPaletteWorkspaceCommands }) {
+  return <button type="button" onClick={() => workspace?.onToggleFullscreen()}>Palette full screen</button>;
+}
+
 const { default: ProjectWorkspaceShell } = await import('@/modules/project-workspace/ProjectWorkspaceShell');
+
+// The matchMedia stand-in vitest.setup.ts installs; stubChromiumWindow wraps it and afterEach puts it back.
+const setupMatchMedia = window.matchMedia;
 
 // The main column's width as the stubbed layout engine reports it.
 let mainColumnWidth = 1200;
@@ -177,6 +195,18 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  // The Fullscreen API and the Chromium window some tests install (see stubFullscreenApi, stubChromiumWindow).
+  const fullscreenStubs: Array<[object, string]> = [
+    [document, 'fullscreenEnabled'],
+    [document, 'fullscreenElement'],
+    [document, 'exitFullscreen'],
+    [document.documentElement, 'requestFullscreen'],
+    [navigator, 'userAgent'],
+  ];
+  for (const [target, key] of fullscreenStubs) {
+    Reflect.deleteProperty(target, key);
+  }
+  Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: setupMatchMedia });
 });
 
 test('the panes may split only while the main column holds two of them', () => {
@@ -376,4 +406,156 @@ test('the run notifications are mounted once, inside the workspace chrome, told 
   renderShell({ isMobile: true });
   assert.equal(runNotificationsProbe.mounted, 1);
   assert.deepEqual(runNotificationsProbe.last, { isMobile: true, canSplit: false });
+});
+
+// ---- The browser full-screen notice. jsdom has no Fullscreen API, so these tests install one.
+
+// What the stubbed browser shows fullscreen.
+let shownFullscreenElement: Element | null = null;
+
+/** A Fullscreen API whose requests play the given outcomes in turn, the last one repeating; afterEach removes it. */
+const stubFullscreenApi = (outcomes: Array<'grant' | 'refuse'>) => {
+  shownFullscreenElement = null;
+  const remaining = [...outcomes];
+  const show = (element: Element | null) => {
+    shownFullscreenElement = element;
+    document.dispatchEvent(new Event('fullscreenchange'));
+  };
+  Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, get: () => true });
+  Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => shownFullscreenElement });
+  const requestFullscreen = vi.fn(async () => {
+    const outcome = remaining.length > 1 ? remaining.shift() : remaining[0];
+    if (outcome === 'refuse') {
+      throw new TypeError('not granted');
+    }
+    show(document.documentElement);
+  });
+  Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, writable: true, value: requestFullscreen });
+  Object.defineProperty(document, 'exitFullscreen', { configurable: true, writable: true, value: async () => show(null) });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  return { requestFullscreen, warn };
+};
+
+// Booleans, not nodes (see hasButton).
+const hasRefusedNotice = () => screen.queryByText(/The browser refused full screen \(not granted\)/) !== null;
+const pressModShiftEnter = () => fireEvent.keyDown(document.body, { code: 'Enter', key: 'Enter', ctrlKey: true, shiftKey: true });
+// Lets the browser's answer to a request arrive.
+const settle = async () => {
+  await act(async () => undefined);
+};
+
+test('a refused browser full screen shows why with a retry, and the retry asks again inside its click', async () => {
+  const { requestFullscreen } = stubFullscreenApi(['refuse', 'grant']);
+  renderShell();
+
+  clickButton('Toggle full screen');
+  await settle();
+  assert.equal(isImmersive(), 'true');
+  assert.equal(hasRefusedNotice(), true);
+
+  clickButton('Retry');
+  // Synchronously within the click, so the browser still sees the user's gesture.
+  assert.equal(requestFullscreen.mock.calls.length, 2);
+  await settle();
+  assert.equal(hasRefusedNotice(), false);
+  assert.equal(isImmersive(), 'true');
+});
+
+test('the pane button, the shortcut and the command palette each ask inside their gesture and each show the refusal', async () => {
+  const { requestFullscreen } = stubFullscreenApi(['refuse']);
+  renderShell();
+
+  // The pane tab bar's button.
+  clickButton('Toggle full screen');
+  assert.equal(requestFullscreen.mock.calls.length, 1);
+  await settle();
+  assert.equal(hasRefusedNotice(), true);
+  clickButton('Pane exit full screen');
+  assert.equal(hasRefusedNotice(), false);
+
+  // The full-screen shortcut.
+  pressModShiftEnter();
+  assert.equal(requestFullscreen.mock.calls.length, 2);
+  await settle();
+  assert.equal(hasRefusedNotice(), true);
+  // The notice takes no keys: the same shortcut still leaves immersive mode, and the notice goes with it.
+  pressModShiftEnter();
+  assert.equal(isImmersive(), 'false');
+  assert.equal(hasRefusedNotice(), false);
+
+  // The command palette's Full screen command, through the real ProjectCommandPalette binding.
+  clickButton('Palette full screen');
+  assert.equal(requestFullscreen.mock.calls.length, 3);
+  await settle();
+  assert.equal(isImmersive(), 'true');
+  assert.equal(hasRefusedNotice(), true);
+});
+
+test('the notice goes with immersive mode and with its close button, and comes back on the next refusal', async () => {
+  stubFullscreenApi(['refuse']);
+  renderShell();
+  clickButton('Toggle full screen');
+  await settle();
+  clickButton('Pane exit full screen');
+  assert.equal(hasRefusedNotice(), false);
+
+  clickButton('Toggle full screen');
+  await settle();
+  assert.equal(hasRefusedNotice(), true);
+  // A status, not a dialog or an escape layer that would take Escape and the shortcuts.
+  assert.equal(document.querySelector('[data-escape-layer]') === null, true);
+  assert.equal(screen.queryByRole('dialog') === null, true);
+  clickButton('Close');
+  assert.equal(hasRefusedNotice(), false);
+  assert.equal(isImmersive(), 'true');
+});
+
+test('phones get no notice, only the console warning', async () => {
+  const { warn } = stubFullscreenApi(['refuse']);
+  renderShell({ isMobile: true });
+
+  clickButton('Toggle full screen');
+  await settle();
+
+  assert.equal(isImmersive(), 'true');
+  assert.equal(hasRefusedNotice(), false);
+  assert.equal(warn.mock.calls.length, 1);
+});
+
+/** Chrome on a Mac whose window stays out of fullscreen, as when this tab is being captured; afterEach removes it. */
+const stubChromiumWindow = () => {
+  Object.defineProperty(navigator, 'userAgent', {
+    configurable: true,
+    value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36',
+  });
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({ ...setupMatchMedia(query), matches: false }),
+  });
+};
+
+const hasInWindowNotice = () => screen.queryByText(/The browser kept full screen inside the window/) !== null;
+
+test('a full screen kept inside the window is explained after three seconds, with the window shortcut instead of a retry', async () => {
+  vi.useFakeTimers();
+  stubFullscreenApi(['grant']);
+  stubChromiumWindow();
+  renderShell();
+
+  clickButton('Toggle full screen');
+  await settle();
+  act(() => {
+    vi.advanceTimersByTime(2999);
+  });
+  assert.equal(hasInWindowNotice(), false);
+  act(() => {
+    vi.advanceTimersByTime(1);
+  });
+
+  assert.equal(hasInWindowNotice(), true);
+  assert.equal(screen.queryByText(/Press F11 for a full-screen window/) !== null, true);
+  assert.equal(hasButton('Retry'), false);
+  clickButton('Pane exit full screen');
+  assert.equal(hasInWindowNotice(), false);
 });

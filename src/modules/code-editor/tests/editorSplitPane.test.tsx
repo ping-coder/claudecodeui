@@ -159,7 +159,6 @@ function PaneEditor({ pane, initiallyExpanded = false }: PaneEditorProps) {
           isMobile={false}
           editorExpanded={editorExpanded}
           editorWidth={600}
-          hasManualWidth={false}
           resizeHandleRef={resizeHandleRef}
           onResizeStart={() => undefined}
           onCloseEditor={closeEditor}
