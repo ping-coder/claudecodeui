@@ -50,7 +50,7 @@ export default function GithubCredentialsSection({
           <h3 className="text-lg font-semibold">{t('apiKeys.github.title')}</h3>
         </div>
         <Button size="sm" onClick={() => onShowNewGithubFormChange(!showNewGithubForm)}>
-          <Plus className="mr-1 h-4 w-4" />
+          <Plus className="me-1 h-4 w-4" />
           {t('apiKeys.github.addButton')}
         </Button>
       </div>
@@ -71,13 +71,13 @@ export default function GithubCredentialsSection({
               placeholder={t('apiKeys.github.form.tokenPlaceholder')}
               value={newGithubToken}
               onChange={(event) => onNewGithubTokenChange(event.target.value)}
-              className="pr-10"
+              className="pe-10"
             />
             <button
               type="button"
               onClick={onToggleNewTokenVisibility}
               aria-label={showNewTokenPlainText ? t('common:misc.hideToken') : t('common:misc.showToken')}
-              className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground"
+              className="absolute end-3 top-2.5 text-muted-foreground hover:text-foreground"
             >
               {showNewTokenPlainText ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>

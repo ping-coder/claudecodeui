@@ -53,11 +53,11 @@ export default function ShellHeader({
   return (
     <div className="flex-shrink-0 border-b border-border bg-card px-4 py-2">
       <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 rtl:space-x-reverse">
           <div className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
 
           {hasSession && sessionDisplayNameShort && (
-            <span className="text-xs text-blue-600 dark:text-blue-300">({sessionDisplayNameShort}...)</span>
+            <span className="bidi-auto text-xs text-blue-600 dark:text-blue-300">({sessionDisplayNameShort}...)</span>
           )}
 
           {!hasSession && <span className="text-xs text-muted-foreground">{statusNewSessionText}</span>}

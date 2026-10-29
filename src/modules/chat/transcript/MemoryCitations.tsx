@@ -38,12 +38,12 @@ export const MemoryCitations = memo(({ citations }: { citations: MemoryCitation[
       </button>
 
       {isOpen && (
-        <ul className="mt-1 space-y-1 border-l border-border/60 pl-2.5">
+        <ul className="mt-1 space-y-1 border-s border-border/60 ps-2.5">
           {citations.map((citation) => (
             <li key={citation.source} className="text-[11px] leading-snug">
               <span className="font-mono text-muted-foreground">{citation.source}</span>
               {citation.note && (
-                <span className="ml-1.5 text-muted-foreground/70">{citation.note}</span>
+                <span className="ms-1.5 text-muted-foreground/70">{citation.note}</span>
               )}
             </li>
           ))}

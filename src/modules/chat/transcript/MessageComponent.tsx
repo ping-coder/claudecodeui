@@ -136,6 +136,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     !message.isThinking;
 
 
+  // In the browser's locale whatever the UI language, so "5:02:28 PM" can land in a Hebrew row:
+  // shown in a <bdi>, which keeps its own direction instead of the row's.
   const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
 
@@ -151,7 +153,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     >
       {message.type === 'user' ? (
         /* User turn on the right: claude.ai-style attachment cards above the bubble */
-        <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
+        <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl rtl:space-x-reverse">
           <div className="flex min-w-0 flex-1 flex-col items-end gap-2 sm:flex-initial">
             {message.images && message.images.length > 0 && (
               <ChatMessageImages
@@ -163,7 +165,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               <ChatMessageFiles files={message.files} />
             )}
             {userCopyContent.trim().length > 0 || (!message.images?.length && !message.files?.length) ? (
-              <div className="group max-w-full rounded-2xl rounded-br-md border border-border/60 bg-muted/60 px-3 py-2 text-foreground shadow-sm dark:bg-gray-800/60 sm:px-4">
+              <div className="group max-w-full rounded-2xl rounded-ee-md border border-border/60 bg-muted/60 px-3 py-2 text-foreground shadow-sm dark:bg-gray-800/60 sm:px-4">
                 <div dir="auto" className="break-words font-serif text-sm">
                   <Markdown
                     breaks
@@ -210,13 +212,13 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   {shouldShowUserCopyControl && (
                     <MessageCopyControl content={userCopyContent} messageType="user" />
                   )}
-                  <span>{formattedTime}</span>
+                  <bdi>{formattedTime}</bdi>
                 </div>
               </div>
             ) : (
               /* Attachment-only turn: no text bubble, but the timestamp still shows */
               <div className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                <span>{formattedTime}</span>
+                <bdi>{formattedTime}</bdi>
               </div>
             )}
           </div>
@@ -244,7 +246,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
             </span>
           </div>
           {message.compactSummary && (
-            <details className="ml-3.5 mt-0.5">
+            <details className="ms-3.5 mt-0.5">
               <summary className="cursor-pointer text-xs text-gray-500 hover:text-foreground dark:text-gray-400">
                 {t('chat:misc.compactionSummary', 'full summary')}
               </summary>
@@ -268,7 +270,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
         /* Claude/Error/Tool messages on the left */
         <div className="w-full">
           {!isGrouped && (
-            <div className="mb-2 flex items-center space-x-3">
+            <div className="mb-2 flex items-center space-x-3 rtl:space-x-reverse">
               {message.type === 'error' ? (
                 <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-sm text-white">
                   !
@@ -487,7 +489,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                     copy and speak it is not gated on the copy control, and an
                     exported transcript keeps it wherever the footer renders. */}
                 <MessageModelLabel model={message.model} />
-                {!isGrouped && <span>{formattedTime}</span>}
+                {!isGrouped && <bdi>{formattedTime}</bdi>}
               </div>
             )}
           </div>

@@ -282,6 +282,32 @@ test('the Workspace group shows each pane command with its shortcut and runs it'
   assert.equal(onOpenSession.mock.calls.length, 0);
 });
 
+test('right to left the panes are named and found by where they are drawn: the first one on the right', () => {
+  // What <html dir="rtl"> computes in a browser; jsdom neither maps dir to direction nor inherits it.
+  const style = document.createElement('style');
+  style.textContent = '[dir="rtl"], [dir="rtl"] * { direction: rtl; }';
+  document.head.append(style);
+  document.documentElement.setAttribute('dir', 'rtl');
+  try {
+    const workspace = createWorkspace();
+    renderPalette(workspace);
+    openPalette();
+    assert.deepEqual(groupOptionNames('Workspace').slice(1, 3), ['Focus right paneCtrl+1', 'Focus left paneCtrl+2']);
+
+    search('focus right');
+    assert.deepEqual(groupOptionNames('Workspace').filter((name) => name.startsWith('Focus')), ['Focus right paneCtrl+1']);
+    search('left');
+    assert.deepEqual(groupOptionNames('Workspace').filter((name) => name.startsWith('Focus')), ['Focus left paneCtrl+2']);
+    assert.deepEqual(groupOptionNames('Open tabs'), ['Fix login bugrepo · Left paneclaude'], 'only the tab drawn on the left');
+
+    clickOption(within(screen.getByRole('group', { name: 'Workspace' })).getByRole('option', { name: /^Focus left pane/ }));
+    assert.deepEqual(vi.mocked(workspace.onFocusPane).mock.calls, [['right']]);
+  } finally {
+    document.documentElement.removeAttribute('dir');
+    style.remove();
+  }
+});
+
 test('unsplit, Split is offered (disabled with the reason when too narrow) and pane-only commands are left out', () => {
   const singleTab: WorkspaceOpenTabSummary[] = [OPEN_TABS[0]];
   const narrow = createWorkspace({ canSplit: false, isSplit: false, openTabs: singleTab });

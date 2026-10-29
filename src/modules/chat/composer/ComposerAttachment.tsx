@@ -68,7 +68,7 @@ const ComposerAttachment = ({ file, onRemove, error }: ComposerAttachmentProps) 
       <button
         type="button"
         onClick={onRemove}
-        className="absolute -right-1.5 -top-1.5 rounded-full border border-border/40 bg-background/90 p-1 text-foreground shadow-sm backdrop-blur transition-opacity hover:bg-background focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+        className="absolute -end-1.5 -top-1.5 rounded-full border border-border/40 bg-background/90 p-1 text-foreground shadow-sm backdrop-blur transition-opacity hover:bg-background focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
         aria-label={`Remove ${file.name}`}
       >
         <XIcon className="h-3 w-3" aria-hidden />

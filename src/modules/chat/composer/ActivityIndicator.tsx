@@ -599,7 +599,7 @@ export default function ActivityIndicator({
               aria-label={t('activityDetails.title', 'Progress details')}
               onBlur={resetTabScroll}
               className={cn(
-                '-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring group-hover:text-foreground',
+                '-me-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring group-hover:text-foreground',
                 isDetailsShown && 'text-foreground',
               )}
             >

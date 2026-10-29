@@ -182,13 +182,13 @@ function QuickSettingsPanelView({ selectedProject, onInsertCommand, allowDocking
       {/* Docked: a layout column while open, gone while collapsed via the handle (the pin is kept). */}
       {isPinned ? (
         isOpen && (
-          <div className="relative h-full w-64 flex-shrink-0 border-l border-border bg-background">
+          <div className="relative h-full w-64 flex-shrink-0 border-s border-border bg-background">
             {panelBody}
           </div>
         )
       ) : (
         <div
-          className={`fixed right-0 top-0 z-[9999] h-full w-64 transform border-l border-border bg-background shadow-xl transition-transform duration-150 ease-out ${isOpen ? 'translate-x-0' : 'translate-x-full'} ${isMobile ? 'h-screen' : ''}`}
+          className={`fixed end-0 top-0 z-[9999] h-full w-64 transform border-s border-border bg-background shadow-xl transition-transform duration-150 ease-out ${isOpen ? 'translate-x-0' : 'translate-x-full rtl:-translate-x-full'} ${isMobile ? 'h-screen' : ''}`}
         >
           {panelBody}
         </div>

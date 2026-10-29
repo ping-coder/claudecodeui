@@ -144,7 +144,7 @@ export default function GitPanelHeader({
         <div className="relative" ref={dropdownRef}>
           <button
             onClick={() => setShowBranchDropdown((prev) => !prev)}
-            className={`flex items-center rounded-lg transition-colors hover:bg-accent ${isMobile ? 'space-x-1 px-2 py-1' : 'space-x-2 px-3 py-1.5'}`}
+            className={`flex items-center rounded-lg transition-colors hover:bg-accent ${isMobile ? 'space-x-1 px-2 py-1 rtl:space-x-reverse' : 'space-x-2 px-3 py-1.5 rtl:space-x-reverse'}`}
           >
             <GitBranch className={`text-muted-foreground ${isMobile ? 'h-3 w-3' : 'h-4 w-4'}`} />
             <span className="flex items-center gap-1">
@@ -171,7 +171,7 @@ export default function GitPanelHeader({
           </button>
 
           {showBranchDropdown && (
-            <div className="absolute left-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
+            <div className="absolute start-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
               <div className="flex items-center gap-2 border-b border-border px-3 py-2">
                 <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <input
@@ -200,11 +200,11 @@ export default function GitPanelHeader({
                     <button
                       key={branch}
                       onClick={() => void handleSwitchBranch(branch)}
-                      className={`w-full px-4 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                      className={`w-full px-4 py-2 text-start text-sm transition-colors hover:bg-accent ${
                         branch === currentBranch ? 'bg-accent/50 text-foreground' : 'text-muted-foreground'
                       }`}
                     >
-                      <span className="flex items-center space-x-2">
+                      <span className="flex items-center space-x-2 rtl:space-x-reverse">
                         {branch === currentBranch && <Check className="h-3 w-3 text-primary" />}
                         <span className={branch === currentBranch ? 'font-medium' : ''}>{branch}</span>
                       </span>
@@ -218,7 +218,7 @@ export default function GitPanelHeader({
                     setShowNewBranchModal(true);
                     setShowBranchDropdown(false);
                   }}
-                  className="flex w-full items-center space-x-2 px-4 py-2 text-left text-sm transition-colors hover:bg-accent"
+                  className="flex w-full items-center space-x-2 px-4 py-2 text-start text-sm transition-colors hover:bg-accent rtl:space-x-reverse"
                 >
                   <Plus className="h-3 w-3" />
                   <span>{t('git:header.createNewBranch')}</span>

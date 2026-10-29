@@ -125,7 +125,7 @@ export default function CommitComposer({
             <button
               onClick={requestCommitConfirmation}
               disabled={!commitMessage.trim() || selectedFileCount === 0 || isCommitting}
-              className="flex items-center space-x-1 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center space-x-1 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 rtl:space-x-reverse"
             >
               <Check className="h-3 w-3" />
               <span>{isCommitting ? t('git:composer.committing') : t('git:composer.commit')}</span>

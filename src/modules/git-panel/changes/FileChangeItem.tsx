@@ -47,7 +47,7 @@ export default function FileChangeItem({
           checked={isSelected}
           onChange={() => onToggleSelected(filePath)}
           onClick={(event) => event.stopPropagation()}
-          className={`rounded border-border bg-background text-primary checked:bg-primary focus:ring-primary/40 ${isMobile ? 'mr-1.5' : 'mr-2'}`}
+          className={`rounded border-border bg-background text-primary checked:bg-primary focus:ring-primary/40 ${isMobile ? 'me-1.5' : 'me-2'}`}
         />
 
         <div className="flex min-w-0 flex-1 items-center">
@@ -56,7 +56,7 @@ export default function FileChangeItem({
               event.stopPropagation();
               onToggleExpanded(filePath);
             }}
-            className={`cursor-pointer rounded p-0.5 hover:bg-accent ${isMobile ? 'mr-1' : 'mr-2'}`}
+            className={`cursor-pointer rounded p-0.5 hover:bg-accent ${isMobile ? 'me-1' : 'me-2'}`}
             title={isExpanded ? t('git:item.collapseDiff') : t('git:item.expandDiff')}
           >
             <ChevronRight className={`h-3 w-3 transition-transform duration-200 ease-in-out ${isExpanded ? 'rotate-90' : 'rotate-0'}`} />

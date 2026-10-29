@@ -58,7 +58,7 @@ export default function RemoveWorktreeModal({
       >
         <div className="p-6">
           <div className="mb-4 flex items-center">
-            <div className="mr-3 rounded-full bg-red-100 p-2 dark:bg-red-900/30">
+            <div className="me-3 rounded-full bg-red-100 p-2 dark:bg-red-900/30">
               <Trash2 className="h-4 w-4 text-red-600 dark:text-red-400" />
             </div>
             <h3 id="remove-worktree-title" className="text-lg font-semibold text-foreground">
@@ -100,7 +100,7 @@ export default function RemoveWorktreeModal({
             </label>
           )}
 
-          <div className="mt-4 flex justify-end space-x-3">
+          <div className="mt-4 flex justify-end space-x-3 rtl:space-x-reverse">
             <button
               onClick={onClose}
               className="rounded-lg px-4 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -110,7 +110,7 @@ export default function RemoveWorktreeModal({
             <button
               onClick={() => void handleRemove()}
               disabled={isRemoving || (isDirty && !force)}
-              className="flex items-center space-x-2 rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center space-x-2 rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 rtl:space-x-reverse"
             >
               {isRemoving ? (
                 <>

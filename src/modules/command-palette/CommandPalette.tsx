@@ -41,6 +41,7 @@ import {
   DialogTitle,
 } from '@/shared/ui';
 import { useTheme } from '@/shared/context/ThemeContext';
+import { visualPaneSide } from '@/shared/direction';
 import { usePaletteOps } from '@/modules/command-palette/context/PaletteOpsContext';
 import {
   SETTINGS_MAIN_TABS,
@@ -55,6 +56,7 @@ import type {
   Project,
   SessionOpenOptions,
   WorkspaceOpenTabSummary,
+  WorkspacePaneSide,
 } from '@/shared/types';
 import { formatShortcut } from '@/shared/utils';
 import { useSessionsSource } from '@/modules/command-palette/hooks/useSessionsSource';
@@ -458,9 +460,9 @@ function CommandPalette({
             >
               <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
               <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate">{s.label}</span>
+                <span className="bidi-auto truncate">{s.label}</span>
                 {s.snippet && (
-                  <span className="truncate text-xs text-muted-foreground">{s.snippet}</span>
+                  <span className="bidi-auto truncate text-xs text-muted-foreground">{s.snippet}</span>
                 )}
               </div>
               {s.provider && (
@@ -496,8 +498,8 @@ function CommandPalette({
               onSelect={() => run(() => ops.openFile(f.path))}
             >
               <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="flex-1 truncate">{f.name}</span>
-              <span className="truncate text-xs text-muted-foreground">{f.relativePath}</span>
+              <span className="bidi-auto flex-1 truncate">{f.name}</span>
+              <span className="bidi-ltr truncate text-xs text-muted-foreground">{f.relativePath}</span>
             </CommandItem>
           ))}
           {browseAll && <BrowseAllItem label={browseAll} onSelect={() => pushPage('files')} />}
@@ -522,7 +524,7 @@ function CommandPalette({
             >
               <GitCommit className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
               <span className="font-mono text-xs text-muted-foreground">{c.shortHash}</span>
-              <span className="flex-1 truncate">{c.message}</span>
+              <span className="bidi-auto flex-1 truncate">{c.message}</span>
               <span className="truncate text-xs text-muted-foreground">{c.author}</span>
             </CommandItem>
           ))}
@@ -570,7 +572,7 @@ function CommandPalette({
                   type="button"
                   onClick={popPage}
                   aria-label={t('commandPalette.backToAll')}
-                  className="ml-0.5 rounded-sm opacity-70 hover:opacity-100"
+                  className="ms-0.5 rounded-sm opacity-70 hover:opacity-100"
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -820,19 +822,24 @@ function workspaceCommands(workspace: CommandPaletteWorkspaceCommands, t: TFunct
     onSelect: workspace.onToggleSplit,
   }];
   if (isSplit) {
+    // Right to left the first pane is on the right: the label says where each pane is, and the
+    // words it is found by say the same.
+    const firstPaneSide = visualPaneSide('left');
+    const secondPaneSide = visualPaneSide('right');
+    const focusLabel = (onScreen: WorkspacePaneSide) => (onScreen === 'left' ? t('workspace.focusLeftPane') : t('workspace.focusRightPane'));
     commands.push(
       {
         id: 'focus-left',
-        value: `${t('workspace.focusLeftPane')} focus left pane switch`,
-        label: t('workspace.focusLeftPane'),
+        value: `${focusLabel(firstPaneSide)} focus ${firstPaneSide} pane switch`,
+        label: focusLabel(firstPaneSide),
         Icon: PanelLeft,
         shortcut: WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
         onSelect: () => workspace.onFocusPane('left'),
       },
       {
         id: 'focus-right',
-        value: `${t('workspace.focusRightPane')} focus right pane switch`,
-        label: t('workspace.focusRightPane'),
+        value: `${focusLabel(secondPaneSide)} focus ${secondPaneSide} pane switch`,
+        label: focusLabel(secondPaneSide),
         Icon: PanelRight,
         shortcut: WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
         onSelect: () => workspace.onFocusPane('right'),
@@ -919,10 +926,12 @@ type OpenTabRow = {
 /** Every tab of both panes, left first. */
 function openTabRows({ isSplit, openTabs }: CommandPaletteWorkspaceCommands, t: TFunction): OpenTabRow[] {
   return openTabs.map((tab, index) => {
-    const sideLabel = tab.side === 'left' ? t('workspace.leftPane') : t('workspace.rightPane');
+    // Where the pane is drawn (right to left the first pane is on the right), in the label and the search words.
+    const onScreen = visualPaneSide(tab.side);
+    const sideLabel = onScreen === 'left' ? t('workspace.leftPane') : t('workspace.rightPane');
     const details = [tab.projectName, isSplit ? sideLabel : ''].filter(Boolean).join(' · ');
     // Unique among all items, even with one session open on both sides or two tabs sharing a title.
-    return { tab, details, value: `${tab.title} ${details} open tab ${tab.side}-${index}` };
+    return { tab, details, value: `${tab.title} ${details} open tab ${onScreen}-${index}` };
   });
 }
 
@@ -948,7 +957,7 @@ function OpenTabsCommandGroup({ rows, onActivateTab, run }: OpenTabsCommandGroup
         >
           <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
           <div className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate">{tab.title}</span>
+            <span className="bidi-auto truncate">{tab.title}</span>
             {details && <span className="truncate text-xs text-muted-foreground">{details}</span>}
           </div>
           <span className="text-xs text-muted-foreground">{tab.provider}</span>

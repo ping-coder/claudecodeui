@@ -95,7 +95,7 @@ export default function NewBranchModal({
             {t('git:newBranch.createdFrom', { branch: currentBranch })}
           </p>
 
-          <div className="flex justify-end space-x-3">
+          <div className="flex justify-end space-x-3 rtl:space-x-reverse">
             <button
               onClick={onClose}
               className="rounded-lg px-4 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -105,7 +105,7 @@ export default function NewBranchModal({
             <button
               onClick={() => void handleCreateBranch()}
               disabled={!newBranchName.trim() || isCreatingBranch}
-              className="flex items-center space-x-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center space-x-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 rtl:space-x-reverse"
             >
               {isCreatingBranch ? (
                 <>

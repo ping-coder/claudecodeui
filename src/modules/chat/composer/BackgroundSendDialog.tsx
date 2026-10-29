@@ -56,7 +56,7 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
         </DialogTitle>
 
         {prompt && prompt.work.length > 0 && (
-          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-foreground/90">
+          <ul className="mt-3 list-disc space-y-1 ps-5 text-sm text-foreground/90">
             {prompt.work.map((item, index) => (
               <li key={`${index}-${item}`} className="break-words">{item}</li>
             ))}

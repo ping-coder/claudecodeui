@@ -112,7 +112,7 @@ export default function WorkspaceTitle({
               <h2
                 title={t('mainContent.renameSessionHint', { title: sessionTitle })}
                 onDoubleClick={startRenaming}
-                className="cursor-text truncate text-sm font-semibold leading-tight text-foreground"
+                className="bidi-auto cursor-text truncate text-sm font-semibold leading-tight text-foreground"
               >
                 {sessionTitle}
               </h2>

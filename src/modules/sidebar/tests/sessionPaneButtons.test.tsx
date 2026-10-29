@@ -216,7 +216,7 @@ test('the side buttons sit left of the "…" and give way to an open rename', ()
   const optionsRoot = container.firstElementChild;
   assert.ok(sideButtons && optionsRoot);
   assert.deepEqual(
-    ['absolute', 'right-full'].map((className) => sideButtons.classList.contains(className)),
+    ['absolute', 'end-full'].map((className) => sideButtons.classList.contains(className)),
     [true, true],
   );
   assert.equal(optionsRoot.classList.contains('relative'), true, 'the "…" control is what they hang off');
@@ -346,4 +346,49 @@ test('the marker names each placement', () => {
   });
 
   assert.deepEqual(labels, ['tooltips.openedLeft', 'tooltips.openedRight', 'tooltips.openedBoth']);
+});
+
+// ------------------------------------------------------------------ Right to left
+
+/** Lays the document out right to left as <html dir="rtl"> does in a browser; jsdom neither maps dir to direction nor inherits it. */
+const layOutRightToLeft = () => {
+  const style = document.createElement('style');
+  style.textContent = '[dir="rtl"], [dir="rtl"] * { direction: rtl; }';
+  document.head.append(style);
+  document.documentElement.setAttribute('dir', 'rtl');
+  return () => {
+    document.documentElement.removeAttribute('dir');
+    style.remove();
+  };
+};
+
+test('right to left the first pane is drawn on the right, and the buttons, marker and menu say so', () => {
+  const restore = layOutRightToLeft();
+  try {
+    const onOpenInPane = vi.fn();
+    const split = renderButtons({ isWorkspaceSplit: true, panePlacement: null, onOpenInPane });
+    assert.equal(sideButton(split.container, 'left')?.getAttribute('aria-label'), 'sessions.openOnRight');
+    assert.equal(sideButton(split.container, 'right')?.getAttribute('aria-label'), 'sessions.openOnLeft');
+    fireEvent.click(sideButton(split.container, 'left') as HTMLButtonElement);
+    assert.deepEqual(onOpenInPane.mock.calls, [['left']], 'it still opens in the first pane');
+    split.unmount();
+
+    // Unsplit, the second pane opens on the left.
+    const unsplit = renderButtons({ isWorkspaceSplit: false, panePlacement: null });
+    assert.equal(sideButton(unsplit.container, 'right')?.getAttribute('aria-label'), 'sessions.openOnLeftSplit');
+    unsplit.unmount();
+
+    const marker = render(<PanePlacementMarker isWorkspaceSplit panePlacement="left" t={t} />);
+    assert.equal(marker.container.querySelector('[role="img"]')?.getAttribute('aria-label'), 'tooltips.openedRight');
+    marker.unmount();
+
+    const splitMenu = renderOptions({ isWorkspaceSplit: true });
+    assert.deepEqual(menuItemLabels(openMenu()).slice(0, 2), ['sessions.openOnRight', 'sessions.openOnLeft']);
+    splitMenu.unmount();
+
+    renderOptions({ isWorkspaceSplit: false });
+    assert.equal(menuItemLabels(openMenu())[0], 'sessions.openOnLeftSplit');
+  } finally {
+    restore();
+  }
 });

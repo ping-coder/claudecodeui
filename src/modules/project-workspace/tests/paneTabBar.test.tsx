@@ -341,6 +341,25 @@ test('the menu fits the tab: no "Keep open" on a kept tab, a draft is never copi
   assert.ok(within(menu).getByRole('menuitem', { name: 'Move to the other side' }));
 });
 
+test('right to left the tabs after a tab are on its left, and its menu says so', () => {
+  // What <html dir="rtl"> computes in a browser; jsdom neither maps dir to direction nor inherits it.
+  const style = document.createElement('style');
+  style.textContent = '[dir="rtl"], [dir="rtl"] * { direction: rtl; }';
+  document.head.append(style);
+  document.documentElement.setAttribute('dir', 'rtl');
+  try {
+    renderBar();
+    fireEvent.contextMenu(tabNamed('Second chat'), { clientX: 400, clientY: 20 });
+    const menu = screen.getByRole('menu');
+    assert.equal(within(menu).queryByRole('menuitem', { name: 'Close tabs to the right' }) === null, true);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Close tabs to the left' }));
+    assert.deepEqual(vi.mocked(actions.closeTabsToRight).mock.calls, [['left', 't2']]);
+  } finally {
+    document.documentElement.removeAttribute('dir');
+    style.remove();
+  }
+});
+
 test('Shift+F10 opens the menu; arrows move inside it; Escape closes it and goes no further', () => {
   renderBar();
   const tab = tabNamed('First chat');
@@ -523,7 +542,7 @@ test('short of room, tabs shrink from up to 256px down to a minimum before the s
   assert.equal(title.classList.contains('min-w-0'), true);
   assert.equal(title.classList.contains('truncate'), true, 'an ellipsis');
   assert.equal(tabEnd.classList.contains('flex-shrink-0'), true);
-  assert.equal(tabEnd.classList.contains('ml-auto'), true, 'at the right edge of a short tab held at its minimum');
+  assert.equal(tabEnd.classList.contains('ms-auto'), true, 'at the right edge of a short tab held at its minimum');
   assert.equal(tabEnd.contains(within(tab).getByRole('img', { name: 'Processing session' })), true);
   assert.equal(tabEnd.contains(within(tab).getByRole('button', { name: 'Close tab' })), true);
 });

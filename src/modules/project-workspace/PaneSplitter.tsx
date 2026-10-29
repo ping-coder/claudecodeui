@@ -13,6 +13,7 @@ import {
   WORKSPACE_SPLIT_RATIO_MAX,
   WORKSPACE_SPLIT_RATIO_MIN,
 } from '@/shared/constants';
+import { forwardArrowKey, inlineSign } from '@/shared/direction';
 
 /** One arrow key press moves the divider by this share of the main width. */
 const KEYBOARD_RATIO_STEP = 0.04;
@@ -55,7 +56,7 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
   const { t } = useTranslation();
   const separatorRef = useRef<HTMLDivElement>(null);
   // Drag origin; null while no drag is in progress.
-  const dragOriginRef = useRef<{ pointerX: number; ratio: number; groupWidth: number } | null>(null);
+  const dragOriginRef = useRef<{ pointerX: number; ratio: number; groupWidth: number; sign: 1 | -1 } | null>(null);
   const frameRef = useRef<number | null>(null);
   const pendingRatioRef = useRef(ratio);
 
@@ -113,7 +114,8 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
     const width = measureGroupWidth();
     // The drag starts where the divider is drawn, so it follows the pointer from the first pixel.
     const originRatio = clampRatio(ratio, width);
-    dragOriginRef.current = { pointerX: event.clientX, ratio: originRatio, groupWidth: width };
+    // Right to left the first pane is on the right and grows as the divider moves left.
+    dragOriginRef.current = { pointerX: event.clientX, ratio: originRatio, groupWidth: width, sign: inlineSign(event.currentTarget) };
     pendingRatioRef.current = originRatio;
     document.body.style.userSelect = 'none';
   }, [measureGroupWidth, ratio]);
@@ -124,7 +126,7 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
       return;
     }
     const available = origin.groupWidth - PANE_SPLITTER_WIDTH_PX;
-    const shift = available > 0 ? (event.clientX - origin.pointerX) / available : 0;
+    const shift = available > 0 ? (origin.sign * (event.clientX - origin.pointerX)) / available : 0;
     pendingRatioRef.current = clampRatio(origin.ratio + shift, origin.groupWidth);
     if (frameRef.current !== null) {
       return;
@@ -158,12 +160,11 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
   }, [onCommit, writeLeftWidth]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowLeft') {
+    // The arrow pointing into the second pane widens the first: ArrowLeft right to left.
+    const grow = forwardArrowKey(event.currentTarget);
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      commit(drawnRatio - KEYBOARD_RATIO_STEP);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      commit(drawnRatio + KEYBOARD_RATIO_STEP);
+      commit(drawnRatio + (event.key === grow ? 1 : -1) * KEYBOARD_RATIO_STEP);
     } else if (event.key === 'Home') {
       event.preventDefault();
       commit(WORKSPACE_SPLIT_RATIO_DEFAULT);
@@ -195,7 +196,7 @@ export default function PaneSplitter({ containerRef, ratio, onCommit }: PaneSpli
       aria-valuemax={Math.round(WORKSPACE_SPLIT_RATIO_MAX * 100)}
       tabIndex={0}
       // The layout width stays PANE_SPLITTER_WIDTH_PX; coarse pointers get a wider invisible hit area and a grip.
-      className="group relative z-10 flex w-1.5 flex-none cursor-col-resize touch-none justify-center bg-background focus-visible:outline-none [@media(pointer:coarse)]:before:absolute [@media(pointer:coarse)]:before:inset-y-0 [@media(pointer:coarse)]:before:-left-[5px] [@media(pointer:coarse)]:before:-right-[5px] [@media(pointer:coarse)]:before:content-['']"
+      className="group relative z-10 flex w-1.5 flex-none cursor-col-resize touch-none justify-center bg-background focus-visible:outline-none [@media(pointer:coarse)]:before:absolute [@media(pointer:coarse)]:before:inset-y-0 [@media(pointer:coarse)]:before:-end-[5px] [@media(pointer:coarse)]:before:-start-[5px] [@media(pointer:coarse)]:before:content-['']"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerEnd}

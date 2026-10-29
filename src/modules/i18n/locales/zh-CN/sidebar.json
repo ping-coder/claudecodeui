@@ -41,7 +41,8 @@
     "deleteSelected_other": "删除 {{count}} 个会话",
     "openOnLeft": "在左侧打开",
     "openOnRight": "在右侧打开",
-    "openOnRightSplit": "在右侧打开（拆分视图）"
+    "openOnRightSplit": "在右侧打开（拆分视图）",
+    "openOnLeftSplit": "在左侧打开（拆分视图）"
   },
   "tooltips": {
     "viewEnvironments": "查看环境",

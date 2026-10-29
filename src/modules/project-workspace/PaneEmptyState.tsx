@@ -183,11 +183,11 @@ export default function PaneEmptyState({
                           { ...session, __projectId: project.projectId, __provider: provider },
                           { target: side, preview: false },
                         )}
-                        className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                        className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-start transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                       >
                         <LLMProviderLogo provider={provider} className="h-3.5 w-3.5 flex-shrink-0" />
-                        <span className="min-w-0 flex-1 truncate text-sm text-foreground">{String(title)}</span>
-                        <span className="max-w-[40%] flex-shrink-0 truncate text-xs text-muted-foreground">{project.displayName}</span>
+                        <span className="bidi-auto min-w-0 flex-1 truncate text-sm text-foreground">{String(title)}</span>
+                        <span className="bidi-auto max-w-[40%] flex-shrink-0 truncate text-xs text-muted-foreground">{project.displayName}</span>
                       </button>
                     </li>
                   );

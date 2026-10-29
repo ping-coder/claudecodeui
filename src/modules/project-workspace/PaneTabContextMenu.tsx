@@ -2,6 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 
+import { isRtl } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 
 /** Gap kept between the menu and the viewport edges. */
@@ -52,8 +53,10 @@ export default function PaneTabContextMenu({ anchor, label, items, onClose }: Pa
       return;
     }
     const { width, height } = menu.getBoundingClientRect();
+    // Right to left the menu opens leftwards from the anchor (the pointer, or the tab's right edge).
+    const startX = isRtl(menu) ? anchor.x - width : anchor.x;
     setPosition({
-      x: Math.max(VIEWPORT_MARGIN_PX, Math.min(anchor.x, window.innerWidth - width - VIEWPORT_MARGIN_PX)),
+      x: Math.max(VIEWPORT_MARGIN_PX, Math.min(startX, window.innerWidth - width - VIEWPORT_MARGIN_PX)),
       y: Math.max(VIEWPORT_MARGIN_PX, Math.min(anchor.y, window.innerHeight - height - VIEWPORT_MARGIN_PX)),
     });
     getEnabledItems(menu)[0]?.focus();
@@ -150,12 +153,12 @@ export default function PaneTabContextMenu({ anchor, label, items, onClose }: Pa
             aria-keyshortcuts={item.shortcut}
             onClick={() => runItem(item)}
             className={cn(
-              'flex w-full items-center rounded-md px-3 py-1.5 text-left text-sm transition-colors focus:outline-none focus-visible:bg-accent',
+              'flex w-full items-center rounded-md px-3 py-1.5 text-start text-sm transition-colors focus:outline-none focus-visible:bg-accent',
               item.disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-accent',
             )}
           >
             {item.label}
-            {item.shortcut && <span aria-hidden="true" className="ml-auto pl-6 text-xs text-muted-foreground">{item.shortcut}</span>}
+            {item.shortcut && <span aria-hidden="true" className="ms-auto ps-6 text-xs text-muted-foreground">{item.shortcut}</span>}
           </button>
         </Fragment>
       ))}

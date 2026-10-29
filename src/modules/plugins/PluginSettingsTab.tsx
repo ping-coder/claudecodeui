@@ -178,10 +178,10 @@ function ToggleSwitch({ checked, onChange, ariaLabel }: { checked: boolean; onCh
         className={`
           relative h-5 w-9 rounded-full bg-muted transition-colors
           duration-200 after:absolute
-          after:left-[2px] after:top-[2px] after:h-4 after:w-4
+          after:start-[2px] after:top-[2px] after:h-4 after:w-4
           after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200
           after:content-[''] peer-checked:bg-emerald-500
-          peer-checked:after:translate-x-4
+          peer-checked:after:translate-x-4 rtl:peer-checked:after:-translate-x-4
         `}
       />
     </label>
@@ -584,7 +584,7 @@ export default function PluginSettingsTab() {
 
       {/* Install from Git — compact */}
       <div className="flex items-center gap-0 overflow-hidden rounded-lg border border-border bg-card">
-        <span className="flex-shrink-0 pl-3 pr-1 text-muted-foreground/40">
+        <span className="flex-shrink-0 pe-1 ps-3 text-muted-foreground/40">
           <GitBranch className="h-3.5 w-3.5" />
         </span>
         <input
@@ -604,7 +604,7 @@ export default function PluginSettingsTab() {
         <button
           onClick={handleInstall}
           disabled={installing || !gitUrl.trim()}
-          className="flex-shrink-0 border-l border-border bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-30"
+          className="flex-shrink-0 border-s border-border bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-30"
         >
           {installing ? (
             <Loader2 className="h-4 w-4 animate-spin" />

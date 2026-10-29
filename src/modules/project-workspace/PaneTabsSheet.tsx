@@ -11,6 +11,7 @@ import type {
   WorkspacePaneSide,
 } from '@/shared/types';
 import { Dialog, DialogContent, DialogTitle, LLMProviderLogo } from '@/shared/ui';
+import { visualPaneSide } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 
 type PaneTabsSheetProps = {
@@ -67,12 +68,16 @@ export default function PaneTabsSheet({
   const { t } = useTranslation();
   const titleId = useId();
   const isSplit = layout.right !== null;
+  // Named after where each pane is on screen: right to left the first pane is on the right.
+  const paneLabel = (side: WorkspacePaneSide) => (visualPaneSide(side) === 'left'
+    ? t('workspace.leftPane', { defaultValue: 'Left pane' })
+    : t('workspace.rightPane', { defaultValue: 'Right pane' }));
   const groups: Array<{ side: WorkspacePaneSide; label: string }> = isSplit
     ? [
-      { side: 'left', label: t('workspace.leftPane', { defaultValue: 'Left pane' }) },
-      { side: 'right', label: t('workspace.rightPane', { defaultValue: 'Right pane' }) },
+      { side: 'left', label: paneLabel('left') },
+      { side: 'right', label: paneLabel('right') },
     ]
-    : [{ side: 'left', label: t('workspace.leftPane', { defaultValue: 'Left pane' }) }];
+    : [{ side: 'left', label: paneLabel('left') }];
   const hasTabs = layout.left.tabs.length > 0 || (layout.right?.tabs.length ?? 0) > 0;
 
   const close = () => onOpenChange(false);
@@ -128,15 +133,15 @@ export default function PaneTabsSheet({
                           close();
                         }}
                         className={cn(
-                          'flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-xl border px-3 py-2 text-left transition-colors active:bg-muted',
+                          'flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-xl border px-3 py-2 text-start transition-colors active:bg-muted',
                           isCurrent ? 'border-primary/30 bg-primary/5' : 'border-border bg-muted/35',
                         )}
                       >
                         <LLMProviderLogo provider={tab.provider} className="h-4 w-4 flex-shrink-0" />
                         <span className="min-w-0 flex-1">
-                          <span className={cn('block truncate text-sm text-foreground', tab.isPreview && 'italic')}>{title}</span>
+                          <span className={cn('bidi-auto block truncate text-sm text-foreground', tab.isPreview && 'italic')}>{title}</span>
                           {display?.projectName && (
-                            <span className="block truncate text-xs text-muted-foreground">{display.projectName}</span>
+                            <span className="bidi-auto block truncate text-xs text-muted-foreground">{display.projectName}</span>
                           )}
                         </span>
                         <SheetActivityMark activity={display?.activity ?? null} />

@@ -53,7 +53,7 @@ function UltracodeSwitchIndicator({ checked }: { checked: boolean }) {
       <span
         className={cn(
           'pointer-events-none inline-block h-3 w-3 rounded-full shadow-sm transition-transform duration-200',
-          checked ? 'translate-x-[13px] bg-white' : 'translate-x-px bg-foreground/60 dark:bg-foreground/80',
+          checked ? 'translate-x-[13px] bg-white rtl:-translate-x-[13px]' : 'translate-x-px bg-foreground/60 dark:bg-foreground/80 rtl:-translate-x-px',
         )}
       />
     </span>

@@ -27,6 +27,7 @@ import type {
   WorkspacePaneState,
   WorkspaceSessionTab,
 } from '@/shared/types';
+import { forwardArrowKey, isRtl, visualPaneSide } from '@/shared/direction';
 import { ActionMenu, LLMProviderLogo, PaneSideGlyph, Tooltip } from '@/shared/ui';
 import {
   cn,
@@ -102,14 +103,17 @@ const isFocusOnBody = (): boolean => {
 };
 
 /**
- * Where a drag over the strip would land: the index of the first tab whose middle lies right of
- * the pointer, or the tab count when the pointer is past the last tab.
+ * Where a drag over the strip would land: the index of the first tab whose middle lies past the
+ * pointer in reading order (right of it, or left of it right to left), or the tab count when the
+ * pointer is past the last tab.
  */
 const getDropIndex = (strip: HTMLElement | null, clientX: number): number => {
   const tabElements = Array.from(strip?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []);
+  const rtl = isRtl(strip);
   const index = tabElements.findIndex((element) => {
     const rect = element.getBoundingClientRect();
-    return clientX < rect.left + rect.width / 2;
+    const middle = rect.left + rect.width / 2;
+    return rtl ? clientX > middle : clientX < middle;
   });
   return index < 0 ? tabElements.length : index;
 };
@@ -336,7 +340,8 @@ export default function PaneTabBar({
     if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu') {
       event.preventDefault();
       const rect = event.currentTarget.getBoundingClientRect();
-      openTabMenu(tab.key, rect.left, rect.bottom);
+      // Under the tab's start edge: its right edge right to left, where the menu opens leftwards.
+      openTabMenu(tab.key, isRtl(event.currentTarget) ? rect.right : rect.left, rect.bottom);
       return;
     }
     if (event.key === RENAME_TAB_SHORTCUT) {
@@ -358,10 +363,12 @@ export default function PaneTabBar({
       return;
     }
 
+    // The arrow pointing along the row moves on: ArrowLeft right to left.
+    const forward = forwardArrowKey(event.currentTarget);
     let nextIndex: number;
-    if (event.key === 'ArrowRight') {
+    if (event.key === forward) {
       nextIndex = (index + 1) % tabs.length;
-    } else if (event.key === 'ArrowLeft') {
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       nextIndex = (index - 1 + tabs.length) % tabs.length;
     } else if (event.key === 'Home') {
       nextIndex = 0;
@@ -534,7 +541,10 @@ export default function PaneTabBar({
     },
     {
       key: 'closeToRight',
-      label: t('workspace.closeTabsToRight', { defaultValue: 'Close tabs to the right' }),
+      // The tabs after this one: on its right, or on its left right to left.
+      label: isRtl()
+        ? t('workspace.closeTabsToLeft', { defaultValue: 'Close tabs to the left' })
+        : t('workspace.closeTabsToRight', { defaultValue: 'Close tabs to the right' }),
       disabled: menuTabIndex === tabs.length - 1,
       onSelect: () => actions.closeTabsToRight(side, menuTab.key),
     },
@@ -642,10 +652,10 @@ export default function PaneTabBar({
       onDrop={handleBarDrop}
     >
       {isCollapsed && (
-        <div className="flex flex-shrink-0 items-center gap-0.5 border-r border-border/50 px-1">
+        <div className="flex flex-shrink-0 items-center gap-0.5 border-e border-border/50 px-1">
           {WORKSPACE_PANE_SIDES.map((switchSide) => {
             const isCurrent = switchSide === side;
-            const label = switchSide === 'left'
+            const label = visualPaneSide(switchSide) === 'left'
               ? t('workspace.focusLeftPane', { defaultValue: 'Focus left pane' })
               : t('workspace.focusRightPane', { defaultValue: 'Focus right pane' });
             return (
@@ -671,7 +681,7 @@ export default function PaneTabBar({
                     data-hidden-pane-activity={hiddenPaneActivity}
                     aria-hidden="true"
                     className={cn(
-                      'absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full',
+                      'absolute end-0.5 top-0.5 h-1.5 w-1.5 rounded-full',
                       hiddenPaneActivity === 'attention' ? 'bg-amber-500' : 'bg-primary',
                     )}
                   />
@@ -761,7 +771,7 @@ export default function PaneTabBar({
                 // close button (32px under a coarse pointer, hence the wider minimum); with an activity mark
                 // and a project suffix as well, the title and the suffix give way and nothing is clipped.
                 className={cn(
-                  'group relative flex h-full min-w-28 max-w-64 cursor-pointer select-none items-center gap-2 border-r border-border/50 pl-3 pr-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60 [@media(pointer:coarse)]:min-w-[7.5rem]',
+                  'group relative flex h-full min-w-28 max-w-64 cursor-pointer select-none items-center gap-2 border-e border-border/50 pe-1.5 ps-3 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60 [@media(pointer:coarse)]:min-w-[7.5rem]',
                   isActive
                     ? (isDimmed ? 'bg-background/70 text-foreground/70' : 'bg-background text-foreground')
                     : (isDimmed ? 'text-muted-foreground/70 hover:bg-accent/40' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'),
@@ -771,13 +781,13 @@ export default function PaneTabBar({
                   <span data-focus-accent="" aria-hidden="true" className="absolute inset-x-0 top-0 h-0.5 bg-primary" />
                 )}
                 {dropIndex === index && (
-                  <span data-drop-caret="before" aria-hidden="true" className="pointer-events-none absolute inset-y-1 -left-px w-0.5 rounded-full bg-primary" />
+                  <span data-drop-caret="before" aria-hidden="true" className="pointer-events-none absolute inset-y-1 -start-px w-0.5 rounded-full bg-primary" />
                 )}
                 {dropIndex === tabs.length && index === tabs.length - 1 && (
-                  <span data-drop-caret="after" aria-hidden="true" className="pointer-events-none absolute inset-y-1 -right-px w-0.5 rounded-full bg-primary" />
+                  <span data-drop-caret="after" aria-hidden="true" className="pointer-events-none absolute inset-y-1 -end-px w-0.5 rounded-full bg-primary" />
                 )}
                 <LLMProviderLogo provider={tab.provider} className="h-4 w-4 flex-shrink-0" />
-                <span data-tab-title="" className={cn('min-w-0 truncate', tab.isPreview && 'italic')}>{title}</span>
+                <span data-tab-title="" className={cn('bidi-auto min-w-0 truncate', tab.isPreview && 'italic')}>{title}</span>
                 {showsProjectName && (
                   // Gives way before the title does. The separator is drawn, a screen reader hears a comma.
                   <span data-tab-project="" className="min-w-0 max-w-24 shrink-[4] truncate text-[11px] text-muted-foreground">
@@ -787,7 +797,7 @@ export default function PaneTabBar({
                   </span>
                 )}
                 {/* Never shrinks, and keeps to the right edge of a short tab held at its minimum width. */}
-                <span data-tab-end="" className="ml-auto flex flex-shrink-0 items-center gap-2">
+                <span data-tab-end="" className="ms-auto flex flex-shrink-0 items-center gap-2">
                   <TabActivityMark activity={display?.activity ?? null} />
                   <button
                     type="button"
@@ -852,7 +862,7 @@ export default function PaneTabBar({
         </div>
       )}
 
-      <div className="flex flex-shrink-0 items-center gap-0.5 pr-1">
+      <div className="flex flex-shrink-0 items-center gap-0.5 pe-1">
         {(tabs.length > 0 || isSplit) && (
           <ActionMenu
             label={t('workspace.paneMenu', { defaultValue: 'Pane actions' })}

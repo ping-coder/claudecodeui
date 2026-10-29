@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { isRtl } from '@/shared/direction';
 import type { Project,CodeEditorDiffInfo,CodeEditorFile } from '@/shared/types';
 
 type UseEditorSidebarOptions = {
@@ -129,8 +130,9 @@ export const useEditorSidebar = ({
       }
 
       const containerRect = mainContainer.getBoundingClientRect();
-      // Calculate new editor width: distance from mouse to right edge of main container
-      const newWidth = containerRect.right - event.clientX;
+      // New editor width: distance from the mouse to the container's end edge (the left edge
+      // right to left, where the docked editor sits on the left).
+      const newWidth = isRtl(mainContainer) ? event.clientX - containerRect.left : containerRect.right - event.clientX;
 
       const minWidth = 300;
       const maxWidth = containerRect.width * 0.8;

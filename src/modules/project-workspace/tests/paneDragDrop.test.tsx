@@ -381,6 +381,35 @@ test('side by side each pane offers its own side; collapsed the visible pane off
   assert.deepEqual(zonesIn('left'), ['left:Open here'], 'no room to split, no right zone');
 });
 
+test('right to left the zones are named after where they are drawn: the first pane is on the right', () => {
+  // What <html dir="rtl"> computes in a browser; jsdom neither maps dir to direction nor inherits it.
+  const style = document.createElement('style');
+  style.textContent = '[dir="rtl"], [dir="rtl"] * { direction: rtl; }';
+  document.head.append(style);
+  document.documentElement.setAttribute('dir', 'rtl');
+  try {
+    const zonesIn = (side: 'left' | 'right') => Array.from(pane(side).querySelectorAll('[data-drop-zone]'))
+      .map((element) => `${element.getAttribute('data-drop-zone')}:${element.textContent}`);
+    const transfer = rowTransfer(ROW_PAYLOAD);
+
+    setLayout({ left: makePane([makeTab('a1')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+    const unsplit = renderRegion();
+    fireDrag(group(), 'dragEnter', transfer);
+    assert.deepEqual(zonesIn('left'), ['left:Open here', 'right:Open on the left (split)'], 'the new pane opens on the left');
+    unsplit.unmount();
+
+    setLayout({ left: makePane([makeTab('a1')]), right: makePane([makeTab('b1')]), focusedSide: 'left', splitRatio: 0.5 });
+    renderRegion(false);
+    fireDrag(group(), 'dragEnter', transfer);
+    assert.deepEqual(zonesIn('left'), ['left:Open on the right', 'right:Open on the left']);
+    fireDrag(zone('left', 'left'), 'drop', transfer);
+    assert.deepEqual(vi.mocked(actions.openSession).mock.calls[0][1], { target: 'left', preview: false }, 'still the first pane');
+  } finally {
+    document.documentElement.removeAttribute('dir');
+    style.remove();
+  }
+});
+
 test('a conversation dragged from the sidebar over a tab bar gets no insertion caret; only a dragged tab lands at a position', () => {
   setLayout({ left: makePane([makeTab('a1'), makeTab('a2')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
   renderRegion();

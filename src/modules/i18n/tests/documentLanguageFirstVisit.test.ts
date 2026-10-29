@@ -16,5 +16,6 @@ import { readUserPreference } from '@/shared/userSettings';
 test('a first visit labels <html> as English without storing a language', () => {
   assert.equal(i18n.language, 'en');
   assert.equal(document.documentElement.getAttribute('lang'), 'en');
+  assert.equal(document.documentElement.getAttribute('dir'), 'ltr');
   assert.equal(readUserPreference<string | null>('userLanguage', null), null);
 });

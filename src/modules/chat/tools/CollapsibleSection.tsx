@@ -45,7 +45,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
         <div className="flex cursor-default select-none items-center gap-1.5 py-0.5 text-xs group-data-[state=open]/section:sticky group-data-[state=open]/section:top-0 group-data-[state=open]/section:z-10 group-data-[state=open]/section:-mx-1 group-data-[state=open]/section:bg-background group-data-[state=open]/section:px-1">
           <CollapsibleTrigger className="flex flex-shrink-0 items-center p-0.5 text-muted-foreground hover:text-foreground">
             <svg
-              className="h-3 w-3 transition-transform duration-150 group-data-[state=open]/section:rotate-90"
+              className="rtl-mirror h-3 w-3 transition-transform duration-150 group-data-[state=open]/section:rotate-90"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -62,19 +62,19 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
           <button
             onClick={onTitleClick}
             className={cn(
-              'flex-1 truncate text-left font-mono text-primary transition-colors hover:text-primary/80 hover:underline',
+              'flex-1 truncate text-start font-mono text-primary transition-colors hover:text-primary/80 hover:underline',
               titleClassName,
             )}
           >
             {title}
           </button>
-          {badge && <span className="ml-auto flex-shrink-0">{badge}</span>}
-          {action && <span className="ml-1 flex-shrink-0">{action}</span>}
+          {badge && <span className="ms-auto flex-shrink-0">{badge}</span>}
+          {action && <span className="ms-1 flex-shrink-0">{action}</span>}
         </div>
       ) : (
         <CollapsibleTrigger className="flex w-full select-none items-center gap-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground group-data-[state=open]/section:sticky group-data-[state=open]/section:top-0 group-data-[state=open]/section:z-10 group-data-[state=open]/section:-mx-1 group-data-[state=open]/section:bg-background group-data-[state=open]/section:px-1">
           <svg
-            className="h-3 w-3 flex-shrink-0 transition-transform duration-150 group-data-[state=open]/section:rotate-90"
+            className="rtl-mirror h-3 w-3 flex-shrink-0 transition-transform duration-150 group-data-[state=open]/section:rotate-90"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -87,14 +87,14 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
           {toolName && (
             <span className="flex-shrink-0 text-[10px] text-muted-foreground/40">/</span>
           )}
-          <span className={cn('flex-1 truncate text-left', titleClassName)}>{title}</span>
-          {badge && <span className="ml-auto flex-shrink-0">{badge}</span>}
-          {action && <span className="ml-1 flex-shrink-0">{action}</span>}
+          <span className={cn('flex-1 truncate text-start', titleClassName)}>{title}</span>
+          {badge && <span className="ms-auto flex-shrink-0">{badge}</span>}
+          {action && <span className="ms-1 flex-shrink-0">{action}</span>}
         </CollapsibleTrigger>
       )}
 
       <CollapsibleContent>
-        <div className="mt-1.5 pl-[18px]">
+        <div className="mt-1.5 ps-[18px]">
           {children}
         </div>
       </CollapsibleContent>

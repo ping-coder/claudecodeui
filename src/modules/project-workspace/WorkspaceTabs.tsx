@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { forwardArrowKey } from '@/shared/direction';
 import { Tooltip, PillBar, Pill } from '@/shared/ui';
 import type { AppTab, WorkspaceViewLabels, WorkspaceViewSetter } from '@/shared/types';
 import { cn } from '@/shared/utils';
@@ -49,8 +50,10 @@ export default function WorkspaceTabs({
     const currentIndex = tabButtons.indexOf(event.currentTarget);
     let nextIndex: number;
 
-    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabButtons.length;
-    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + tabButtons.length) % tabButtons.length;
+    // The arrow pointing along the row moves on: ArrowLeft right to left.
+    const forward = forwardArrowKey(tabList);
+    if (event.key === forward) nextIndex = (currentIndex + 1) % tabButtons.length;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') nextIndex = (currentIndex - 1 + tabButtons.length) % tabButtons.length;
     else if (event.key === 'Home') nextIndex = 0;
     else if (event.key === 'End') nextIndex = tabButtons.length - 1;
     else return;

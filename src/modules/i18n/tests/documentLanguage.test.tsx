@@ -37,6 +37,7 @@ vi.mock('@/shared/api', () => ({
 }));
 
 const htmlLang = () => document.documentElement.getAttribute('lang');
+const htmlDir = () => document.documentElement.getAttribute('dir');
 
 afterAll(async () => {
   await i18n.changeLanguage('en');
@@ -45,6 +46,16 @@ afterAll(async () => {
 test('the saved language is on <html> as soon as i18n loads', () => {
   assert.equal(i18n.language, 'zh-CN');
   assert.equal(htmlLang(), 'zh-CN');
+  assert.equal(htmlDir(), 'ltr');
+});
+
+test('a right-to-left language turns <html> around, and back', async () => {
+  await i18n.changeLanguage('he');
+  assert.equal(htmlLang(), 'he');
+  assert.equal(htmlDir(), 'rtl');
+
+  await i18n.changeLanguage('ja');
+  assert.equal(htmlDir(), 'ltr');
 });
 
 test('picking a language in the selector relabels <html>', () => {
@@ -93,4 +104,5 @@ test('a code without translations is labelled as the English that is shown', asy
   // i18next keeps the requested code but falls back to the English strings.
   assert.equal(i18n.language, 'xx');
   assert.equal(htmlLang(), 'en');
+  assert.equal(htmlDir(), 'ltr');
 });

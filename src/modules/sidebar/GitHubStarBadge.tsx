@@ -31,7 +31,7 @@ export default function GitHubStarBadge() {
         <Star className="h-3 w-3" />
         <span className="font-normal">Star</span>
         {formattedCount && (
-          <span className="border-l border-border/50 pl-1.5 tabular-nums">{formattedCount}</span>
+          <span className="border-s border-border/50 ps-1.5 tabular-nums">{formattedCount}</span>
         )}
       </a>
       <button
@@ -40,7 +40,7 @@ export default function GitHubStarBadge() {
           e.stopPropagation();
           dismiss();
         }}
-        className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-border/50 bg-muted text-muted-foreground transition-colors hover:text-foreground group-hover/star:flex"
+        className="absolute -end-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-border/50 bg-muted text-muted-foreground transition-colors hover:text-foreground group-hover/star:flex"
         aria-label="Dismiss"
       >
         <X className="h-2.5 w-2.5" />

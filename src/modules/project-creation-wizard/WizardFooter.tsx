@@ -33,7 +33,7 @@ export default function WizardFooter({
           t('projectWizard.buttons.cancel')
         ) : (
           <>
-            <ChevronLeft className="mr-1 h-4 w-4" />
+            <ChevronLeft className="me-1 h-4 w-4" />
             {t('projectWizard.buttons.back')}
           </>
         )}
@@ -42,20 +42,20 @@ export default function WizardFooter({
       <Button onClick={step === 2 ? onCreate : onNext} disabled={isCreating}>
         {isCreating ? (
           <>
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="me-2 h-4 w-4 animate-spin" />
             {isCloneWorkflow
               ? t('projectWizard.buttons.cloning', { defaultValue: 'Cloning...' })
               : t('projectWizard.buttons.creating')}
           </>
         ) : step === 2 ? (
           <>
-            <Check className="mr-1 h-4 w-4" />
+            <Check className="me-1 h-4 w-4" />
             {t('projectWizard.buttons.createProject')}
           </>
         ) : (
           <>
             {t('projectWizard.buttons.next')}
-            <ChevronRight className="ml-1 h-4 w-4" />
+            <ChevronRight className="ms-1 h-4 w-4" />
           </>
         )}
       </Button>

@@ -2,6 +2,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Loader2, type LucideIcon } from 'lucide-react';
 
+import { isRtl } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 import { Button } from '@/shared/ui/Button';
 
@@ -26,6 +27,7 @@ type ActionMenuProps = {
   items: ActionMenuItem[];
   icon?: LucideIcon;
   ariaLabel?: string;
+  /** Which edge of the trigger the menu lines up with; mirrored right to left ('right' is the end edge). */
   align?: 'left' | 'right';
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -176,7 +178,8 @@ export function ActionMenu({
         top: rect.bottom + 6 + estimatedHeight <= window.innerHeight - 8
           ? rect.bottom + 6
           : Math.max(8, rect.top - estimatedHeight - 6),
-        left: Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8)),
+        // Lined up with the trigger's end edge: its right edge, or its left edge right to left.
+        left: Math.max(8, Math.min(isRtl(triggerRef.current) ? rect.left : rect.right - menuWidth, window.innerWidth - menuWidth - 8)),
       });
     }
     setMenuOpen(true);
@@ -193,7 +196,7 @@ export function ActionMenu({
         portal ? 'fixed z-[70]' : 'absolute top-full z-50 mt-2',
         'min-w-[220px] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg',
         'animate-in fade-in-0 zoom-in-95',
-        !portal && (align === 'right' ? 'right-0' : 'left-0'),
+        !portal && (align === 'right' ? 'end-0' : 'start-0'),
         menuClassName,
       )}
       style={portal && portalPosition ? portalPosition : undefined}
@@ -210,7 +213,7 @@ export function ActionMenu({
               disabled={item.disabled || item.loading}
               onClick={() => runItem(item)}
               className={cn(
-                'flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors',
+                'flex w-full items-start gap-3 rounded-md px-3 py-2 text-start text-sm transition-colors',
                 'focus:outline-none focus-visible:bg-accent',
                 item.disabled || item.loading
                   ? 'cursor-not-allowed opacity-50'

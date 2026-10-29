@@ -76,10 +76,10 @@ export default function CommitHistoryItem({
       <button
         type="button"
         aria-expanded={isExpanded}
-        className="flex w-full cursor-pointer items-start border-0 bg-transparent p-3 text-left transition-colors hover:bg-accent/50"
+        className="flex w-full cursor-pointer items-start border-0 bg-transparent p-3 text-start transition-colors hover:bg-accent/50"
         onClick={onToggle}
       >
-        <span className="mr-2 mt-1 rounded p-0.5 hover:bg-accent">
+        <span className="me-2 mt-1 rounded p-0.5 hover:bg-accent">
           {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         </span>
         <div className="min-w-0 flex-1">
@@ -137,11 +137,12 @@ export default function CommitHistoryItem({
                 </div>
                 <div>
                   <div className="text-muted-foreground/60">{t('git:history.added')}</div>
-                  <div className="font-semibold text-green-600 dark:text-green-400">+{fileSummary.totalInsertions}</div>
+                  {/* dir="ltr": right to left "+12" would read "12+"; the cell stays centred. */}
+                  <div dir="ltr" className="font-semibold text-green-600 dark:text-green-400">+{fileSummary.totalInsertions}</div>
                 </div>
                 <div>
                   <div className="text-muted-foreground/60">{t('git:history.removed')}</div>
-                  <div className="font-semibold text-red-600 dark:text-red-400">-{fileSummary.totalDeletions}</div>
+                  <div dir="ltr" className="font-semibold text-red-600 dark:text-red-400">-{fileSummary.totalDeletions}</div>
                 </div>
               </div>
             )}

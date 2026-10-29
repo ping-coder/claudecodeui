@@ -35,6 +35,7 @@ import type {
   WorkspaceViewSetter,
 } from '@/shared/types';
 import { DeploymentEnvironmentBadge } from '@/shared/ui';
+import { visualPaneSide } from '@/shared/direction';
 import { cn, getPaneScopedDomId } from '@/shared/utils';
 
 /** Room the tab bar keeps for its buttons and about two full-width tabs before the view bar may join it. */
@@ -140,7 +141,7 @@ function PaneMobileHeader({ onMenuClick, actions }: PaneMobileHeaderProps) {
     <div className="pwa-header-safe flex flex-shrink-0 items-center gap-2 border-b border-border/50 bg-background/80 p-2 backdrop-blur-sm sm:p-3">
       <MobileMenuButton onMenuClick={onMenuClick} compact />
       <DeploymentEnvironmentBadge className="max-w-20" />
-      {actions && <div className="ml-auto flex items-center gap-1">{actions}</div>}
+      {actions && <div className="ms-auto flex items-center gap-1">{actions}</div>}
     </div>
   );
 }
@@ -583,7 +584,7 @@ function WorkspacePane({
       data-workspace-pane={side}
       role="group"
       aria-label={isSplit
-        ? (side === 'left' ? t('workspace.leftPane', { defaultValue: 'Left pane' }) : t('workspace.rightPane', { defaultValue: 'Right pane' }))
+        ? (visualPaneSide(side) === 'left' ? t('workspace.leftPane', { defaultValue: 'Left pane' }) : t('workspace.rightPane', { defaultValue: 'Right pane' }))
         : undefined}
       className={cn('flex min-h-0 min-w-0 flex-col overflow-hidden outline-none', className)}
       style={style}

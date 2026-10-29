@@ -4,6 +4,7 @@ import { Check, Edit2, GitBranch, MoreHorizontal, PanelLeft, PanelRight, Trash2,
 import type { TFunction } from 'i18next';
 
 import { ActionMenu } from '@/shared/ui';
+import { visualPaneSide } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 import type { LLMProvider, SessionPanePlacement, WorkspacePaneSide } from '@/shared/types';
 import { useSessionForkingProviders } from '@/shared/hooks/useProviderCapabilities';
@@ -116,27 +117,34 @@ export default function SessionOptions({
 
   // Absolute sides lead the menu, which is how touch screens (no hover buttons) choose one.
   // Unsplit the only side to offer is the right one, and opening there splits.
+  // Labels name where a pane is drawn: right to left the first pane ('left') is on the right,
+  // and the PanelLeft and PanelRight icons mirror with it.
   const openInPane = canTargetSides ? onOpenInPane : undefined;
+  const sideLabel = (side: WorkspacePaneSide) => (visualPaneSide(side) === 'left'
+    ? t('sessions.openOnLeft', { defaultValue: 'Open on the left' })
+    : t('sessions.openOnRight', { defaultValue: 'Open on the right' }));
   const paneItems: SessionMenuItem[] = !openInPane
     ? []
     : isWorkspaceSplit
       ? [
         {
           key: 'open-left',
-          label: t('sessions.openOnLeft', { defaultValue: 'Open on the left' }),
+          label: sideLabel('left'),
           icon: PanelLeft,
           onSelect: () => openInPane('left'),
         },
         {
           key: 'open-right',
-          label: t('sessions.openOnRight', { defaultValue: 'Open on the right' }),
+          label: sideLabel('right'),
           icon: PanelRight,
           onSelect: () => openInPane('right'),
         },
       ]
       : [{
         key: 'open-right',
-        label: t('sessions.openOnRightSplit', { defaultValue: 'Open on the right (split view)' }),
+        label: visualPaneSide('right') === 'left'
+          ? t('sessions.openOnLeftSplit', { defaultValue: 'Open on the left (split view)' })
+          : t('sessions.openOnRightSplit', { defaultValue: 'Open on the right (split view)' }),
         icon: PanelRight,
         onSelect: () => openInPane('right'),
       }];
@@ -228,7 +236,7 @@ export default function SessionOptions({
               // Hung off the left of the "…" rather than laid out beside it, so these controls'
               // own box stays that button's size: while the side buttons are hidden, a click or
               // tap on the row's time label still reaches the row's link.
-              className="absolute right-full top-1/2 mr-1 -translate-y-1/2"
+              className="absolute end-full top-1/2 me-1 -translate-y-1/2"
               canTargetSides={canTargetSides}
               isWorkspaceSplit={isWorkspaceSplit}
               panePlacement={panePlacement}

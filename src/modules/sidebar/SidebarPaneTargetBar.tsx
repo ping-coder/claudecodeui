@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { PaneSideGlyph } from '@/shared/ui';
+import { forwardArrowKey, visualPaneSide } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 import { WORKSPACE_PANE_SIDES } from '@/shared/constants';
 import type { SidebarPaneTargeting, WorkspacePaneSide } from '@/shared/types';
@@ -34,11 +35,14 @@ export default function SidebarPaneTargetBar({ paneTargeting, t }: SidebarPaneTa
     }
   };
 
-  // Radio-group keys: the arrows move the choice and the focus together.
+  // Radio-group keys: the arrows move the choice and the focus together. 'left' is the first
+  // option, drawn on the right right to left, where ArrowLeft moves on to 'right'.
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const side: WorkspacePaneSide | null = event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+    const forward = forwardArrowKey(event.currentTarget);
+    const back = forward === 'ArrowRight' ? 'ArrowLeft' : 'ArrowRight';
+    const side: WorkspacePaneSide | null = event.key === back || event.key === 'ArrowUp'
       ? 'left'
-      : event.key === 'ArrowRight' || event.key === 'ArrowDown'
+      : event.key === forward || event.key === 'ArrowDown'
         ? 'right'
         : null;
     if (!side) {
@@ -82,7 +86,7 @@ export default function SidebarPaneTargetBar({ paneTargeting, t }: SidebarPaneTa
             >
               <PaneSideGlyph placement={side} className="h-3.5 w-3.5" />
               <span className="truncate">
-                {side === 'left'
+                {visualPaneSide(side) === 'left'
                   ? t('paneTarget.left', { defaultValue: 'Left' })
                   : t('paneTarget.right', { defaultValue: 'Right' })}
               </span>

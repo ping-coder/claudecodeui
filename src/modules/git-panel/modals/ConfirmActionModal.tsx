@@ -128,7 +128,7 @@ export default function ConfirmActionModal({ action, onCancel, onConfirm }: Conf
         aria-labelledby={titleId}
       >
         <div className="flex shrink-0 items-center px-6 pt-6">
-          <div className={`mr-3 rounded-full p-2 ${CONFIRMATION_ICON_CONTAINER_CLASSES[action.type]}`}>
+          <div className={`me-3 rounded-full p-2 ${CONFIRMATION_ICON_CONTAINER_CLASSES[action.type]}`}>
             {renderConfirmActionIcon(action.type)}
           </div>
           <h3 id={titleId} className="text-lg font-semibold text-foreground">
@@ -165,7 +165,7 @@ export default function ConfirmActionModal({ action, onCancel, onConfirm }: Conf
           </label>
         )}
 
-        <div className="flex shrink-0 justify-end space-x-3 px-6 pb-6">
+        <div className="flex shrink-0 justify-end space-x-3 px-6 pb-6 rtl:space-x-reverse">
           <button
             onClick={handleCancel}
             className="rounded-lg px-4 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -174,7 +174,7 @@ export default function ConfirmActionModal({ action, onCancel, onConfirm }: Conf
           </button>
           <button
             onClick={handleConfirm}
-            className={`flex items-center space-x-2 rounded-lg px-4 py-2 text-sm text-white transition-colors ${CONFIRMATION_BUTTON_CLASSES[action.type]}`}
+            className={`flex items-center space-x-2 rounded-lg px-4 py-2 text-sm text-white transition-colors rtl:space-x-reverse ${CONFIRMATION_BUTTON_CLASSES[action.type]}`}
           >
             {renderConfirmActionIcon(action.type)}
             <span>

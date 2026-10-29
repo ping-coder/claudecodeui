@@ -3,6 +3,7 @@ import { Settings2, Terminal, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { QuickSettingsTab } from '@/shared/types';
+import { forwardArrowKey } from '@/shared/direction';
 import { getQuickSettingsTabId, getQuickSettingsTabPanelId } from '@/shared/utils';
 
 type TabDefinition = {
@@ -30,8 +31,10 @@ export default function QuickSettingsTabs({ activeTab, onSelectTab }: QuickSetti
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const currentIndex = TABS.findIndex((tab) => tab.id === activeTab);
     let nextIndex: number;
-    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % TABS.length;
-    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+    // The arrow pointing along the row moves on: ArrowLeft right to left.
+    const forward = forwardArrowKey(event.currentTarget);
+    if (event.key === forward) nextIndex = (currentIndex + 1) % TABS.length;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
     else return;
 
     event.preventDefault();

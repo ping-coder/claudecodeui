@@ -490,7 +490,7 @@ export default function ChatComposer({
         {showFileDropdown && filteredFiles.length > 0 && (
           <div
             ref={fileDropdownRef}
-            className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-48 overflow-y-auto rounded-xl border border-border/50 bg-card/95 shadow-lg backdrop-blur-md"
+            className="absolute bottom-full end-0 start-0 z-50 mb-2 max-h-48 overflow-y-auto rounded-xl border border-border/50 bg-card/95 shadow-lg backdrop-blur-md"
           >
             {filteredFiles.map((file, index) => (
               <div
@@ -576,7 +576,9 @@ export default function ChatComposer({
 
           <PromptInputBody>
             <div ref={inputHighlightRef} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
-              <div className="chat-input-placeholder block w-full whitespace-pre-wrap break-words px-4 py-2 text-sm leading-6 text-transparent">
+              {/* The highlights have to wrap exactly as the textarea's text does: dir="auto" like it, and the
+                  unicode-bidi: plaintext browsers give a textarea[dir=auto], so each paragraph takes its own direction. */}
+              <div dir="auto" className="chat-input-placeholder block w-full whitespace-pre-wrap break-words px-4 py-2 text-sm leading-6 text-transparent [unicode-bidi:plaintext]">
                 {renderInputWithMentions(input)}
               </div>
             </div>
@@ -622,7 +624,7 @@ export default function ChatComposer({
               <MessageSquareIcon />
               {slashCommandsCount > 0 && (
                 <span
-                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground"
+                  className="absolute -end-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground"
                 >
                   {slashCommandsCount}
                 </span>
@@ -641,7 +643,7 @@ export default function ChatComposer({
 
           </PromptInputTools>
 
-          <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
+          <div className="ms-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
             <ScheduleMessagePopover
               disabled={!input.trim()}
               onSchedule={onScheduleMessage}
@@ -695,7 +697,7 @@ export default function ChatComposer({
                 }
                 aria-label={submitAriaLabel}
                 title={submitAriaLabel}
-                className={showsBusySendMenu ? 'h-10 w-10 rounded-r-none sm:h-10 sm:w-10' : 'h-10 w-10 sm:h-10 sm:w-10'}
+                className={showsBusySendMenu ? 'h-10 w-10 rounded-e-none sm:h-10 sm:w-10' : 'h-10 w-10 sm:h-10 sm:w-10'}
               >
                 {isTranscribing ? (
                   <Loader2 className="h-4 w-4 animate-spin" />

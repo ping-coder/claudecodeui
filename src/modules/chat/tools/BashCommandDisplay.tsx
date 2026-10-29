@@ -44,6 +44,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
   const isExporting = useIsExportingTranscript();
   const [openState, setOpen] = useState(false);
   const open = openState || isExporting;
+  const isMultilineOpen = open && command.includes('\n');
   const [copied, setCopied] = useState(false);
 
   // Output often arrives after this component first mounts, so apply the
@@ -113,9 +114,14 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
             `white-space: pre-wrap !important`, which would defeat `truncate`
             and render collapsed multi-line commands in full. */}
         <span
+          // Expanded over several lines it reads as code: left to right, each line from the left
+          // edge so the indentation shows (right to left, .font-mono lines would each end at the right).
+          dir={isMultilineOpen ? 'ltr' : undefined}
           className={cn(
             'min-w-0 flex-1 font-mono text-xs text-foreground',
             open ? 'whitespace-pre-wrap break-all' : 'truncate',
+            // Right to left the block of lines stays beside the "$" as it does left to right; the room left goes past it.
+            isMultilineOpen && 'rtl:ml-auto rtl:flex-initial',
           )}
         >
           {command}
@@ -126,7 +132,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
         )}
         {status && status !== 'running' && <ToolStatusBadge status={status} className="flex-shrink-0" />}
         {!open && hasOutput && !isRunning && (
-          <span className="flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/70 transition-opacity group-hover/cmd:opacity-0">
+          <span className="bidi-auto flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/70 transition-opacity group-hover/cmd:opacity-0">
             {outputLineCount} {outputLineCount === 1 ? 'line' : 'lines'}
           </span>
         )}
@@ -143,7 +149,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
       </div>
 
       {description && !open && (
-        <div className="truncate px-2.5 pb-1.5 pl-[2.4rem] text-[11px] italic text-muted-foreground/70">
+        <div className="truncate px-2.5 pb-1.5 ps-[2.4rem] text-[11px] italic text-muted-foreground/70">
           {description}
         </div>
       )}

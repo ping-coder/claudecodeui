@@ -92,7 +92,7 @@ export default function QuickSettingsCommandsTab({
             type="button"
             onClick={() => onInsertCommand(command)}
             title={t('quickSettings.commands.insertTitle', { command: command.name })}
-            className="flex w-full flex-col items-start rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
+            className="flex w-full flex-col items-start rounded-md px-2 py-1.5 text-start transition-colors hover:bg-accent"
           >
             <span className="font-mono text-sm text-foreground">{command.name}</span>
             {command.description && (

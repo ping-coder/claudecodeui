@@ -339,7 +339,7 @@ test('the peek shows the sidebar as a forced-open drawer, at the user\'s width, 
   rerender(region({ isImmersive: true, isSidebarPeekOpen: true }));
 
   const drawer = container.firstElementChild as HTMLElement;
-  for (const className of ['fixed', 'inset-y-0', 'left-0', 'z-40']) {
+  for (const className of ['fixed', 'inset-y-0', 'start-0', 'z-40']) {
     assert.ok(drawer.classList.contains(className), className);
   }
   assert.ok(!drawer.classList.contains('hidden'));

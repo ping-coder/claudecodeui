@@ -103,7 +103,7 @@ export default function PrdEditorHeader({
                   placeholder="Enter PRD filename"
                   maxLength={100}
                 />
-                <span className="ml-1 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 sm:text-xs">
+                <span className="ms-1 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 sm:text-xs">
                   .txt
                 </span>
               </div>

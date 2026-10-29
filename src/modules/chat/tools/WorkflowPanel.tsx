@@ -226,7 +226,7 @@ const WorkflowAgentRowView = memo(({ agent, timelineAddress, onFileOpen, createD
         {describeWorkflowAgent(agent)}
       </span>
       {agent.phase && <span className="flex-shrink-0 text-muted-foreground/70">· {agent.phase}</span>}
-      <span className="ml-auto flex-shrink-0 text-[11px] text-muted-foreground/70">
+      <span className="ms-auto flex-shrink-0 text-[11px] text-muted-foreground/70">
         {t(`workflow.agentStatus.${agent.status}`, agent.status)}
       </span>
     </>
@@ -239,17 +239,17 @@ const WorkflowAgentRowView = memo(({ agent, timelineAddress, onFileOpen, createD
           type="button"
           aria-expanded={isOpen}
           onClick={() => setIsOpen((previous) => !previous)}
-          className="flex w-full items-center gap-1.5 text-left hover:text-foreground"
+          className="flex w-full items-center gap-1.5 text-start hover:text-foreground"
         >
           <ChevronRight className={cn('h-3 w-3 flex-shrink-0 transition-transform duration-150', isOpen && 'rotate-90')} />
           {summary}
         </button>
       ) : (
-        <div className="flex items-center gap-1.5 pl-[18px]">{summary}</div>
+        <div className="flex items-center gap-1.5 ps-[18px]">{summary}</div>
       )}
 
       {agent.status === 'running' && (agent.lastToolName || agent.tokens !== undefined || agent.toolCalls !== undefined) && (
-        <div className="flex flex-wrap gap-x-2 pl-[30px] text-[11px] text-muted-foreground/70">
+        <div className="flex flex-wrap gap-x-2 ps-[30px] text-[11px] text-muted-foreground/70">
           {agent.lastToolName && (
             <span className="min-w-0 truncate">
               {agent.lastToolName}
@@ -262,11 +262,11 @@ const WorkflowAgentRowView = memo(({ agent, timelineAddress, onFileOpen, createD
       )}
 
       {agent.status === 'completed' && agent.resultPreview && (
-        <div className="line-clamp-2 whitespace-pre-wrap break-words pl-[30px] text-[11px] text-muted-foreground/70">{agent.resultPreview}</div>
+        <div className="line-clamp-2 whitespace-pre-wrap break-words ps-[30px] text-[11px] text-muted-foreground/70">{agent.resultPreview}</div>
       )}
 
       {isOpen && timelineAddress && agent.agentId && (
-        <div className="mt-1 space-y-2 pl-[30px]">
+        <div className="mt-1 space-y-2 ps-[30px]">
           <WorkflowAgentTimeline
             sessionId={timelineAddress.sessionId}
             runId={timelineAddress.runId}
@@ -357,12 +357,12 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
   );
 
   return (
-    <div className="my-1 border-l-2 border-l-purple-500 py-0.5 pl-3 dark:border-l-purple-400">
+    <div className="my-1 border-s-2 border-s-purple-500 py-0.5 ps-3 dark:border-s-purple-400">
       <button
         type="button"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((previous) => !previous)}
-        className="flex w-full select-none flex-wrap items-center gap-x-1.5 gap-y-0.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full select-none flex-wrap items-center gap-x-1.5 gap-y-0.5 py-0.5 text-start text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         {/* One unit, so the name never wraps away from its title; it
             truncates only once the title has a line to itself. */}
@@ -382,7 +382,7 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
             own when the card is too narrow for them beside the name, rather
             than squeezing it; on that line the phase and the elapsed time
             truncate before the count and the status do. */}
-        <span className="ml-auto flex min-w-0 max-w-full items-center gap-2 text-[11px]">
+        <span className="ms-auto flex min-w-0 max-w-full items-center gap-2 text-[11px]">
           {agentProgress.total > 0 && (
             // Like the CLI's workflow row. The bar is decoration here: the
             // count beside it already says it in the button's name.
@@ -427,11 +427,11 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
       </button>
 
       {showBody && (
-        <div className="mt-1.5 space-y-2 pl-[18px] text-xs">
+        <div className="mt-1.5 space-y-2 ps-[18px] text-xs">
           {meta.phases.length > 0 && (
             <div className="rounded border border-border/40 bg-muted/40 p-2 text-muted-foreground">
               <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground/60">{t('workflow.phases', 'Phases')}</div>
-              <ol className="list-decimal space-y-0.5 pl-4">
+              <ol className="list-decimal space-y-0.5 ps-4">
                 {meta.phases.map((phase) => (
                   <li key={phase.title}>
                     <span className="font-medium text-foreground">{phase.title}</span>
@@ -492,7 +492,7 @@ export const WorkflowPanel = memo(({ toolInput, toolResult, workflow, taskStatus
             <details className="rounded border border-border/40 bg-muted/30 p-2">
               <summary className="cursor-pointer text-[10px] uppercase tracking-wide text-muted-foreground/60">
                 {t('workflow.script', 'Script')}
-                {scriptPath && <span className="ml-2 normal-case tracking-normal text-muted-foreground/50">{scriptPath}</span>}
+                {scriptPath && <span className="ms-2 normal-case tracking-normal text-muted-foreground/50">{scriptPath}</span>}
               </summary>
               {script && (
                 <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">{script}</pre>

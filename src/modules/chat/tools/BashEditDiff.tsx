@@ -223,7 +223,7 @@ function toProjectPath(filePath: string, projectRoot?: string): string {
 function BashEditDiffNote({ children }: { children: ReactNode }) {
   return (
     // The transparent border lines the note up with the file blocks' headers.
-    <div className="border-l-2 border-transparent py-0.5 pl-3 text-[11px] text-muted-foreground">
+    <div className="border-s-2 border-transparent py-0.5 ps-3 text-[11px] text-muted-foreground">
       {children}
     </div>
   );
@@ -289,7 +289,8 @@ function BashEditDiffFileSection({ file, onFileOpen }: BashEditDiffFileSectionPr
           </span>
         </div>
 
-        <div className="font-mono text-[11px] leading-[18px]">
+        {/* Left to right in any language, like the code it shows. */}
+        <div dir="ltr" className="font-mono text-[11px] leading-[18px]">
           {hunks.map((hunk, hunkIndex) => (
             <Fragment key={hunkIndex}>
               <div className="select-none bg-gray-50/80 px-2 text-gray-500 dark:bg-gray-800/40 dark:text-gray-400">

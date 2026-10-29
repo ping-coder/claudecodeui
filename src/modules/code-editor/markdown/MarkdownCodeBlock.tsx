@@ -47,7 +47,7 @@ export default function MarkdownCodeBlock({
   return (
     <div className="group relative my-2">
       {language !== 'text' && (
-        <div className="absolute left-3 top-2 z-10 text-xs font-medium uppercase text-gray-400">{language}</div>
+        <div className="absolute start-3 top-2 z-10 text-xs font-medium uppercase text-gray-400">{language}</div>
       )}
 
       <button
@@ -59,7 +59,7 @@ export default function MarkdownCodeBlock({
               setTimeout(() => setCopied(false), 2000);
             }
           })}
-        className="absolute right-2 top-2 z-10 rounded-md border border-border bg-card/90 px-2 py-1 text-xs text-foreground/80 opacity-0 transition-opacity hover:bg-muted group-hover:opacity-100"
+        className="absolute end-2 top-2 z-10 rounded-md border border-border bg-card/90 px-2 py-1 text-xs text-foreground/80 opacity-0 transition-opacity hover:bg-muted group-hover:opacity-100"
       >
         {copied ? 'Copied!' : 'Copy'}
       </button>

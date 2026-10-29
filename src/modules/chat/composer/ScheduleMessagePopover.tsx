@@ -92,10 +92,15 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
             <ComposerMenuItem
               key={minutes}
               label={t(`schedule.in.${minutes}`)}
-              description={new Date(Date.now() + minutes * 60_000).toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-              })}
+              // In the browser's locale: a <bdi> keeps "05:07 PM" in order in a right-to-left menu.
+              description={(
+                <bdi>
+                  {new Date(Date.now() + minutes * 60_000).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </bdi>
+              )}
               isSelected={false}
               onSelect={() => commit(new Date(Date.now() + minutes * 60_000))}
             />

@@ -94,13 +94,13 @@ export default function TaskBoardToolbar({
     <>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="relative max-w-md flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <Search className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
           <input
             type="text"
             value={searchTerm}
             onChange={(event) => onSearchTermChange(event.target.value)}
             placeholder={t('search.placeholder')}
-            className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-10 pr-4 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+            className="w-full rounded-lg border border-gray-300 bg-white py-2 pe-4 ps-10 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
           />
         </div>
 
@@ -187,14 +187,14 @@ export default function TaskBoardToolbar({
                     </button>
 
                     {isPrdDropdownOpen && (
-                      <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800">
+                      <div className="absolute end-0 top-full z-30 mt-2 w-56 rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800">
                         <div className="p-2">
                           <button
                             onClick={() => {
                               onCreatePrd();
                               setIsPrdDropdownOpen(false);
                             }}
-                            className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm font-medium text-purple-700 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-900/30"
+                            className="flex w-full items-center gap-2 rounded px-3 py-2 text-start text-sm font-medium text-purple-700 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-900/30"
                           >
                             <Plus className="h-4 w-4" />
                             {t('buttons.createNewPRD')}
@@ -209,7 +209,7 @@ export default function TaskBoardToolbar({
                                 onOpenPrd(prd);
                                 setIsPrdDropdownOpen(false);
                               }}
-                              className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                              className="flex w-full items-center gap-2 rounded px-3 py-2 text-start text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
                             >
                               <FileText className="h-4 w-4" />
                               <span className="truncate">{prd.name}</span>

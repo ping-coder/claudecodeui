@@ -175,7 +175,7 @@ export default function EditorSidebar({
       <div
         className={isFloating
           ? 'contents'
-          : `h-full overflow-hidden border-l border-gray-200 dark:border-gray-700 ${useFlexLayout ? 'min-w-0 flex-1' : ''}`}
+          : `h-full overflow-hidden border-s border-gray-200 dark:border-gray-700 ${useFlexLayout ? 'min-w-0 flex-1' : ''}`}
         style={isFloating || useFlexLayout ? undefined : { width: `${effectiveWidth}px`, minWidth: `${EDITOR_PANEL_MIN_WIDTH_PX}px` }}
       >
         <CodeEditor

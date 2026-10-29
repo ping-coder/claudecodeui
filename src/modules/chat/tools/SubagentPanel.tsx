@@ -114,12 +114,12 @@ export const SubagentPanel = memo(({
   const prompt = String(parsedInput.prompt ?? '');
 
   return (
-    <div className="my-1 border-l-2 border-l-purple-500 py-0.5 pl-3 dark:border-l-purple-400">
+    <div className="my-1 border-s-2 border-s-purple-500 py-0.5 ps-3 dark:border-s-purple-400">
       <button
         type="button"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((previous) => !previous)}
-        className="flex w-full select-none items-center gap-1.5 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full select-none items-center gap-1.5 py-0.5 text-start text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight className={cn('h-3 w-3 flex-shrink-0 transition-transform duration-150', isOpen && 'rotate-90')} />
         <Bot className="h-3.5 w-3.5 flex-shrink-0 text-purple-500 dark:text-purple-400" />
@@ -133,7 +133,7 @@ export const SubagentPanel = memo(({
         {nickname && (
           <span className="flex-shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground/70">{nickname}</span>
         )}
-        <span className={cn('ml-auto flex flex-shrink-0 items-center gap-1 text-[11px]', STATUS_STYLES[status])}>
+        <span className={cn('ms-auto flex flex-shrink-0 items-center gap-1 text-[11px]', STATUS_STYLES[status])}>
           {status === 'running' ? (
             <>
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
@@ -161,7 +161,7 @@ export const SubagentPanel = memo(({
       </button>
 
       {showTimeline && (
-        <div className="mt-1.5 space-y-2 pl-[18px]">
+        <div className="mt-1.5 space-y-2 ps-[18px]">
           {subagent?.model && (
             <div className="text-[10px] uppercase tracking-wide text-muted-foreground/50">{subagent.model}</div>
           )}

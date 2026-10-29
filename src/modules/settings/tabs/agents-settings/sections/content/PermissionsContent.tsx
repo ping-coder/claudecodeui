@@ -146,7 +146,7 @@ function ClaudePermissions({
             size="sm"
             className="h-10 px-4"
           >
-            <Plus className="mr-2 h-4 w-4 sm:mr-0" />
+            <Plus className="me-2 h-4 w-4 sm:me-0" />
             <span className="sm:hidden">{t('permissions.actions.add')}</span>
           </Button>
         </div>
@@ -219,7 +219,7 @@ function ClaudePermissions({
             size="sm"
             className="h-10 px-4"
           >
-            <Plus className="mr-2 h-4 w-4 sm:mr-0" />
+            <Plus className="me-2 h-4 w-4 sm:me-0" />
             <span className="sm:hidden">{t('permissions.actions.add')}</span>
           </Button>
         </div>
@@ -360,7 +360,7 @@ function CursorPermissions({
             size="sm"
             className="h-10 px-4"
           >
-            <Plus className="mr-2 h-4 w-4 sm:mr-0" />
+            <Plus className="me-2 h-4 w-4 sm:me-0" />
             <span className="sm:hidden">{t('permissions.actions.add')}</span>
           </Button>
         </div>
@@ -433,7 +433,7 @@ function CursorPermissions({
             size="sm"
             className="h-10 px-4"
           >
-            <Plus className="mr-2 h-4 w-4 sm:mr-0" />
+            <Plus className="me-2 h-4 w-4 sm:me-0" />
             <span className="sm:hidden">{t('permissions.actions.add')}</span>
           </Button>
         </div>

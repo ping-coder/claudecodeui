@@ -296,17 +296,17 @@ const markdownComponents = {
     return <>{children}</>;
   },
   blockquote: ({ children }: { children?: React.ReactNode }) => (
-    <blockquote className="my-3 border-l-2 border-primary/50 pl-4 italic text-muted-foreground">
+    <blockquote className="my-3 border-s-2 border-primary/50 ps-4 italic text-muted-foreground">
       {children}
     </blockquote>
   ),
   hr: () => <hr className="my-4 border-t border-border" />,
   p: ({ children }: { children?: React.ReactNode }) => <div className="mb-2 last:mb-0">{children}</div>,
   ul: ({ children }: { children?: React.ReactNode }) => (
-    <ul className="mb-2 list-outside list-disc space-y-1 pl-5 marker:text-current last:mb-0">{children}</ul>
+    <ul className="mb-2 list-outside list-disc space-y-1 ps-5 marker:text-current last:mb-0">{children}</ul>
   ),
   ol: ({ children }: { children?: React.ReactNode }) => (
-    <ol className="mb-2 list-outside list-decimal space-y-1 pl-5 marker:text-current last:mb-0">{children}</ol>
+    <ol className="mb-2 list-outside list-decimal space-y-1 ps-5 marker:text-current last:mb-0">{children}</ol>
   ),
   li: ({ children }: { children?: React.ReactNode }) => <li className="[&>div:last-child]:mb-0 [&>div]:mb-1">{children}</li>,
   table: ({ children }: { children?: React.ReactNode }) => (
@@ -320,7 +320,7 @@ const markdownComponents = {
     <tr className="[&:last-child>td]:border-b-0">{children}</tr>
   ),
   th: ({ children }: { children?: React.ReactNode }) => (
-    <th className="border-b border-border px-3 py-2 text-left font-semibold text-foreground">{children}</th>
+    <th className="border-b border-border px-3 py-2 text-start font-semibold text-foreground">{children}</th>
   ),
   td: ({ children }: { children?: React.ReactNode }) => (
     <td className="border-b border-border/60 px-3 py-2 align-top">{children}</td>

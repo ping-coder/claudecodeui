@@ -248,7 +248,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
         type="button"
         onClick={() => setSelectedSessionId(session.id)}
         className={cn(
-          'group w-full rounded-md border px-3 py-2.5 text-left transition-colors',
+          'group w-full rounded-md border px-3 py-2.5 text-start transition-colors',
           isSelected
             ? 'border-primary/50 bg-primary/10 text-foreground'
             : 'border-border/60 bg-card/30 text-muted-foreground hover:bg-muted/50',
@@ -260,7 +260,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
               <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', getStatusDot(session.status))} />
               <div className="truncate text-sm font-medium">{session.title || getDomain(session.url, t)}</div>
             </div>
-            <div className="mt-1 truncate pl-3.5 text-xs text-muted-foreground">{getDomain(session.url, t)}</div>
+            <div className="mt-1 truncate ps-3.5 text-xs text-muted-foreground">{getDomain(session.url, t)}</div>
           </div>
           <Badge variant="outline" className="shrink-0 border-border bg-background text-[10px] text-muted-foreground">
             {getStatusLabel(session.status, t)}
@@ -413,7 +413,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
                 type="button"
                 onClick={() => setSelectedSessionId(session.id)}
                 className={cn(
-                  'flex min-w-[180px] items-center gap-2 rounded-md border px-2.5 py-2 text-left',
+                  'flex min-w-[180px] items-center gap-2 rounded-md border px-2.5 py-2 text-start',
                   selectedSession?.id === session.id
                     ? 'border-primary/40 bg-primary/5'
                     : 'border-border bg-background',
@@ -479,7 +479,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
           )}
         </main>
 
-        <aside className="hidden min-h-0 flex-col border-l border-border/60 bg-background lg:flex">
+        <aside className="hidden min-h-0 flex-col border-s border-border/60 bg-background lg:flex">
           <div className="border-b border-border/60 px-4 py-3">
             <div className="flex items-center justify-between gap-2">
               <div>

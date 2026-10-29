@@ -153,7 +153,7 @@ export default function SidebarModals({
                   className="w-full justify-start"
                   onClick={() => onConfirmDeleteProject(false)}
                 >
-                  <EyeOff className="mr-2 h-4 w-4" />
+                  <EyeOff className="me-2 h-4 w-4" />
                   {t('deleteConfirmation.archiveProject', 'Archive project')}
                 </Button>
                 <Button
@@ -161,7 +161,7 @@ export default function SidebarModals({
                   className="w-full justify-start bg-red-600 text-white hover:bg-red-700"
                   onClick={() => onConfirmDeleteProject(true)}
                 >
-                  <Trash2 className="mr-2 h-4 w-4" />
+                  <Trash2 className="me-2 h-4 w-4" />
                   {t('deleteConfirmation.deleteAllData')}
                 </Button>
                 <Button variant="ghost" className="w-full" onClick={onCancelDeletion}>
@@ -208,7 +208,7 @@ export default function SidebarModals({
                     className="w-full justify-start"
                     onClick={() => onConfirmDeleteSession(false)}
                   >
-                    <EyeOff className="mr-2 h-4 w-4" />
+                    <EyeOff className="me-2 h-4 w-4" />
                     {t('deleteConfirmation.archiveSession', 'Archive session')}
                   </Button>
                 )}
@@ -217,7 +217,7 @@ export default function SidebarModals({
                   className="w-full justify-start bg-red-600 text-white hover:bg-red-700"
                   onClick={() => onConfirmDeleteSession(true)}
                 >
-                  <Trash2 className="mr-2 h-4 w-4" />
+                  <Trash2 className="me-2 h-4 w-4" />
                   {t('deleteConfirmation.deleteSessionPermanently', 'Delete permanently')}
                 </Button>
                 <Button variant="ghost" className="w-full" onClick={onCancelDeletion}>
@@ -261,7 +261,7 @@ export default function SidebarModals({
                   className="w-full justify-start"
                   onClick={() => onConfirmDeleteSessions(false)}
                 >
-                  <EyeOff className="mr-2 h-4 w-4" />
+                  <EyeOff className="me-2 h-4 w-4" />
                   {t('deleteConfirmation.archiveSessions', { count: pendingDeletion.sessionIds.length })}
                 </Button>
                 <Button
@@ -269,7 +269,7 @@ export default function SidebarModals({
                   className="w-full justify-start bg-red-600 text-white hover:bg-red-700"
                   onClick={() => onConfirmDeleteSessions(true)}
                 >
-                  <Trash2 className="mr-2 h-4 w-4" />
+                  <Trash2 className="me-2 h-4 w-4" />
                   {t('deleteConfirmation.deleteSessionPermanently', 'Delete permanently')}
                 </Button>
                 <Button variant="ghost" className="w-full" onClick={onCancelDeletion}>

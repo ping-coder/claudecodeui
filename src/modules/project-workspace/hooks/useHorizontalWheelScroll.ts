@@ -1,10 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { RefObject } from 'react';
 
+import { isRtl } from '@/shared/direction';
+
 /** Mouse wheels that report whole lines scroll this many pixels per line. */
 const WHEEL_LINE_HEIGHT_PX = 20;
 /** Slack before an edge counts as reached, so sub-pixel scroll positions do not leave a fade showing. */
 const EDGE_TOLERANCE_PX = 2;
+
+/**
+ * How far the strip is scrolled from its left edge, 0..max in both directions. Right to left,
+ * scrollLeft runs from 0 (scrolled to the start, which is the right edge) down to -max.
+ */
+const offsetFromLeft = (element: HTMLElement): number => {
+  const max = element.scrollWidth - element.clientWidth;
+  return isRtl(element) ? element.scrollLeft + max : element.scrollLeft;
+};
 
 /**
  * A horizontally scrolling strip of tabs: a vertical mouse wheel scrolls it sideways (until an
@@ -23,8 +34,10 @@ export function useHorizontalWheelScroll(scrollRef: RefObject<HTMLElement | null
     if (!element) {
       return;
     }
-    setCanScrollLeft(element.scrollLeft > EDGE_TOLERANCE_PX);
-    setCanScrollRight(element.scrollLeft < element.scrollWidth - element.clientWidth - EDGE_TOLERANCE_PX);
+    // Physical sides: the fades and scroll buttons stay at the left and right edges in both directions.
+    const offset = offsetFromLeft(element);
+    setCanScrollLeft(offset > EDGE_TOLERANCE_PX);
+    setCanScrollRight(offset < element.scrollWidth - element.clientWidth - EDGE_TOLERANCE_PX);
   }, [scrollRef]);
 
   useEffect(() => {
@@ -57,15 +70,18 @@ export function useHorizontalWheelScroll(scrollRef: RefObject<HTMLElement | null
         return;
       }
 
+      // Wheeling down moves towards the end of the strip: rightwards, or leftwards right to left.
       const maxScrollLeft = element.scrollWidth - element.clientWidth;
-      const canMove = event.deltaY < 0 ? element.scrollLeft > 0 : element.scrollLeft < maxScrollLeft;
+      const fromStart = Math.abs(element.scrollLeft);
+      const canMove = event.deltaY < 0 ? fromStart > 0 : fromStart < maxScrollLeft;
       if (!canMove) {
         return;
       }
 
       event.preventDefault();
       const lineMultiplier = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE_HEIGHT_PX : 1;
-      element.scrollBy({ left: event.deltaY * lineMultiplier, behavior: 'auto' });
+      const towardsEnd = isRtl(element) ? -1 : 1;
+      element.scrollBy({ left: event.deltaY * lineMultiplier * towardsEnd, behavior: 'auto' });
     };
 
     // Not passive: preventDefault keeps the page from scrolling while the strip takes the wheel.

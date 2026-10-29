@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import type { TFunction } from 'i18next';
-import { twMerge } from 'tailwind-merge';
+import { extendTailwindMerge } from 'tailwind-merge';
 
 import type {
   AppTab,
@@ -29,6 +29,26 @@ export const IS_PLATFORM = import.meta.env?.VITE_IS_PLATFORM === 'true';
 // ---------------------------
 
 //----------------- TAILWIND CLASS COMPOSITION ------------
+
+// tailwind-merge does not let px-/mx-/inset-x-/border-x- override the logical
+// ps-/pe-, ms-/me-, start-/end-, border-s-/border-e- that it does for pl-/pr-.
+// Without this, cn('ps-3', 'px-0') would keep ps-3 where cn('pl-3', 'px-0') used
+// to drop pl-3, and a caller's px-0 would stop removing the component's padding.
+const twMerge = extendTailwindMerge({
+  extend: {
+    conflictingClassGroups: {
+      px: ['ps', 'pe'],
+      mx: ['ms', 'me'],
+      'inset-x': ['start', 'end'],
+      'border-w-x': ['border-w-s', 'border-w-e'],
+      'border-color-x': ['border-color-s', 'border-color-e'],
+      'scroll-mx': ['scroll-ms', 'scroll-me'],
+      'scroll-px': ['scroll-ps', 'scroll-pe'],
+      'rounded-t': ['rounded-ss', 'rounded-se'],
+      'rounded-b': ['rounded-es', 'rounded-ee'],
+    },
+  },
+});
 
 /**
  * Merges conditional class names and resolves conflicting Tailwind utilities so the

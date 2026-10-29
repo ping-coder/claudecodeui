@@ -34,10 +34,16 @@ type BarOptions = {
   revealMessage?: (message: ChatMessage, options?: RevealMessageOptions) => void;
   loadAllMessages?: () => Promise<boolean>;
   findLoadedQuestion?: (question: ChatMessage) => ChatMessage;
+  /** How wide the transcript's scrollbar is; jsdom draws none. */
+  scrollbarWidth?: number;
 };
 
 function renderBar(options: BarOptions) {
   const scrollContainerRef = { current: document.createElement('div') };
+  if (options.scrollbarWidth) {
+    Object.defineProperty(scrollContainerRef.current, 'offsetWidth', { configurable: true, value: 800 + options.scrollbarWidth });
+    Object.defineProperty(scrollContainerRef.current, 'clientWidth', { configurable: true, value: 800 });
+  }
   const props = {
     scrollContainerRef,
     renderedCount: options.chatMessages.length,
@@ -127,7 +133,7 @@ describe('the pinned question line', () => {
     assert.equal(questionButton().textContent?.includes('+1 inserted'), true);
   });
 
-  it('puts the export menu in the right margin from 980px, after the controls below that', () => {
+  it('puts the export menu in the end margin from 980px, after the controls below that', () => {
     measureBar(979);
     const medium = renderBar({ chatMessages: [user(0, 'the question')] });
     assert.equal(screen.getByTestId('export').closest('.max-w-\\[54\\.25rem\\]') !== null, true);
@@ -137,6 +143,20 @@ describe('the pinned question line', () => {
     renderBar({ chatMessages: [user(0, 'the question')] });
     assert.equal(screen.getByTestId('export').closest('.max-w-\\[54\\.25rem\\]') === null, true);
     assert.equal(screen.getByTestId('export').closest('[data-pinned-question]') !== null, true);
+  });
+
+  it('keeps the transcript scrollbar\'s room on its end side, where the scrollbar is in either direction', () => {
+    measureBar(1000);
+    renderBar({ chatMessages: [user(0, 'the question')], scrollbarWidth: 15 });
+    const bar = document.querySelector('[data-pinned-question]') as HTMLElement;
+    assert.equal((bar.firstElementChild as HTMLElement).style.paddingInlineEnd, '15px');
+    assert.equal((bar.firstElementChild as HTMLElement).style.paddingRight, '');
+    assert.equal((screen.getByTestId('export').parentElement as HTMLElement).style.insetInlineEnd, '31px');
+
+    fireEvent.click(questionButton());
+    // The panel's outer box: it is as wide as the bar and leaves the same room.
+    const panelBox = panel()?.parentElement?.parentElement;
+    assert.equal(panelBox?.style.paddingInlineEnd, '15px');
   });
 
   it('says it is reading while the server is asked for a question older than every loaded page', () => {
@@ -200,7 +220,7 @@ describe('the pinned question panel', () => {
   it('keeps focus in the bar after a press on its parts that take none: the panel\'s footer, the line\'s padding', () => {
     renderBar({ chatMessages: messages });
     fireEvent.click(questionButton());
-    const footerTime = [...(panel()?.querySelectorAll('span') ?? [])].pop() as HTMLElement;
+    const footerTime = [...(panel()?.querySelectorAll('bdi') ?? [])].pop() as HTMLElement;
     focusAsPressed(footerTime);
     assert.equal(isFocusInBar(), true, 'a press on the footer\'s time');
     assert.equal(hasEscapeLayer(), true);

@@ -45,7 +45,7 @@ function ErrorFallback({
               />
             </svg>
           </div>
-          <h3 className="ml-3 text-sm font-medium text-red-800">{t('misc.errorTitle')}</h3>
+          <h3 className="ms-3 text-sm font-medium text-red-800">{t('misc.errorTitle')}</h3>
         </div>
         <div className="text-sm text-red-700">
           <p className="mb-2">{t('misc.errorDescription')}</p>

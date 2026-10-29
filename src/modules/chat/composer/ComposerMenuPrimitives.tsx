@@ -30,6 +30,7 @@ export function ComposerMenuSurface({
       className="fixed z-[100] min-w-48 overflow-y-auto overscroll-contain rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-xl"
       style={{
         right: anchor.right,
+        left: anchor.left,
         bottom: anchor.bottom,
         maxHeight: anchor.maxHeight,
         maxWidth: anchor.maxWidth,
@@ -96,7 +97,7 @@ export function ComposerMenuItem({
       title={title}
       onClick={disabled ? undefined : onSelect}
       className={cn(
-        'flex w-full items-start gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors',
+        'flex w-full items-start gap-2.5 rounded-lg px-2.5 py-1.5 text-start text-sm transition-colors',
         'hover:bg-accent focus-visible:bg-accent focus-visible:outline-none',
         isSelected ? 'text-foreground' : 'text-foreground/90',
         disabled && 'cursor-not-allowed opacity-50 hover:bg-transparent',

@@ -80,7 +80,7 @@ export default function PermissionRequestsBanner({
               <ConfirmationRequest>
                 <div>
                   <span className="font-medium text-foreground">Permission required</span>
-                  <span className="ml-2 text-muted-foreground">
+                  <span className="ms-2 text-muted-foreground">
                     Tool: <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{request.toolName}</code>
                   </span>
                 </div>

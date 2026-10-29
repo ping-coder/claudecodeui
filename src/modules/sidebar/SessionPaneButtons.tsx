@@ -3,6 +3,7 @@ import type { FocusEvent, MouseEvent } from 'react';
 import type { TFunction } from 'i18next';
 
 import { PaneSideGlyph, Tooltip } from '@/shared/ui';
+import { visualPaneSide } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 import type { SessionPanePlacement, WorkspacePaneSide } from '@/shared/types';
 
@@ -26,12 +27,17 @@ type PanePlacementMarkerProps = {
   t: TFunction;
 };
 
+/** Named after where the pane is drawn: right to left the first pane ('left') is on the right. */
 const getSideLabel = (side: WorkspacePaneSide, isWorkspaceSplit: boolean, t: TFunction): string => {
-  if (side === 'left') {
-    return t('sessions.openOnLeft', { defaultValue: 'Open on the left' });
+  const isOnLeft = visualPaneSide(side) === 'left';
+  if (side === 'left' || isWorkspaceSplit) {
+    return isOnLeft
+      ? t('sessions.openOnLeft', { defaultValue: 'Open on the left' })
+      : t('sessions.openOnRight', { defaultValue: 'Open on the right' });
   }
-  return isWorkspaceSplit
-    ? t('sessions.openOnRight', { defaultValue: 'Open on the right' })
+  // Unsplit, the second pane is not there yet: opening there splits.
+  return isOnLeft
+    ? t('sessions.openOnLeftSplit', { defaultValue: 'Open on the left (split view)' })
     : t('sessions.openOnRightSplit', { defaultValue: 'Open on the right (split view)' });
 };
 
@@ -140,9 +146,10 @@ export function PanePlacementMarker({ isWorkspaceSplit, panePlacement, t }: Pane
     return null;
   }
 
+  // Named after where the pane is drawn, as the glyph beside it is.
   const label = panePlacement === 'both'
     ? t('tooltips.openedBoth', { defaultValue: 'Open in both panes' })
-    : panePlacement === 'left'
+    : visualPaneSide(panePlacement) === 'left'
       ? t('tooltips.openedLeft', { defaultValue: 'Open in the left pane' })
       : t('tooltips.openedRight', { defaultValue: 'Open in the right pane' });
 

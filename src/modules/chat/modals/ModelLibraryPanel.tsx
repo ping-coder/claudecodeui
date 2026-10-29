@@ -281,7 +281,7 @@ export default function ModelLibraryPanel({
         })}
       </div>
 
-      <div className="scrollbar-thin grid min-h-0 flex-1 items-start gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(20rem,1.2fr)]">
+      <div className="scrollbar-thin grid min-h-0 flex-1 items-start gap-4 overflow-y-auto pe-1 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(20rem,1.2fr)]">
         <form
           onSubmit={handleSubmit}
           className="h-fit rounded-2xl border border-border/70 bg-muted/20 p-4 shadow-sm"

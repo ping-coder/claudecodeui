@@ -86,7 +86,7 @@ function WorkflowAgentLine({ agent }: { agent: ActivityDetailsAgent }) {
       </span>
       {agent.phase && <span className="min-w-0 max-w-[40%] shrink-0 truncate text-muted-foreground/70">· {agent.phase}</span>}
       {agent.elapsedMs !== undefined && (
-        <span className="ml-auto shrink-0 pl-2 tabular-nums text-muted-foreground/60">{formatElapsed(agent.elapsedMs, t)}</span>
+        <span className="ms-auto shrink-0 ps-2 tabular-nums text-muted-foreground/60">{formatElapsed(agent.elapsedMs, t)}</span>
       )}
     </li>
   );
@@ -125,16 +125,16 @@ function WorkflowDetails({ workflow }: { workflow: ActivityDetailsWorkflow }) {
         <span className="min-w-0 truncate font-medium text-foreground" title={workflow.name || undefined}>
           {workflow.name || t('activityDetails.workflow', 'Workflow')}
         </span>
-        <span className={cn('ml-auto flex shrink-0 items-center gap-1 pl-2 text-[11px]', WORKFLOW_STATUS_STYLES[status])}>
+        <span className={cn('ms-auto flex shrink-0 items-center gap-1 ps-2 text-[11px]', WORKFLOW_STATUS_STYLES[status])}>
           {isRunning && <RunningDot />}
           {t(`activityDetails.status.${status}`, status)}
         </span>
       </div>
       {workflow.description && (
-        <div className="truncate pl-5" title={workflow.description}>{workflow.description}</div>
+        <div className="truncate ps-5" title={workflow.description}>{workflow.description}</div>
       )}
       {shownReadout.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-5 tabular-nums">
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 ps-5 tabular-nums">
           {progress && (
             <RunProgressBar
               done={progress.done}
@@ -156,12 +156,12 @@ function WorkflowDetails({ workflow }: { workflow: ActivityDetailsWorkflow }) {
         </div>
       )}
       {workflow.agents.length > 0 && (
-        <ul className="mt-1 space-y-0.5 pl-5">
+        <ul className="mt-1 space-y-0.5 ps-5">
           {workflow.agents.map((agent) => <WorkflowAgentLine key={agent.key} agent={agent} />)}
         </ul>
       )}
       {workflow.hiddenAgentCount > 0 && (
-        <div className="pl-10 text-[11px] text-muted-foreground/70">
+        <div className="ps-10 text-[11px] text-muted-foreground/70">
           {t('activityDetails.moreAgents', { count: workflow.hiddenAgentCount, defaultValue: '+{{count}} more' })}
         </div>
       )}
@@ -212,7 +212,7 @@ function BackgroundTaskDetails({ tasks }: { tasks: ActivityDetailsTask[] }) {
                 <RunningDot />
               </span>
               <span className="min-w-0 truncate text-foreground" title={name}>{name}</span>
-              <span className="ml-auto shrink-0 pl-2 tabular-nums text-muted-foreground/60">{formatElapsed(task.elapsedMs, t)}</span>
+              <span className="ms-auto shrink-0 ps-2 tabular-nums text-muted-foreground/60">{formatElapsed(task.elapsedMs, t)}</span>
             </li>
           );
         })}

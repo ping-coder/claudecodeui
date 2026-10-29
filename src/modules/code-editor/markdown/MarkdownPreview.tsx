@@ -17,7 +17,7 @@ const markdownPreviewComponents: Components = {
   // second Typography-styled <pre> shell from framing it.
   pre: ({ children }) => <>{children}</>,
   blockquote: ({ children }) => (
-    <blockquote className="my-2 border-l-4 border-gray-300 pl-4 italic text-gray-600 dark:border-gray-600 dark:text-gray-400">
+    <blockquote className="my-2 border-s-4 border-gray-300 ps-4 italic text-gray-600 dark:border-gray-600 dark:text-gray-400">
       {children}
     </blockquote>
   ),
@@ -33,7 +33,7 @@ const markdownPreviewComponents: Components = {
   ),
   thead: ({ children }) => <thead className="bg-gray-50 dark:bg-gray-800">{children}</thead>,
   th: ({ children }) => (
-    <th className="border border-gray-200 px-3 py-2 text-left text-sm font-semibold dark:border-gray-700">{children}</th>
+    <th className="border border-gray-200 px-3 py-2 text-start text-sm font-semibold dark:border-gray-700">{children}</th>
   ),
   td: ({ children }) => (
     <td className="border border-gray-200 px-3 py-2 align-top text-sm dark:border-gray-700">{children}</td>

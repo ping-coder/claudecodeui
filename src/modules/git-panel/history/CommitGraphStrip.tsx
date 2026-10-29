@@ -25,7 +25,7 @@ export default function CommitGraphStrip({ row }: CommitGraphStripProps) {
   return (
     <div aria-hidden className="relative shrink-0 self-stretch overflow-hidden" style={{ width }}>
       <svg
-        className="absolute left-0 top-0"
+        className="absolute start-0 top-0"
         width={width}
         height={NODE_ZONE_HEIGHT}
         fill="none"

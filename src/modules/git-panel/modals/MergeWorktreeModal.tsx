@@ -114,7 +114,7 @@ export default function MergeWorktreeModal({
             <span className="max-w-[45%] truncate rounded-md bg-muted px-2 py-1 font-mono text-foreground/80">
               {baseBranch}
             </span>
-            <span className="ml-auto shrink-0 text-xs text-muted-foreground">{commitLabel}</span>
+            <span className="ms-auto shrink-0 text-xs text-muted-foreground">{commitLabel}</span>
           </div>
 
           <label className="mb-3 flex cursor-pointer items-start gap-2 text-sm text-foreground/80">
@@ -163,7 +163,7 @@ export default function MergeWorktreeModal({
             </span>
           </label>
 
-          <div className="flex justify-end space-x-3">
+          <div className="flex justify-end space-x-3 rtl:space-x-reverse">
             <button
               onClick={onClose}
               className="rounded-lg px-4 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -173,7 +173,7 @@ export default function MergeWorktreeModal({
             <button
               onClick={() => void handleMerge()}
               disabled={isMerging || !message.trim()}
-              className="flex items-center space-x-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center space-x-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 rtl:space-x-reverse"
             >
               {isMerging ? (
                 <>

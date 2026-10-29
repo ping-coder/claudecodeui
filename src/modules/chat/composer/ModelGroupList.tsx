@@ -86,7 +86,7 @@ export default function ModelGroupList({
               <button
                 type="button"
                 onClick={() => toggle(group.key)}
-                className="flex w-full items-center gap-1.5 text-left hover:text-foreground"
+                className="flex w-full items-center gap-1.5 text-start hover:text-foreground"
                 aria-expanded={!isCollapsed}
               >
                 {isCollapsed ? (
@@ -96,14 +96,14 @@ export default function ModelGroupList({
                 )}
                 <LLMProviderLogo provider={group.provider} className="h-3.5 w-3.5 shrink-0" />
                 {group.name}
-                <span className="ml-auto text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
+                <span className="ms-auto text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
                   {group.models.length}
                 </span>
               </button>
             }
           >
             {group.models.length === 0 && loading ? (
-              <CommandItem disabled className="ml-4 border-l border-border/40 pl-4 text-muted-foreground">
+              <CommandItem disabled className="ms-4 border-s border-border/40 ps-4 text-muted-foreground">
                 {loadingLabel}
               </CommandItem>
             ) : null}
@@ -117,7 +117,7 @@ export default function ModelGroupList({
               <CommandItem
                 value={`${group.name} show`}
                 onSelect={() => toggle(group.key)}
-                className="ml-4 border-l border-border/40 pl-4 text-[11px] text-muted-foreground"
+                className="ms-4 border-s border-border/40 ps-4 text-[11px] text-muted-foreground"
               >
                 {group.models.length} hidden — click to show
               </CommandItem>
@@ -131,7 +131,7 @@ export default function ModelGroupList({
                   key={`${group.key}-${model.value}`}
                   value={`${group.name} ${model.label} ${model.description || ""}`}
                   onSelect={() => onSelect(group.provider, model.value)}
-                  className="ml-4 border-l border-border/40 pl-4"
+                  className="ms-4 border-s border-border/40 ps-4"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-2">
@@ -146,7 +146,7 @@ export default function ModelGroupList({
                       </div>
                     )}
                   </div>
-                  {isSelected && <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />}
+                  {isSelected && <Check className="ms-auto h-4 w-4 shrink-0 text-primary" />}
                 </CommandItem>
               );
             })}

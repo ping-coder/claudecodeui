@@ -41,7 +41,8 @@
     "deleteSelected_other": "Delete {{count}} sessions",
     "openOnLeft": "Open on the left",
     "openOnRight": "Open on the right",
-    "openOnRightSplit": "Open on the right (split view)"
+    "openOnRightSplit": "Open on the right (split view)",
+    "openOnLeftSplit": "Open on the left (split view)"
   },
   "tooltips": {
     "viewEnvironments": "View Environments",

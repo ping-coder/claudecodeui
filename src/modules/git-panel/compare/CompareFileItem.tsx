@@ -48,7 +48,7 @@ export default function CompareFileItem({
               event.stopPropagation();
               onToggleExpanded(file);
             }}
-            className={`cursor-pointer rounded p-0.5 hover:bg-accent ${isMobile ? 'mr-1' : 'mr-2'}`}
+            className={`cursor-pointer rounded p-0.5 hover:bg-accent ${isMobile ? 'me-1' : 'me-2'}`}
             title={isExpanded ? t('git:item.collapseDiff') : t('git:item.expandDiff')}
             aria-expanded={isExpanded}
           >
@@ -70,7 +70,7 @@ export default function CompareFileItem({
           </span>
 
           <span
-            className={`ml-2 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[10px] font-bold ${badgeClass}`}
+            className={`ms-2 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[10px] font-bold ${badgeClass}`}
             title={statusLabel}
           >
             {file.status}

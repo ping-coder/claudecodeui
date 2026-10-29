@@ -64,12 +64,12 @@ export default function SidebarFooter({
           {/* Desktop update */}
           <div className="hidden px-2 py-1.5 md:block">
             <button
-              className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-blue-50/80 dark:hover:bg-blue-900/15"
+              className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-start transition-colors hover:bg-blue-50/80 dark:hover:bg-blue-900/15"
               onClick={onShowVersionModal}
             >
               <div className="relative flex-shrink-0">
                 <ArrowUpCircle className="h-4 w-4 text-blue-500 dark:text-blue-400" />
-                <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+                <span className="absolute -end-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
               </div>
               <div className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-normal text-blue-600 dark:text-blue-300">
@@ -90,9 +90,9 @@ export default function SidebarFooter({
             >
               <div className="relative flex-shrink-0">
                 <ArrowUpCircle className="h-4 w-4 text-blue-500 dark:text-blue-400" />
-                <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+                <span className="absolute -end-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
               </div>
-              <div className="min-w-0 flex-1 text-left">
+              <div className="min-w-0 flex-1 text-start">
                 <span className="block truncate text-sm font-normal text-blue-600 dark:text-blue-300">
                   {releaseInfo?.title || `v${latestVersion}`}
                 </span>

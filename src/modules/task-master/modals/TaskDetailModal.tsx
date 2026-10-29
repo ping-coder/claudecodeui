@@ -254,7 +254,7 @@ export default function TaskDetailModal({
                       onClick={() => onTaskClick?.({ id: dependency })}
                       className="rounded bg-blue-100 px-2 py-1 text-sm text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800"
                     >
-                      <ArrowRight className="mr-1 inline h-3 w-3" />
+                      <ArrowRight className="me-1 inline h-3 w-3" />
                       {dependency}
                     </button>
                   ))}
@@ -283,7 +283,7 @@ export default function TaskDetailModal({
             <div className="rounded-lg border border-gray-200 dark:border-gray-700">
               <button
                 onClick={() => setShowDetails((current) => !current)}
-                className="flex w-full items-center justify-between p-4 text-left hover:bg-gray-50 dark:hover:bg-gray-800"
+                className="flex w-full items-center justify-between p-4 text-start hover:bg-gray-50 dark:hover:bg-gray-800"
               >
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Implementation Details</span>
                 {showDetails ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -300,7 +300,7 @@ export default function TaskDetailModal({
             <div className="rounded-lg border border-gray-200 dark:border-gray-700">
               <button
                 onClick={() => setShowTestStrategy((current) => !current)}
-                className="flex w-full items-center justify-between p-4 text-left hover:bg-gray-50 dark:hover:bg-gray-800"
+                className="flex w-full items-center justify-between p-4 text-start hover:bg-gray-50 dark:hover:bg-gray-800"
               >
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Test Strategy</span>
                 {showTestStrategy ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}

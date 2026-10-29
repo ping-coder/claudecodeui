@@ -200,7 +200,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                   className={`${config.buttonClass ?? ''} text-white`}
                   size="sm"
                 >
-                  <LogIn className="mr-2 h-4 w-4" />
+                  <LogIn className="me-2 h-4 w-4" />
                   {authStatus.authenticated ? t('agents.login.reLoginButton') : t('agents.login.button')}
                 </Button>
               </div>

@@ -101,7 +101,7 @@ export default function WorkspacePathField({
                 <button
                   key={suggestion.path}
                   onClick={() => handleSuggestionSelect(suggestion)}
-                  className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+                  className="w-full px-4 py-2 text-start text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
                 >
                   <div className="font-medium text-gray-900 dark:text-white">{suggestion.name}</div>
                   <div className="text-xs text-gray-500 dark:text-gray-400">{suggestion.path}</div>

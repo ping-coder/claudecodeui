@@ -826,7 +826,7 @@ function ChatInterface({
 
         <div className="relative flex-shrink-0">
           {isUserScrolledUp && chatMessages.length > 0 && (
-            <div className="pointer-events-none absolute -top-11 left-0 right-0 z-20 flex justify-center">
+            <div className="pointer-events-none absolute -top-11 end-0 start-0 z-20 flex justify-center">
               <button
                 type="button"
                 onClick={scrollToBottomAndReset}

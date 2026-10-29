@@ -44,7 +44,7 @@ export function DarkModeToggle({
       <span
         className={cn(
           'flex h-5 w-5 transform items-center justify-center rounded-full shadow-sm transition-transform duration-200',
-          isEnabled ? 'translate-x-[22px] bg-white' : 'translate-x-[2px] bg-foreground/60 dark:bg-foreground/80',
+          isEnabled ? 'translate-x-[22px] bg-white rtl:-translate-x-[22px]' : 'translate-x-[2px] bg-foreground/60 dark:bg-foreground/80 rtl:-translate-x-[2px]',
         )}
       >
         {isEnabled ? (

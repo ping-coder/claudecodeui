@@ -26,7 +26,7 @@ export default function FileTreeDetailedColumns({ columns, gridTemplate }: FileT
   return (
     <div className="sticky top-0 z-10 mb-0.5 border-b border-border bg-background pb-1 pt-0.5">
       <div
-        className="grid gap-x-2 border-l-2 border-transparent pl-1 pr-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70"
+        className="grid gap-x-2 border-s-2 border-transparent pe-2 ps-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70"
         style={{ gridTemplateColumns: gridTemplate }}
       >
         <div data-column="name" className="truncate">{t('fileTree.name')}</div>

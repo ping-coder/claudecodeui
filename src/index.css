@@ -928,7 +928,7 @@
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
     background-size: 1.5em 1.5em;
-    padding-right: 2.5rem;
+    padding-inline-end: 2.5rem;
     -webkit-appearance: none;
     -moz-appearance: none;
     appearance: none;
@@ -939,10 +939,15 @@
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
     background-size: 1.5em 1.5em;
-    padding-right: 2.5rem;
+    padding-inline-end: 2.5rem;
     -webkit-appearance: none;
     -moz-appearance: none;
     appearance: none;
+  }
+
+  /* The arrow sits at the end of the field. */
+  [dir="rtl"] select {
+    background-position: left 0.5rem center;
   }
   
   /* Fix select option text in mobile */
@@ -1049,4 +1054,78 @@
       background-color: transparent;
     }
   }
+}
+
+/* Right to left: <html dir="rtl"> is set with the language (i18n/config.ts).
+   Outside @layer on purpose: Tailwind drops layered rules whose classes it cannot
+   find in src, and .cm-editor, .xterm and .katex come from the libraries. */
+
+/* Code blocks, inline code, the editor, the terminal and formulas read left to
+   right in any language; isolated, so code inside a Hebrew sentence keeps its order.
+   Logical classes on these elements resolve left to right too: keep layout classes
+   (ms-, end-) off them, or put them on a wrapper. */
+[dir="rtl"] :is(pre, code, samp, .cm-editor, .xterm, .katex) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Paths, commands, hashes and shortcuts in .font-mono or <kbd>: the characters
+   follow their first letter ("/src/a.ts" stays as written), while the element keeps
+   the row's direction, so its own ms-/end- classes still place it right to left.
+   Aligned as the row around it is, not by its text: a value that fits starts at the
+   right edge, one in a centred block stays centred (match-parent, which Chromium
+   only knows prefixed; right where neither is supported). Fields follow the rule for
+   what people type below; .bidi-auto and .bidi-ltr bring their own alignment. */
+[dir="rtl"] :is(.font-mono, kbd):not(pre, code, samp, pre *, code *, [dir="ltr"], [dir="ltr"] *, textarea, input, .bidi-auto, .bidi-ltr) {
+  unicode-bidi: plaintext;
+  text-align: right;
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
+}
+
+/* What people type follows its own first letter, paragraph by paragraph, like
+   dir="auto", and an empty field (placeholder) follows the page; dir="auto" alone
+   would turn it left to right. .bidi-plaintext does the same for typed text shown
+   back outside its field (an insert waiting to be delivered). */
+[dir="rtl"] :is(textarea, input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="email"], .bidi-plaintext):not(.xterm *) {
+  unicode-bidi: plaintext;
+}
+[dir="rtl"] [dir="auto"]:placeholder-shown {
+  direction: rtl;
+}
+
+/* Titles and names that may be in any language (session titles, file names):
+   laid out by their own first letter. Paths, branches and hashes outside .font-mono:
+   always left to right. Both start at the right edge of the row while they fit. */
+[dir="rtl"] .bidi-auto {
+  unicode-bidi: plaintext;
+  text-align: right;
+}
+[dir="rtl"] .bidi-ltr {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: right;
+}
+
+/* Icons that point along the reading direction turn around (back, forward,
+   expand, send, sidebar). The scale property composes with Tailwind's transform,
+   so a chevron that rotates when open still points down. .rtl-keep opts out. */
+:is(
+  .lucide-chevron-left,
+  .lucide-chevron-right,
+  .lucide-chevrons-left,
+  .lucide-chevrons-right,
+  .lucide-arrow-left,
+  .lucide-arrow-right,
+  .lucide-send-horizontal,
+  .lucide-undo-2,
+  .lucide-log-in,
+  .lucide-panel-left,
+  .lucide-panel-left-close,
+  .lucide-panel-left-open,
+  .lucide-panel-right,
+  .lucide-panel-right-close,
+  .rtl-mirror
+):dir(rtl):not(.rtl-keep) {
+  scale: -1 1;
 }

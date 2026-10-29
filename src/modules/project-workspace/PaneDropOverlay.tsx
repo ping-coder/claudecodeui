@@ -5,12 +5,13 @@ import { useTranslation } from 'react-i18next';
 import { PANE_TAB_DRAG_EFFECT } from '@/shared/constants';
 import type { SessionDragPayload, WorkspacePaneSide } from '@/shared/types';
 import { PaneSideGlyph } from '@/shared/ui';
+import { visualPaneSide } from '@/shared/direction';
 import { cn, readSessionDragPayload } from '@/shared/utils';
 
 type PaneDropOverlayProps = {
-  /** One drop zone per side, left to right. */
+  /** One drop zone per side, in pane order (drawn right to left in a right-to-left UI). */
   targets: readonly WorkspacePaneSide[];
-  /** A right pane exists, so zones name a side; otherwise they read "here" and "on the right (split)". */
+  /** A right pane exists, so zones name a side; otherwise they read "here" and "on the right (split)", or the left right to left. */
   isSplit: boolean;
   /** A conversation or tab was dropped on a zone; `copy` is the Alt key, which copies a dragged tab instead of moving it. */
   onDropSession: (side: WorkspacePaneSide, payload: SessionDragPayload, copy: boolean) => void;
@@ -26,15 +27,20 @@ export default function PaneDropOverlay({ targets, isSplit, onDropSession }: Pan
   // The zone under the pointer, highlighted so the user sees where the drop lands.
   const [hoveredSide, setHoveredSide] = useState<WorkspacePaneSide | null>(null);
 
+  // Named after where the zone is drawn: right to left the first pane ('left') is on the right.
   const getZoneLabel = (side: WorkspacePaneSide): string => {
+    const isOnLeft = visualPaneSide(side) === 'left';
     if (isSplit) {
-      return side === 'left'
+      return isOnLeft
         ? t('workspace.dropLeft', { defaultValue: 'Open on the left' })
         : t('workspace.dropRight', { defaultValue: 'Open on the right' });
     }
-    return side === 'right'
-      ? t('workspace.dropRightSplit', { defaultValue: 'Open on the right (split)' })
-      : t('workspace.dropHere', { defaultValue: 'Open here' });
+    if (side === 'left') {
+      return t('workspace.dropHere', { defaultValue: 'Open here' });
+    }
+    return isOnLeft
+      ? t('workspace.dropLeftSplit', { defaultValue: 'Open on the left (split)' })
+      : t('workspace.dropRightSplit', { defaultValue: 'Open on the right (split)' });
   };
 
   const handleDragOver = (event: ReactDragEvent<HTMLDivElement>, side: WorkspacePaneSide) => {

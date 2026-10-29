@@ -287,12 +287,12 @@ export default function CommandMenu({
                 onMouseDown={(event) => event.preventDefault()}
               >
                 {isSelected && (
-                  <span className="absolute bottom-1.5 left-1.5 top-1.5 w-0.5 rounded-full bg-primary" />
+                  <span className="absolute bottom-1.5 start-1.5 top-1.5 w-0.5 rounded-full bg-primary" />
                 )}
                 <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${accentClass}`}>
                   <NamespaceIcon aria-hidden="true" size={14} strokeWidth={2.2} />
                 </span>
-                <div className="min-w-0 flex-1 pr-1">
+                <div className="min-w-0 flex-1 pe-1">
                   <div className={`flex min-w-0 items-center gap-2 ${command.description ? 'mb-1' : 'mb-0'}`}>
                     <span
                       className="min-w-0 truncate font-mono text-[13px] font-semibold text-foreground"

@@ -253,7 +253,7 @@ function SidebarProjectItem({
                           <TaskIndicator
                             status={taskStatus}
                             size="xs"
-                            className="ml-2 hidden flex-shrink-0 md:inline-flex"
+                            className="ms-2 hidden flex-shrink-0 md:inline-flex"
                           />
                         )}
                       </div>
@@ -361,7 +361,7 @@ function SidebarProjectItem({
                 )}
               />
             </div>
-            <div className="min-w-0 flex-1 text-left">
+            <div className="min-w-0 flex-1 text-start">
               {isEditing ? (
                 <div className="space-y-1">
                   <input
@@ -382,21 +382,24 @@ function SidebarProjectItem({
                       }
                     }}
                   />
-                  <div className="truncate text-xs text-muted-foreground" title={project.fullPath}>
+                  <div className="bidi-ltr truncate text-xs text-muted-foreground" title={project.fullPath}>
                     {project.fullPath}
                   </div>
                 </div>
               ) : (
                 <div>
-                  <div className="truncate text-sm font-normal text-foreground" title={project.displayName}>
+                  <div className="bidi-auto truncate text-sm font-normal text-foreground" title={project.displayName}>
                     {project.displayName}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {sessionCountDisplay}
                     {project.fullPath !== project.displayName && (
-                      <span className="ml-1 opacity-60" title={project.fullPath}>
+                      <span className="ms-1 opacity-60" title={project.fullPath}>
                         {' - '}
-                        {project.fullPath.length > 25 ? `...${project.fullPath.slice(-22)}` : project.fullPath}
+                        {/* The path in its own element: bidi-ltr turns it left to right, and on the span above it would flip ml-1 too. */}
+                        <span className="bidi-ltr">
+                          {project.fullPath.length > 25 ? `...${project.fullPath.slice(-22)}` : project.fullPath}
+                        </span>
                       </span>
                     )}
                   </div>

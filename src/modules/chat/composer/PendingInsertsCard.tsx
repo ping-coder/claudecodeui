@@ -47,7 +47,9 @@ export default function PendingInsertsCard({
       <ul className="mt-1 space-y-1">
         {inserts.map((insert) => (
           <li key={insert.insertId} className="flex items-start gap-2.5">
-            <p className="max-h-20 min-w-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words text-sm text-foreground/90">
+            {/* bidi-plaintext: right to left, each paragraph of what was typed runs and aligns in its own
+                direction, as in the field. Not dir="auto", which would change the left-to-right UI too. */}
+            <p className="bidi-plaintext max-h-20 min-w-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words text-sm text-foreground/90">
               {insert.content}
             </p>
             {insert.state === 'delivering' || insert.state === 'withdrawFailed' ? (

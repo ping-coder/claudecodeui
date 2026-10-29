@@ -74,7 +74,7 @@ export default function SidebarModeTabs({
           <span className="relative flex h-3 w-3 items-center justify-center">
             <Activity className={cn('h-3 w-3', runningSessionsCount > 0 && 'text-emerald-500')} />
             {runningSessionsCount > 0 && (
-              <span className="absolute -right-2.5 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-emerald-500 px-0.5 text-[8px] font-semibold leading-none text-white shadow-sm ring-1 ring-background">
+              <span className="absolute -end-2.5 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-emerald-500 px-0.5 text-[8px] font-semibold leading-none text-white shadow-sm ring-1 ring-background">
                 {runningBadgeText}
               </span>
             )}

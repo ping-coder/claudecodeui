@@ -111,7 +111,7 @@ export default function CodeEditorHeader({
             )}
           </div>
           <div className="flex min-w-0 items-center gap-1">
-            <p className="truncate text-xs text-gray-500 dark:text-gray-400" title={file.path}>{file.path}</p>
+            <p className="bidi-ltr truncate text-xs text-gray-500 dark:text-gray-400" title={file.path}>{file.path}</p>
             <button
               type="button"
               onClick={handleCopyPath}

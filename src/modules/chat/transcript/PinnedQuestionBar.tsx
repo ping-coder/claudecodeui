@@ -18,14 +18,14 @@ const PANEL_MAX_TRANSCRIPT_SHARE = 0.45;
 /**
  * Bar widths at which its parts change: below the first the insert count
  * goes (the panel still lists the inserts); from the second, the 868px
- * message column with 56px either side, the export menu sits in the right
- * margin instead of after the controls.
+ * message column with 56px either side, the export menu sits in the end
+ * margin (the right one, or the left right to left) instead of after the controls.
  */
 const SHOWS_INSERT_COUNT_MIN_WIDTH_PX = 520;
 const EXPORT_IN_MARGIN_MIN_WIDTH_PX = 980;
 
-/** How far the export menu sits from the right edge in the margin: where the transcript's header had it (right-4). */
-const EXPORT_MENU_RIGHT_INSET_PX = 16;
+/** How far the export menu sits from the end edge in the margin: where the transcript's header had it (end-4). */
+const EXPORT_MENU_END_INSET_PX = 16;
 
 /**
  * How the bar's jumps bring a message into view: its top just under the
@@ -134,8 +134,9 @@ function PinnedQuestionBar({
   // out of the bar while the panel is open.
   const [hasFocusWithin, setHasFocusWithin] = useState(false);
   // The transcript's scrollbar narrows its message column and not the bar's:
-  // the bar leaves the same room on its right, so the question lines up with
+  // the bar leaves the same room at its end, so the question lines up with
   // the messages and the export menu stays where the transcript had it.
+  // Browsers put the scrollbar on the end side: the right, or the left right to left.
   const [scrollbarWidth, setScrollbarWidth] = useState(0);
 
   const questionKey = question ? getIntrinsicMessageKey(question) ?? String(question.timestamp) : null;
@@ -307,7 +308,7 @@ function PinnedQuestionBar({
       onFocus={() => setHasFocusWithin(true)}
       onBlur={handleBlur}
     >
-      <div className="h-full" style={{ paddingRight: scrollbarWidth }}>
+      <div className="h-full" style={{ paddingInlineEnd: scrollbarWidth }}>
         <div className="mx-auto flex h-full w-full max-w-[54.25rem] items-center gap-1 px-4">
           <button
             ref={questionButtonRef}
@@ -316,6 +317,9 @@ function PinnedQuestionBar({
             disabled={!question}
             aria-expanded={isExpanded}
             aria-controls={isExpanded ? panelId : undefined}
+            // text-left, not text-start: the dir="auto" line below inherits the keyword, and an inherited
+            // start would follow the line's own direction, putting a Hebrew question at the far end left
+            // to right. Right to left, the line's bidi-auto aligns it.
             className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md px-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:cursor-default disabled:hover:bg-transparent [@media(pointer:coarse)]:h-9"
           >
             <span
@@ -327,7 +331,8 @@ function PinnedQuestionBar({
             <span className="sr-only">{`${label}: `}</span>
             <span
               dir="auto"
-              className={`min-w-0 flex-1 truncate text-sm ${isCommand ? 'font-mono' : 'font-serif'} ${
+              // bidi-auto: right to left, a line that fits starts by the avatar as a title does, whichever way its text runs.
+              className={`bidi-auto min-w-0 flex-1 truncate text-sm ${isCommand ? 'font-mono' : 'font-serif'} ${
                 status === 'ready' ? 'text-foreground' : 'text-muted-foreground'
               }`}
             >
@@ -377,7 +382,7 @@ function PinnedQuestionBar({
       {exportMenuInMargin && (
         <div
           className="absolute inset-y-0 flex items-center"
-          style={{ right: EXPORT_MENU_RIGHT_INSET_PX + scrollbarWidth }}
+          style={{ insetInlineEnd: EXPORT_MENU_END_INSET_PX + scrollbarWidth }}
         >
           {exportMenu}
         </div>
@@ -386,7 +391,7 @@ function PinnedQuestionBar({
       {isExpanded && question && (
         // Over the transcript rather than pushing it down, as wide as its
         // message column.
-        <div className="pointer-events-none absolute inset-x-0 top-full z-10 pt-1" style={{ paddingRight: scrollbarWidth }}>
+        <div className="pointer-events-none absolute inset-x-0 top-full z-10 pt-1" style={{ paddingInlineEnd: scrollbarWidth }}>
           <div className="mx-auto w-full max-w-[54.25rem] px-4">
             <div
               id={panelId}
@@ -429,15 +434,17 @@ function PinnedQuestionBar({
                         key={getIntrinsicMessageKey(insert) ?? index}
                         type="button"
                         onClick={() => jumpToInsert(insert)}
+                        // text-left for the dir="auto" preview, as on the question line above.
                         className="flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                       >
                         <span className="flex flex-shrink-0 items-center gap-1.5 pt-0.5 text-xs text-muted-foreground">
                           <span className="rounded-full border border-primary/20 bg-primary/5 px-1.5 text-[10px] font-medium leading-4 text-primary/80">
                             {t('message.inserted', { defaultValue: 'Inserted' })}
                           </span>
-                          {formatClock(insert.timestamp)}
+                          {/* In the browser's locale: a <bdi> keeps "5:02 PM" in order in a right-to-left row. */}
+                          <bdi>{formatClock(insert.timestamp)}</bdi>
                         </span>
-                        <span dir="auto" className="line-clamp-2 min-w-0 flex-1 break-words font-serif text-sm text-foreground">
+                        <span dir="auto" className="bidi-auto line-clamp-2 min-w-0 flex-1 break-words font-serif text-sm text-foreground">
                           {convertMarkdownToPlainText(String(insert.content ?? '').slice(0, INSERT_PREVIEW_CHARS))}
                         </span>
                       </button>
@@ -447,7 +454,7 @@ function PinnedQuestionBar({
               </div>
               <div className="flex flex-shrink-0 items-center justify-end gap-1 border-t border-border/60 px-2 py-1 text-xs text-muted-foreground">
                 {content.trim() && <MessageCopyControl content={content} messageType="user" />}
-                <span>{new Date(question.timestamp).toLocaleTimeString()}</span>
+                <bdi>{new Date(question.timestamp).toLocaleTimeString()}</bdi>
               </div>
             </div>
           </div>

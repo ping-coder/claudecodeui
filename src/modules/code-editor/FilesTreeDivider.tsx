@@ -12,6 +12,7 @@ import {
   EDITOR_SIDE_CONTENT_MIN_WIDTH_PX,
   FILES_TREE_RATIO_DEFAULT,
 } from '@/shared/constants';
+import { forwardArrowKey, inlineSign } from '@/shared/direction';
 
 /** One arrow key press moves the divider by this share of the pane. */
 const KEYBOARD_RATIO_STEP = 0.04;
@@ -44,7 +45,7 @@ export default function FilesTreeDivider() {
   const { ratio, commitRatio } = useFilesTreeRatio();
   const separatorRef = useRef<HTMLDivElement>(null);
   // Drag origin; null while no drag is in progress.
-  const dragOriginRef = useRef<{ pointerX: number; ratio: number; rowWidth: number } | null>(null);
+  const dragOriginRef = useRef<{ pointerX: number; ratio: number; rowWidth: number; sign: 1 | -1 } | null>(null);
   const pendingRatioRef = useRef(ratio);
   const frameRef = useRef<number | null>(null);
 
@@ -96,7 +97,8 @@ export default function FilesTreeDivider() {
     const width = measureRowWidth();
     // The drag starts where the divider is drawn, so it follows the pointer from the first pixel.
     const originRatio = clampTreeRatio(ratio, width);
-    dragOriginRef.current = { pointerX: event.clientX, ratio: originRatio, rowWidth: width };
+    // Right to left the tree is on the right and grows as the divider moves left.
+    dragOriginRef.current = { pointerX: event.clientX, ratio: originRatio, rowWidth: width, sign: inlineSign(event.currentTarget) };
     pendingRatioRef.current = originRatio;
     document.body.style.userSelect = 'none';
   }, [measureRowWidth, ratio]);
@@ -106,7 +108,7 @@ export default function FilesTreeDivider() {
     if (!origin || origin.rowWidth <= 0) {
       return;
     }
-    const shift = (event.clientX - origin.pointerX) / origin.rowWidth;
+    const shift = (origin.sign * (event.clientX - origin.pointerX)) / origin.rowWidth;
     pendingRatioRef.current = clampTreeRatio(origin.ratio + shift, origin.rowWidth);
     if (frameRef.current !== null) {
       return;
@@ -152,12 +154,11 @@ export default function FilesTreeDivider() {
   }, [commitRatio]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowLeft') {
+    // The arrow pointing into the editor widens the tree: ArrowLeft right to left.
+    const grow = forwardArrowKey(event.currentTarget);
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      commitClamped(drawnRatio - KEYBOARD_RATIO_STEP);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      commitClamped(drawnRatio + KEYBOARD_RATIO_STEP);
+      commitClamped(drawnRatio + (event.key === grow ? 1 : -1) * KEYBOARD_RATIO_STEP);
     } else if (event.key === 'Home') {
       event.preventDefault();
       resetRatio();
@@ -194,7 +195,7 @@ export default function FilesTreeDivider() {
       onDoubleClick={resetRatio}
       onKeyDown={handleKeyDown}
       // The layout width stays 4px; coarse pointers get a wider invisible hit area.
-      className="group relative w-1 flex-shrink-0 cursor-col-resize touch-none bg-gray-200 transition-colors hover:bg-blue-500 focus-visible:bg-blue-500 focus-visible:outline-none dark:bg-gray-700 dark:hover:bg-blue-600 [@media(pointer:coarse)]:before:absolute [@media(pointer:coarse)]:before:inset-y-0 [@media(pointer:coarse)]:before:-left-[6px] [@media(pointer:coarse)]:before:-right-[6px] [@media(pointer:coarse)]:before:content-['']"
+      className="group relative w-1 flex-shrink-0 cursor-col-resize touch-none bg-gray-200 transition-colors hover:bg-blue-500 focus-visible:bg-blue-500 focus-visible:outline-none dark:bg-gray-700 dark:hover:bg-blue-600 [@media(pointer:coarse)]:before:absolute [@media(pointer:coarse)]:before:inset-y-0 [@media(pointer:coarse)]:before:-end-[6px] [@media(pointer:coarse)]:before:-start-[6px] [@media(pointer:coarse)]:before:content-['']"
     />
   );
 }

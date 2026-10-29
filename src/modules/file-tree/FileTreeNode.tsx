@@ -79,7 +79,7 @@ function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
   }
 
   return (
-    <span className={cn('ml-[18px] flex flex-shrink-0 items-center', item.isIgnored && 'opacity-60')}>
+    <span className={cn('ms-[18px] flex flex-shrink-0 items-center', item.isIgnored && 'opacity-60')}>
       {renderFileIcon(item.name)}
     </span>
   );
@@ -134,7 +134,7 @@ export default function FileTreeNode({
   const isIgnoredDirectory = isDirectory && isIgnored;
 
   const nameClassName = cn(
-    'text-[13px] leading-tight truncate',
+    'bidi-auto text-[13px] leading-tight truncate',
     isDirectory ? 'font-medium text-foreground' : 'text-foreground/90',
     // Greyed on the icon and name only: on the row it would fade the hover background too.
     isIgnored && 'opacity-60',
@@ -143,12 +143,12 @@ export default function FileTreeNode({
   // View mode only changes the row layout; selection, expansion, and recursion stay shared.
   const rowClassName = cn(
     viewMode === 'detailed'
-      ? 'group grid gap-x-2 py-[3px] pr-2 hover:bg-accent/60 cursor-pointer items-center rounded-sm transition-colors duration-100'
+      ? 'group grid gap-x-2 py-[3px] pe-2 hover:bg-accent/60 cursor-pointer items-center rounded-sm transition-colors duration-100'
       : viewMode === 'compact'
-      ? 'group flex items-center justify-between py-[3px] pr-2 hover:bg-accent/60 cursor-pointer rounded-sm transition-colors duration-100'
-      : 'group flex items-center gap-1.5 py-[3px] pr-2 cursor-pointer rounded-sm hover:bg-accent/60 transition-colors duration-100',
-    isDirectory && isOpen && 'border-l-2 border-primary/30',
-    (isDirectory && !isOpen) || !isDirectory ? 'border-l-2 border-transparent' : '',
+      ? 'group flex items-center justify-between py-[3px] pe-2 hover:bg-accent/60 cursor-pointer rounded-sm transition-colors duration-100'
+      : 'group flex items-center gap-1.5 py-[3px] pe-2 cursor-pointer rounded-sm hover:bg-accent/60 transition-colors duration-100',
+    isDirectory && isOpen && 'border-s-2 border-primary/30',
+    (isDirectory && !isOpen) || !isDirectory ? 'border-s-2 border-transparent' : '',
     'relative',
     isDropTarget && 'bg-blue-500/10 ring-1 ring-inset ring-blue-500/40',
   );
@@ -160,7 +160,7 @@ export default function FileTreeNode({
         className={cn(rowClassName, 'bg-accent/30')}
         // In the detailed grid the input spans the row instead of one metadata track.
         style={{
-          paddingLeft: `${level * 16 + 4}px`,
+          paddingInlineStart: `${level * 16 + 4}px`,
           ...(viewMode === 'detailed' ? { gridTemplateColumns: 'auto minmax(0, 1fr)' } : null),
         }}
         onClick={(e) => e.stopPropagation()}
@@ -198,7 +198,7 @@ export default function FileTreeNode({
       title={t('fileTree.uploadToFolder', 'Upload files to "{{folder}}"', { folder: item.name })}
       aria-label={t('fileTree.uploadToFolder', 'Upload files to "{{folder}}"', { folder: item.name })}
       className={cn(
-        'absolute right-1 top-1/2 -translate-y-1/2 rounded p-1',
+        'absolute end-1 top-1/2 -translate-y-1/2 rounded p-1',
         'bg-background/80 text-muted-foreground opacity-0 transition-opacity',
         'group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground',
       )}
@@ -211,7 +211,7 @@ export default function FileTreeNode({
     <div
       className={rowClassName}
       style={{
-        paddingLeft: `${level * 16 + 4}px`,
+        paddingInlineStart: `${level * 16 + 4}px`,
         ...(viewMode === 'detailed' ? { gridTemplateColumns: detailedGridTemplate } : null),
       }}
       // "Matches a rule" rather than "ignored by git": a tracked file that
@@ -227,7 +227,7 @@ export default function FileTreeNode({
             <span className={nameClassName}>{item.name}</span>
           </div>
           {detailedColumns.includes('size') && (
-            <div data-column="size" className="truncate text-sm tabular-nums text-muted-foreground">
+            <div data-column="size" className="bidi-ltr truncate text-sm tabular-nums text-muted-foreground">
               {item.type === 'file' ? formatFileSize(item.size) : ''}
             </div>
           )}
@@ -244,7 +244,7 @@ export default function FileTreeNode({
             <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
             <span className={nameClassName}>{item.name}</span>
           </div>
-          <div className="ml-2 flex flex-shrink-0 items-center gap-3 text-sm text-muted-foreground">
+          <div className="ms-2 flex flex-shrink-0 items-center gap-3 text-sm text-muted-foreground">
             {item.type === 'file' && (
               <>
                 <span className="tabular-nums">{formatFileSize(item.size)}</span>
@@ -289,8 +289,8 @@ export default function FileTreeNode({
       {isDirectory && isOpen && hasChildren && (
         <div className="relative">
           <span
-            className="absolute bottom-0 top-0 border-l border-border/40"
-            style={{ left: `${level * 16 + 14}px` }}
+            className="absolute bottom-0 top-0 border-s border-border/40"
+            style={{ insetInlineStart: `${level * 16 + 14}px` }}
             aria-hidden="true"
           />
           {item.children?.map((child) => (

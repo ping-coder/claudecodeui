@@ -22,7 +22,8 @@ export function PaneSideGlyph({ placement, className }: PaneSideGlyphProps) {
       aria-hidden="true"
       focusable="false"
       data-placement={placement ?? 'none'}
-      className={cn('h-4 w-4 shrink-0', className)}
+      // Right to left the 'left' pane is drawn on the right, next to the sidebar: mirror the picture.
+      className={cn('rtl-mirror h-4 w-4 shrink-0', className)}
     >
       <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.25" />
       <line x1="8" y1="2.5" x2="8" y2="13.5" stroke="currentColor" strokeWidth="1.25" />

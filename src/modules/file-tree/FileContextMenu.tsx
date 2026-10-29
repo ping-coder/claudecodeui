@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import { useTranslation } from 'react-i18next';
 import { Copy, Download, FileText, FolderPlus, Pencil, RefreshCw, Trash2, Upload, type LucideIcon } from 'lucide-react';
 
+import { isRtl } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 
 type FileContextItem = {
@@ -31,18 +32,31 @@ const CONTEXT_MENU_WIDTH = 200;
 const CONTEXT_MENU_HEIGHT = 300;
 const VIEWPORT_PADDING = 10;
 
-function calculateViewportSafePosition(clientX: number, clientY: number) {
+/** Where the menu's fixed box goes: its left edge, or right to left its right edge, and its top. */
+type ContextMenuPosition = { left?: number; right?: number; top: number };
+
+function calculateViewportSafePosition(clientX: number, clientY: number): ContextMenuPosition {
   // Keep the context menu inside the visible viewport.
-  const safeX =
-    clientX + CONTEXT_MENU_WIDTH > window.innerWidth
-      ? window.innerWidth - CONTEXT_MENU_WIDTH - VIEWPORT_PADDING
-      : clientX;
   const safeY =
     clientY + CONTEXT_MENU_HEIGHT > window.innerHeight
       ? window.innerHeight - CONTEXT_MENU_HEIGHT - VIEWPORT_PADDING
       : clientY;
+  const top = Math.max(VIEWPORT_PADDING, safeY);
 
-  return { x: Math.max(VIEWPORT_PADDING, safeX), y: Math.max(VIEWPORT_PADDING, safeY) };
+  if (isRtl()) {
+    // Right to left it opens leftwards: its right edge at the pointer, however wide the labels make it.
+    // Near the left edge of the viewport it is pushed back in, as near the right edge left to right.
+    if (clientX - CONTEXT_MENU_WIDTH < 0) {
+      return { left: VIEWPORT_PADDING, top };
+    }
+    return { right: Math.max(VIEWPORT_PADDING, window.innerWidth - clientX), top };
+  }
+
+  const safeX =
+    clientX + CONTEXT_MENU_WIDTH > window.innerWidth
+      ? window.innerWidth - CONTEXT_MENU_WIDTH - VIEWPORT_PADDING
+      : clientX;
+  return { left: Math.max(VIEWPORT_PADDING, safeX), top };
 }
 
 /** Rendered by FileTreeNode to show the right-click actions available on one file or directory row. */
@@ -75,7 +89,7 @@ export default function FileContextMenu({
 }) {
   const { t } = useTranslation();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+  const [menuPosition, setMenuPosition] = useState<ContextMenuPosition>({ left: 0, top: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
 
   const closeContextMenu = useCallback(() => {
@@ -295,7 +309,7 @@ export default function FileContextMenu({
           ref={menuRef}
           role="menu"
           aria-label={t('fileTree.context.menuLabel', 'File context menu')}
-          style={{ position: 'fixed', left: menuPosition.x, top: menuPosition.y, zIndex: 9999 }}
+          style={{ position: 'fixed', ...menuPosition, zIndex: 9999 }}
           className={cn(
             'min-w-[180px] py-1 px-1',
             'bg-popover border border-border rounded-lg shadow-lg',
@@ -306,7 +320,7 @@ export default function FileContextMenu({
           {isLoading ? (
             <div className="flex items-center justify-center py-4">
               <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
-              <span className="ml-2 text-sm text-muted-foreground">{t('fileTree.context.loading', 'Loading...')}</span>
+              <span className="ms-2 text-sm text-muted-foreground">{t('fileTree.context.loading', 'Loading...')}</span>
             </div>
           ) : (
             menuActions.map((action) => (
@@ -318,7 +332,7 @@ export default function FileContextMenu({
                   disabled={isLoading || action.isDisabled}
                   onClick={() => runMenuActionAndClose(action.onSelect)}
                   className={cn(
-                    'w-full flex items-center gap-3 px-3 py-2 text-sm text-left rounded-md transition-colors',
+                    'w-full flex items-center gap-3 px-3 py-2 text-sm text-start rounded-md transition-colors',
                     'focus:outline-none focus:bg-accent',
                     action.isDisabled
                       ? 'opacity-50 cursor-not-allowed'

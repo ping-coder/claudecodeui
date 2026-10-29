@@ -101,7 +101,7 @@ export default function QuickSettingsContent({
 
       <QuickSettingsSection title={t('quickSettings.sections.inputSettings')}>
         {renderToggleRows(inputSettingToggles)}
-        <p className="ml-3 text-xs text-muted-foreground">
+        <p className="ms-3 text-xs text-muted-foreground">
           {t('quickSettings.sendByCtrlEnterDescription')}
         </p>
       </QuickSettingsSection>

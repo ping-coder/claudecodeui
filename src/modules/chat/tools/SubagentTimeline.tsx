@@ -68,7 +68,7 @@ export const SubagentTimeline = memo(({ activity, activityCount, onFileOpen, cre
   return (
     <>
       {visibleEntries.length > 0 && (
-        <div className="border-l border-border/60 pl-2">
+        <div className="border-s border-border/60 ps-2">
           {visibleEntries.map((entry, index) => (
             entry.kind === 'tool' ? (
               // Rendered through the same router the main thread uses, so a

@@ -35,7 +35,7 @@ export default function TaskEmptyState({
           <h3 className="mb-2 text-lg font-semibold text-gray-900 dark:text-white">{t('notConfigured.title')}</h3>
           <p className="mb-6 text-sm text-gray-600 dark:text-gray-400">{t('notConfigured.description')}</p>
 
-          <div className="mb-6 rounded-lg bg-blue-50 p-4 text-left dark:bg-blue-950">
+          <div className="mb-6 rounded-lg bg-blue-50 p-4 text-start dark:bg-blue-950">
             <h4 className="mb-3 text-sm font-medium text-blue-900 dark:text-blue-100">{t('notConfigured.whatIsTitle')}</h4>
             <div className="space-y-1 text-xs text-blue-800 dark:text-blue-200">
               <p>- {t('notConfigured.features.aiPowered')}</p>
@@ -61,7 +61,7 @@ export default function TaskEmptyState({
   return (
     <div className={cn('text-center py-12', className)}>
       <div className="mx-auto max-w-4xl">
-        <div className="mb-6 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-6 text-left dark:border-blue-800 dark:from-blue-950/50 dark:to-indigo-950/50">
+        <div className="mb-6 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-6 text-start dark:border-blue-800 dark:from-blue-950/50 dark:to-indigo-950/50">
           <div className="mb-4 flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-900/50">
               <FileText className="h-5 w-5 text-blue-600 dark:text-blue-400" />

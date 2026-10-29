@@ -57,13 +57,13 @@ export const ToolDiffViewer: React.FC<ToolDiffViewerProps> = ({
             {filePath}
           </span>
         )}
-        <span className={`rounded px-1.5 py-px text-[10px] font-medium ${badgeClasses} ml-2 flex-shrink-0`}>
+        <span className={`rounded px-1.5 py-px text-[10px] font-medium ${badgeClasses} ms-2 flex-shrink-0`}>
           {badge}
         </span>
       </div>
 
-      {/* Diff lines */}
-      <div className="font-mono text-[11px] leading-[18px]">
+      {/* Diff lines: left to right in any language, like the code they show. */}
+      <div dir="ltr" className="font-mono text-[11px] leading-[18px]">
         {diffLines.map((diffLine, i) => (
           <div key={i} className="flex">
             <span

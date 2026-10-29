@@ -54,7 +54,7 @@ export default function ShellSessionBusyNotice({ busy, isTakingOver, onRetry, on
           {t(`shell.sessionBusy.reason.${busy.reason}`, { defaultValue: REASON_DEFAULTS[busy.reason] })}
         </p>
         {listedTasks.length > 0 && (
-          <ul className="list-disc space-y-1 pl-5 text-foreground">
+          <ul className="list-disc space-y-1 ps-5 text-foreground">
             {listedTasks.map((task) => (
               <li key={task.taskId} className="break-words">{describeBackgroundTask(task, t)}</li>
             ))}

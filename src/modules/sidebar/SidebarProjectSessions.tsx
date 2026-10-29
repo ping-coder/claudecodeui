@@ -145,7 +145,7 @@ export default function SidebarProjectSessions({
   };
 
   return (
-    <div className="ml-3 space-y-1 border-l border-border pl-3">
+    <div className="ms-3 space-y-1 border-s border-border ps-3">
       {isCompact ? (
         <div className="px-3 pb-1 pt-1">
           <button
@@ -233,7 +233,7 @@ export default function SidebarProjectSessions({
       {!initialSessionsLoaded ? (
         <SessionListSkeleton />
       ) : !hasSessions && !hasMoreSessions ? (
-        <div className="px-3 py-2 text-left">
+        <div className="px-3 py-2 text-start">
           <p className="text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
         </div>
       ) : (

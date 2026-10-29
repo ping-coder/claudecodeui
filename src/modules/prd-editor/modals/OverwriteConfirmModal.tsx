@@ -27,7 +27,7 @@ export default function OverwriteConfirmModal({
       <div className="relative w-full max-w-md rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800">
         <div className="p-6">
           <div className="mb-4 flex items-center">
-            <div className="mr-3 rounded-full bg-yellow-100 p-2 dark:bg-yellow-900">
+            <div className="me-3 rounded-full bg-yellow-100 p-2 dark:bg-yellow-900">
               <AlertTriangle className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />
             </div>
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">File Already Exists</h3>

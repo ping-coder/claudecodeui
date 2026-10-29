@@ -130,12 +130,12 @@ function SearchField({
 }) {
   return (
     <div className="relative">
-      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className="h-10 rounded-xl border-border/70 bg-background/75 pl-9 pr-3 shadow-none focus-visible:ring-primary/40"
+        className="h-10 rounded-xl border-border/70 bg-background/75 pe-3 ps-9 shadow-none focus-visible:ring-primary/40"
       />
     </div>
   );
@@ -167,7 +167,7 @@ function HelpContent({ data }: { data: HelpCommandData }) {
       <div className="flex min-h-0 flex-col gap-3">
         <SearchField value={query} onChange={setQuery} placeholder={t('chat:misc.filterCommands')} />
 
-        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto pe-1">
           <div className="grid gap-2 sm:grid-cols-2">
             {filteredCommands.map((command, index) => (
               <div
@@ -347,7 +347,7 @@ function ModelsContent({
       )}
 
       {filteredOptions.length > 0 ? (
-        <div className="scrollbar-thin -mr-1 min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="scrollbar-thin -me-1 min-h-0 flex-1 overflow-y-auto pe-1">
           <div className="grid gap-2 md:grid-cols-2">
             {filteredOptions.map((option, index) => {
               const isCurrent = option.value === currentModel;
@@ -360,7 +360,7 @@ function ModelsContent({
                   onClick={() => handleSelectModel(option.value)}
                   disabled={Boolean(changingModel)}
                   aria-label={`Select model ${option.value}`}
-                  className={`settings-content-enter group flex min-h-16 flex-col rounded-2xl border p-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60 ${
+                  className={`settings-content-enter group flex min-h-16 flex-col rounded-2xl border p-3 text-start shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60 ${
                     isCurrent
                       ? 'border-primary/45 bg-primary/10'
                       : isPendingSelection

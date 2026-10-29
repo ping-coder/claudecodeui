@@ -27,6 +27,7 @@ import type {
   SidebarPaneTargeting,
   WorkspacePaneSide,
 } from '@/shared/types';
+import { forwardArrowKey, inlineSign } from '@/shared/direction';
 import { cn, focusWithLentTabIndex, hasSessionDragPayload } from '@/shared/utils';
 
 /**
@@ -100,7 +101,7 @@ function ProjectSidebarRegion({
     isPeekOpenRef.current = isPeekOpen;
   }, [isPeekOpen]);
   // Drag origin; null while no resize is in progress.
-  const resizeOriginRef = useRef<{ pointerX: number; width: number } | null>(null);
+  const resizeOriginRef = useRef<{ pointerX: number; width: number; sign: 1 | -1 } | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const pendingWidthRef = useRef<number>(sidebarWidth);
   // The sidebar's container, so the drawer's own Escape-layer marker is not taken for another layer's.
@@ -278,7 +279,8 @@ function ProjectSidebarRegion({
   const handleResizeStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
-    resizeOriginRef.current = { pointerX: event.clientX, width: sidebarWidth };
+    // Right to left the sidebar is on the right and grows as the pointer moves left.
+    resizeOriginRef.current = { pointerX: event.clientX, width: sidebarWidth, sign: inlineSign(event.currentTarget) };
     pendingWidthRef.current = sidebarWidth;
     document.body.style.userSelect = 'none';
   }, [sidebarWidth]);
@@ -287,7 +289,7 @@ function ProjectSidebarRegion({
     const origin = resizeOriginRef.current;
     if (!origin) return;
 
-    pendingWidthRef.current = origin.width + (event.clientX - origin.pointerX);
+    pendingWidthRef.current = origin.width + origin.sign * (event.clientX - origin.pointerX);
     if (resizeFrameRef.current !== null) return;
     resizeFrameRef.current = window.requestAnimationFrame(() => {
       resizeFrameRef.current = null;
@@ -311,12 +313,11 @@ function ProjectSidebarRegion({
   }, [setSidebarWidth]);
 
   const handleResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowLeft') {
+    // The arrow pointing away from the sidebar widens it: ArrowLeft right to left.
+    const grow = forwardArrowKey(event.currentTarget);
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      setSidebarWidth(sidebarWidth - SIDEBAR_WIDTH_KEYBOARD_STEP);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      setSidebarWidth(sidebarWidth + SIDEBAR_WIDTH_KEYBOARD_STEP);
+      setSidebarWidth(sidebarWidth + (event.key === grow ? 1 : -1) * SIDEBAR_WIDTH_KEYBOARD_STEP);
     } else if (event.key === 'Home') {
       event.preventDefault();
       resetSidebarWidth();
@@ -448,9 +449,9 @@ function ProjectSidebarRegion({
         <div
           ref={peekContainerRef}
           className={cn(
-            'h-full border-r border-border/50',
+            'h-full border-e border-border/50',
             isPeekOpen
-              ? 'fixed inset-y-0 left-0 z-40 bg-background shadow-xl outline-none'
+              ? 'fixed inset-y-0 start-0 z-40 bg-background shadow-xl outline-none'
               : 'relative flex-shrink-0',
             // Hidden, not unmounted: Settings, the delete confirmations and the version modal live in it.
             isImmersive && !isPeekOpen && 'hidden',
@@ -488,7 +489,7 @@ function ProjectSidebarRegion({
               aria-valuemin={SIDEBAR_WIDTH_MIN}
               aria-valuemax={SIDEBAR_WIDTH_MAX}
               tabIndex={0}
-              className="absolute inset-y-0 -right-0.5 z-10 w-1 cursor-col-resize hover:bg-primary/40 focus-visible:bg-primary/60 focus-visible:outline-none"
+              className="absolute inset-y-0 -end-0.5 z-10 w-1 cursor-col-resize hover:bg-primary/40 focus-visible:bg-primary/60 focus-visible:outline-none"
               onPointerDown={handleResizeStart}
               onPointerMove={handleResizeMove}
               onPointerUp={handleResizeEnd}
@@ -524,8 +525,8 @@ function ProjectSidebarRegion({
         aria-label={t('versionUpdate.ariaLabels.closeSidebar')}
       />
       <div
-        className={`relative h-full w-[85vw] max-w-sm transform border-r border-border/40 bg-card transition-transform duration-150 ease-out sm:w-80 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`relative h-full w-[85vw] max-w-sm transform border-e border-border/40 bg-card transition-transform duration-150 ease-out sm:w-80 ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full rtl:translate-x-full'
         }`}
         onClick={(event) => event.stopPropagation()}
         onTouchStart={(event) => event.stopPropagation()}

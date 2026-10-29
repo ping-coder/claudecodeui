@@ -199,7 +199,7 @@ function SidebarSessionItem({
   return (
     <div className="group relative">
       {(showAttentionIndicator || showBackgroundIndicator || showRecentIndicator) && (
-        <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
+        <div className="absolute start-0 top-1/2 -translate-x-1 -translate-y-1/2 transform rtl:translate-x-1">
           <Tooltip content={indicatorLabel} position="right">
             <div
               role="status"
@@ -252,13 +252,13 @@ function SidebarSessionItem({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div
-                  className="min-w-0 flex-1 truncate text-sm font-normal text-foreground"
+                  className="bidi-auto min-w-0 flex-1 truncate text-sm font-normal text-foreground"
                   title={sessionView.sessionName}
                 >
                   {sessionView.sessionName}
                 </div>
                 {isProcessing ? (
-                  <span className="ml-auto flex-shrink-0">
+                  <span className="ms-auto flex-shrink-0">
                     <Tooltip content={t('tooltips.processingSessionIndicator', 'Processing session')} position="top">
                       <span className="flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -266,7 +266,7 @@ function SidebarSessionItem({
                     </Tooltip>
                   </span>
                 ) : compactSessionAge && (
-                  <span className="ml-auto flex-shrink-0 text-[11px] text-muted-foreground">{compactSessionAge}</span>
+                  <span className="ms-auto flex-shrink-0 text-[11px] text-muted-foreground">{compactSessionAge}</span>
                 )}
               </div>
               <div className="mt-0.5 flex items-center">
@@ -284,7 +284,7 @@ function SidebarSessionItem({
                 aria-label={`Session options for ${sessionView.sessionName}`}
                 aria-haspopup="dialog"
                 aria-expanded={isMobileOptionsOpen}
-                className="ml-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted active:scale-95"
+                className="ms-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted active:scale-95"
                 onClick={(event) => {
                   event.stopPropagation();
                   setMobileOptionsOpen(true);
@@ -310,7 +310,7 @@ function SidebarSessionItem({
                 <LLMProviderLogo provider={session.__provider} className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-foreground" title={sessionView.sessionName}>
+                <p className="bidi-auto truncate text-sm font-medium text-foreground" title={sessionView.sessionName}>
                   {sessionView.sessionName}
                 </p>
                 <p id="mobile-session-options-description" className="text-xs text-muted-foreground">
@@ -365,7 +365,7 @@ function SidebarSessionItem({
                 <button
                   type="button"
                   onClick={startMobileRename}
-                  className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+                  className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-start text-foreground transition-colors active:bg-muted"
                 >
                   <Edit2 className="h-5 w-5 flex-shrink-0" />
                   <span className="text-sm font-medium">Rename session</span>
@@ -376,7 +376,7 @@ function SidebarSessionItem({
                   onClick={handleCopyAction}
                   disabled={isCopyPending}
                   className={cn(
-                    'flex min-h-12 w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors',
+                    'flex min-h-12 w-full items-center gap-3 rounded-xl border px-4 py-3 text-start transition-colors',
                     copyState === 'copied'
                       ? 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'
                       : copyState === 'error'
@@ -404,7 +404,7 @@ function SidebarSessionItem({
                       setMobileOptionsOpen(false);
                       requestDeleteSession();
                     }}
-                    className="flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-red-600 transition-colors active:bg-red-500/10 dark:text-red-400"
+                    className="flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-start text-red-600 transition-colors active:bg-red-500/10 dark:text-red-400"
                   >
                     <Trash2 className="h-5 w-5 flex-shrink-0" />
                     <span className="text-sm font-medium">Archive or delete session</span>
@@ -436,8 +436,8 @@ function SidebarSessionItem({
           aria-disabled={isSelecting && !isSelectable ? true : undefined}
           className={cn(
             buttonVariants({ variant: 'ghost' }),
-            'h-auto w-full justify-start rounded-md border bg-card p-2 text-left font-normal transition-all duration-150',
-            isSelecting ? 'pr-2' : 'pr-11',
+            'h-auto w-full justify-start rounded-md border bg-card p-2 text-start font-normal transition-all duration-150',
+            isSelecting ? 'pe-2' : 'pe-11',
             isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
             !isSelected && isProcessing
               ? 'border-border/60 bg-muted/20 hover:bg-muted/25'
@@ -495,7 +495,7 @@ function SidebarSessionItem({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div
-                  className="min-w-0 flex-1 truncate text-sm font-normal text-foreground"
+                  className="bidi-auto min-w-0 flex-1 truncate text-sm font-normal text-foreground"
                   title={sessionView.sessionName}
                 >
                   {sessionView.sessionName}
@@ -503,7 +503,7 @@ function SidebarSessionItem({
                 {isProcessing ? (
                   <span
                     className={cn(
-                      'ml-auto flex-shrink-0 transition-opacity duration-200',
+                      'ms-auto flex-shrink-0 transition-opacity duration-200',
                       isEditing ? 'opacity-0' : !isSelecting && 'group-hover:opacity-0',
                     )}
                   >
@@ -516,7 +516,7 @@ function SidebarSessionItem({
                 ) : compactSessionAge && (
                   <span
                     className={cn(
-                      'ml-auto flex-shrink-0 text-[11px] text-muted-foreground transition-opacity duration-200',
+                      'ms-auto flex-shrink-0 text-[11px] text-muted-foreground transition-opacity duration-200',
                       isEditing ? 'opacity-0' : !isSelecting && 'group-hover:opacity-0',
                     )}
                   >
@@ -533,7 +533,7 @@ function SidebarSessionItem({
 
         {!isSelecting && (
           <SessionOptions
-            className="absolute right-2 top-1/2 -translate-y-1/2 transform transition-all duration-200"
+            className="absolute end-2 top-1/2 -translate-y-1/2 transform transition-all duration-200"
             sessionId={session.id}
             sessionName={sessionView.sessionName}
             provider={session.__provider}

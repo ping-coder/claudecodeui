@@ -200,7 +200,7 @@ export default function SidebarRecentConversations({
                 * which carries no information in a list ordered by recency.
                 */}
               {showAttentionIndicator && (
-                <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
+                <div className="absolute start-0 top-1/2 -translate-x-1 -translate-y-1/2 transform rtl:translate-x-1">
                   <Tooltip
                     content={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
                     position="right"
@@ -222,7 +222,7 @@ export default function SidebarRecentConversations({
                 onDragStart={handleDragStart}
                 data-testid="recent-conversation-row"
                 className={cn(
-                  'flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 pr-11 text-left transition-colors',
+                  'flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 pe-11 text-start transition-colors',
                   isSelected
                     ? 'bg-primary/10 text-foreground'
                     : 'text-foreground hover:bg-accent/60',
@@ -237,11 +237,11 @@ export default function SidebarRecentConversations({
                 <PanePlacementMarker isWorkspaceSplit={isWorkspaceSplit} panePlacement={panePlacement} t={t} />
 
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-normal leading-4">
+                  <span className="bidi-auto block truncate text-[13px] font-normal leading-4">
                     {conversation.sessionTitle}
                   </span>
                   <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
-                    <span className="truncate">{conversation.projectDisplayName}</span>
+                    <span className="bidi-auto truncate">{conversation.projectDisplayName}</span>
                     {isProcessing ? (
                       <>
                         <span className="flex-shrink-0 text-muted-foreground/40">·</span>
@@ -275,7 +275,7 @@ export default function SidebarRecentConversations({
               </a>
 
               <SessionOptions
-                className="absolute right-2 top-1/2 -translate-y-1/2 transform"
+                className="absolute end-2 top-1/2 -translate-y-1/2 transform"
                 sessionId={conversation.sessionId}
                 sessionName={conversation.sessionTitle}
                 provider={conversation.provider}

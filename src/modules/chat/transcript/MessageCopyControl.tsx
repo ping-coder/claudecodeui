@@ -216,7 +216,7 @@ const MessageCopyControl = ({
                     key={option.format}
                     type="button"
                     onClick={() => handleFormatChange(option.format)}
-                    className={`block w-full rounded px-2 py-1.5 text-left transition-colors ${isSelected
+                    className={`block w-full rounded px-2 py-1.5 text-start transition-colors ${isSelected
                       ? 'bg-accent text-foreground'
                       : 'text-foreground hover:bg-accent'
                       }`}

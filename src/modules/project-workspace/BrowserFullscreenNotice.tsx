@@ -41,7 +41,7 @@ function BrowserFullscreenNotice({ issue, onRetry, onDismiss }: BrowserFullscree
   return (
     <div
       role="status"
-      className="fixed left-1/2 z-20 flex w-max max-w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 items-start gap-2 rounded-lg border border-border/60 bg-background/95 py-2 pl-3 pr-1.5 text-sm shadow-lg backdrop-blur-sm"
+      className="fixed left-1/2 z-20 flex w-max max-w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 items-start gap-2 rounded-lg border border-border/60 bg-background/95 py-2 pe-1.5 ps-3 text-sm shadow-lg backdrop-blur-sm"
       // Just under the immersive tab bar (40px), clear of the safe area.
       style={{ top: 'calc(env(safe-area-inset-top, 0px) + 3rem)' }}
     >

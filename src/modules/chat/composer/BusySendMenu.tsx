@@ -99,7 +99,7 @@ export default function BusySendMenu({
         aria-expanded={isOpen}
         aria-label={triggerLabel}
         title={triggerLabel}
-        className="h-10 w-6 shrink-0 rounded-l-none rounded-r-lg border-l border-primary-foreground/25 [&_svg]:size-3.5"
+        className="h-10 w-6 shrink-0 rounded-e-lg rounded-s-none border-s border-primary-foreground/25 [&_svg]:size-3.5"
       >
         <ChevronUpIcon />
       </Button>

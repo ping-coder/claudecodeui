@@ -268,13 +268,13 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
         {/* New item input */}
         {operations.isCreating && (
           <div
-            className="mb-1 flex items-center gap-1.5 py-[3px] pr-2"
-            style={{ paddingLeft: `${(operations.newItemParent.split('/').length - 1) * 16 + 4}px` }}
+            className="mb-1 flex items-center gap-1.5 py-[3px] pe-2"
+            style={{ paddingInlineStart: `${(operations.newItemParent.split('/').length - 1) * 16 + 4}px` }}
           >
             {operations.newItemType === 'directory' ? (
               <Folder className={cn(ICON_SIZE_CLASS, 'text-blue-500')} />
             ) : (
-              <span className="ml-[18px]">{renderFileIcon(operations.newItemName)}</span>
+              <span className="ms-[18px]">{renderFileIcon(operations.newItemName)}</span>
             )}
             <Input
               ref={newItemInputRef}
@@ -387,7 +387,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
       {toast && (
         <div
           className={cn(
-            'fixed bottom-4 right-4 z-[9999] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-bottom-2',
+            'fixed bottom-4 end-4 z-[9999] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-bottom-2',
             toast.type === 'success'
               ? 'bg-green-600 text-white'
               : 'bg-red-600 text-white'

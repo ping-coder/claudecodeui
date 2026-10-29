@@ -65,11 +65,11 @@ export default function WorkspaceHeader({
             onRenameSession={onRenameSession}
           />
           <WorkspaceConnectionStatus />
-          {headerActions && <div className="ml-auto flex flex-shrink-0 items-center gap-1">{headerActions}</div>}
+          {headerActions && <div className="ms-auto flex flex-shrink-0 items-center gap-1">{headerActions}</div>}
         </div>
 
         <div className="-mx-3 min-w-0 sm:mx-0 sm:flex-1">
-          <div className="relative ml-auto w-fit max-w-full">
+          <div className="relative ms-auto w-fit max-w-full">
             {canScrollLeft && (
               <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-12 bg-gradient-to-r from-background via-background/90 to-transparent" />
             )}
@@ -78,7 +78,7 @@ export default function WorkspaceHeader({
               onScroll={updateScrollState}
               className={cn(
                 'scrollbar-hide max-w-full scroll-smooth overflow-x-auto overscroll-x-contain px-3 [-webkit-overflow-scrolling:touch]',
-                hasOverflow ? 'sm:px-9' : 'sm:pl-3 sm:pr-0',
+                hasOverflow ? 'sm:px-9' : 'sm:pe-0 sm:ps-3',
               )}
             >
               <WorkspaceTabs
@@ -99,7 +99,8 @@ export default function WorkspaceHeader({
                 aria-label={t('navigation.scrollTabsLeft', { defaultValue: 'Scroll tabs left' })}
                 className="absolute left-1 top-1/2 z-20 hidden h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md border border-border/70 bg-background/95 text-muted-foreground shadow-sm outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/60 sm:flex"
               >
-                <ChevronLeft className="h-4 w-4" />
+                {/* Physical: the button sits at the left edge and scrolls left in either direction. */}
+                <ChevronLeft className="rtl-keep h-4 w-4" />
               </button>
             )}
             {canScrollRight && (
@@ -109,7 +110,7 @@ export default function WorkspaceHeader({
                 aria-label={t('navigation.scrollTabsRight', { defaultValue: 'Scroll tabs right' })}
                 className="absolute right-1 top-1/2 z-20 hidden h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md border border-border/70 bg-background/95 text-muted-foreground shadow-sm outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/60 sm:flex"
               >
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="rtl-keep h-4 w-4" />
               </button>
             )}
           </div>

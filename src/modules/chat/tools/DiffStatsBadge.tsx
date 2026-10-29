@@ -32,8 +32,9 @@ export function DiffStatsBadge({ stats, className }: DiffStatsBadgeProps) {
       className={cn('inline-flex items-center gap-1 font-mono text-[10px] tabular-nums', className)}
       aria-label={`${added} lines added, ${removed} removed`}
     >
-      {added > 0 && <span className="text-green-600 dark:text-green-400">+{added}</span>}
-      {removed > 0 && <span className="text-red-600 dark:text-red-400">-{removed}</span>}
+      {/* bidi-ltr: right to left "+3" would read "3+". */}
+      {added > 0 && <span className="bidi-ltr text-green-600 dark:text-green-400">+{added}</span>}
+      {removed > 0 && <span className="bidi-ltr text-red-600 dark:text-red-400">-{removed}</span>}
     </span>
   );
 }

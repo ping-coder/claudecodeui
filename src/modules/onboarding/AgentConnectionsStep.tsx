@@ -62,7 +62,7 @@ export default function AgentConnectionsStep({
         </p>
       </div>
 
-      <div className="-mr-1 max-h-[38vh] space-y-2 overflow-y-auto pr-1">
+      <div className="-me-1 max-h-[38vh] space-y-2 overflow-y-auto pe-1">
         {providerCards.map((providerCard) => {
           const terminalSignInCommand = PROVIDER_TERMINAL_SIGN_IN_COMMANDS[providerCard.provider];
           return (

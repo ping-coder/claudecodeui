@@ -139,7 +139,7 @@ test('newest on top: three cards on desktop, one on a phone, and a line for the 
   const view = renderBanners();
   assert.deepEqual(cardTitles(), ['Title e', 'Title d', 'Title c']);
   assert.equal(hasText('2 more'), true);
-  assert.equal(stack().className.includes('right-4 w-[22rem]'), true);
+  assert.equal(stack().className.includes('end-4 w-[22rem]'), true);
   assert.equal(readStackTop(), '6rem below the safe area');
 
   fireEvent.click(screen.getByRole('button', { name: 'Dismiss all' }));

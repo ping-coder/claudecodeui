@@ -38,7 +38,7 @@ export default function ApiKeysSection({
           <h3 className="text-lg font-semibold">{t('apiKeys.title')}</h3>
         </div>
         <Button size="sm" onClick={() => onShowNewKeyFormChange(!showNewKeyForm)}>
-          <Plus className="mr-1 h-4 w-4" />
+          <Plus className="me-1 h-4 w-4" />
           {t('apiKeys.newButton')}
         </Button>
       </div>

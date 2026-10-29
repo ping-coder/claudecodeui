@@ -126,7 +126,7 @@ test('the Files view sizes the editor box by the tree share, not by what the edi
   await renderFiles();
 
   // The row's second child: the sidebar's box, found without the divider so HEAD fails on the layout itself.
-  const editorWrapper = screen.getByTestId('editor').closest('.border-l');
+  const editorWrapper = screen.getByTestId('editor').closest('.border-s');
   const box = editorWrapper?.parentElement;
   // A definite basis taken from the share: the 5000-character line no longer sizes the box.
   assert.equal(box?.style.flex.includes('var(--files-tree-ratio, 0.4)') ?? false, true, `flex: "${box?.style.flex}"`);
@@ -204,6 +204,36 @@ test('arrow keys step the share by 4%, Home and a double-click save 40% back', a
   assert.equal(readShare(), '0.4');
 });
 
+test('right to left the tree is on the right: a drag leftwards and ArrowLeft widen it', async () => {
+  // What <html dir="rtl"> computes; jsdom neither maps dir to direction nor inherits it.
+  const rtlStyle = document.createElement('style');
+  rtlStyle.textContent = '[dir="rtl"], [dir="rtl"] * { direction: rtl; }';
+  document.head.append(rtlStyle);
+  document.documentElement.setAttribute('dir', 'rtl');
+  try {
+    await renderFiles();
+    const divider = findDivider();
+    assert.equal(divider !== null, true);
+    if (!divider) return;
+
+    firePointer(divider, 'pointerDown', 700);
+    firePointer(divider, 'pointerMove', 700 - 0.1 * 1152);
+    flushFrames();
+    assertClose(Number(readShare()), 0.5, 'the tree grows as the divider moves left');
+    firePointer(divider, 'pointerUp', 700 - 0.1 * 1152);
+    assertClose(Number(stored()), 0.5, 'the saved share');
+
+    fireEvent.keyDown(divider, { key: 'ArrowLeft' });
+    assert.equal(findDivider()?.getAttribute('aria-valuenow'), '54');
+    fireEvent.keyDown(divider, { key: 'ArrowRight' });
+    fireEvent.keyDown(divider, { key: 'ArrowRight' });
+    assert.equal(findDivider()?.getAttribute('aria-valuenow'), '46');
+  } finally {
+    document.documentElement.removeAttribute('dir');
+    rtlStyle.remove();
+  }
+});
+
 test('in a narrow pane the divider reports where it is drawn and saves nothing it did not move', async () => {
   // A 573px split pane: the tree keeps 200px, so a saved 30% is drawn at 35%.
   rowWidth = 573;
@@ -272,7 +302,7 @@ test('a Files drag leaves the Chat side panel at its own width', async () => {
   // Switched to Chat: the editor docks at the side-panel width, with the old handle.
   view.rerender(sidebar(false));
   assert.equal(findDivider() === null, true, 'no tree divider outside the Files view');
-  const editorWrapper = screen.getByTestId('editor').closest('.border-l') as HTMLElement | null;
+  const editorWrapper = screen.getByTestId('editor').closest('.border-s') as HTMLElement | null;
   assert.equal(editorWrapper?.style.width, '600px');
   assert.equal(screen.queryByTitle('Drag to resize') !== null, true);
   assert.equal(readFile.mock.calls.length, 1, 'switching views keeps the editor mounted');

@@ -210,9 +210,9 @@ function ChatMessagesPane({
       {chatMessages.length > 0 && (
         // As tall as the export button whether or not it is here (the pinned
         // question bar takes it), so the rows below never move with it.
-        <div className="pointer-events-none sticky right-4 top-3 z-10 mb-2 flex min-h-8 items-start justify-between gap-2 sm:px-4">
+        <div className="pointer-events-none sticky end-4 top-3 z-10 mb-2 flex min-h-8 items-start justify-between gap-2 sm:px-4">
           {/* Running background work stays in view while the transcript scrolls under it. */}
-          <div className="pointer-events-auto min-w-0 pl-4 sm:pl-0">
+          <div className="pointer-events-auto min-w-0 ps-4 sm:ps-0">
             <BackgroundTasksStrip
               messages={chatMessages}
               tasks={backgroundTasks}
@@ -240,7 +240,7 @@ function ChatMessagesPane({
       <div className="mx-auto w-full max-w-[54.25rem] space-y-3 px-4 sm:space-y-4">
       {(isLoadingSessionMessages || isProcessing) && chatMessages.length === 0 ? (
         <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
-          <div className="flex items-center justify-center space-x-2">
+          <div className="flex items-center justify-center space-x-2 rtl:space-x-reverse">
             <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
             <p>{t('session.loading.sessionMessages')}</p>
           </div>
@@ -267,7 +267,7 @@ function ChatMessagesPane({
           {/* Loading indicator for older messages (hide when load-all is active) */}
           {isLoadingMoreMessages && !isLoadingAllMessages && !allMessagesLoaded && (
             <div className="py-3 text-center text-gray-500 dark:text-gray-400">
-              <div className="flex items-center justify-center space-x-2">
+              <div className="flex items-center justify-center space-x-2 rtl:space-x-reverse">
                 <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
                 <p className="text-sm">{t('session.loading.olderMessages')}</p>
               </div>
@@ -298,7 +298,7 @@ function ChatMessagesPane({
           {!hasMoreMessages && chatMessages.length > visibleMessageCount && (
             <div className="border-b border-gray-200 py-2 text-center text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
               {t('session.messages.showingLast', { count: visibleMessageCount, total: chatMessages.length })} |
-              <button className="ml-1 text-blue-600 underline hover:text-blue-700" onClick={loadEarlierMessages}>
+              <button className="ms-1 text-blue-600 underline hover:text-blue-700" onClick={loadEarlierMessages}>
                 {t('session.messages.loadEarlier')}
               </button>
               {' | '}

@@ -98,7 +98,7 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
               <Collapsible className="mt-3">
                 <CollapsibleTrigger className="flex items-center gap-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground">
                   <svg
-                    className="h-2.5 w-2.5 flex-shrink-0 transition-transform duration-150 data-[state=open]:rotate-90"
+                    className="rtl-mirror h-2.5 w-2.5 flex-shrink-0 transition-transform duration-150 data-[state=open]:rotate-90"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -130,7 +130,7 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
             </Button>
             <Button size="sm" onClick={handleBuild}>
               Build{' '}
-              <kbd className="ml-1 rounded bg-primary-foreground/20 px-1 py-0.5 font-mono text-[10px]">
+              <kbd className="ms-1 rounded bg-primary-foreground/20 px-1 py-0.5 font-mono text-[10px]">
                 ⌘↩
               </kbd>
             </Button>

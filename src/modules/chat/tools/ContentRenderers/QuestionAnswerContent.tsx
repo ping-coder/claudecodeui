@@ -64,7 +64,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
             <button
               type="button"
               onClick={() => setExpandedIdx(isExpanded ? null : idx)}
-              className="flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50"
+              className="flex w-full items-start gap-2.5 px-3 py-2 text-start transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50"
             >
               <div className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full ${
                 answerLabels.length > 0
@@ -186,7 +186,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
                       </div>
                       <div className="min-w-0 flex-1">
                         <span className="font-medium text-gray-900 dark:text-gray-100">{lbl}</span>
-                        <span className="ml-1 text-[10px] text-blue-500 dark:text-blue-400">(custom)</span>
+                        <span className="ms-1 text-[10px] text-blue-500 dark:text-blue-400">(custom)</span>
                       </div>
                     </div>
                   ))}

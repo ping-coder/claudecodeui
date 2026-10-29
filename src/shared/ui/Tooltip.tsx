@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { isRtl } from '@/shared/direction';
 import { cn } from '@/shared/utils';
 
 type TooltipPosition = 'top' | 'bottom' | 'left' | 'right';
@@ -12,6 +13,18 @@ type TooltipProps = {
   className?: string;
   delay?: number;
 };
+
+/**
+ * 'left' and 'right' mean towards the start and the end of the line: right to left they swap,
+ * so a tooltip asked to open beside a row's leading dot still opens over the row. The result is
+ * a physical side, matching the physical coordinates below (and the physical arrow classes).
+ */
+function physicalPosition(position: TooltipPosition): TooltipPosition {
+  if ((position === 'left' || position === 'right') && isRtl()) {
+    return position === 'left' ? 'right' : 'left';
+  }
+  return position;
+}
 
 function getArrowClasses(position: TooltipPosition): string {
   switch (position) {
@@ -56,7 +69,7 @@ export function Tooltip({
     };
 
     // Calculate tooltip position based on the specified position prop.
-    switch (position) {
+    switch (physicalPosition(position)) {
       case 'bottom':
         style.left = rect.left + rect.width / 2;
         style.top = rect.bottom + spacing;
@@ -190,7 +203,7 @@ export function Tooltip({
         >
           {content}
           {/* Arrow */}
-          <div className={cn('absolute w-0 h-0 border-4 border-transparent', getArrowClasses(position))} />
+          <div className={cn('absolute w-0 h-0 border-4 border-transparent', getArrowClasses(physicalPosition(position)))} />
         </div>,
         document.body
       )}

@@ -190,7 +190,7 @@ function TaskCard({ task, onClick = null, showParent = false, className = '' }: 
       </div>
 
       {progress.total > 0 && (
-        <div className="ml-3">
+        <div className="ms-3">
           <div className="mb-1 flex items-center gap-2">
             <span className="text-xs text-gray-500 dark:text-gray-400">Progress:</span>
             <div className="h-1.5 flex-1 rounded-full bg-gray-200 dark:bg-gray-700" title={`${progress.completed} of ${progress.total} subtasks completed`}>

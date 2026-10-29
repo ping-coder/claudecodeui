@@ -281,7 +281,7 @@ export default function SidebarContent({
                       <button
                         key={`${session.provider}-${session.sessionId}`}
                         type="button"
-                        className="group flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/60"
+                        className="group flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-start transition-colors hover:bg-accent/60"
                         onClick={(event) => onConversationResultClick(
                           {
                             projectId: session.projectId,
@@ -362,7 +362,7 @@ export default function SidebarContent({
                       {projectResult.sessions.map((session) => (
                         <button
                           key={`${projectResult.projectId ?? projectResult.projectName}-${session.sessionId}`}
-                          className="w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/50"
+                          className="w-full rounded-md px-2 py-2 text-start transition-colors hover:bg-accent/50"
                           onClick={(event) => onConversationResultClick(
                             {
                               // Pass the DB projectId (preferred) so the parent can
@@ -387,7 +387,7 @@ export default function SidebarContent({
                               </span>
                             )}
                           </div>
-                          <div className="space-y-1 pl-4">
+                          <div className="space-y-1 ps-4">
                             {session.matches.map((match, idx) => (
                               <div key={idx} className="flex items-start gap-1">
                                 <span className="mt-0.5 flex-shrink-0 text-[10px] font-normal uppercase text-muted-foreground/60">
@@ -572,7 +572,7 @@ export default function SidebarContent({
                         {projectSessions.map((session) => (
                           <button
                             key={String(session.id)}
-                            className="flex w-full items-center gap-2.5 border-b border-border/35 px-2.5 py-2 text-left transition-colors last:border-b-0 hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                            className="flex w-full items-center gap-2.5 border-b border-border/35 px-2.5 py-2 text-start transition-colors last:border-b-0 hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                             onClick={(event) => onArchivedSessionClick({
                               sessionId: String(session.id),
                               provider: session.__provider,
@@ -665,7 +665,7 @@ export default function SidebarContent({
                         className="group/session flex items-center gap-1 border-b border-border/35 px-2.5 py-2 last:border-b-0 hover:bg-accent/35"
                       >
                         <button
-                          className="flex min-w-0 flex-1 items-center gap-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="flex min-w-0 flex-1 items-center gap-2.5 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           onClick={(event) => onArchivedSessionClick(session, getClickOpenOptions(event))}
                         >
                           <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">

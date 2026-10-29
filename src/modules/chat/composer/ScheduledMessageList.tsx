@@ -49,7 +49,11 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
               <p className="text-[11px] text-muted-foreground">
                 {isFailed
                   ? t('schedule.failed', { reason: message.failureReason ?? '' })
-                  : t('schedule.pending', { when: new Date(message.scheduledFor).toLocaleString() })}
+                  : t('schedule.pending', {
+                    // In the browser's locale, inside a translated sentence: isolated (FSI…PDI, as a <bdi>
+                    // would) so "10/29/2026, 5:07:00 PM" keeps its order in a right-to-left one.
+                    when: `\u2068${new Date(message.scheduledFor).toLocaleString()}\u2069`,
+                  })}
               </p>
               <p className="mt-0.5 truncate text-foreground">{message.content}</p>
             </div>

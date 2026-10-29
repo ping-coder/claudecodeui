@@ -274,6 +274,9 @@ describe('the pending inserts card', () => {
     assert.equal(screen.queryAllByText('· Claude reads it at its next step').length, 1);
     assert.equal(screen.queryAllByText('first').length, 1);
     assert.equal(screen.queryAllByText('second').length, 1);
+    // Right to left, what was typed reads in its own direction (index.css); no dir="auto", which would change the left-to-right UI.
+    assert.equal(screen.getByText('first').classList.contains('bidi-plaintext'), true);
+    assert.equal(screen.getByText('first').hasAttribute('dir'), false);
     const withdrawButtons = screen.getAllByRole('button', { name: 'Withdraw inserted message' });
     assert.equal(withdrawButtons.length, 2);
     fireEvent.click(withdrawButtons[1]);

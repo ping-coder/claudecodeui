@@ -182,10 +182,13 @@ const getSavedLanguage = (): string => {
 // announces the start-up language synchronously, and a listener added after it
 // would leave the first paint labelled with index.html's "en".
 // resolvedLanguage is the language whose strings are actually shown.
-// dir is left alone: the layout uses physical left/right classes, so dir="rtl"
-// would only half-mirror it.
+// dir follows it too: i18n.dir() knows the right-to-left languages (Hebrew,
+// Arabic, Persian, Urdu...), and the layout uses logical classes (ms-, ps-,
+// start-, text-start), so <html dir="rtl"> mirrors it as a whole.
 i18n.on('languageChanged', (lng: string) => {
-  document.documentElement.lang = i18n.resolvedLanguage ?? lng;
+  const shown = i18n.resolvedLanguage ?? lng;
+  document.documentElement.lang = shown;
+  document.documentElement.dir = i18n.dir(shown);
 });
 
 // Initialize i18next
