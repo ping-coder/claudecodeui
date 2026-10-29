@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@/modules/i18n';
 import { useShellConnection } from '@/modules/shell/hooks/useShellConnection';
 import ShellSessionBusyNotice from '@/modules/shell/ShellSessionBusyNotice';
-import type { BackgroundTaskSummary, Project, ProjectSession, ShellSessionBusy } from '@/shared/types';
+import type { BackgroundTaskSummary, Project, ProjectSession, ScheduledWorkSummary, ShellSessionBusy } from '@/shared/types';
 
 /**
  * The server sends `session_busy` instead of starting the CLI while CloudCLI
@@ -72,6 +72,19 @@ const task = (taskId: string, extra: Partial<BackgroundTaskSummary> = {}): Backg
 });
 
 const SESSION_ID = 'app-1';
+
+const loop = (extra: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+  id: 'cron:b2148320',
+  kind: 'cron',
+  toolUseId: 'toolu_cron_1',
+  prompt: 'check CI',
+  startedAt: 1,
+  nextFireAt: 300_001,
+  recurring: true,
+  holdUntil: 691_200_001,
+  cron: '*/5 * * * *',
+  ...extra,
+});
 
 const busyFrame = (fields: Record<string, unknown> = {}) => ({
   type: 'session_busy',
@@ -467,6 +480,59 @@ describe('the shell connection while CloudCLI still runs the session', () => {
     expect(second.inits()).toHaveLength(2);
   });
 
+  it('keeps the scheduled work a frame lists, and sends every id of it back with a takeover', () => {
+    const { view, open } = renderConnection();
+    const socket = open();
+    const selfPaced = loop({ id: 'wakeup:toolu_wake_1', kind: 'wakeup', toolUseId: 'toolu_wake_2', cron: undefined });
+    act(() => {
+      answerLatestInit(socket, {
+        reason: 'held',
+        tasks: [],
+        // The last cannot be named, but it is held all the same.
+        scheduled: [loop(), selfPaced, { id: 'cron:0dd1d0e5', kind: 'cron' }],
+      });
+    });
+    expect(JSON.stringify(view.result.current.sessionBusy)).toBe(JSON.stringify({
+      reason: 'held',
+      tasks: [],
+      scheduled: [loop(), selfPaced],
+      hasQueuedMessage: false,
+      changed: false,
+    }));
+
+    act(() => {
+      view.result.current.takeOverSession();
+    });
+    expect(JSON.stringify(socket.inits().at(-1)?.takeOver)).toBe(JSON.stringify({
+      turnStartedAt: null,
+      taskIds: [],
+      scheduledIds: ['cron:b2148320', 'wakeup:toolu_wake_1', 'cron:0dd1d0e5'],
+    }));
+  });
+
+  it('reads a frame with no scheduled work as before, and sends scheduled ids back only for a frame that lists them', () => {
+    const { view, open } = renderConnection();
+    const socket = open();
+    act(() => {
+      answerLatestInit(socket, { scheduled: [] });
+    });
+    expect(view.result.current.sessionBusy !== null && 'scheduled' in view.result.current.sessionBusy).toBe(false);
+    act(() => {
+      view.result.current.takeOverSession();
+    });
+    expect(JSON.stringify(socket.inits().at(-1)?.takeOver)).toBe(JSON.stringify({ turnStartedAt: null, taskIds: ['wf1', 'n1'], scheduledIds: [] }));
+
+    // A server older than scheduled work sends no list, and gets none back.
+    act(() => {
+      answerLatestInit(socket);
+    });
+    act(() => {
+      view.result.current.takeOverSession();
+    });
+    const takeOver = socket.inits().at(-1)?.takeOver as Record<string, unknown> | undefined;
+    expect(takeOver !== undefined && 'scheduledIds' in takeOver).toBe(false);
+  });
+
   it('a replaced socket that closes late leaves its successor\'s notice alone', () => {
     const { view, open } = renderConnection();
     const first = open();
@@ -551,6 +617,41 @@ describe('ShellSessionBusyNotice', () => {
       'Agent Survey 4',
       '+2 more',
     ]);
+  });
+
+  it('names the scheduled work after the tasks, five items at most together', () => {
+    const reminder = loop({ id: 'cron:7b7cd8fc', prompt: 'stretch', recurring: false });
+    const few = renderNotice(busy({ tasks: [task('wf1', { workflowName: 'audit' })], scheduled: [loop(), reminder] }));
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Workflow audit', 'Loop check CI', 'Reminder stretch']);
+    few.view.unmount();
+
+    renderNotice(busy({
+      tasks: Array.from({ length: 4 }, (_, index) => task(`a${index}`, { taskType: 'local_agent', description: `Survey ${index}` })),
+      scheduled: [loop(), reminder, loop({ id: 'wakeup:toolu_wake_1', kind: 'wakeup', prompt: '/loop' })],
+    }));
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'Agent Survey 0',
+      'Agent Survey 1',
+      'Agent Survey 2',
+      'Agent Survey 3',
+      'Loop check CI',
+      '+2 more',
+    ]);
+  });
+
+  it('says the process waits for the loops, or runs them beside the tasks; other reasons stay', () => {
+    const held = renderNotice(busy({ reason: 'held', scheduled: [loop()] }));
+    expect(screen.queryAllByText('This session has loops waiting for their next run:').length).toBe(1);
+    expect(screen.queryAllByText(/waiting on a Monitor/).length).toBe(0);
+    held.view.unmount();
+
+    const background = renderNotice(busy({ reason: 'background', tasks: [task('wf1', { workflowName: 'audit' })], scheduled: [loop()] }));
+    expect(screen.queryAllByText('Background tasks and loops are still running:').length).toBe(1);
+    background.view.unmount();
+
+    renderNotice(busy({ reason: 'turn', scheduled: [loop()] }));
+    expect(screen.queryAllByText('A chat turn is still running.').length).toBe(1);
+    expect(screen.queryAllByText('Loop check CI').length).toBe(1);
   });
 
   it('calls back once per button', () => {

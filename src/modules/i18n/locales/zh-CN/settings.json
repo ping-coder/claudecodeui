@@ -11,7 +11,7 @@
     "title": "账户",
     "language": "语言",
     "languageLabel": "显示语言",
-    "languageDescription": "选择您偏好的界面语言",
+    "languageDescription": "选择界面语言",
     "username": "用户名",
     "email": "邮箱",
     "profile": "个人资料",
@@ -63,7 +63,7 @@
     "ttsModel": "文字转语音模型",
     "voice": "语音",
     "format": "音频格式",
-    "note": "自定义基础 URL 由您的浏览器直接调用，必须允许浏览器 CORS 请求。留空以使用服务器配置的后端。"
+    "note": "自定义基础 URL 由浏览器直接调用，必须允许浏览器的 CORS 请求。留空则使用服务器配置的后端。"
   },
   "quickSettings": {
     "title": "快速设置",
@@ -82,7 +82,7 @@
       "dragging": "正在拖拽手柄",
       "closePanel": "关闭设置面板",
       "openPanel": "打开设置面板",
-      "draggingStatus": "正在拖拽...",
+      "draggingStatus": "正在拖拽…",
       "toggleAndMove": "点击切换，拖拽移动"
     },
     "tabs": {
@@ -111,6 +111,7 @@
     "title": "终端快捷键",
     "sectionKeys": "按键",
     "sectionNavigation": "导航",
+    "paste": "粘贴",
     "escape": "Escape",
     "tab": "Tab",
     "shiftTab": "Shift+Tab",
@@ -160,7 +161,7 @@
       "enable": "启用通知",
       "disable": "关闭通知",
       "enabled": "此浏览器已启用通知",
-      "loading": "更新中...",
+      "loading": "更新中…",
       "unsupported": "此浏览器不支持推送通知。",
       "denied": "此网站的推送通知已被阻止。请在浏览器的网站设置中允许通知，然后重新打开设置。",
       "dismissed": "没有获得通知权限。请再次点击「启用通知」，并在浏览器询问时选择允许。",
@@ -201,7 +202,7 @@
     },
     "projectSorting": {
       "label": "项目排序",
-      "description": "项目在侧边栏中的排列方式",
+      "description": "项目在侧栏中的排列方式",
       "alphabetical": "按字母顺序",
       "recentActivity": "最近活动"
     },
@@ -231,6 +232,11 @@
         "label": "字体大小",
         "description": "编辑器字体大小（px）"
       }
+    },
+    "keepProjectsExpanded": {
+      "section": "侧栏",
+      "label": "保持项目展开",
+      "description": "可以同时展开多个项目，刷新后仍保持展开。"
     }
   },
   "mcpForm": {
@@ -246,7 +252,7 @@
       "label": "范围",
       "userGlobal": "用户（全局）",
       "projectLocal": "项目（本地）",
-      "userDescription": "用户范围：在您机器上的所有项目中可用",
+      "userDescription": "用户范围：在这台机器的所有项目中可用",
       "projectDescription": "本地范围：仅在选定项目中可用",
       "cannotChange": "编辑现有服务器时无法更改范围"
     },
@@ -259,17 +265,18 @@
       "url": "URL",
       "envVars": "环境变量（KEY=值，每行一个）",
       "headers": "请求头（KEY=值，每行一个）",
-      "selectProject": "选择项目..."
+      "selectProject": "选择项目…"
     },
     "placeholders": {
-      "serverName": "我的服务"
+      "serverName": "我的服务",
+      "args": "--port\n3000"
     },
     "validation": {
       "missingType": "缺少必填字段：type",
       "stdioRequiresCommand": "stdio 类型需要 command 字段",
       "httpRequiresUrl": "{{type}} 类型需要 url 字段",
       "invalidJson": "无效的 JSON 格式",
-      "jsonHelp": "粘贴您的 MCP 服务器配置（JSON 格式）。示例格式：",
+      "jsonHelp": "粘贴 JSON 格式的 MCP 服务器配置。示例格式：",
       "jsonExampleStdio": "• stdio: {\"type\":\"stdio\",\"command\":\"npx\",\"args\":[\"@upstash/context7-mcp\"]}",
       "jsonExampleHttp": "• http/sse: {\"type\":\"http\",\"url\":\"https://api.example.com/mcp\"}"
     },
@@ -277,15 +284,32 @@
     "projectPath": "路径：{{path}}",
     "actions": {
       "cancel": "取消",
-      "saving": "保存中...",
+      "saving": "保存中…",
       "addServer": "添加服务器",
       "updateServer": "更新服务器"
-    }
+    },
+    "scopes": {
+      "userGlobal": "用户（全局）",
+      "userAllProviders": "用户（所有提供商）",
+      "local": "Claude 本地",
+      "project": "项目",
+      "projectAllProviders": "项目（所有提供商）",
+      "userGlobalDesc": "在这台机器的所有项目中可用",
+      "userAllProvidersDesc": "写入每个提供商的用户配置，在这台机器的所有项目中可用",
+      "localDesc": "保存在 Claude 的用户设置中，只用于所选项目",
+      "projectDesc": "保存在所选项目的工作区中",
+      "projectAllProvidersDesc": "在所选项目的工作区中为每个提供商写入配置"
+    },
+    "unsupportedTransport": "添加到所有提供商时只支持 stdio 和 http，不支持 {{transport}}。",
+    "addToProvider": "{{action}}到 {{provider}}",
+    "workingDirectory": "工作目录",
+    "envVarNames": "环境变量名",
+    "bearerTokenEnvVar": "Bearer 令牌环境变量"
   },
   "saveStatus": {
     "success": "设置保存成功！",
     "error": "保存设置失败",
-    "saving": "保存中..."
+    "saving": "保存中…"
   },
   "footerActions": {
     "save": "保存设置",
@@ -293,18 +317,18 @@
   },
   "git": {
     "title": "Git 配置",
-    "description": "配置您的 git 提交身份。这些设置将通过 git config --global 全局应用",
+    "description": "设置提交时使用的 Git 身份。这些设置会通过 git config --global 全局生效",
     "name": {
       "label": "Git 名称",
-      "help": "您的 git 提交名称"
+      "help": "用于 Git 提交的名字"
     },
     "email": {
       "label": "Git 邮箱",
-      "help": "您的 git 提交邮箱"
+      "help": "用于 Git 提交的邮箱"
     },
     "actions": {
       "save": "保存配置",
-      "saving": "保存中..."
+      "saving": "保存中…"
     },
     "status": {
       "success": "保存成功"
@@ -314,8 +338,8 @@
     "title": "API 密钥",
     "description": "生成 API 密钥以从其他应用访问外部 API。",
     "newKey": {
-      "alertTitle": "⚠️ 保存您的 API 密钥",
-      "alertMessage": "这是您唯一一次看到此密钥。请妥善保存。",
+      "alertTitle": "⚠️ 保存好 API 密钥",
+      "alertMessage": "这个密钥只显示这一次，记得妥善保存。",
       "iveSavedIt": "我已保存"
     },
     "form": {
@@ -337,11 +361,11 @@
     "github": {
       "title": "GitHub 令牌",
       "description": "添加 GitHub 个人访问令牌以通过外部 API 克隆私有仓库。",
-      "descriptionAlt": "添加 GitHub 个人访问令牌以克隆私有仓库。您也可以直接在 API 请求中传递令牌而无需存储。",
+      "descriptionAlt": "添加 GitHub 个人访问令牌，用来克隆私有仓库。也可以不保存令牌，直接在 API 请求里传入。",
       "addButton": "添加令牌",
       "form": {
         "namePlaceholder": "令牌名称（例如：个人仓库）",
-        "tokenPlaceholder": "GitHub 个人访问令牌（ghp_...）",
+        "tokenPlaceholder": "GitHub 个人访问令牌（ghp_…）",
         "descriptionPlaceholder": "描述（可选）",
         "addButton": "添加令牌",
         "cancelButton": "取消",
@@ -354,16 +378,16 @@
     "apiDocsLink": "API 文档",
     "documentation": {
       "title": "外部 API 文档",
-      "description": "了解如何使用外部 API 从您的应用程序触发 Claude/Cursor 会话。",
+      "description": "了解如何用外部 API 从你的应用里触发 Claude/Cursor 会话。",
       "viewLink": "查看 API 文档 →"
     },
-    "loading": "加载中...",
+    "loading": "加载中…",
     "version": {
       "updateAvailable": "有可用更新：v{{version}}"
     }
   },
   "tasks": {
-    "checking": "正在检查 TaskMaster 安装...",
+    "checking": "正在检查 TaskMaster 安装…",
     "notInstalled": {
       "title": "未安装 TaskMaster AI CLI",
       "description": "需要 TaskMaster CLI 才能使用任务管理功能。安装它以开始使用：",
@@ -378,20 +402,43 @@
     },
     "settings": {
       "enableLabel": "启用 TaskMaster 集成",
-      "enableDescription": "在整个界面中显示 TaskMaster 任务、横幅和侧边栏指示器"
+      "enableDescription": "在界面各处显示 TaskMaster 的任务、提示条和侧栏指示器"
     }
   },
   "agents": {
     "authStatus": {
-      "checking": "检查中...",
+      "checking": "检查中…",
       "connected": "已连接",
       "notConnected": "未连接",
       "disconnected": "已断开",
       "notInstalled": "未安装",
       "cliNotInstalled": "此机器上未安装 {{agent}} CLI",
-      "checkingAuth": "正在检查认证状态...",
+      "checkingAuth": "正在检查认证状态…",
       "loggedInAs": "登录为 {{email}}",
-      "authenticatedUser": "已认证用户"
+      "authenticatedUser": "已认证用户",
+      "server": {
+        "notAuthenticated": "未登录",
+        "notLoggedIn": "未登录",
+        "cliNotInstalled": "{{agent}} CLI 未安装",
+        "cliNotFound": "找不到 {{agent}} CLI，或者没有安装",
+        "agyNotInstalled": "Antigravity CLI（agy）未安装",
+        "agyNotSignedIn": "未登录。在终端里运行一次 agy 即可登录。",
+        "claudeNotAuthenticated": "Claude CLI 未登录。运行 claude /login，或者配置 ANTHROPIC_API_KEY。",
+        "claudeLoginExpired": "Claude 登录已过期，再运行一次 claude /login。",
+        "claudeCredentialsUnreadable": "无法读取 Claude 凭据，再运行一次 claude /login。",
+        "claudeCredentialsCorrupt": "Claude 凭据文件已损坏，再运行一次 claude /login。",
+        "noValidTokens": "没有找到有效的令牌",
+        "notConfigured": "{{agent}} 未配置",
+        "readFailed": "无法读取 {{agent}} 的登录信息",
+        "agyStatusFailed": "无法读取 Antigravity CLI 的状态",
+        "commandTimeout": "命令超时",
+        "checkFailed": "无法检查登录状态",
+        "apiKey": "API 密钥",
+        "authToken": "认证令牌",
+        "settingsFile": "通过 settings.json 配置",
+        "oauthToken": "OAuth 令牌（长期有效）",
+        "providerCredentials": "{{provider}} 凭据"
+      }
     },
     "account": {
       "claude": {
@@ -411,10 +458,23 @@
       }
     },
     "connectionStatus": "连接状态",
+    "subscriptionOverride": {
+      "title": "没有使用你的订阅登录",
+      "description": "{{source}}里设置了 {{variable}}，所以 Claude Code 的每个请求都用这个密钥按 API 用量付费，而不是用你的订阅登录。",
+      "descriptionWithEmail": "{{source}}里设置了 {{variable}}，所以 Claude Code 的每个请求都用这个密钥按 API 用量付费，而不是用你的订阅登录（{{email}}）。",
+      "source": {
+        "process_env": "服务器的环境变量",
+        "settings_file": "~/.claude/settings.json 文件"
+      },
+      "fix": {
+        "process_env": "要使用订阅，在启动服务器的地方（.env、shell 配置文件、服务单元）删掉 {{variable}}，然后重启服务器。",
+        "settings_file": "要使用订阅，从 ~/.claude/settings.json 的 \"env\" 字段里删掉 {{variable}}。"
+      }
+    },
     "login": {
       "title": "登录",
       "reAuthenticate": "重新认证",
-      "description": "登录您的 {{agent}} 账户以启用 AI 功能",
+      "description": "登录 {{agent}} 账户，启用 AI 功能",
       "reAuthDescription": "使用其他账户登录或刷新凭据",
       "button": "登录",
       "reLoginButton": "重新登录"
@@ -450,7 +510,7 @@
       "title": "来自 Claude 设置文件的规则",
       "description": "Claude CLI 会在上面的列表之外同时应用这些规则。拒绝规则无论设置在哪里都优先，但对于「允许的工具」中已允许的工具，询问规则不会再请求确认。这里仅供查看；请在文件中编辑。",
       "sources": {
-        "user": "您的设置",
+        "user": "用户设置",
         "managed": "托管设置（管理员）"
       },
       "groups": {
@@ -514,7 +574,7 @@
         "default": "sandboxMode=workspace-write, approvalPolicy=on-request. 在工作区沙箱内运行命令。Codex 决定何时需要批准；此非交互式集成无法批准请求。",
         "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=never。所有命令在项目目录内自动执行。",
         "bypassPermissions": "sandboxMode=danger-full-access, approvalPolicy=never。完全系统访问权限，仅在可信环境中使用。",
-        "overrideNote": "您可以使用聊天界面中的模式按钮按会话覆盖此设置。"
+        "overrideNote": "可以用聊天界面里的模式按钮，为单个会话覆盖这个设置。"
       }
     },
     "actions": {
@@ -540,7 +600,8 @@
       "command": "命令",
       "url": "URL",
       "args": "参数",
-      "environment": "环境变量"
+      "environment": "环境变量",
+      "line": "{{label}}：{{value}}"
     },
     "tools": {
       "title": "工具",
@@ -557,7 +618,7 @@
     },
     "help": {
       "title": "关于 Codex MCP",
-      "description": "Codex 支持基于 stdio 的 MCP 服务器。您可以添加服务器，通过额外的工具和资源来扩展 Codex 的功能。"
+      "description": "Codex 支持基于 stdio 的 MCP 服务器。可以添加服务器，用额外的工具和资源扩展 Codex 的能力。"
     }
   },
   "pluginSettings": {
@@ -566,7 +627,7 @@
     "installPlaceholder": "https://github.com/user/my-plugin",
     "installButton": "安装",
     "installing": "安装中…",
-    "securityWarning": "仅安装您已审查过源代码或信任作者的插件。",
+    "securityWarning": "只安装你审查过源代码的插件，或来自可信作者的插件。",
     "scanningPlugins": "正在扫描插件…",
     "noPluginsInstalled": "未安装插件",
     "pullLatest": "从 git 拉取最新内容",
@@ -637,11 +698,207 @@
       "description": "GitHub Issues 看板，支持双向 TaskMaster 同步和 /github-task CLI 技能自动安装",
       "install": "安装"
     },
+    "claudeUsagePlugin": {
+      "name": "Claude 用量",
+      "description": "实时跟踪 Claude Code 套餐限额，查看 30 天的 Token 用量和费用历史。",
+      "install": "安装"
+    },
+    "codexUsagePlugin": {
+      "name": "Codex 用量",
+      "description": "实时跟踪 Codex 套餐限额和重置时间，查看账户 30 天的 Token 用量。",
+      "install": "安装"
+    },
+    "glmUsagePlugin": {
+      "name": "GLM 用量",
+      "description": "实时跟踪 GLM（智谱）编程套餐额度，查看 30 天的 Token 用量历史。",
+      "install": "安装"
+    },
+    "agentMonitorPlugin": {
+      "name": "智能体监控",
+      "description": "查看对话结束后仍在后台运行的子智能体和 Shell，并可以停止它们。",
+      "install": "安装"
+    },
     "morePlugins": "更多",
     "enable": "启用",
     "disable": "禁用",
     "installAriaLabel": "插件 git 仓库 URL",
     "tab": "标签",
     "runningStatus": "运行中"
+  },
+  "skillsPage": {
+    "description": "从本地文件、完整文件夹和项目目录管理 {{provider}} 技能。",
+    "searchPlaceholder": "搜索技能…",
+    "searchAriaLabel": "搜索技能",
+    "clearSearch": "清除技能搜索",
+    "addSkill": "添加技能",
+    "refresh": "刷新",
+    "scanningProjectSkills": "正在扫描项目技能…",
+    "addDialogTitle": "添加 {{provider}} 技能",
+    "addDialogDescription": "上传 SKILL.md 文件或完整的技能文件夹。",
+    "closeDialog": "关闭添加技能对话框",
+    "savedSuccessfully": "技能已保存。",
+    "footerHint": "上传文件夹时沿用所选文件夹的名称；单独的文件使用 `SKILL.md` 中的 `name`。",
+    "installWithCount_other": "安装 {{count}} 个技能",
+    "installPlain": "安装技能",
+    "loading": "正在加载 {{provider}} 技能…",
+    "emptyTitle": "还没有发现技能",
+    "emptyDescription": "在上方添加全局技能，或在工作区中创建项目专用的技能文件夹。",
+    "noMatchTitle": "没有匹配的技能",
+    "noMatchDescription": "换个命令、名称、范围、项目或来源路径试试。",
+    "count_other": "{{count}} 个技能",
+    "noDescription": "技能的 front matter 中没有提供描述。",
+    "pluginBadge": "插件：{{name}}",
+    "projectBadge": "项目：{{name}}",
+    "source": "来源",
+    "upload": {
+      "dropTitle": "拖入技能文件夹或 SKILL.md",
+      "dropHint": "文件夹里可以包含脚本、参考资料和资源文件。",
+      "chooseFiles": "选择文件",
+      "chooseFolder": "选择文件夹",
+      "readyToInstall": "待安装",
+      "filesCount_other": "{{count}} 个文件",
+      "markdownFile": "Markdown 文件",
+      "removeFile": "移除 {{name}}",
+      "hideInstallLocation": "隐藏安装位置",
+      "whereToInstall": "会安装到哪里？"
+    },
+    "errors": {
+      "tooManyFiles": "一个技能文件夹最多包含 {{max}} 个文件。",
+      "tooLarge": "所选技能文件夹的总大小必须小于 30 MB。",
+      "noSkillMd": "所选文件夹中没有 SKILL.md 文件。",
+      "couldNotReadSkillMd": "无法读取 {{folder}} 中的 SKILL.md。",
+      "readFailed": "读取技能文件夹失败",
+      "dropMarkdown": "拖入一个或多个 Markdown 文件，或包含 SKILL.md 的文件夹。",
+      "addFirst": "先添加一个或多个 Markdown 文件。",
+      "importFailed": "导入技能失败"
+    },
+    "scopes": {
+      "user": "用户",
+      "plugin": "插件",
+      "repo": "仓库",
+      "project": "项目",
+      "admin": "管理员",
+      "system": "系统"
+    }
+  },
+  "browserUse": {
+    "title": "浏览器",
+    "subtitle": "监控 AI 智能体打开的浏览器会话。",
+    "openSettings": "打开浏览器设置",
+    "refreshSessions": "刷新浏览器会话",
+    "runtimeDisabled": "未启用",
+    "runtimeReady": "就绪",
+    "runtimeInstalling": "安装中",
+    "runtimeSetupRequired": "需要安装",
+    "loadFailed": "加载浏览器功能失败",
+    "actionFailed": "浏览器操作失败",
+    "never": "从未",
+    "unknown": "未知",
+    "justNow": "刚刚",
+    "secondsAgo": "{{n}} 秒前",
+    "minutesAgo": "{{n}} 分钟前",
+    "hoursAgo": "{{n}} 小时前",
+    "daysAgo": "{{n}} 天前",
+    "noPageLoaded": "未加载页面",
+    "waitingAction": "等待中",
+    "emptyTitleEnabled": "还没有浏览器会话",
+    "emptyTitleDisabled": "浏览器功能未启用",
+    "emptyDescEnabled": "AI 任务使用浏览器功能时，智能体的浏览器会话会显示在这里。",
+    "emptyDescDisabled": "在设置中启用浏览器功能，智能体就能打开受监控的浏览器会话。",
+    "runtimeSetupTitle": "需要安装运行环境",
+    "installing": "正在安装…",
+    "installRuntime": "安装运行环境",
+    "promptLabel": "提示词",
+    "prompt1": "用浏览器检查结账流程，报告所有异常的界面状态。",
+    "prompt2": "用浏览器打开 <url>，与页面交互，并总结每一步之后页面有什么变化。",
+    "screenshotAlt": "浏览器会话截图",
+    "waitingScreenshot": "等待截图",
+    "waitingScreenshotHint": "智能体的下一张浏览器快照会显示在这里。",
+    "activeCount": "{{n}} 个活跃",
+    "totalCount": "共 {{n}} 个",
+    "updated": "{{time}}更新",
+    "statusEmpty": "无",
+    "fullScreen": "全屏",
+    "stopSession": "停止会话",
+    "deleteSession": "删除会话",
+    "sessions": "会话",
+    "noSessions": "没有智能体的浏览器会话。",
+    "selected": "选中的会话",
+    "statusLabel": "状态",
+    "lastAction": "最近操作",
+    "profileLabel": "配置文件",
+    "temporaryProfile": "临时",
+    "stop": "停止",
+    "delete": "删除",
+    "sessionFallback": "浏览器会话",
+    "close": "关闭",
+    "statusReadySession": "就绪",
+    "statusStoppedSession": "已停止",
+    "statusUnavailableSession": "不可用",
+    "installFailed": "安装浏览器运行环境失败"
+  },
+  "browserUseSettings": {
+    "sectionTitle": "浏览器",
+    "sectionDescription": "允许智能体创建受控的 Playwright 浏览器会话，你可以在「浏览器」标签中监控。",
+    "enableLabel": "启用浏览器功能",
+    "enableDescription": "为支持的智能体注册浏览器功能。智能体可以创建浏览器会话，你可以查看、停止和删除它们。",
+    "enableAriaLabel": "启用浏览器功能",
+    "playwrightLabel": "Playwright",
+    "chromiumLabel": "Chromium",
+    "statusPrefix": "状态",
+    "statusChip": "{{label}}：{{value}}",
+    "checking": "检查中…",
+    "installed": "已安装",
+    "missing": "未安装",
+    "ready": "就绪",
+    "setupRequired": "需要安装",
+    "disabled": "未启用",
+    "runtimeRequiredTitle": "需要浏览器运行环境",
+    "runtimeRequiredFallback": "先安装浏览器运行环境，智能体才能创建浏览器会话。",
+    "installing": "正在安装…",
+    "installRuntime": "安装运行环境",
+    "loadSettingsFailed": "加载浏览器设置失败",
+    "loadStatusFailed": "加载浏览器状态失败",
+    "saveFailed": "保存浏览器设置失败",
+    "installFailed": "安装浏览器运行环境失败"
+  },
+  "mcpServersAdd": {
+    "menuLabel": "添加 MCP 服务器",
+    "globalButtonLabel": "添加全局 MCP 服务器",
+    "providerButtonLabel": "添加 {{provider}} MCP 服务器",
+    "globalAddDescription": "把同一个 stdio 或 HTTP 服务器写入 Claude、Cursor、Codex 和 OpenCode。",
+    "providerAddDescription": "「{{button}}」只影响 {{provider}}。",
+    "globalModalDescription": "把这个 MCP 服务器添加到每个提供商：Claude、Cursor、Codex 和 OpenCode。同一份配置要在所有提供商中通用，所以只支持 stdio 和 HTTP 传输。",
+    "refreshingScopes": "正在刷新项目范围…",
+    "loadingServers": "正在加载 MCP 服务器…",
+    "configCwd": "工作目录",
+    "configEnvVars": "环境变量名"
+  },
+  "mcpTeamCard": {
+    "title": "团队 MCP 配置",
+    "description": "在团队内共享 MCP 服务器配置，所有人自动保持同步。",
+    "proLink": "CloudCLI Pro 专享"
+  },
+  "mcpServersAddErrors": {
+    "selectProjectRequired": "项目范围的 MCP 服务器需要先选择项目",
+    "globalScopeUnsupported": "添加到所有提供商时只支持用户或项目范围。",
+    "globalAddFailed": "未能把 MCP 服务器添加到所有提供商。{{details}}",
+    "deleteConfirm": "删除这个 MCP 服务器？",
+    "unknownError": "未知错误"
+  },
+  "about": {
+    "tagline": "开源的 AI 编程助手界面",
+    "starOnGitHub": "在 GitHub 上加星标",
+    "hostedTitle": "试用 CloudCLI 托管版",
+    "hostedDescription": "团队协作、共享 MCP 配置、跨环境同步设置，以及托管的基础设施。",
+    "learnMore": "了解更多",
+    "docs": "文档",
+    "proFeaturesTitle": "CloudCLI Pro 功能",
+    "syncSettingsTitle": "同步设置",
+    "syncSettingsDescription": "在所有环境之间同步偏好设置、MCP 配置和主题。",
+    "teamManagementTitle": "团队管理",
+    "teamManagementDescription": "多用户、基于角色的访问控制，以及团队共享的项目。",
+    "licensed": "采用 AGPL-3.0 许可证",
+    "proCta": "CloudCLI Pro 专享"
   }
 }

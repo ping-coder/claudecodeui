@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactElement } from 'react';
+import type { TFunction } from 'i18next';
 import {
   CornerDownLeft,
   Folder,
@@ -12,6 +13,8 @@ import {
   User,
   type LucideIcon,
 } from 'lucide-react';
+
+import { describeCommandType, describeSlashCommand } from '@/modules/chat/utils/catalogLabels';
 
 type CommandMenuCommand = {
   name: string;
@@ -50,13 +53,24 @@ const menuBaseStyle: CSSProperties = {
   backdropFilter: 'blur(12px)',
 };
 
-const namespaceLabels: Record<string, string> = {
-  frequent: 'Frequently Used',
-  builtin: 'Built-in Commands',
-  skill: 'Skills',
-  project: 'Project Commands',
-  user: 'User Commands',
-  other: 'Other Commands',
+/** A group's heading: the groups this menu orders by name, any other by its namespace as the server sends it. */
+const getNamespaceLabel = (namespace: string, t: TFunction): string => {
+  switch (namespace) {
+    case 'frequent':
+      return t('chat:slashCommands.groups.frequent');
+    case 'builtin':
+      return t('chat:slashCommands.groups.builtin');
+    case 'skill':
+      return t('chat:slashCommands.groups.skill');
+    case 'project':
+      return t('chat:slashCommands.groups.project');
+    case 'user':
+      return t('chat:slashCommands.groups.user');
+    case 'other':
+      return t('chat:slashCommands.groups.other');
+    default:
+      return namespace;
+  }
 };
 
 const namespaceIcons: Record<string, LucideIcon> = {
@@ -243,7 +257,7 @@ export default function CommandMenu({
           textAlign: 'center',
         }}
       >
-        No commands available
+        {t('chat:slashCommands.empty')}
       </div>
     );
   }
@@ -260,7 +274,7 @@ export default function CommandMenu({
         <div key={namespace} className="command-group">
           {orderedNamespaces.length > 1 && (
             <div className="flex items-center justify-between px-2 pb-1.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              <span>{namespaceLabels[namespace] || namespace}</span>
+              <span>{getNamespaceLabel(namespace, t)}</span>
               <span className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                 {(groupedCommands[namespace] || []).length}
               </span>
@@ -271,6 +285,7 @@ export default function CommandMenu({
             const isSelected = commandIndex === selectedIndex;
             const NamespaceIcon = getNamespaceIcon(namespace);
             const accentClass = getNamespaceAccentClass(namespace);
+            const description = describeSlashCommand(command, t);
             return (
               <div
                 key={renderKey}
@@ -293,7 +308,7 @@ export default function CommandMenu({
                   <NamespaceIcon aria-hidden="true" size={14} strokeWidth={2.2} />
                 </span>
                 <div className="min-w-0 flex-1 pe-1">
-                  <div className={`flex min-w-0 items-center gap-2 ${command.description ? 'mb-1' : 'mb-0'}`}>
+                  <div className={`flex min-w-0 items-center gap-2 ${description ? 'mb-1' : 'mb-0'}`}>
                     <span
                       className="min-w-0 truncate font-mono text-[13px] font-semibold text-foreground"
                       title={command.name}
@@ -302,16 +317,16 @@ export default function CommandMenu({
                     </span>
                     {command.metadata?.type && (
                       <span className="command-metadata-badge shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm">
-                        {command.metadata.type}
+                        {describeCommandType(command.metadata.type, t)}
                       </span>
                     )}
                   </div>
-                  {command.description && (
+                  {description && (
                     <div
                       className="truncate whitespace-nowrap text-[12px] leading-4 text-muted-foreground"
-                      title={command.description}
+                      title={description}
                     >
-                      {command.description}
+                      {description}
                     </div>
                   )}
                 </div>

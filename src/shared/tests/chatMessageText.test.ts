@@ -39,6 +39,17 @@ describe('isTurnOpener', () => {
     assert.equal(isTurnOpener({ type: 'user', content: 'Also this', timestamp: '2026-10-28T12:00:01.000Z', inserted: true }), false);
   });
 
+  it('is false for a local command, which asks the model nothing, and true for a command that hands it a turn', () => {
+    assert.equal(isTurnOpener({
+      type: 'user',
+      content: '/model claude-opus-5-5',
+      timestamp: '2026-10-28T12:00:04.000Z',
+      commandName: '/model',
+      isLocalCommand: true,
+    }), false);
+    assert.equal(isTurnOpener({ type: 'user', content: '/review src/chat', timestamp: '2026-10-28T12:00:05.000Z', commandName: '/review' }), true);
+  });
+
   it('is false for the assistant\'s rows, a background task\'s report among them', () => {
     assert.equal(isTurnOpener({ type: 'assistant', content: 'Because…', timestamp: '2026-10-28T12:00:02.000Z' }), false);
     assert.equal(isTurnOpener({ type: 'assistant', content: 'Task done', timestamp: '2026-10-28T12:00:03.000Z', isTaskNotification: true }), false);

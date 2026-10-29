@@ -11,6 +11,7 @@
     "starred": "Starred",
     "all": "All",
     "untitledSession": "Untitled Session",
+    "untitledProviderSession": "Untitled {{provider}} Session",
     "newSession": "New Session",
     "codexSession": "Codex Session",
     "fetchingProjects": "Fetching your Claude projects and sessions",
@@ -43,6 +44,22 @@
     "openOnRight": "Open on the right",
     "openOnRightSplit": "Open on the right (split view)",
     "openOnLeftSplit": "Open on the left (split view)"
+  },
+  "sessionMenu": {
+    "title": "Session options",
+    "optionsFor": "Session options for {{name}}",
+    "providerSession": "{{provider}} session",
+    "copyId": "Copy {{provider}} session ID",
+    "copyIdLoading": "Loading {{provider}} session ID…",
+    "copyIdCopied": "{{provider}} session ID copied",
+    "copyIdFailed": "Couldn't copy {{provider}} session ID",
+    "copyIdUnavailable": "{{provider}} session ID unavailable",
+    "retryClick": "Click to try again.",
+    "retryTap": "Tap to try again.",
+    "fork": "Fork session",
+    "forkDescription": "Continue from a copy, leaving this one untouched.",
+    "archiveOrDelete": "Archive or delete session",
+    "nameLabel": "Session name"
   },
   "tooltips": {
     "viewEnvironments": "View Environments",
@@ -86,7 +103,9 @@
     "rename": "Rename",
     "joinCommunity": "Join Community",
     "reportIssue": "Report Issue",
-    "starOnGithub": "Star on GitHub"
+    "starOnGithub": "Star on GitHub",
+    "star": "Star",
+    "dismiss": "Dismiss"
   },
   "branding": {
     "openSource": "Open Source"
@@ -106,7 +125,11 @@
     "oneHourAgo": "1 hour ago",
     "hoursAgo": "{{count}} hours ago",
     "oneDayAgo": "1 day ago",
-    "daysAgo": "{{count}} days ago"
+    "daysAgo": "{{count}} days ago",
+    "compactNow": "<1m",
+    "compactMinutes": "{{count}}m",
+    "compactHours": "{{count}}hr",
+    "compactDays": "{{count}}d"
   },
   "messages": {
     "deleteConfirm": "Are you sure you want to delete this?",
@@ -142,7 +165,11 @@
     "modeProjects": "Projects",
     "modeConversations": "Conversations",
     "modeMore": "More",
+    "runningTooltip": "Running sessions",
+    "archiveOnlyTooltip": "Archive only",
     "conversationsPlaceholder": "Search in conversations...",
+    "runningPlaceholder": "Search running sessions...",
+    "archivedPlaceholder": "Search archived sessions...",
     "searching": "Searching...",
     "sessionTitles": "Session",
     "conversationContents": "Conversation contents",
@@ -150,8 +177,8 @@
     "tryDifferentQuery": "Try a different search query",
     "matches_one": "{{count}} match",
     "matches_other": "{{count}} matches",
-    "projectsScanned_one": "{{count}} project scanned",
-    "projectsScanned_other": "{{count}} projects scanned"
+    "scanProgress_one": "{{done}} of {{total}} project scanned",
+    "scanProgress_other": "{{done}} of {{total}} projects scanned"
   },
   "recent": {
     "title": "Recent conversations",
@@ -161,10 +188,31 @@
     "loadMore": "Load older conversations",
     "loadingMore": "Loading more..."
   },
+  "running": {
+    "title": "Running now",
+    "emptyTitle": "No sessions running",
+    "emptyDescription": "Active work will appear here while a provider is processing.",
+    "noMatchingSessions": "No running sessions match this search."
+  },
+  "archived": {
+    "title": "Archive",
+    "restoreHint": "Restore items whenever you need them",
+    "visibleOfTotal": "{{visible}} of {{total}}",
+    "loadingTitle": "Loading archive...",
+    "loadingDescription": "Fetching hidden workspaces and sessions you can restore later.",
+    "emptyTitle": "No archived items",
+    "emptyDescription": "Archived workspaces and sessions will appear here when you hide them from the active list.",
+    "noMatchingSessions": "No matching archived items",
+    "tryDifferentSearch": "Try a different search term.",
+    "restoreAction": "Restore",
+    "restoreProject": "Restore workspace",
+    "restore": "Restore session",
+    "deletePermanently": "Delete permanently"
+  },
   "deleteConfirmation": {
     "deleteProject": "Remove Project",
     "deleteSession": "Delete Session",
-    "confirmDelete": "What would you like to do with",
+    "confirmDeleteNamed": "What would you like to do with {{name}}?",
     "sessionCount_one": "This project contains {{count}} conversation.",
     "sessionCount_other": "This project contains {{count}} conversations.",
     "removeFromSidebar": "Remove from sidebar only",
@@ -176,11 +224,10 @@
     "deleteAllData": "Delete all data permanently",
     "allConversationsDeleted": "The project will be removed from the sidebar. Your files, memories, and session data will be preserved.",
     "cannotUndo": "You can re-add the project later.",
-    "confirmDeleteSessions": "What would you like to do with",
     "deleteSessions_one": "Delete {{count}} Session",
     "deleteSessions_other": "Delete {{count}} Sessions",
-    "selectedSessions_one": "{{count}} selected session",
-    "selectedSessions_other": "{{count}} selected sessions",
+    "confirmDeleteSelected_one": "What would you like to do with <strong>{{count}} selected session</strong>?",
+    "confirmDeleteSelected_other": "What would you like to do with <strong>{{count}} selected sessions</strong>?",
     "archiveSessions_one": "Archive {{count}} session",
     "archiveSessions_other": "Archive {{count}} sessions",
     "archiveSessionsNotice_one": "Archive keeps the session out of the active list while preserving its history.",

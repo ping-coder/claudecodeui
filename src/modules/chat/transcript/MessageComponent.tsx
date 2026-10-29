@@ -7,7 +7,7 @@ import { GitBranchIcon, PencilIcon } from 'lucide-react';
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,Project } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { describeHandOverChanges, getPaneScopedDomId } from '@/shared/utils';
-import { formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
+import { describeTaskNotificationFallback, formatTimeOfDay, formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
 import { ToolRenderer, ToolErrorDisplay, SubagentPanel, WorkflowPanel, shouldHideToolResult } from '@/modules/chat/tools';
 import { LLMProviderLogo } from '@/shared/ui';
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/modules/chat/transcript/Reasoning';
@@ -93,11 +93,25 @@ const describeBackgroundWorkStopped = (changes: string[], fallback: string, t: T
 };
 
 /**
+ * The Claude runtime's notice that a message meant to go into the process the
+ * session holds for its loops and reminders (a queued or scheduled message
+ * sent with acceptProcessSettings) did not, so it was not sent and the loops
+ * go on: an `error` row with code HAND_OVER_FAILED, worded by its `reason`
+ * (`stale-plan`, `lookup`; any other reads as the general case).
+ */
+const describeHandOverFailed = (reason: unknown, t: TFunction): string => {
+  if (reason === 'stale-plan') {
+    return t('claudeStatus.handOverFailed.stalePlan');
+  }
+  return reason === 'lookup' ? t('claudeStatus.handOverFailed.lookup') : t('claudeStatus.handOverFailed.other');
+};
+
+/**
  * Rendered by chat's ChatMessagesPane and ToolGroupContainer to draw one
  * transcript entry — user turn, assistant turn, or a tool call and its result.
  */
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
       (prevMessage.type === 'user') ||
@@ -110,12 +124,19 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
       if (message.type === 'error' && message.errorCode === 'BACKGROUND_WORK_STOPPED') {
         return describeBackgroundWorkStopped(message.errorChanges ?? [], String(message.content || ''), t);
       }
-      const content = formatUsageLimitText(String(message.content || ''));
+      if (message.type === 'error' && message.errorCode === 'HAND_OVER_FAILED') {
+        return describeHandOverFailed(message.errorReason, t);
+      }
+      // An error the server sent no words for.
+      if (message.type === 'error' && !String(message.content || '').trim()) {
+        return t('misc.unknownError');
+      }
+      const content = formatUsageLimitText(String(message.content || ''), t, i18n.language);
       return provider === 'codex' && message.type === 'assistant' && !message.isThinking
         ? stripProposedPlanEnvelope(content)
         : content;
     },
-    [message.content, message.errorChanges, message.errorCode, message.isThinking, message.type, provider, t]
+    [i18n.language, message.content, message.errorChanges, message.errorCode, message.errorReason, message.isThinking, message.type, provider, t]
   );
   const assistantCopyContent = message.isToolUse
     ? String(message.displayText || message.content || '')
@@ -136,9 +157,12 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     !message.isThinking;
 
 
-  // In the browser's locale whatever the UI language, so "5:02:28 PM" can land in a Hebrew row:
-  // shown in a <bdi>, which keeps its own direction instead of the row's.
-  const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
+  // In the interface language, not the browser's. Shown in a <bdi>, which keeps the time's own
+  // direction in a right-to-left row whatever shape a language gives it.
+  const formattedTime = useMemo(
+    () => formatTimeOfDay(message.timestamp, i18n.language),
+    [message.timestamp, i18n.language],
+  );
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
 
   if (shouldHideThinkingMessage) {
@@ -263,7 +287,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
         <div className="w-full">
           <div className="flex items-center gap-2 py-0.5">
             <span className={`inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full ${message.taskNotificationStatus === 'completed' ? 'bg-green-400 dark:bg-green-500' : 'bg-amber-400 dark:bg-amber-500'}`} />
-            <span className="text-xs text-gray-500 dark:text-gray-400">{message.content}</span>
+            <span dir="auto" className="text-xs text-gray-500 dark:text-gray-400">
+              {message.content || describeTaskNotificationFallback(message.taskNotificationStatus, t)}
+            </span>
           </div>
         </div>
       ) : (
@@ -395,7 +421,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               <Reasoning defaultOpen={isExporting}>
                 <ReasoningTrigger />
                 <ReasoningContent>
-                  <Markdown className="prose prose-sm prose-gray max-w-none font-serif dark:prose-invert">
+                  {/* Laid out by its own first letter, as the reply is; the copy row below stays the interface's. */}
+                  <Markdown dir="auto" className="prose prose-sm prose-gray max-w-none font-serif dark:prose-invert">
                     {message.content}
                   </Markdown>
                   {!isExporting && (
@@ -412,7 +439,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   <Reasoning className="mb-3" defaultOpen={false}>
                     <ReasoningTrigger />
                     <ReasoningContent>
-                      <div className="whitespace-pre-wrap">
+                      <div dir="auto" className="whitespace-pre-wrap">
                         {message.reasoning}
                       </div>
                     </ReasoningContent>

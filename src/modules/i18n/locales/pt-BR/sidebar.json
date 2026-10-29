@@ -159,6 +159,7 @@
   "deleteConfirmation": {
     "deleteProject": "Remover projeto",
     "deleteSession": "Excluir sessão",
+    "confirmDeleteNamed": "O que você gostaria de fazer com {{name}}?",
     "confirmDelete": "O que você gostaria de fazer com",
     "sessionCount_one": "Este projeto contém {{count}} conversa.",
     "sessionCount_other": "Este projeto contém {{count}} conversas.",
@@ -176,6 +177,9 @@
     "deleteSessions_one": "Excluir {{count}} sessão",
     "deleteSessions_other": "Excluir {{count}} sessões",
     "deleteSessions_many": "Excluir {{count}} de sessões",
+    "confirmDeleteSelected_one": "O que você gostaria de fazer com <strong>{{count}} sessão selecionada</strong>?",
+    "confirmDeleteSelected_many": "O que você gostaria de fazer com <strong>{{count}} de sessões selecionadas</strong>?",
+    "confirmDeleteSelected_other": "O que você gostaria de fazer com <strong>{{count}} sessões selecionadas</strong>?",
     "selectedSessions_one": "{{count}} sessão selecionada",
     "selectedSessions_other": "{{count}} sessões selecionadas",
     "selectedSessions_many": "{{count}} de sessões selecionadas",

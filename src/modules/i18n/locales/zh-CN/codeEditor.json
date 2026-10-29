@@ -7,9 +7,10 @@
     "showDiff": "显示差异高亮",
     "settings": "编辑器设置",
     "collapse": "折叠编辑器",
-    "expand": "展开编辑器到全宽"
+    "expand": "展开编辑器到全宽",
+    "popOut": "在浮动窗口中打开"
   },
-  "loading": "正在加载 {{fileName}}...",
+  "loading": "正在加载 {{fileName}}…",
   "header": {
     "showingChanges": "显示更改"
   },
@@ -18,13 +19,14 @@
     "pathCopied": "文件路径已复制",
     "download": "下载文件",
     "save": "保存",
-    "saving": "保存中...",
+    "saving": "保存中…",
     "saved": "已保存！",
     "exitFullscreen": "退出全屏",
     "fullscreen": "全屏",
     "close": "关闭",
     "previewMarkdown": "预览 Markdown",
     "editMarkdown": "编辑 Markdown",
+    "previewHtml": "在新标签页中打开 HTML 预览",
     "wrapTextFiles": "自动换行（Markdown 和文本文件）",
     "wrapCodeFiles": "自动换行（代码文件）"
   },
@@ -38,13 +40,18 @@
     "message": "文件 \"{{fileName}}\" 无法在文本编辑器中显示，因为它是二进制文件。"
   },
   "filePreview": {
-    "loading": "正在加载预览...",
+    "loading": "正在加载预览…",
     "error": "无法显示此文件。",
     "openInNewTab": "在新标签页中打开"
   },
+  "markdownPreview": {
+    "copy": "复制",
+    "copied": "已复制"
+  },
   "unsavedChanges": {
-    "confirmClose": "您有未保存的更改。关闭此文件并放弃这些更改？",
+    "confirmClose": "关闭这个文件并放弃未保存的更改？",
     "indicator": "未保存的更改"
   },
-  "resizeFileTree": "调整文件树宽度"
+  "resizeFileTree": "调整文件树宽度",
+  "resizeEditor": "拖动调整宽度"
 }

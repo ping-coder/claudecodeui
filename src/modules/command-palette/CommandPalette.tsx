@@ -44,6 +44,7 @@ import { useTheme } from '@/shared/context/ThemeContext';
 import { visualPaneSide } from '@/shared/direction';
 import { usePaletteOps } from '@/modules/command-palette/context/PaletteOpsContext';
 import {
+  PROVIDER_DISPLAY_NAMES,
   SETTINGS_MAIN_TABS,
   WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
   WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
@@ -53,6 +54,7 @@ import {
 import type {
   AppTab,
   CommandPaletteWorkspaceCommands,
+  LLMProvider,
   Project,
   SessionOpenOptions,
   WorkspaceOpenTabSummary,
@@ -92,7 +94,22 @@ type CommandPaletteProps = {
   onOpenSession: (sessionId: string, options: SessionOpenOptions) => void;
   /** Split-workspace commands and open tabs; without it the Workspace and Open tabs groups are not offered. */
   workspace?: CommandPaletteWorkspaceCommands;
+  /**
+   * How a session row's title reads: project-workspace passes sidebar's formatSessionTitle, which
+   * shows the server's placeholder names ("Untitled Claude Session") in the interface language.
+   * Titles show as stored without it.
+   */
+  formatSessionTitle?: (title: string) => string;
 };
+
+/** A provider id as its name ("agy" reads Antigravity); an id this build does not know, as it is. */
+const providerDisplayName = (provider: string): string => (
+  Object.prototype.hasOwnProperty.call(PROVIDER_DISPLAY_NAMES, provider)
+    ? PROVIDER_DISPLAY_NAMES[provider as LLMProvider]
+    : provider
+);
+
+const keepTitle = (title: string): string => title;
 
 /** Picks a session result for the other pane instead of the focused one. Handled here, inside the palette. */
 const OPEN_ON_OTHER_SIDE_SHORTCUT = ['mod', 'enter'] as const;
@@ -122,6 +139,7 @@ function CommandPalette({
   onShowTab,
   onOpenSession,
   workspace,
+  formatSessionTitle = keepTitle,
 }: CommandPaletteProps) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -179,7 +197,7 @@ function CommandPalette({
     type Row = { id: string; label: string; provider?: string; snippet?: string };
     const byId = new Map<string, Row>();
     for (const s of sessions) {
-      byId.set(s.id, { id: s.id, label: s.label, provider: s.provider });
+      byId.set(s.id, { id: s.id, label: formatSessionTitle(s.label), provider: s.provider });
     }
     for (const m of messageMatches) {
       const existing = byId.get(m.sessionId);
@@ -188,14 +206,14 @@ function CommandPalette({
       } else {
         byId.set(m.sessionId, {
           id: m.sessionId,
-          label: m.label,
+          label: formatSessionTitle(m.label),
           provider: m.provider,
           snippet: m.snippet,
         });
       }
     }
     return Array.from(byId.values());
-  }, [sessions, messageMatches, showSessions]);
+  }, [sessions, messageMatches, showSessions, formatSessionTitle]);
 
   // A file row's value is the file's absolute path, which no other row's value can equal; a relative
   // path could equal a branch name, and cmdk highlights and runs every row holding the selected
@@ -466,7 +484,7 @@ function CommandPalette({
                 )}
               </div>
               {s.provider && (
-                <span className="text-xs text-muted-foreground">{s.provider}</span>
+                <span className="text-xs text-muted-foreground">{providerDisplayName(s.provider)}</span>
               )}
               {canOpenOnOtherSide && (
                 // Shown on the highlighted row only: how to send it to the other pane instead.
@@ -587,7 +605,7 @@ function CommandPalette({
             value={search}
             onValueChange={setSearch}
           />
-          <CommandList onPointerDownCapture={recordPointerModifier}>
+          <CommandList onPointerDownCapture={recordPointerModifier} label={t('commandPalette.title')}>
             <CommandEmpty>{t('commandPalette.noResults')}</CommandEmpty>
             {orderedGroups.map((group) => (
               <React.Fragment key={group.id}>{group.node}</React.Fragment>
@@ -960,7 +978,7 @@ function OpenTabsCommandGroup({ rows, onActivateTab, run }: OpenTabsCommandGroup
             <span className="bidi-auto truncate">{tab.title}</span>
             {details && <span className="truncate text-xs text-muted-foreground">{details}</span>}
           </div>
-          <span className="text-xs text-muted-foreground">{tab.provider}</span>
+          <span className="text-xs text-muted-foreground">{providerDisplayName(tab.provider)}</span>
           {tab.isActive && <Check className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
         </CommandItem>
       ))}

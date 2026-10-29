@@ -23,6 +23,8 @@ type MarkdownProps = {
   className?: string;
   /** Render single newlines as hard line breaks (for user-typed messages). */
   breaks?: boolean;
+  /** The container's `dir`: `auto` lays model-written text out by its own first letter in any interface language. */
+  dir?: 'auto' | 'ltr' | 'rtl';
 };
 
 // Links to the wider web (or in-page anchors) keep normal browser navigation;
@@ -378,9 +380,9 @@ function MarkdownBodyRenderer({ children, breaks = false }: Omit<MarkdownProps, 
 export const MarkdownBody = memo(MarkdownBodyRenderer);
 
 /** Markdown in its own prose container. The form every non-streaming caller uses. */
-export const Markdown = memo(function Markdown({ children, className, breaks }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ children, className, breaks, dir }: MarkdownProps) {
   return (
-    <div className={className}>
+    <div className={className} dir={dir}>
       <MarkdownBody breaks={breaks}>{children}</MarkdownBody>
     </div>
   );

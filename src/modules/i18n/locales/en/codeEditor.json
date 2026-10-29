@@ -7,7 +7,8 @@
     "showDiff": "Show diff highlighting",
     "settings": "Editor Settings",
     "collapse": "Collapse editor",
-    "expand": "Expand editor to full width"
+    "expand": "Expand editor to full width",
+    "popOut": "Open in modal"
   },
   "loading": "Loading {{fileName}}...",
   "header": {
@@ -25,6 +26,7 @@
     "close": "Close",
     "previewMarkdown": "Preview markdown",
     "editMarkdown": "Edit markdown",
+    "previewHtml": "Open HTML preview in new tab",
     "wrapTextFiles": "Word wrap (Markdown and text files)",
     "wrapCodeFiles": "Word wrap (code files)"
   },
@@ -42,9 +44,14 @@
     "error": "Unable to display this file.",
     "openInNewTab": "Open in new tab"
   },
+  "markdownPreview": {
+    "copy": "Copy",
+    "copied": "Copied!"
+  },
   "unsavedChanges": {
     "confirmClose": "You have unsaved changes. Close this file and discard them?",
     "indicator": "Unsaved changes"
   },
-  "resizeFileTree": "Resize file tree"
+  "resizeFileTree": "Resize file tree",
+  "resizeEditor": "Drag to resize"
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import PinnedQuestionBar from '@/modules/chat/transcript/PinnedQuestionBar';
 import type { ChatMessage, RevealMessageOptions } from '@/shared/types';
 
@@ -114,7 +114,7 @@ describe('the pinned question line', () => {
     assert.equal(questionButton().textContent?.includes('Fix the scroll bug in the chat pane'), true);
     assert.equal(questionButton().querySelector('.font-serif') !== null, true);
 
-    rerenderMessages([user(0, '/review src/modules/chat', { commandName: '/review', isLocalCommand: true }), assistant(1)]);
+    rerenderMessages([user(0, '/review src/modules/chat', { commandName: '/review' }), assistant(1)]);
     assert.equal(questionButton().querySelector('.font-mono')?.textContent, '/review src/modules/chat');
 
     rerenderMessages([user(0, '', { images: [{ name: 'shot.png' }], files: [{ name: 'notes.txt' }] }), assistant(1)]);
@@ -279,6 +279,22 @@ describe('the pinned question panel', () => {
     assert.equal(revealMessage.mock.calls.length === 1, true);
     assert.equal(revealMessage.mock.calls[0][0] === insert, true);
     assert.equal(JSON.stringify(revealMessage.mock.calls[0][1]), JSON.stringify(START));
+  });
+
+  it('tells the inserts\' and the question\'s times in the interface language, not the browser\'s', async () => {
+    await i18n.changeLanguage('zh-CN');
+    try {
+      renderBar({ chatMessages: messages });
+      fireEvent.click(questionButton());
+      const times = [...(panel()?.querySelectorAll('bdi') ?? [])].map((bdi) => bdi.textContent ?? '');
+      assert.deepEqual(times, [
+        new Date(insert.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+        new Date(question.timestamp).toLocaleTimeString('zh-CN'),
+      ]);
+      assert.notEqual(times[1], new Date(question.timestamp).toLocaleTimeString('en'));
+    } finally {
+      await i18n.changeLanguage('en');
+    }
   });
 });
 

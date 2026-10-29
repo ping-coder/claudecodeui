@@ -8,6 +8,8 @@ import StandaloneShellHeader from '@/modules/standalone-shell/StandaloneShellHea
 type StandaloneShellProps = {
   project?: Project | null;
   session?: ProjectSession | null;
+  /** How the shell names `session` in its header and resume prompt (see Shell's `sessionTitle`). */
+  sessionTitle?: string | null;
   command?: string | null;
   isPlainShell?: boolean | null;
   isActive?: boolean;
@@ -25,6 +27,7 @@ type StandaloneShellProps = {
 export default function StandaloneShell({
   project = null,
   session = null,
+  sessionTitle = null,
   command = null,
   isPlainShell = null,
   isActive = true,
@@ -66,6 +69,7 @@ export default function StandaloneShell({
         <Shell
           selectedProject={project}
           selectedSession={session}
+          sessionTitle={sessionTitle}
           initialCommand={command}
           isPlainShell={shouldUsePlainShell}
           isActive={isActive}

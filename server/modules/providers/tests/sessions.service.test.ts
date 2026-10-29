@@ -9,7 +9,7 @@ import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
-import type { BackgroundTaskSummary, NormalizedMessage, WorkflowInfo } from '@/shared/types.js';
+import type { BackgroundTaskSummary, NormalizedMessage, ScheduledWorkSummary, WorkflowInfo } from '@/shared/types.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -443,6 +443,103 @@ test('a CLI turn does not duplicate a session whose background work CloudCLI hol
   });
 });
 
+/** One piece of scheduled work a held process lists for a session. */
+const scheduledItem = (id: string, startedAt: number): ScheduledWorkSummary => ({
+  id,
+  kind: id.startsWith('cron:') ? 'cron' : 'wakeup',
+  toolUseId: `toolu_${id.replace(/\W/g, '')}`,
+  prompt: 'check CI',
+  startedAt,
+  nextFireAt: startedAt + 300_000,
+  recurring: true,
+  holdUntil: startedAt + 691_200_000,
+});
+
+test('a session held only for scheduled work is listed as background work only when asked, and its firing is never a Claude CLI turn', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('loop-session', 'claude', '/tmp/running-project');
+    sessionsDb.assignProviderSessionId('loop-session', 'claude-native-loop');
+
+    // A /loop fires: the process CloudCLI holds for it runs the turn and
+    // registers itself `busy` meanwhile.
+    const scheduled = [scheduledItem('wakeup:toolu_01Chain', 3_000), scheduledItem('cron:b2148320', 2_000)];
+    await withClaudeCliRegistry(
+      [{ pid: process.pid, sessionId: 'claude-native-loop', status: 'busy', entrypoint: 'sdk-ts', startedAt: 9_000 }],
+      async () => await withProviders(
+        {
+          claude: {
+            run: async () => undefined,
+            abort: () => false,
+            listBackgroundWork: () => [],
+            listScheduledWork: () => [{ sessionId: 'loop-session', scheduled }],
+          },
+        },
+        async () => {
+          assert.deepEqual(await sessionsService.listRunningSessions(), [], 'a client that cannot show it sees nothing, as before');
+          assert.deepEqual(await sessionsService.listRunningSessions({ scheduled: true }), [{
+            sessionId: 'loop-session',
+            provider: 'claude',
+            startedAt: 2_000,
+            lastSeq: 0,
+            background: true,
+            canInterrupt: false,
+            tasks: [],
+            scheduled,
+          }]);
+        },
+      ),
+    );
+  });
+});
+
+test('asked for scheduled work, a chat run and a background entry carry their session\'s, and a background entry starts with the earliest of its work', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('turn-session', 'claude', '/tmp/running-project');
+    sessionsDb.createAppSession('tasks-session', 'claude', '/tmp/running-project');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'turn-session', provider: 'claude', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    const tasks = [task('agent', 5_000)];
+    const turnLoops = [scheduledItem('cron:7b7cd8fc', 100)];
+    const taskLoops = [scheduledItem('wakeup:toolu_01Chain', 1_000)];
+    await withClaudeCliRegistry([], async () => await withProviders(
+      {
+        claude: {
+          run: async () => undefined,
+          abort: () => false,
+          listBackgroundWork: () => [{ sessionId: 'tasks-session', tasks }],
+          listScheduledWork: () => [
+            { sessionId: 'turn-session', scheduled: turnLoops },
+            { sessionId: 'tasks-session', scheduled: taskLoops },
+          ],
+        },
+      },
+      async () => {
+        assert.deepEqual(await sessionsService.listRunningSessions({ scheduled: true }), [
+          { sessionId: 'turn-session', provider: 'claude', startedAt: run.startedAt, lastSeq: 0, scheduled: turnLoops },
+          {
+            sessionId: 'tasks-session',
+            provider: 'claude',
+            startedAt: 1_000,
+            lastSeq: 0,
+            background: true,
+            canInterrupt: false,
+            tasks,
+            scheduled: taskLoops,
+          },
+        ]);
+        // Unasked, the entries are what they were.
+        assert.deepEqual(await sessionsService.listRunningSessions(), [
+          { sessionId: 'turn-session', provider: 'claude', startedAt: run.startedAt, lastSeq: 0 },
+          { sessionId: 'tasks-session', provider: 'claude', startedAt: 5_000, lastSeq: 0, background: true, canInterrupt: false, tasks },
+        ]);
+      },
+    ));
+  });
+});
+
 test('an unreadable registry never fails the running-sessions poll', { concurrency: false }, async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('safe-session', 'claude', '/tmp/running-project');
@@ -765,6 +862,74 @@ test('a Claude row without a uuid gets a new id on every parse, and at finds it 
         await findContent({ beforeId: oldestLoaded.id, at: Date.parse(oldestLoaded.timestamp) }),
         'Second question',
       );
+    }));
+  } finally {
+    await rm(transcriptDirectory, { recursive: true, force: true });
+  }
+});
+
+test('a local command such as a model switch opens no turn, while a slash command that hands the model one does', { concurrency: false }, async () => {
+  const transcriptDirectory = await mkdtemp(path.join(os.tmpdir(), 'sessions-service-local-command-'));
+  const sessionId = 'claude-local-command-session';
+  const transcriptPath = path.join(transcriptDirectory, `${sessionId}.jsonl`);
+  let second = 0;
+  const row = (uuid: string, fields: Record<string, unknown>) => JSON.stringify({
+    uuid,
+    timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, second++)).toISOString(),
+    sessionId,
+    ...fields,
+  });
+  const userRow = (uuid: string, content: unknown, extra: Record<string, unknown> = {}) =>
+    row(uuid, { type: 'user', message: { role: 'user', content }, ...extra });
+  const assistantRow = (uuid: string, text: string) =>
+    row(uuid, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  // A command Claude Code runs by itself, as it records one: name first. A
+  // prompt command's record (`/review` below) leads with its message instead.
+  const localCommand = (name: string, args: string) =>
+    `<command-name>/${name}</command-name>\n            <command-message>${name}</command-message>\n            <command-args>${args}</command-args>`;
+
+  try {
+    await withClaudeCliRegistry([], async () => await withIsolatedDatabase(async () => {
+      const rows = [
+        userRow('question', [{ type: 'text', text: 'Fix the scroll bug' }]),
+        assistantRow('answer', 'Fixed it'),
+        userRow('review', '<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src/chat</command-args>'),
+        userRow('review-prompt', [{ type: 'text', text: 'Review the code in src/chat' }], { isMeta: true }),
+        assistantRow('reviewing', 'Reviewing src/chat'),
+        // The switch the SDK's setModel writes while the turn runs; a typed /model reads the same.
+        userRow('caveat', '<local-command-caveat>The command below was run directly in Claude Code.</local-command-caveat>', { isMeta: true }),
+        userRow('model', localCommand('model', 'claude-opus-5-5')),
+        userRow('model-output', '<local-command-stdout>Set model to claude-opus-5-5</local-command-stdout>'),
+        assistantRow('still-reviewing', 'Still reviewing'),
+        // /goal runs locally and then hands the model a turn, which the CLI stamps on its record.
+        userRow('goal', localCommand('goal', 'ship it'), { turnOrigin: 'human' }),
+        userRow('goal-prompt', 'A session-scoped Stop hook is now active.', { isMeta: true }),
+        assistantRow('working', 'Working toward the goal'),
+      ];
+      await writeFile(transcriptPath, `${rows.join('\n')}\n`, 'utf8');
+      sessionsDb.createSession(
+        sessionId,
+        'claude',
+        '/tmp/local-command-project',
+        'Local command conversation',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:11.000Z',
+        transcriptPath,
+      );
+
+      const { messages } = await sessionsService.fetchHistory(sessionId);
+      const rowWith = (content: string) => messages.find((message) => message.content === content);
+      assert.equal(rowWith('/model claude-opus-5-5')?.isLocalCommand === true, true);
+      assert.equal(rowWith('/review src/chat')?.commandName, '/review');
+      assert.equal(rowWith('/review src/chat')?.isLocalCommand === true, false);
+      assert.equal(rowWith('/goal ship it')?.commandName, '/goal');
+      assert.equal(rowWith('/goal ship it')?.isLocalCommand === true, false);
+
+      const questionBefore = async (content: string) =>
+        (await sessionsService.findTurnQuestion(sessionId, { beforeId: rowWith(content)?.id ?? '' }))?.content ?? null;
+      assert.equal(await questionBefore('Reviewing src/chat'), '/review src/chat');
+      assert.equal(await questionBefore('Still reviewing'), '/review src/chat', 'the model switch opens no turn');
+      assert.equal(await questionBefore('Working toward the goal'), '/goal ship it');
     }));
   } finally {
     await rm(transcriptDirectory, { recursive: true, force: true });

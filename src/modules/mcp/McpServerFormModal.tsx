@@ -201,7 +201,7 @@ export default function McpServerFormModal({
                   <select
                     value={formData.workspacePath}
                     onChange={(event) => updateForm('workspacePath', event.target.value)}
-                    className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                    className="w-full rounded-lg border border-gray-300 bg-gray-50 py-2 pe-10 ps-3 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
                     required
                   >
                     <option value="">{t('mcpForm.fields.selectProject')}</option>
@@ -242,7 +242,7 @@ export default function McpServerFormModal({
                 <select
                   value={formData.transport}
                   onChange={(event) => updateTransport(event.target.value as McpFormState['transport'])}
-                  className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                  className="w-full rounded-lg border border-gray-300 bg-gray-50 py-2 pe-10 ps-3 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
                 >
                   {availableTransports.map((transport) => (
                     <option key={transport} value={transport}>
@@ -259,7 +259,9 @@ export default function McpServerFormModal({
               <label className="mb-2 block text-sm font-medium text-foreground">
                 {t('mcpForm.fields.jsonConfig')} *
               </label>
+              {/* JSON reads left to right in any language: right to left, a line holding only a brace would mirror it. */}
               <textarea
+                dir="ltr"
                 value={formData.jsonInput}
                 onChange={(event) => updateJsonInput(event.target.value)}
                 className={`w-full border px-3 py-2 ${
@@ -272,12 +274,13 @@ export default function McpServerFormModal({
               {jsonValidationError && (
                 <p className="mt-1 text-xs text-red-500">{jsonValidationError}</p>
               )}
+              {/* The examples read left to right in any language: right to left the dash and the brackets at their ends would move. */}
               <p className="mt-2 text-xs text-muted-foreground">
                 {t('mcpForm.validation.jsonHelp')}
                 <br />
-                - stdio: {`{"type":"stdio","command":"npx","args":["@upstash/context7-mcp"]}`}
+                <span dir="ltr">- stdio: {`{"type":"stdio","command":"npx","args":["@upstash/context7-mcp"]}`}</span>
                 <br />
-                - http/sse: {`{"type":"http","url":"https://api.example.com/mcp"}`}
+                <span dir="ltr">- http/sse: {`{"type":"http","url":"https://api.example.com/mcp"}`}</span>
               </p>
             </div>
           )}
@@ -305,7 +308,7 @@ export default function McpServerFormModal({
                   onChange={(event) => updateMultilineText('args', event.target.value)}
                   className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
                   rows={3}
-                  placeholder="--port&#10;3000"
+                  placeholder={t('mcpForm.placeholders.args')}
                 />
               </div>
 

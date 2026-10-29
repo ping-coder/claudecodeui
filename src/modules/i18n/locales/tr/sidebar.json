@@ -146,6 +146,7 @@
   "deleteConfirmation": {
     "deleteProject": "Projeyi Kaldır",
     "deleteSession": "Oturumu Sil",
+    "confirmDeleteNamed": "Ne yapmak istersin: {{name}}?",
     "confirmDelete": "Ne yapmak istersin:",
     "sessionCount_one": "Bu proje {{count}} konuşma içeriyor.",
     "sessionCount_other": "Bu proje {{count}} konuşma içeriyor.",
@@ -161,6 +162,8 @@
     "confirmDeleteSessions": "Ne yapmak istersin:",
     "deleteSessions_one": "{{count}} Oturumu Sil",
     "deleteSessions_other": "{{count}} Oturumu Sil",
+    "confirmDeleteSelected_one": "Ne yapmak istersin: <strong>seçili {{count}} oturum</strong>?",
+    "confirmDeleteSelected_other": "Ne yapmak istersin: <strong>seçili {{count}} oturum</strong>?",
     "selectedSessions_one": "seçili {{count}} oturum",
     "selectedSessions_other": "seçili {{count}} oturum",
     "archiveSessions_one": "{{count}} oturumu arşivle",

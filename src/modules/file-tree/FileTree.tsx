@@ -348,9 +348,9 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
               </div>
               <div>
                 <h3 className="font-medium text-foreground">
-                  {t('fileTree.delete.title', 'Delete {{type}}', {
-                    type: operations.deleteConfirmation.item.type === 'directory' ? 'Folder' : 'File'
-                  })}
+                  {operations.deleteConfirmation.item.type === 'directory'
+                    ? t('fileTree.delete.titleFolder', 'Delete Folder')
+                    : t('fileTree.delete.titleFile', 'Delete File')}
                 </h3>
                 <p className="text-sm text-muted-foreground">
                   {operations.deleteConfirmation.item.name}

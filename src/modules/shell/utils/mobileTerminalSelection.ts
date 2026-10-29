@@ -53,8 +53,14 @@ const SCROLL_INERTIA_MIN_VELOCITY = 0.02; // px/ms below which coasting stops
 const SCROLL_INERTIA_MAX_VELOCITY = 5; // px/ms cap to avoid runaway flings
 const SCROLL_INERTIA_MAX_IDLE_MS = 90; // ignore a flick if the finger paused before lifting
 
+/** The selection menu's button labels, in the UI language. */
+export type MobileTerminalSelectionLabels = {
+  copy: string;
+  selectAll: string;
+};
+
 type ContextMenuItem = {
-  label: string;
+  label: keyof MobileTerminalSelectionLabels;
   action: () => void;
 };
 
@@ -62,6 +68,8 @@ export type MobileTerminalSelectionOptions = {
   minFontSize?: number;
   maxFontSize?: number;
   onFontSizeChange?: (fontSize: number) => void;
+  // Read each time the menu opens, so a language switch reaches a terminal that is already open.
+  getLabels: () => MobileTerminalSelectionLabels;
 };
 
 function isTouchSelectionEnvironment(): boolean {
@@ -110,6 +118,8 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
   private readonly minFontSize: number;
   private readonly maxFontSize: number;
   private readonly onFontSizeChange: (fontSize: number) => void;
+  private readonly getLabels: () => MobileTerminalSelectionLabels;
+  private readonly menuButtons: Array<{ button: HTMLButtonElement; label: keyof MobileTerminalSelectionLabels }> = [];
   private isPinching = false;
   private pinchStartDistance = 0;
   private initialFontSize = 0;
@@ -124,11 +134,12 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
   constructor(
     terminal: Terminal,
     terminalContent: HTMLElement,
-    options: MobileTerminalSelectionOptions = {},
+    options: MobileTerminalSelectionOptions,
   ) {
     this.terminal = terminal;
     this.terminalContent = terminalContent;
     this.originalPosition = terminalContent.style.position;
+    this.getLabels = options.getLabels;
 
     const minFontSize = Number(options.minFontSize) || DEFAULT_MIN_FONT_SIZE;
     const maxFontSize = Number(options.maxFontSize) || DEFAULT_MAX_FONT_SIZE;
@@ -205,21 +216,30 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     menu.style.userSelect = 'none';
 
     const items: ContextMenuItem[] = [
-      { label: 'Copy', action: () => this.copySelection() },
-      { label: 'Select All', action: () => this.selectAllText() },
+      { label: 'copy', action: () => this.copySelection() },
+      { label: 'selectAll', action: () => this.selectAllText() },
     ];
 
     for (const item of items) {
-      menu.appendChild(this.createContextMenuButton(item));
+      const button = this.createContextMenuButton(item);
+      this.menuButtons.push({ button, label: item.label });
+      menu.appendChild(button);
     }
+    this.updateMenuLabels();
 
     return menu;
+  }
+
+  private updateMenuLabels(): void {
+    const labels = this.getLabels();
+    for (const { button, label } of this.menuButtons) {
+      button.textContent = labels[label];
+    }
   }
 
   private createContextMenuButton(item: ContextMenuItem): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = item.label;
     button.style.appearance = 'none';
     button.style.border = 'none';
     button.style.margin = '0';
@@ -596,6 +616,7 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
   }
 
   private showContextMenu(): void {
+    this.updateMenuLabels();
     this.contextMenu.style.display = 'flex';
     this.isContextMenuVisible = true;
     this.positionContextMenu();
@@ -1055,7 +1076,7 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
 export function installMobileTerminalSelection(
   terminal: Terminal,
   terminalContent: HTMLElement,
-  options: MobileTerminalSelectionOptions = {},
+  options: MobileTerminalSelectionOptions,
 ): MobileTerminalSelectionManager | null {
   if (!isTouchSelectionEnvironment() || !terminal.element) {
     return null;

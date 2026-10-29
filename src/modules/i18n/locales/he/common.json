@@ -34,7 +34,9 @@
     "failed": "נכשל",
     "pending": "ממתין",
     "completed": "הושלם",
-    "inProgress": "בתהליך"
+    "inProgress": "בתהליך",
+    "reconnecting": "מתחבר מחדש…",
+    "chatConnectionLost": "החיבור לצ'אט נותק. מתחבר מחדש…"
   },
   "messages": {
     "savedSuccessfully": "נשמר בהצלחה",
@@ -150,6 +152,7 @@
     "uploadComplete": "ההעלאה הושלמה",
     "uploadFailed": "ההעלאה נכשלה",
     "uploadedCount": "הועלו {{uploaded}} מתוך {{total}} קבצים",
+    "ignoredByGitignore": "תואם לכלל ב-\u2066.gitignore\u2069",
     "context": {
       "rename": "שינוי שם",
       "delete": "מחיקה",
@@ -163,10 +166,11 @@
       "loading": "טוען…"
     },
     "delete": {
-      "title": "מחיקת פריט",
       "folderWarning": "התיקייה וכל התוכן שלה יימחקו לצמיתות.",
       "fileWarning": "הקובץ יימחק לצמיתות.",
-      "confirm": "מחיקה"
+      "confirm": "מחיקה",
+      "titleFolder": "מחיקת תיקייה",
+      "titleFile": "מחיקת קובץ"
     },
     "toast": {
       "renamed": "השם שונה בהצלחה",
@@ -183,7 +187,23 @@
       "invalidChars": "שם הקובץ מכיל תווים לא חוקיים",
       "reserved": "שם הקובץ הוא שם שמור",
       "dotsOnly": "שם הקובץ לא יכול להכיל נקודות בלבד"
-    }
+    },
+    "uploadError": {
+      "noProject": "יש לבחור פרויקט לפני העלאת קבצים.",
+      "tooMany": "אפשר להעלות עד {{max}} קבצים בבת אחת.",
+      "tooLarge": "הקובץ {{fileName}} גדול מ-{{size}}.",
+      "readDropped": "לא ניתן לקרוא את הקבצים שנגררו.",
+      "network": "ההעלאה נכשלה. יש לבדוק את החיבור ולנסות שוב.",
+      "canceled": "ההעלאה בוטלה.",
+      "status": "ההעלאה נכשלה (HTTP {{status}})",
+      "server": "ההעלאה נכשלה: {{error}}"
+    },
+    "uploadedAll_one": "קובץ אחד הועלה בהצלחה",
+    "uploadedAll_two": "שני קבצים הועלו בהצלחה",
+    "uploadedAll_other": "{{count}} קבצים הועלו בהצלחה",
+    "filesCount_one": "קובץ אחד",
+    "filesCount_two": "שני קבצים",
+    "filesCount_other": "{{count}} קבצים"
   },
   "projectWizard": {
     "title": "יצירת פרויקט חדש",
@@ -206,8 +226,8 @@
     "step2": {
       "existingPath": "נתיב סביבת העבודה",
       "newPath": "נתיב סביבת העבודה",
-      "existingPlaceholder": "/path/to/existing/workspace",
-      "newPlaceholder": "/path/to/new/workspace",
+      "existingPlaceholder": "\u2066/path/to/existing/workspace\u2069",
+      "newPlaceholder": "\u2066/path/to/new/workspace\u2069",
       "existingHelp": "הנתיב המלא לתיקיית סביבת העבודה הקיימת",
       "newHelp": "הנתיב המלא לתיקיית סביבת העבודה",
       "githubUrl": "כתובת GitHub (אופציונלי)",
@@ -224,7 +244,7 @@
       "tokenPlaceholder": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
       "tokenHelp": "הטוקן ישמש רק לפעולה הזו",
       "publicRepoInfo": "מאגרים ציבוריים לא דורשים אימות. אפשר לדלג על הטוקן כשמשכפלים מאגר ציבורי.",
-      "noTokensHelp": "אין טוקנים שמורים. אפשר להוסיף טוקנים בהגדרות → מפתחות API לשימוש חוזר נוח.",
+      "noTokensHelp": "אין טוקנים שמורים. אפשר להוסיף טוקנים בהגדרות ← מפתחות API לשימוש חוזר נוח.",
       "optionalTokenPublic": "טוקן GitHub (אופציונלי למאגרים ציבוריים)",
       "tokenPublicPlaceholder": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (להשאיר ריק למאגרים ציבוריים)"
     },
@@ -328,6 +348,12 @@
     "refreshIn_two": "החלון יתרענן בעוד שתי שניות. אם העדכון לא נכנס לתוקף, יש להפעיל מחדש (RESTART) את הסביבה.",
     "refreshIn_other": "החלון יתרענן בעוד {{count}} שניות. אם העדכון לא נכנס לתוקף, יש להפעיל מחדש (RESTART) את הסביבה."
   },
+  "deploymentEnvironment": {
+    "staging": "סטייג'",
+    "development": "פיתוח",
+    "test": "בדיקות",
+    "badgeTooltip": "סביבת פריסה: {{environment}}"
+  },
   "commandPalette": {
     "title": "לוח הפקודות",
     "pages": {
@@ -375,7 +401,12 @@
     "browseAllBranches_one": "עיון בכל הענפים ({{count}})",
     "browseAllBranches_two": "עיון בכל הענפים ({{count}})",
     "browseAllBranches_other": "עיון בכל הענפים ({{count}})",
-    "switchTo": "מעבר אל: {{name}}"
+    "switchTo": "מעבר אל: {{name}}",
+    "filesShownOf": "מוצגים {{shown}} מתוך {{total}} קבצים. אפשר להקליד כדי למצוא את השאר.",
+    "filesBestMatches": "מוצגות {{shown}} ההתאמות הטובות ביותר. אפשר להמשיך להקליד כדי לצמצם אותן.",
+    "filesTooLarge": "הקבצים לא מוצגים בפרויקטים עם יותר מ-10,000 פריטים. אפשר לפתוח תיקייה קטנה יותר כפרויקט, או להתעלם מתוצרי ה-build ב-\u2066.gitignore\u2069 שבתיקיית השורש.",
+    "filesSearching": "מחפש קבצים…",
+    "filesSearchIncomplete": "החיפוש כיסה רק חלק מהפרויקט הגדול הזה, ולכן ייתכן שחסרים קבצים. אפשר לפתוח תיקייה קטנה יותר כפרויקט, או להתעלם מתוצרי ה-build ב-\u2066.gitignore\u2069 שבתיקיית השורש."
   },
   "folderBrowser": {
     "title": "בחירת תיקייה",
@@ -395,7 +426,6 @@
     "errorTitle": "משהו השתבש",
     "errorDescription": "אירעה שגיאה בטעינת ממשק הצ'אט.",
     "errorDetails": "פרטי השגיאה",
-    "tryAgain": "ניסיון חוזר",
     "projectFallback": "פרויקט",
     "openMenu": "פתיחת תפריט",
     "noProjectSelected": "לא נבחר פרויקט",
@@ -410,14 +440,14 @@
     "pluginLoadFailed": "טעינת התוסף נכשלה: {{error}}"
   },
   "workflow": {
-    "title": "Workflow",
+    "title": "תהליך עבודה",
     "status": {
       "running": "פועל",
       "completed": "הסתיים",
       "failed": "נכשל",
       "stopped": "ללא תוצאה"
     },
-    "stoppedHint": "ההרצה הסתיימה לפני שה-workflow החזיר תוצאה",
+    "stoppedHint": "ההרצה הסתיימה לפני שתהליך העבודה החזיר תוצאה",
     "phases": "שלבים",
     "agents": "סוכנים",
     "agentsFinished_one": "סוכנים שהסתיימו: {{finished}} מתוך {{count}}",
@@ -454,5 +484,101 @@
     "taskRowNotLoaded": "הופעלה מוקדם יותר בשיחה הזו; לחיצה לטעינה",
     "taskOfAgent": "הופעלה על ידי אחד הסוכנים של הסשן הזה"
   },
-  "cancel": "ביטול"
+  "cancel": "ביטול",
+  "workspace": {
+    "newChat": "צ'אט חדש",
+    "newChatIn": "צ'אט חדש ב-{{project}}",
+    "split": "תצוגה מפוצלת",
+    "splitDisabled": "יש להרחיב את החלון כדי לפצל",
+    "labelWithShortcut": "{{label}} ({{shortcut}})",
+    "merge": "מיזוג החלוניות",
+    "focusLeftPane": "מיקוד בחלונית השמאלית",
+    "focusRightPane": "מיקוד בחלונית הימנית",
+    "leftPane": "חלונית שמאלית",
+    "rightPane": "חלונית ימנית",
+    "paneMenu": "פעולות החלונית",
+    "allTabs": "כל הלשוניות",
+    "closeTab": "סגירת הלשונית",
+    "closeOtherTabs": "סגירת שאר הלשוניות",
+    "closeTabsToRight": "סגירת הלשוניות מימין",
+    "closeTabsToLeft": "סגירת הלשוניות משמאל",
+    "closeAllTabs": "סגירת כל הלשוניות",
+    "keepOpen": "השארת הלשונית פתוחה",
+    "previewHint": "תצוגה מקדימה · לחיצה כפולה כדי להשאיר אותה פתוחה",
+    "renameHint": "לחיצה כפולה או F2 לשינוי השם",
+    "openOnOtherSide": "פתיחה בצד השני",
+    "moveToOtherSide": "העברה לצד השני",
+    "copySessionId": "העתקת מזהה הסשן",
+    "renameSession": "שינוי שם הסשן",
+    "closePane": "סגירת הצד הזה",
+    "tabsButton": "לשוניות ({{count}})",
+    "fullscreen": "מסך מלא",
+    "exitFullscreen": "יציאה ממסך מלא",
+    "fullscreenRefused": "הדפדפן סירב לעבור למסך מלא ({{detail}}), ולכן התצוגה ממלאת רק את החלון.",
+    "fullscreenInWindow": "הדפדפן השאיר את המסך המלא בתוך החלון: ייתכן שהלשונית הזו משותפת, מוקרנת או מוקלטת על ידי תוסף, או שתוסף מטפל במסך המלא.",
+    "fullscreenWindowTipApple": "כדי להציג את החלון במסך מלא, אפשר ללחוץ על \u2066⌃⌘F\u2069; כדי להסתיר את סרגל הכלים, יש לבטל את הסימון של \u2066View > Always Show Toolbar in Full Screen\u2069 (\u2066⇧⌘F\u2069).",
+    "fullscreenWindowTip": "כדי להציג את החלון במסך מלא, אפשר ללחוץ על F11.",
+    "fullscreenPartial": "מצב המסך המלא מכסה רק חלק מהמסך (חלון \u2066{{width}}×{{height}}\u2069, מסך \u2066{{screenWidth}}×{{screenHeight}}\u2069): ייתכן שהחלון ב-Split View או מוצמד לחלק מהמסך.",
+    "fullscreenPartialTip": "יש להוציא את החלון מ-Split View או מההצמדה, ואז לבחור שוב במסך מלא.",
+    "fullscreenIframe": "הדף הזה מוטמע בדף שלא מאפשר מסך מלא; כדי לקבל את כל המסך, יש לפתוח את CloudCLI בלשונית נפרדת.",
+    "fullscreenNoApi": "הדפדפן הזה לא תומך במסך מלא לדפי אינטרנט, ולכן התצוגה ממלאת רק את החלון.",
+    "showSidebar": "הצגת סרגל הצד",
+    "emptyTitle": "אין שיחה פתוחה",
+    "emptyOtherTitle": "הצד הזה ריק",
+    "recentConversations": "שיחות אחרונות",
+    "openCurrentHere": "פתיחת השיחה הנוכחית גם כאן",
+    "dragHint": "אפשר לגרור לכאן שיחה מסרגל הצד",
+    "touchHint": "אפשר להקיש על שיחה בסרגל הצד כדי לפתוח אותה בצד הזה",
+    "shortcutsHint": "{{split}} פיצול או מיזוג · {{left}} / {{right}} מעבר בין חלוניות · {{fullscreen}} מסך מלא",
+    "dropHere": "פתיחה כאן",
+    "dropLeft": "פתיחה בצד שמאל",
+    "dropRight": "פתיחה בצד ימין",
+    "dropRightSplit": "פתיחה בצד ימין (פיצול)",
+    "dropLeftSplit": "פתיחה בצד שמאל (פיצול)",
+    "shellElsewhere": "הטרמינל הזה פתוח בחלונית השנייה",
+    "useShellHere": "שימוש בטרמינל כאן",
+    "tasksFollowFocus": "המשימות מוצגות בחלונית שבמיקוד",
+    "focusThisPane": "מיקוד בחלונית הזו",
+    "missingSession": "השיחה הזו כבר לא קיימת",
+    "showHiddenSide": "הצגת החלונית המוסתרת",
+    "paletteGroup": "סביבת עבודה",
+    "openTabsGroup": "לשוניות פתוחות",
+    "resizePanes": "שינוי גודל החלוניות",
+    "chooseProject": "בחירת פרויקט",
+    "sidebarDrawer": "סרגל הצד",
+    "shortcutsHintUnsplit": "{{split}} פיצול · {{fullscreen}} מסך מלא",
+    "shortcutsHintFullscreen": "{{fullscreen}} מסך מלא"
+  },
+  "runNotifications": {
+    "title": {
+      "running": "[פועל]",
+      "runningCount": "[{{count}} פועלים]",
+      "background": "[ברקע]",
+      "backgroundCount": "[{{count}} ברקע]",
+      "done": "[הסתיים]",
+      "doneCount": "[{{count}} הסתיימו]",
+      "failed": "[נכשל]",
+      "failedCount": "[{{count}} נכשלו]",
+      "replied": "[השיב]",
+      "repliedCount": "[{{count}} השיבו]"
+    },
+    "untitledSession": "סשן ללא שם",
+    "outcome": {
+      "done": "הסתיים",
+      "replied": "השיב, ועבודה ברקע עדיין פועלת",
+      "failed": "נכשל",
+      "backgroundDone": "העבודה ברקע הסתיימה"
+    },
+    "withProject": "{{outcome}} · {{project}}",
+    "banner": {
+      "region": "התראות על משימות",
+      "open": "פתיחה",
+      "openLabel": "פתיחת {{title}}",
+      "dismiss": "סגירה",
+      "dismissAll": "סגירת הכול",
+      "more": "ועוד {{count}}",
+      "announce": "{{outcome}}: {{title}}",
+      "enableSystem": "הפעלת התראות מערכת"
+    }
+  }
 }

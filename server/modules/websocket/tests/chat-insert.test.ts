@@ -65,6 +65,9 @@ function createGateway(answers: {
     abort: async () => false,
     stopBackgroundTask: async () => false,
     hasBackgroundWork: () => false,
+    hasScheduledWork: () => false,
+    listScheduledWork: () => [],
+    stopScheduledWork: async () => ({ status: 'not_found' }),
     resolveToolApproval: () => {},
     getPendingApprovalsForSession: () => [],
     insert: async (provider, sessionId, input) => {

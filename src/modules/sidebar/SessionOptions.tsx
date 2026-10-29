@@ -9,13 +9,14 @@ import { cn } from '@/shared/utils';
 import type { LLMProvider, SessionPanePlacement, WorkspacePaneSide } from '@/shared/types';
 import { useSessionForkingProviders } from '@/shared/hooks/useProviderCapabilities';
 import { useProviderSessionIdCopy } from '@/modules/sidebar/hooks/useProviderSessionIdCopy';
-import { PROVIDER_LABELS } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { PROVIDER_LABELS, formatSessionTitle } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SessionPaneButtons from '@/modules/sidebar/SessionPaneButtons';
 
 type SessionMenuItem = ComponentProps<typeof ActionMenu>['items'][number];
 
 type SessionOptionsProps = {
   sessionId: string;
+  /** The title as stored: a rename starts from it, the menu shows it through formatSessionTitle. */
   sessionName: string;
   provider: LLMProvider;
   /**
@@ -81,8 +82,9 @@ export default function SessionOptions({
 }: SessionOptionsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const providerLabel = PROVIDER_LABELS[provider];
+  const sessionTitle = formatSessionTitle(sessionName, t);
   const { copyState, copyLabel, setOptionsOpen, handleCopyAction, isCopyPending, CopyStateIcon } =
-    useProviderSessionIdCopy(sessionId, providerLabel);
+    useProviderSessionIdCopy(sessionId, providerLabel, t);
 
   // Read from the backend capability matrix rather than branching on the
   // provider id here; the request is cached module-side, so every row shares one.
@@ -152,14 +154,14 @@ export default function SessionOptions({
   const sessionItems: SessionMenuItem[] = [
     ...(projectId !== null ? [{
       key: 'rename',
-      label: 'Rename session',
+      label: t('common:workspace.renameSession'),
       icon: Edit2,
       onSelect: () => onStartEditingSession(projectId, sessionId, sessionName),
     }] : []),
     {
       key: 'copy',
       label: copyLabel,
-      description: copyState === 'error' ? 'Click to try again.' : undefined,
+      description: copyState === 'error' ? t('sessionMenu.retryClick') : undefined,
       icon: CopyStateIcon,
       loading: isCopyPending,
       closeOnSelect: false,
@@ -167,18 +169,18 @@ export default function SessionOptions({
     },
     ...(canFork && onFork ? [{
       key: 'fork',
-      label: 'Fork session',
-      description: 'Continue from a copy, leaving this one untouched.',
+      label: t('sessionMenu.fork'),
+      description: t('sessionMenu.forkDescription'),
       icon: GitBranch,
       onSelect: onFork,
     }] : []),
     ...(canDelete && !isProcessing ? [{
       key: 'delete',
-      label: 'Archive or delete session',
+      label: t('sessionMenu.archiveOrDelete'),
       icon: Trash2,
       isDanger: true,
       showDividerBefore: true,
-      onSelect: () => onDeleteSession(sessionId, sessionName),
+      onSelect: () => onDeleteSession(sessionId, sessionTitle),
     }] : []),
   ];
 
@@ -245,8 +247,8 @@ export default function SessionOptions({
             />
           )}
           <ActionMenu
-            label="Session options"
-            ariaLabel={`Session options for ${sessionName}`}
+            label={t('sessionMenu.title')}
+            ariaLabel={t('sessionMenu.optionsFor', { name: sessionTitle })}
             icon={MoreHorizontal}
             iconOnly
             portal
@@ -257,10 +259,12 @@ export default function SessionOptions({
             menuClassName="w-[260px] rounded-xl p-1.5 shadow-xl"
             header={(
               <div className="mb-1 border-b border-border px-3 py-2">
-                <p className="truncate text-xs font-medium text-foreground" title={sessionName}>
-                  {sessionName}
+                <p className="bidi-auto truncate text-xs font-medium text-foreground" title={sessionTitle}>
+                  {sessionTitle}
                 </p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">{providerLabel} session</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {t('sessionMenu.providerSession', { provider: providerLabel })}
+                </p>
               </div>
             )}
             items={menuItems}

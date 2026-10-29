@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
+import { search } from '@codemirror/search';
 import { EditorView } from '@codemirror/view';
 import { oneDark } from '@codemirror/theme-one-dark';
 import type { Extension } from '@codemirror/state';
@@ -7,6 +8,14 @@ import type { Extension } from '@codemirror/state';
 import type { CodeEditorGotoTarget } from '@/shared/types';
 
 import MarkdownPreview from '@/modules/code-editor/markdown/MarkdownPreview';
+
+/**
+ * The search panel's state in the editor's own configuration. Without it Ctrl+F appends that state
+ * to the configuration, and react-codemirror replaces the whole configuration whenever an input
+ * changes (the extensions, when the editor floats, docks or changes a setting; the theme), which
+ * closed an open search panel. One instance, so the state carries over each replacement.
+ */
+const SEARCH_EXTENSION = search();
 
 type CodeEditorSurfaceProps = {
   content: string;
@@ -57,6 +66,22 @@ export default function CodeEditorSurface({
     });
   }, [view, gotoTarget, content]);
 
+  // Both keep their identity across renders: react-codemirror reconfigures the editor whenever
+  // either changes, and an inline basicSetup object did so on every keystroke.
+  const basicSetup = useMemo(() => ({
+    lineNumbers: showLineNumbers,
+    foldGutter: true,
+    dropCursor: false,
+    allowMultipleSelections: false,
+    indentOnInput: true,
+    bracketMatching: true,
+    closeBrackets: true,
+    autocompletion: true,
+    highlightSelectionMatches: true,
+    searchKeymap: true,
+  }), [showLineNumbers]);
+  const editorExtensions = useMemo(() => [...extensions, SEARCH_EXTENSION], [extensions]);
+
   if (markdownPreview && isMarkdownFile) {
     return (
       <div className="h-full overflow-y-auto bg-white dark:bg-gray-900">
@@ -72,25 +97,14 @@ export default function CodeEditorSurface({
       onCreateEditor={setView}
       value={content}
       onChange={onChange}
-      extensions={extensions}
+      extensions={editorExtensions}
       theme={isDarkMode ? oneDark : undefined}
       height="100%"
       style={{
         fontSize: `${fontSize}px`,
         height: '100%',
       }}
-      basicSetup={{
-        lineNumbers: showLineNumbers,
-        foldGutter: true,
-        dropCursor: false,
-        allowMultipleSelections: false,
-        indentOnInput: true,
-        bracketMatching: true,
-        closeBrackets: true,
-        autocompletion: true,
-        highlightSelectionMatches: true,
-        searchKeymap: true,
-      }}
+      basicSetup={basicSetup}
     />
   );
 }

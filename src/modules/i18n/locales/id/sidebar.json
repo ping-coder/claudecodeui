@@ -154,6 +154,7 @@
   "deleteConfirmation": {
     "deleteProject": "Hapus Proyek",
     "deleteSession": "Hapus Sesi",
+    "confirmDeleteNamed": "Apa yang ingin dilakukan dengan {{name}}?",
     "confirmDelete": "Apa yang ingin dilakukan dengan",
     "sessionCount_one": "Proyek ini berisi {{count}} percakapan.",
     "sessionCount_other": "Proyek ini berisi {{count}} percakapan.",
@@ -169,6 +170,8 @@
     "confirmDeleteSessions": "Apa yang ingin dilakukan dengan",
     "deleteSessions_one": "Hapus {{count}} Sesi",
     "deleteSessions_other": "Hapus {{count}} Sesi",
+    "confirmDeleteSelected_one": "Apa yang ingin dilakukan dengan <strong>{{count}} sesi terpilih</strong>?",
+    "confirmDeleteSelected_other": "Apa yang ingin dilakukan dengan <strong>{{count}} sesi terpilih</strong>?",
     "selectedSessions_one": "{{count}} sesi terpilih",
     "selectedSessions_other": "{{count}} sesi terpilih",
     "archiveSessions_one": "Arsipkan {{count}} sesi",

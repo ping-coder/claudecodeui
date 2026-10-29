@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ComponentProps, ReactNode } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import type {
   Project,
   WorkspaceLayout,
@@ -263,4 +263,34 @@ test('an empty right pane on a phone still offers Tabs; immersive hides the head
   setLayout({ left: makePane([makeTab('a1'), makeTab('a2')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
   view.rerender(phoneRegion({ isImmersive: true }));
   assert.equal(screen.queryByRole('button', { name: /^Tabs/ }) === null, true);
+});
+
+test('the sheet reads the server\'s placeholder names in the interface language', async () => {
+  // A language switch saves the choice to the server; it must not reach the network.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    renderSheet({
+      tabDisplay: new Map([
+        ...SHEET_DISPLAY,
+        ['l1', { title: 'Untitled Cursor Session', projectName: 'Alpha', activity: null }],
+        ['r2', { title: 'Untitled Session', projectName: 'Alpha', activity: null }],
+      ]),
+    });
+
+    const rowTitles = within(screen.getByRole('dialog')).getAllByRole('region').map((region) => within(region)
+      .getAllByRole('button')
+      .filter((button) => !button.hasAttribute('aria-label'))
+      .map((row) => row.textContent));
+    assert.deepEqual(rowTitles, [['未命名的 Cursor 会话Alpha', 'Left previewAlpha'], ['Right oneAlpha', '未命名会话Alpha']]);
+  } finally {
+    // Unmount first, so restoring the language cannot re-render this test's sheet.
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
 });

@@ -514,7 +514,8 @@ function readChecklistWindow(
  * Where the newest turn sits in the rows: the user message that opened it
  * (-1 when that message is above the loaded rows, so every loaded row is the
  * turn's) and the turn's newest checklist row (-1 when it has none). A message
- * inserted while the turn ran is part of that turn, not the start of another.
+ * inserted while the turn ran, or a local command such as a model switch, is
+ * part of that turn, not the start of another.
  */
 function locateTurn(messages: ChatMessage[]): { turnOpenIndex: number; lastChecklistIndex: number } {
   let lastChecklistIndex = -1;
@@ -531,11 +532,11 @@ function locateTurn(messages: ChatMessage[]): { turnOpenIndex: number; lastCheck
 }
 
 /**
- * The checklist of the turn in flight, counted. The newest user message not
- * inserted mid-turn opened that turn; a checklist above it belongs to a turn
- * that is over and says nothing about this one, so it is never borrowed —
- * though the items it had done, when the turn carries its list on, are left
- * out of the turn's pace.
+ * The checklist of the turn in flight, counted. The newest user message that
+ * opens a turn (isTurnOpener) opened that turn; a checklist above it belongs
+ * to a turn that is over and says nothing about this one, so it is never
+ * borrowed — though the items it had done, when the turn carries its list on,
+ * are left out of the turn's pace.
  */
 function readTurnChecklistProgress(messages: ChatMessage[], turnStartedAt: number): ActivityProgress | null {
   const { turnOpenIndex, lastChecklistIndex } = locateTurn(messages);
@@ -968,6 +969,9 @@ function listActivityTasks(
  *   over, since nothing advances it until the next one;
  * - the session's background tasks, less the runs a loaded `Workflow` row
  *   speaks for (`listActivityTasks`);
+ * - the scheduled work (loops, reminders) the session's held process keeps,
+ *   as the activity entry has it from the server, and the clock its next
+ *   runs are told against;
  * - the run itself, and whether a Claude CLI process CloudCLI does not drive
  *   is behind it — then no live events reach the view, and what is listed
  *   comes from the transcript, reloaded as the CLI writes it.
@@ -1019,5 +1023,7 @@ export function deriveActivityDetails(
     hiddenWorkflowCount: Math.max(0, workflows.length - MAX_LISTED_WORKFLOWS),
     checklist: activity.background ? null : readTurnChecklistItems(messages, lastChecklistIndex),
     tasks: listActivityTasks(activity, spokenForIds, nowMs),
+    scheduled: activity.scheduled ?? [],
+    nowMs,
   };
 }

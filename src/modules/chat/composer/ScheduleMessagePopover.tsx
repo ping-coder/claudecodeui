@@ -5,6 +5,7 @@ import { Clock } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
 import { useComposerMenuAnchor } from '@/modules/chat/hooks/useComposerMenuAnchor';
+import { formatTimeOfDay } from '@/modules/chat/utils/chatFormatting';
 import {
   ComposerMenuHeading,
   ComposerMenuItem,
@@ -42,7 +43,7 @@ function toLocalInputValue(date: Date): string {
  * box can be sent later instead of now.
  */
 export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessagePopoverProps) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
   // Portalled and anchored like the model and permission menus: the composer
@@ -92,10 +93,10 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
             <ComposerMenuItem
               key={minutes}
               label={t(`schedule.in.${minutes}`)}
-              // In the browser's locale: a <bdi> keeps "05:07 PM" in order in a right-to-left menu.
+              // In the interface language; a <bdi> keeps the time in its own order in a right-to-left menu.
               description={(
                 <bdi>
-                  {new Date(Date.now() + minutes * 60_000).toLocaleTimeString([], {
+                  {formatTimeOfDay(Date.now() + minutes * 60_000, i18n.language, {
                     hour: '2-digit',
                     minute: '2-digit',
                   })}

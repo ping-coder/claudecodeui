@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { formatSessionTitle } from '@/modules/sidebar';
 import {
   WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
   WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
@@ -174,7 +175,11 @@ export default function PaneEmptyState({
               <ul className="space-y-0.5">
                 {recentConversations.map(({ session, project }) => {
                   const provider = readSessionProvider(session);
-                  const title = session.summary || session.name || session.title || t('mainContent.newSession', { defaultValue: 'New Session' });
+                  // The server's placeholder names ("Untitled Claude Session") read in the interface language.
+                  const title = formatSessionTitle(
+                    String(session.summary || session.name || session.title || t('mainContent.newSession', { defaultValue: 'New Session' })),
+                    t,
+                  );
                   return (
                     <li key={`${project.projectId}:${session.id}`}>
                       <button
@@ -186,7 +191,7 @@ export default function PaneEmptyState({
                         className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-start transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                       >
                         <LLMProviderLogo provider={provider} className="h-3.5 w-3.5 flex-shrink-0" />
-                        <span className="bidi-auto min-w-0 flex-1 truncate text-sm text-foreground">{String(title)}</span>
+                        <span className="bidi-auto min-w-0 flex-1 truncate text-sm text-foreground">{title}</span>
                         <span className="bidi-auto max-w-[40%] flex-shrink-0 truncate text-xs text-muted-foreground">{project.displayName}</span>
                       </button>
                     </li>

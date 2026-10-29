@@ -11,7 +11,9 @@ const PRODUCTION_DEPLOYMENT_ENVIRONMENTS = new Set(['production', 'prod']);
  * blank, "production" and "prod" (in any case) all mean production.
  *
  * Used by the server entrypoint, which resolves it once at startup for `/health`
- * so the web UI can mark the tab title and the sidebar of a non-production server.
+ * so the web UI can mark the tab title and the sidebar of a non-production server,
+ * and by createSystemModule, whose browser diagnostics lines carry it as `env=`
+ * (`production` when this is null).
  */
 export function resolveDeploymentEnvironment(rawValue: string | undefined): string | null {
   const environment = rawValue?.trim() ?? '';

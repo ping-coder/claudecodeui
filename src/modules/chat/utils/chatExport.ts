@@ -7,6 +7,8 @@
  * machine-readable views of the same messages.
  */
 
+import type { TFunction } from 'i18next';
+
 import type { ChatMessage, DiffLine, LLMProvider, Project } from '@/shared/types';
 import { buildTranscriptHtml } from '@/modules/chat/export/buildTranscriptHtml';
 import { buildTranscriptMarkdown } from '@/modules/chat/export/buildTranscriptMarkdown';
@@ -19,6 +21,9 @@ export type TranscriptExportInput = {
   provider: LLMProvider | string;
   selectedProject?: Project | null;
   createDiff: (oldStr: string, newStr: string) => DiffLine[];
+  /** The interface language and its `t`: the file's own words (its header line) follow them. */
+  t: TFunction;
+  language: string;
 };
 
 const EXTENSIONS: Record<TranscriptExportFormat, string> = {
@@ -90,6 +95,8 @@ export async function buildTranscriptExport(
       provider: input.provider,
       exportedAt,
       createDiff: input.createDiff,
+      t: input.t,
+      language: input.language,
     });
   }
 
@@ -100,6 +107,8 @@ export async function buildTranscriptExport(
     selectedProject: input.selectedProject,
     sessionTitle: input.sessionTitle,
     exportedAt,
+    t: input.t,
+    language: input.language,
   });
 }
 

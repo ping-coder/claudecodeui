@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
+import '@/modules/i18n';
 import { resetUserPreferences } from '@/shared/userSettings';
 import type { LLMProvider, ProjectSession, ProviderModelsDefinition } from '@/shared/types';
 

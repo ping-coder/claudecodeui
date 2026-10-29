@@ -110,8 +110,9 @@ function ProjectWorkspaceShell({
           />
         </div>
 
-        {/* Desktop only: says why immersive mode came without the whole screen. Phones keep the console warning. */}
-        {!isMobile && isImmersive && browserFullscreenIssue && (
+        {/* Desktop only: says why a maximize (immersive mode, the editor, the PRD editor, Browser Use) came without the
+            whole screen. Phones keep the console warning and the report. */}
+        {!isMobile && browserFullscreenIssue && (
           <BrowserFullscreenNotice
             issue={browserFullscreenIssue}
             onRetry={retryBrowserFullscreen}

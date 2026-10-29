@@ -20,9 +20,9 @@ type ShellInitMessage = {
   // the terminal is painted in.
   colorScheme?: 'light' | 'dark';
   // Asks the server to stop what CloudCLI still runs on the session (the
-  // chat turn, the held process and its background tasks) and then start the
-  // CLI; sent only after a `session_busy`, with what that frame showed. The
-  // server stops nothing if more has started since.
+  // chat turn, the held process with its background tasks and scheduled
+  // work) and then start the CLI; sent only after a `session_busy`, with what
+  // that frame showed. The server stops nothing if more has started since.
   takeOver?: ShellTakeOverSnapshot;
   // This init's number; the `session_busy` answering it carries it back.
   initId: number;
@@ -52,13 +52,15 @@ type ShellIncomingMessage =
   | { type: 'claude_theme'; colorScheme?: string }
   // Sent instead of starting the CLI while CloudCLI itself still runs the
   // session; the socket stays open for another init. `initId` is the number
-  // of the init it answers.
+  // of the init it answers. `scheduled` lists the held process's scheduled
+  // work (a server older than that sends none).
   | {
     type: 'session_busy';
     sessionId?: string;
     provider?: string;
     reason?: string;
     tasks?: unknown;
+    scheduled?: unknown;
     turnStartedAt?: number | null;
     hasQueuedMessage?: boolean;
     changed?: boolean;

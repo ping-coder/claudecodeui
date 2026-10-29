@@ -13,7 +13,7 @@ import providerRouter from '@/modules/providers/provider.routes.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
-import type { BackgroundTaskSummary, WorkflowAgentActivity } from '@/shared/types.js';
+import type { BackgroundTaskSummary, ScheduledWorkSummary, WorkflowAgentActivity } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
 async function withProviderServer(
@@ -634,6 +634,55 @@ test('the running-sessions route reports a session held open for background work
         background: true,
         canInterrupt: false,
         tasks,
+      }]);
+    }));
+  } finally {
+    providerRegistry.listProviders = realListProviders;
+  }
+});
+
+test('the running-sessions route lists a session held only for scheduled work when asked with scheduled=1, and leaves it out otherwise', async () => {
+  // A /loop holds the session's process for its next firing, with no task.
+  const scheduled: ScheduledWorkSummary[] = [{
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_01CronCreate',
+    prompt: 'check CI',
+    startedAt: 1_700_000_000_000,
+    nextFireAt: 1_700_000_300_000,
+    recurring: true,
+    holdUntil: 1_700_691_200_000,
+    cron: '*/5 * * * *',
+    cadence: 'Every 5 minutes',
+  }];
+  const realListProviders = providerRegistry.listProviders;
+  providerRegistry.listProviders = () => [{
+    id: 'claude',
+    runtime: {
+      listBackgroundWork: () => [],
+      listScheduledWork: () => [{ sessionId: 'loop-session', scheduled }],
+    },
+  } as unknown as IProvider];
+
+  try {
+    await withIsolatedHome(() => withProviderServer(async (baseUrl) => {
+      const read = async (query: string) => {
+        const response = await fetch(`${baseUrl}/api/providers/sessions/running${query}`);
+        assert.equal(response.status, 200);
+        return (await response.json() as { data: { sessions: unknown[] } }).data.sessions;
+      };
+
+      assert.deepEqual(await read(''), []);
+      assert.deepEqual(await read('?scheduled=0'), []);
+      assert.deepEqual(await read('?scheduled=1'), [{
+        sessionId: 'loop-session',
+        provider: 'claude',
+        startedAt: 1_700_000_000_000,
+        lastSeq: 0,
+        background: true,
+        canInterrupt: false,
+        tasks: [],
+        scheduled,
       }]);
     }));
   } finally {

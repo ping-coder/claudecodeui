@@ -73,6 +73,22 @@ describe('the background-work send dialog', () => {
     expect(screen.queryByText(/^This message changes/)).toBeNull();
   });
 
+  it('offers no Queue for scheduled work alone, and says the loops stop', () => {
+    const onResolve = vi.fn();
+    render(<BackgroundSendDialog prompt={{ work: ['Loop check CI'], changes: ['effort'], queue: false }} onResolve={onResolve} />);
+
+    expect(screen.queryAllByText('Loop check CI').length).toBe(1);
+    expect(screen.queryAllByRole('button', { name: 'Queue' }).length).toBe(0);
+    expect(screen.queryAllByText('This message has to run in a new process, which stops these loops.').length).toBe(1);
+    expect(screen.queryAllByText(/Queue the message/).length).toBe(0);
+    // Why the message needs a new process is still said.
+    expect(screen.queryAllByText(/^This message changes the reasoning effort/).length).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onResolve.mock.calls).toEqual([['send'], ['cancel']]);
+  });
+
   it('has its new strings in English and Simplified Chinese', () => {
     const keys = [
       'claudeStatus.backgroundTask.prompt.descriptionNewProcess',

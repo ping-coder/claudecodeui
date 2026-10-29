@@ -41,6 +41,8 @@ async function withIsolatedDatabase(runTest: (userId: number) => void | Promise<
     sessionsDb.createAppSession(SESSION_ID, 'claude', tempDirectory, 'Scheduled session');
     await runTest(Number(user.id));
   } finally {
+    // Also forgets the retry waits of queued messages a test's runtime turned away.
+    closeScheduledMessageDispatcher();
     chatRunRegistry.clearAll();
     closeConnection();
     if (previousDatabasePath === undefined) {
@@ -65,6 +67,8 @@ const UNUSED_GATEWAY_METHODS = {
   getPendingApprovalsForSession: () => [],
   insert: async () => ({ accepted: false, reason: 'UNSUPPORTED' }) as const,
   cancelInsert: async () => ({ status: 'unsupported' }) as const,
+  listScheduledWork: () => [],
+  stopScheduledWork: async () => ({ status: 'not_found' }) as const,
 } satisfies Partial<ProviderRuntimeGateway>;
 
 /** The hand-over plan of a session whose process nothing holds. */
@@ -168,6 +172,26 @@ function compareWithHeldProcess(
   return { changes, switches };
 }
 
+/** The settings a held process cannot switch for a turn (see `ProviderHandOverPlanOptions.acceptProcessSettings`). */
+const PROCESS_ONLY_SETTINGS: HandOverChange[] = ['effort', 'ultracode', 'tools'];
+
+/**
+ * What keeps a turn out of a held process, as Claude's runtime reads
+ * `acceptProcessSettings` (`accepts`: the turn sets it): nothing, when the
+ * process is held for scheduled work alone (`heldForScheduledWorkAlone`) and
+ * only settings it cannot switch keep the turn out, which then runs with the
+ * process's own; otherwise `changes` as they are.
+ */
+function changesOnceAccepted(
+  changes: HandOverChange[],
+  accepts: boolean,
+  heldForScheduledWorkAlone: boolean,
+): HandOverChange[] {
+  return accepts && heldForScheduledWorkAlone && changes.every((change) => PROCESS_ONLY_SETTINGS.includes(change))
+    ? []
+    : changes;
+}
+
 /**
  * A hand-over plan as Claude's runtime makes one for `heldSessionId`, whose
  * process may be held after its turn for work of its own:
@@ -181,11 +205,16 @@ function compareWithHeldProcess(
  * process (the user's, handed to it), the process takes no other, and the
  * plan says only that the work is held, which interrupting that turn would
  * stop. As the real gateway asks the named provider's runtime, only the
- * sessions' provider (`claude`) answers that it holds anything.
+ * sessions' provider (`claude`) answers that it holds anything. A turn that
+ * accepts the process's own settings (`planOptions.acceptProcessSettings`,
+ * or `acceptProcessSettings: true` in the options) is let in as
+ * `changesOnceAccepted` says, `heldForScheduledWorkAlone()` telling whether
+ * the hold is for scheduled work alone.
  */
 function planHeldProcess(
   heldSessionId: string,
   heldLaunchOptions: () => Record<string, unknown> | null,
+  heldForScheduledWorkAlone: () => boolean = () => false,
 ): ProviderRuntimeGateway['planHandOver'] {
   return async (provider, sessionId, options, planOptions?: ProviderHandOverPlanOptions) => {
     const launched = provider === 'claude' && sessionId === heldSessionId ? heldLaunchOptions() : null;
@@ -196,8 +225,10 @@ function planHeldProcess(
       return { heldWork: true, canHandOver: false, changes: [], switches: [] };
     }
     const inheritUnset = planOptions?.inheritUnset === true || options.inheritUnset === true;
-    const { changes, switches } = compareWithHeldProcess(launched, options, inheritUnset);
-    return { heldWork: true, canHandOver: changes.length === 0, changes, switches };
+    const accepts = planOptions?.acceptProcessSettings === true || options.acceptProcessSettings === true;
+    const compared = compareWithHeldProcess(launched, options, inheritUnset);
+    const changes = changesOnceAccepted(compared.changes, accepts, heldForScheduledWorkAlone());
+    return { heldWork: true, canHandOver: changes.length === 0, changes, switches: compared.switches };
   };
 }
 
@@ -211,6 +242,7 @@ function createRuntime(
     ...UNUSED_GATEWAY_METHODS,
     hasRuntime: () => true,
     hasBackgroundWork,
+    hasScheduledWork: () => false,
     planHandOver: planNothingHeld,
     run: async (provider: string, command: string, options: Record<string, unknown>) => {
       if (behaviour === 'throw') {
@@ -252,6 +284,7 @@ function createHoldingRuntime(
     ...UNUSED_GATEWAY_METHODS,
     hasRuntime: () => true,
     hasBackgroundWork: (sessionId: string) => reportsBackgroundWork && holding && sessionId === heldSessionId,
+    hasScheduledWork: () => false,
     planHandOver: planNothingHeld,
     run: async (
       provider: string,
@@ -309,13 +342,17 @@ function createHoldingRuntime(
  * work. A turn the process cannot take opens a process of its own.
  * `handOver` is the user's next send going into the latest open process the
  * same way, its run taking the session's slot. With `reportsBackgroundWork`
- * the tracker sees that work too (a task, not a wake-up). Runs after
- * `exitAll`, and runs for other sessions, settle at once.
+ * the tracker sees that work too (a task, not a wake-up); with
+ * `scheduledWork` the runtime lists it as scheduled work (a wake-up, a
+ * CronCreate job), which a turn that accepts the process's own settings
+ * goes in over (`changesOnceAccepted`); without either, the work is one no
+ * list shows, such as a Monitor. Runs after `exitAll`, and runs for other
+ * sessions, settle at once.
  */
 function createHandOverRuntime(
   runs: RunCall[],
   heldSessionId: string,
-  { reportsBackgroundWork = false }: { reportsBackgroundWork?: boolean } = {},
+  { reportsBackgroundWork = false, scheduledWork = false }: { reportsBackgroundWork?: boolean; scheduledWork?: boolean } = {},
 ) {
   type HeldWriter = ProviderRuntimeWriter & { sendComplete(opts: { exitCode: number }): void };
   // Each open process with the writer of the turn it ran last.
@@ -326,6 +363,7 @@ function createHandOverRuntime(
   let holdingWork = false;
   let exited = false;
   const holdsWork = (sessionId: string) => sessionId === heldSessionId && holdingWork;
+  const heldForScheduledWorkAlone = () => scheduledWork && !reportsBackgroundWork;
   const heldProcess = () => (holdingWork ? openProcesses.at(-1) ?? null : null);
   // Runs a turn in the process as its next turn, which ends at once.
   const runInProcess = (process: (typeof openProcesses)[number], writer: HeldWriter) => {
@@ -339,14 +377,22 @@ function createHandOverRuntime(
     ...UNUSED_GATEWAY_METHODS,
     hasRuntime: () => true,
     hasBackgroundWork: (sessionId: string) => reportsBackgroundWork && holdsWork(sessionId),
-    planHandOver: planHeldProcess(heldSessionId, () => heldProcess()?.launched ?? null),
+    hasScheduledWork: (sessionId: string) => scheduledWork && holdsWork(sessionId),
+    planHandOver: planHeldProcess(heldSessionId, () => heldProcess()?.launched ?? null, heldForScheduledWorkAlone),
     run: async (provider: string, command: string, options: Record<string, unknown>, writer: HeldWriter) => {
       runs.push({ provider, command, options });
       if (options.sessionId !== heldSessionId || exited) {
         return;
       }
       const process = heldProcess();
-      if (process && compareWithHeldProcess(process.launched, options, options.inheritUnset === true).changes.length === 0) {
+      const changes = process
+        ? changesOnceAccepted(
+          compareWithHeldProcess(process.launched, options, options.inheritUnset === true).changes,
+          options.acceptProcessSettings === true,
+          heldForScheduledWorkAlone(),
+        )
+        : [];
+      if (process && changes.length === 0) {
         handedOver.push(command);
         runInProcess(process, writer);
         return;
@@ -397,19 +443,24 @@ function createHandOverRuntime(
 /**
  * A runtime holding `heldSessionId`'s process open after its turn for work of
  * the session's own, as Claude holds it for a wake-up that ScheduleWakeup or
- * /loop set: the tracker sees nothing, unless `tracksWork` (a backgrounded
- * build runs in the process too). A self-paced /loop arms its next wake-up at
- * each, so the hold lasts until `endHold` (the user stopped the loop, or the
- * work reported back). The process was launched with the run options
- * `launched`. Its hand-over plan (`planHeldProcess`), whose every call
- * `plans` records, lets in a turn that keeps those launch settings and names
- * what the turn would switch. Its runs hand their turn over as Claude's
- * runtime does, judging the turn as its options say, or with the settings it
- * leaves out taken as the process's own when its options set `inheritUnset:
- * true`: a turn that goes in is the process's next turn, which ends at once,
- * after the switches it makes to the process's model and permission mode
- * (`switched`), and the hold goes on; one that cannot starts a process of
- * its own, which replaces the held one and stops the work (`stops`). A turn
+ * /loop set, which it lists as scheduled work: the tracker sees nothing,
+ * unless `tracksWork` (a backgrounded build runs in the process too). With
+ * `scheduledWork: false` the work is one no list shows, such as a Monitor. A
+ * self-paced /loop arms its next wake-up at each, so the hold lasts until
+ * `endHold` (the user stopped the loop, or the work reported back). The
+ * process was launched with the run options `launched`. Its hand-over plan
+ * (`planHeldProcess`), whose every call `plans` records, lets in a turn that
+ * keeps those launch settings and names what the turn would switch. Its runs
+ * hand their turn over as Claude's runtime does, judging the turn as its
+ * options say, or with the settings it leaves out taken as the process's own
+ * when its options set `inheritUnset: true`, and with the settings the
+ * process cannot switch taken from it when they set `acceptProcessSettings:
+ * true` and the process is held for scheduled work alone
+ * (`changesOnceAccepted`; such turns are listed in `accepted`): a turn that
+ * goes in is the process's next turn, which ends at once, after the switches
+ * it makes to the process's model and permission mode (`switched`), and the
+ * hold goes on; one that cannot starts a process of its own, which replaces
+ * the held one and stops the work (`stops`). A turn
  * whose options set `restoreSwitchesAfterTurn: true` has the process switch
  * back once it is over (`restored`); otherwise what it switched stays, and
  * the work runs on with it. `live()` is what the process runs with now. An
@@ -417,15 +468,18 @@ function createHandOverRuntime(
  * work, stops the work too. With `reportsSwitchBacks`, the switch back is
  * answered only when the test calls `confirmSwitchBacks`, as the CLI answers
  * it once the pass has moved on: each answer goes to the turn's
- * `onSwitchesRestored` run option with what was switched back. `duringTurn`
+ * `onSwitchesRestored` run option with what was switched back, for every
+ * turn that went in with `restoreSwitchesAfterTurn: true`, as Claude's
+ * runtime answers it, whether or not the turn switched anything. `duringTurn`
  * runs as each turn does, before it ends, for what the user does meanwhile.
  */
 function createHeldProcessRuntime(
   runs: RunCall[],
   heldSessionId: string,
   launched: Record<string, unknown>,
-  { tracksWork = false, reportsSwitchBacks = false, duringTurn }: {
+  { tracksWork = false, scheduledWork = true, reportsSwitchBacks = false, duringTurn }: {
     tracksWork?: boolean;
+    scheduledWork?: boolean;
     reportsSwitchBacks?: boolean;
     duringTurn?: (command: string) => void;
   } = {},
@@ -439,11 +493,13 @@ function createHeldProcessRuntime(
   const switched: string[] = [];
   const restored: string[] = [];
   const aborts: string[] = [];
+  const accepted: string[] = [];
   const pendingSwitchBacks: Array<() => void> = [];
   // The launch options, with the model and permission mode switched since.
   const live: Record<string, unknown> = { ...launched };
   let holding = true;
-  const plan = planHeldProcess(heldSessionId, () => (holding ? live : null));
+  const heldForScheduledWorkAlone = () => scheduledWork && !tracksWork;
+  const plan = planHeldProcess(heldSessionId, () => (holding ? live : null), heldForScheduledWorkAlone);
   const stopWork = () => {
     holding = false;
     stops.push(heldSessionId);
@@ -453,6 +509,7 @@ function createHeldProcessRuntime(
     ...UNUSED_GATEWAY_METHODS,
     hasRuntime: () => true,
     hasBackgroundWork: (sessionId: string) => tracksWork && holding && sessionId === heldSessionId,
+    hasScheduledWork: (sessionId: string) => scheduledWork && holding && sessionId === heldSessionId,
     planHandOver: async (provider, sessionId, options, planOptions?: ProviderHandOverPlanOptions) => {
       plans.push({ sessionId, options, planOptions });
       return plan(provider, sessionId, options, planOptions);
@@ -464,10 +521,15 @@ function createHeldProcessRuntime(
         return;
       }
       const inheritUnset = options.inheritUnset === true;
-      const { changes, switches } = compareWithHeldProcess(live, options, inheritUnset);
+      const compared = compareWithHeldProcess(live, options, inheritUnset);
+      const { switches } = compared;
+      const changes = changesOnceAccepted(compared.changes, options.acceptProcessSettings === true, heldForScheduledWorkAlone());
       if (changes.length > 0) {
         stopWork();
         return;
+      }
+      if (compared.changes.length > 0) {
+        accepted.push(command);
       }
       const turn = inheritUnset ? withSettingsInherited(live, options) : options;
       const before = { model: live.model, permissionMode: live.permissionMode };
@@ -478,9 +540,11 @@ function createHeldProcessRuntime(
         live.permissionMode = permissionModeOf(turn);
       }
       switched.push(...switches);
-      if (options.restoreSwitchesAfterTurn === true && switches.length > 0) {
-        Object.assign(live, before);
-        restored.push(...switches);
+      if (options.restoreSwitchesAfterTurn === true) {
+        if (switches.length > 0) {
+          Object.assign(live, before);
+          restored.push(...switches);
+        }
         if (reportsSwitchBacks && typeof options.onSwitchesRestored === 'function') {
           const report = options.onSwitchesRestored as (restored: Record<string, unknown>) => void;
           pendingSwitchBacks.push(() => report({
@@ -506,6 +570,7 @@ function createHeldProcessRuntime(
     switched,
     restored,
     aborts,
+    accepted,
     live: () => ({ ...live }),
     endHold: () => {
       holding = false;
@@ -524,12 +589,14 @@ function projectPathOf(sessionId: string): string | null | undefined {
 }
 
 /**
- * A turn's run options less its attachments, which the chat gateway checks
- * and sets for the run itself (see `buildTurnRunOptions`).
+ * A turn's run options less what the chat gateway sets for the run itself:
+ * its attachments, which it checks (see `buildTurnRunOptions`), and the
+ * callback that puts the session's own settings back after a turn that
+ * keeps its switches to itself (`onSwitchesRestored`).
  */
 function withoutAttachments(options: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(options).filter(([key]) => !['attachments', 'images', 'files'].includes(key)),
+    Object.entries(options).filter(([key]) => !['attachments', 'images', 'files', 'onSwitchesRestored'].includes(key)),
   );
 }
 
@@ -650,9 +717,10 @@ test('a queued message waits for background work its session\'s last turn left r
 
 test('a queued message that needs a new process waits while its session\'s process is held for work no task reports, and goes once the hold ends', async () => {
   await withIsolatedDatabase(async (userId) => {
-    // The user's turn, at high effort, ended having scheduled a wake-up: its
-    // process is held for it, though the tracker sees no task. A send at max
-    // effort was refused rather than stop that, and the user chose to queue it.
+    // The user's turn, at high effort, ended with a Monitor still watching:
+    // its process is held for it, though the tracker sees no task and it is
+    // no scheduled work. A send at max effort was refused rather than stop
+    // that, and the user chose to queue it.
     const userRun = chatRunRegistry.startRun({
       appSessionId: SESSION_ID,
       provider: 'claude',
@@ -672,9 +740,9 @@ test('a queued message that needs a new process waits while its session\'s proce
     const { runtime, stops, endHold } = createHeldProcessRuntime(runs, SESSION_ID, {
       cwd: projectPathOf(SESSION_ID),
       effort: 'high',
-    });
+    }, { scheduledWork: false });
 
-    // Sent now, it would replace that process and stop the wake-up.
+    // Sent now, it would replace that process and stop the Monitor.
     assert.equal(await dispatchQueuedMessages(runtime), 0);
     assert.equal(runs.length, 0);
     assert.deepEqual(stops, []);
@@ -684,7 +752,7 @@ test('a queued message that needs a new process waits while its session\'s proce
       attachments: [],
     });
 
-    // The wake-up has run and the process has let go: it goes on the next pass.
+    // The Monitor has ended and the process has let go: it goes on the next pass.
     endHold();
     assert.equal(await dispatchQueuedMessages(runtime), 1);
     assert.deepEqual(runs.map((run) => run.command), ['now at max effort']);
@@ -761,14 +829,14 @@ test('a due message that needs a new process waits while its session\'s process 
       scheduledFor: secondsAgo(1),
     });
 
-    // The session's last turn ended with work still going (a wake-up, a
-    // CronCreate job), and its process, launched at high effort, is held for
-    // it. No turn is under way.
+    // The session's last turn ended with work still going that no task or
+    // scheduled work stands for (a Monitor), and its process, launched at
+    // high effort, is held for it. No turn is under way.
     const runs: RunCall[] = [];
     const { runtime, aborts, stops, endHold } = createHeldProcessRuntime(runs, SESSION_ID, {
       cwd: projectPathOf(SESSION_ID),
       effort: 'high',
-    });
+    }, { scheduledWork: false });
 
     assert.equal(await dispatchDueScheduledMessages(runtime), 0);
     assert.equal(runs.length, 0);
@@ -836,6 +904,10 @@ test('a queued message the held process can take goes into it, though a self-pac
       attachments: [],
     });
 
+    // The runtime lists the loop as the session's scheduled work, and no task:
+    // scheduled work keeps no queued message back.
+    assert.equal(runtime.hasScheduledWork(SESSION_ID), true);
+    assert.equal(runtime.hasBackgroundWork(SESSION_ID), false);
     assert.equal(await dispatchQueuedMessages(runtime), 1);
     assert.deepEqual(runs.map((run) => run.command), ['also look at the logs']);
     assert.equal(sessionDraftsDb.getDrafts(userId).length, 0);
@@ -843,6 +915,7 @@ test('a queued message the held process can take goes into it, though a self-pac
     assert.equal(plans.length, 1);
     assert.deepEqual(withoutAttachments(plans[0].options), withoutAttachments(runs[0].options));
     assert.deepEqual(plans[0].planOptions, { inheritUnset: true });
+    assert.equal('acceptProcessSettings' in runs[0].options, false, 'it fits the process as it is');
   });
 });
 
@@ -1065,6 +1138,465 @@ test('a due message without tool rules goes into the held process when due, thou
   });
 });
 
+test('a due message at an effort only a new process can apply goes into the process a /loop alone holds, on the process\'s own effort, instead of waiting as long as the loop runs', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    // The user's /loop turn ended at high effort with its next wake-up armed,
+    // and nothing else runs in the process.
+    sessionsDb.setSessionEffort(SESSION_ID, 'high');
+    const runs: RunCall[] = [];
+    const { runtime, plans, stops, accepted, aborts, live, confirmSwitchBacks } = createHeldProcessRuntime(runs, SESSION_ID, {
+      cwd: projectPathOf(SESSION_ID),
+      effort: 'high',
+    }, { reportsSwitchBacks: true });
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'dig deeper at max effort',
+      options: { effort: 'max' },
+      scheduledFor: secondsAgo(1),
+    });
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    assert.deepEqual(runs.map((run) => run.command), ['dig deeper at max effort']);
+    assert.equal(runs[0].options.acceptProcessSettings, true);
+    assert.equal(runs[0].options.effort, 'max', 'a process of its own would still run at the message\'s effort');
+    assert.deepEqual(accepted, ['dig deeper at max effort'], 'its turn went in, on the process\'s effort');
+    assert.equal(live().effort, 'high');
+    assert.deepEqual(stops, [], 'the loop goes on');
+    assert.deepEqual(aborts, []);
+    assert.equal(scheduledMessagesDb.listForSession(userId, SESSION_ID)[0].status, 'sent');
+    // Planned as it was scheduled first, then again taking the process's
+    // settings, as it then went.
+    assert.deepEqual(plans.map((plan) => plan.planOptions), [
+      { inheritUnset: true },
+      { inheritUnset: true, acceptProcessSettings: true },
+    ]);
+    assert.equal('acceptProcessSettings' in plans[0].options, false);
+    assert.deepEqual(withoutAttachments(plans[1].options), withoutAttachments(runs[0].options));
+    // Recorded for its turn, then put back: the user's next send stays on the loop's effort.
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.effort, 'max');
+    confirmSwitchBacks();
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.effort, 'high');
+  });
+});
+
+test('a due message with ultracode on goes into the process a /loop alone holds with it off, and leaves the session\'s ultracode off once the process is switched back', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    sessionsDb.setSessionEffort(SESSION_ID, 'high');
+    sessionsDb.setSessionUltracode(SESSION_ID, false);
+    const runs: RunCall[] = [];
+    const { runtime, accepted, stops, confirmSwitchBacks } = createHeldProcessRuntime(runs, SESSION_ID, {
+      cwd: projectPathOf(SESSION_ID),
+      effort: 'high',
+      ultracode: false,
+    }, { reportsSwitchBacks: true });
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'think it through with ultracode',
+      options: { effort: 'high', ultracode: true },
+      scheduledFor: secondsAgo(1),
+    });
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    assert.equal(runs[0].options.acceptProcessSettings, true);
+    assert.deepEqual(accepted, ['think it through with ultracode']);
+    assert.deepEqual(stops, []);
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.ultracode, 1);
+    confirmSwitchBacks();
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.ultracode, 0);
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.effort, 'high');
+  });
+});
+
+test('a queued message whose tool rules only a new process can apply goes into the process a /loop alone holds, with the process\'s own rules', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    // The /loop was launched while the user denied WebFetch; the composer has
+    // allowed it since, which only a new process could apply.
+    const runs: RunCall[] = [];
+    const { runtime, plans, stops, accepted } = createHeldProcessRuntime(
+      runs,
+      SESSION_ID,
+      composerLaunch(SESSION_ID, { disallowedTools: ['WebFetch'] }),
+    );
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, {
+      content: 'fetch the changelog',
+      options: {
+        ...SCHEDULED_AT_THE_LOOP_SETTINGS,
+        toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false },
+      },
+      attachments: [],
+    });
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(runs.map((run) => run.command), ['fetch the changelog']);
+    assert.equal(runs[0].options.acceptProcessSettings, true);
+    assert.deepEqual(accepted, ['fetch the changelog']);
+    assert.deepEqual(stops, [], 'the loop goes on');
+    assert.equal(sessionDraftsDb.getDrafts(userId).length, 0);
+    assert.deepEqual(plans.map((plan) => plan.planOptions), [
+      { inheritUnset: true },
+      { inheritUnset: true, acceptProcessSettings: true },
+    ]);
+  });
+});
+
+test('a message at an effort only a new process can apply still waits when the held process runs a task as well as a /loop, or is held for a Monitor, and the runtime is not asked to take the process\'s settings', async () => {
+  for (const holdOptions of [{ tracksWork: true }, { scheduledWork: false }]) {
+    await withIsolatedDatabase(async (userId) => {
+      const runs: RunCall[] = [];
+      const { runtime, plans, stops } = createHeldProcessRuntime(runs, SESSION_ID, {
+        cwd: projectPathOf(SESSION_ID),
+        effort: 'high',
+      }, holdOptions);
+      scheduledMessagesService.schedule({
+        userId,
+        sessionId: SESSION_ID,
+        content: 'now at max effort',
+        options: { effort: 'max' },
+        scheduledFor: secondsAgo(1),
+      });
+
+      assert.equal(await dispatchDueScheduledMessages(runtime), 0, JSON.stringify(holdOptions));
+      assert.equal(runs.length, 0);
+      assert.deepEqual(stops, []);
+      assert.deepEqual(plans.map((plan) => plan.planOptions), [{ inheritUnset: true }]);
+      assert.equal(scheduledMessagesDb.listForSession(userId, SESSION_ID)[0].status, 'pending');
+    });
+  }
+});
+
+test('a message that needs a new process for its working directory still waits while a /loop alone holds the process', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const { runtime, plans, stops } = createHeldProcessRuntime(runs, SESSION_ID, {
+      cwd: projectPathOf(SESSION_ID),
+      effort: 'high',
+    });
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'look at the other checkout',
+      options: { cwd: '/somewhere/else', effort: 'max' },
+      scheduledFor: secondsAgo(1),
+    });
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 0);
+    assert.equal(runs.length, 0);
+    assert.deepEqual(stops, []);
+    assert.deepEqual(plans.map((plan) => plan.planOptions), [{ inheritUnset: true }]);
+  });
+});
+
+test('a message the runtime will not take on the held process\'s settings, or fails to plan so, waits while a /loop alone holds the process', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const keptOut: ProviderHandOverPlan = { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] };
+    let planAccepting: () => Promise<ProviderHandOverPlan> = async () => keptOut;
+    const planOptionsAsked: Array<ProviderHandOverPlanOptions | undefined> = [];
+    const runtime: ProviderRuntimeGateway = {
+      ...createRuntime(runs),
+      hasScheduledWork: (sessionId) => sessionId === SESSION_ID,
+      planHandOver: async (_provider, _sessionId, options, planOptions?: ProviderHandOverPlanOptions) => {
+        planOptionsAsked.push(planOptions);
+        assert.equal(options.acceptProcessSettings === true, planOptions?.acceptProcessSettings === true);
+        return planOptions?.acceptProcessSettings === true ? planAccepting() : keptOut;
+      },
+    };
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'now at max effort',
+      options: { effort: 'max' },
+      scheduledFor: secondsAgo(1),
+    });
+    const status = () => scheduledMessagesDb.listForSession(userId, SESSION_ID)[0].status;
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 0);
+    assert.deepEqual(planOptionsAsked, [{ inheritUnset: true }, { inheritUnset: true, acceptProcessSettings: true }]);
+    assert.equal(status(), 'pending');
+
+    planAccepting = async () => {
+      throw new Error('the runtime could not plan');
+    };
+    assert.equal(await dispatchDueScheduledMessages(runtime), 0);
+    assert.equal(runs.length, 0);
+    assert.equal(status(), 'pending');
+
+    planAccepting = async () => ({ heldWork: true, canHandOver: true, changes: [], switches: [] });
+    assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    assert.deepEqual(runs.map((run) => run.command), ['now at max effort']);
+    assert.equal(runs[0].options.acceptProcessSettings, true);
+    assert.equal(status(), 'sent');
+  });
+});
+
+test('an acceptProcessSettings a message\'s stored options carry is dropped: only the dispatcher decides that a turn takes the held process\'s settings', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    // A Monitor keeps the process held, which no turn may change settings for.
+    const runs: RunCall[] = [];
+    const { runtime, plans, stops } = createHeldProcessRuntime(runs, SESSION_ID, {
+      cwd: projectPathOf(SESSION_ID),
+      effort: 'high',
+    }, { scheduledWork: false });
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'due at max effort',
+      options: { effort: 'max', acceptProcessSettings: true },
+      scheduledFor: secondsAgo(1),
+    });
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, {
+      content: 'queued at max effort',
+      options: { effort: 'max', acceptProcessSettings: true },
+      attachments: [],
+    });
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 0);
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.equal(runs.length, 0);
+    assert.deepEqual(stops, []);
+    assert.equal(plans.length, 2);
+    for (const plan of plans) {
+      assert.deepEqual(plan.planOptions, { inheritUnset: true });
+      assert.equal('acceptProcessSettings' in plan.options, false);
+    }
+  });
+});
+
+/** What Claude's runtime says when the held process does not take an accepting turn after all (failAcceptingTurn). */
+const HAND_OVER_FAILED_CONTENT = 'Not sent: this message changes the reasoning effort, which only a new Claude process can apply, and a new process would stop the session\'s scheduled work.';
+
+/**
+ * `runtime` whose next `times` runs of a turn that accepts the held
+ * process's settings (`acceptProcessSettings: true`) the process turns away
+ * at the hand-over, as Claude's runtime fails such a turn: an `error` with
+ * code HAND_OVER_FAILED and why, then a throw that carries the same. The
+ * process and its work go on. Later runs go to `runtime` as they are.
+ */
+function turningAwayAtHandOver(runtime: ProviderRuntimeGateway, times: number): ProviderRuntimeGateway & { turnedAway: string[] } {
+  const turnedAway: string[] = [];
+  return {
+    ...runtime,
+    turnedAway,
+    run: async (provider, command, options, writer) => {
+      if (options.acceptProcessSettings !== true || turnedAway.length >= times) {
+        return runtime.run(provider, command, options, writer);
+      }
+      turnedAway.push(command);
+      writer.send({ kind: 'error', code: 'HAND_OVER_FAILED', reason: 'stale-plan', content: HAND_OVER_FAILED_CONTENT, sessionId: 'native', provider: 'claude' });
+      throw Object.assign(new Error(HAND_OVER_FAILED_CONTENT), { code: 'HAND_OVER_FAILED', reason: 'stale-plan' });
+    },
+  };
+}
+
+test('a queued message the held process turns away at the hand-over (HAND_OVER_FAILED) goes back in the queue, the composer\'s text kept, and goes on a later pass', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 1);
+    sessionDraftsDb.saveDraftText(userId, SESSION_ID, 'still typing');
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] });
+    const draft = () => sessionDraftsDb.getDrafts(userId).find((entry) => entry.scope === SESSION_ID);
+
+    const start = Date.now();
+    assert.equal(await dispatchQueuedMessages(runtime, new Date(start)), 1);
+    assert.equal(runtime.turnedAway.join('|'), 'dig deeper at max effort');
+    assert.equal(JSON.stringify(draft()?.queuedMessage ?? null), JSON.stringify({ content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] }));
+    assert.equal(draft()?.text, 'still typing');
+    assert.equal(held.stops.length, 0, 'the loop goes on');
+
+    // Planned again on the next poll, and the process takes it this time.
+    assert.equal(await dispatchQueuedMessages(runtime, new Date(start + POLL_INTERVAL_MS)), 1);
+    assert.equal(held.accepted.join('|'), 'dig deeper at max effort');
+    assert.equal(draft()?.queuedMessage ?? null, null);
+    assert.equal(draft()?.text, 'still typing');
+  });
+});
+
+/**
+ * Runs a queued pass at each of `seconds` after `start`, and returns those
+ * at which the held process turned a turn away, to the nearest second.
+ */
+async function passesTurnedAway(
+  runtime: ProviderRuntimeGateway & { turnedAway: string[] },
+  start: number,
+  seconds: number[],
+): Promise<string> {
+  const turnedAwayAt: number[] = [];
+  for (const second of seconds) {
+    const before = runtime.turnedAway.length;
+    await dispatchQueuedMessages(runtime, new Date(start + second * 1_000));
+    if (runtime.turnedAway.length > before) {
+      turnedAwayAt.push(Math.round(second));
+    }
+  }
+  return turnedAwayAt.join(',');
+}
+
+/** The polls of `minutes` minutes, as seconds after the first, each after the first 0.4 s early, as a timer may fire. */
+const pollsFor = (minutes: number) => Array.from(
+  { length: (minutes * 60_000) / POLL_INTERVAL_MS + 1 },
+  (_, index) => (index === 0 ? 0 : index * (POLL_INTERVAL_MS / 1_000) - 0.4),
+);
+
+test('a queued message the held process keeps turning away is tried again a poll later, then after twice as long each time, ten minutes at most', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 100);
+    sessionDraftsDb.saveDraftText(userId, SESSION_ID, 'still typing');
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] });
+
+    // Forty minutes of polls: each try adds an error row to the conversation.
+    assert.equal(await passesTurnedAway(runtime, Date.now(), pollsFor(40)), '0,30,90,210,450,930,1530,2130');
+    assert.equal(sessionDraftsDb.listQueuedMessages().length, 1, 'still queued');
+    assert.equal(sessionDraftsDb.getDrafts(userId).find((entry) => entry.scope === SESSION_ID)?.text, 'still typing');
+    assert.equal(held.stops.length, 0, 'the loop goes on');
+  });
+});
+
+test('a turned-away queued message the user adds to is tried on the next poll, and one that goes through ends the waits', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 3);
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] });
+    const start = Date.now();
+
+    // Turned away at 0 s and 30 s: the next try waits a minute, to 90 s.
+    assert.equal(await passesTurnedAway(runtime, start, [0, 30, 60]), '0,30');
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'and check the logs', attachments: [] });
+    assert.equal(await passesTurnedAway(runtime, start, [60]), '60', 'the message changed: no wait');
+    // Turned away a third time in a row: it waits two minutes, to 180 s, when the process takes it.
+    assert.equal(await passesTurnedAway(runtime, start, [90, 150]), '');
+    assert.equal(held.accepted.length, 0, 'not tried before then');
+    assert.equal(await dispatchQueuedMessages(runtime, new Date(start + 180_000)), 1);
+    assert.equal(held.accepted.join('|'), 'dig deeper at max effort\n\nand check the logs');
+    assert.equal(sessionDraftsDb.listQueuedMessages().length, 0);
+
+    // A message turned away after that waits a poll again, not ten minutes.
+    const turningAwayAgain = turningAwayAtHandOver(held.runtime, 2);
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'now at max effort again', options: { effort: 'max' }, attachments: [] });
+    assert.equal(await passesTurnedAway(turningAwayAgain, start, [210, 240]), '210,240');
+  });
+});
+
+test('a session whose queued message waits to be tried again holds back no other session\'s', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    sessionsDb.createAppSession(OTHER_SESSION_ID, 'claude', '/workspace/demo', 'Other session');
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 100);
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] });
+    const start = Date.now();
+
+    assert.equal(await passesTurnedAway(runtime, start, [0, 30]), '0,30');
+    sessionDraftsDb.appendQueuedMessage(userId, OTHER_SESSION_ID, { content: 'run the tests', attachments: [] });
+    assert.equal(await passesTurnedAway(runtime, start, [60]), '');
+    assert.equal(commandsFor(runs, OTHER_SESSION_ID).join('|'), 'run the tests');
+  });
+});
+
+test('a turned-away queued message goes on the next poll once the session\'s process is no longer held', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 100);
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'dig deeper at max effort', options: { effort: 'max' }, attachments: [] });
+    const start = Date.now();
+
+    // Turned away four times in a row: the next try would wait four minutes, to 450 s.
+    assert.equal(await passesTurnedAway(runtime, start, [0, 30, 90, 210, 240]), '0,30,90,210');
+    // The loop ends: nothing is held that could turn the message away.
+    held.endHold();
+    assert.equal(await dispatchQueuedMessages(runtime, new Date(start + 270_000)), 1);
+    assert.equal(commandsFor(runs, SESSION_ID).join('|'), 'dig deeper at max effort');
+  });
+});
+
+test('a queued message whose run fails otherwise is not put back', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: 'will fail', options: {}, attachments: [] });
+
+    assert.equal(await dispatchQueuedMessages(createRuntime([], 'throw')), 1);
+    assert.equal(sessionDraftsDb.listQueuedMessages().length, 0);
+    assert.equal(sessionDraftsDb.getDrafts(userId).length, 0);
+  });
+});
+
+test('a due message the held process turns away at the hand-over is marked failed with why, and not sent again', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime = turningAwayAtHandOver(held.runtime, 1);
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'dig deeper at max effort',
+      options: { effort: 'max' },
+      scheduledFor: secondsAgo(1),
+    });
+    const row = () => scheduledMessagesDb.listForSession(userId, SESSION_ID)[0];
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    assert.equal(runtime.turnedAway.join('|'), 'dig deeper at max effort');
+    assert.equal(row().status, 'failed');
+    // The code of the runtime's reason, which the list words in the user's language.
+    assert.equal(row().failure_reason, 'hand_over_failed:stale-plan');
+    assert.equal(held.stops.length, 0, 'the loop goes on');
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 0);
+    assert.equal(held.accepted.length, 0);
+  });
+});
+
+test('a due message the held process turns away at the hand-over without a throw is marked failed all the same', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const runtime: ProviderRuntimeGateway = {
+      ...held.runtime,
+      run: async (_provider, _command, _options, writer) => {
+        writer.send({ kind: 'error', code: 'HAND_OVER_FAILED', reason: 'lookup', content: 'Not sent: the message could not be handed to the process the work ran in.', sessionId: 'native', provider: 'claude' });
+      },
+    };
+    scheduledMessagesService.schedule({
+      userId,
+      sessionId: SESSION_ID,
+      content: 'dig deeper at max effort',
+      options: { effort: 'max' },
+      scheduledFor: secondsAgo(1),
+    });
+
+    assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    const row = scheduledMessagesDb.listForSession(userId, SESSION_ID)[0];
+    assert.equal(row.status, 'failed');
+    assert.equal(row.failure_reason, 'hand_over_failed:lookup');
+  });
+});
+
+test('a due message turned away at the hand-over for a reason with no code, or none, is marked failed with the runtime\'s English text', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const runs: RunCall[] = [];
+    const held = createHeldProcessRuntime(runs, SESSION_ID, { cwd: projectPathOf(SESSION_ID), effort: 'high' });
+    const reasons: Array<string | undefined> = ['a-newer-reason', undefined];
+    const runtime: ProviderRuntimeGateway = {
+      ...held.runtime,
+      run: async (_provider, _command, _options, writer) => {
+        const reason = reasons.shift();
+        writer.send({ kind: 'error', code: 'HAND_OVER_FAILED', ...(reason ? { reason } : {}), content: 'Not sent: the process would not take it.', sessionId: 'native', provider: 'claude' });
+      },
+    };
+    for (const content of ['first', 'second']) {
+      scheduledMessagesService.schedule({ userId, sessionId: SESSION_ID, content, options: { effort: 'max' }, scheduledFor: secondsAgo(1) });
+      assert.equal(await dispatchDueScheduledMessages(runtime), 1);
+    }
+    const failed = scheduledMessagesDb.listForSession(userId, SESSION_ID).map((row) => `${row.status}:${row.failure_reason}`);
+    assert.equal(failed.join('|'), 'failed:the process would not take it.|failed:the process would not take it.');
+  });
+});
+
 test('a due message does not interrupt the user\'s turn under way in the held process while the tracker reports the session\'s background work, and goes once the work is done', async () => {
   await withIsolatedDatabase(async (userId) => {
     // A /loop holds the session's process, launched at high effort, and a
@@ -1172,7 +1704,7 @@ test('a due message the held process could take does not interrupt the user\'s t
   });
 });
 
-test('while a self-paced /loop keeps the process held, a due message that needs a new process waits poll after poll, and the session\'s later due messages wait behind it, but not its queued turn', { timeout: 10_000 }, async () => {
+test('while a Monitor keeps the process held, a due message that needs a new process waits poll after poll, and the session\'s later due messages wait behind it, but not its queued turn', { timeout: 10_000 }, async () => {
   mock.timers.enable({ apis: ['setInterval'] });
   try {
     await withIsolatedDatabase(async (userId) => {
@@ -1180,7 +1712,7 @@ test('while a self-paced /loop keeps the process held, a due message that needs 
       const { runtime, stops, endHold } = createHeldProcessRuntime(runs, SESSION_ID, {
         cwd: projectPathOf(SESSION_ID),
         effort: 'high',
-      });
+      }, { scheduledWork: false });
       const first = scheduledMessagesService.schedule({
         userId,
         sessionId: SESSION_ID,
@@ -1203,7 +1735,7 @@ test('while a self-paced /loop keeps the process held, a due message that needs 
       const statusOf = (id: string) =>
         scheduledMessagesDb.listForSession(userId, SESSION_ID).find((row) => row.id === id)?.status;
 
-      // The first would replace the process and stop the loop. The second
+      // The first would replace the process and stop the Monitor. The second
       // could go into it, but not ahead of the first. The queued turn waits
       // for neither: it goes into the process on the first poll.
       initializeScheduledMessageDispatcher(runtime);
@@ -1219,7 +1751,7 @@ test('while a self-paced /loop keeps the process held, a due message that needs 
       assert.equal(statusOf(first.id), 'pending');
       assert.equal(statusOf(second.id), 'pending');
 
-      // The user stops the loop and the process lets go: the due ones go in order.
+      // The Monitor ends and the process lets go: the due ones go in order.
       endHold();
       mock.timers.tick(POLL_INTERVAL_MS);
       await flushPasses();
@@ -1239,11 +1771,12 @@ test('while a self-paced /loop keeps the process held, a due message that needs 
 
 test('a due message that has to wait keeps none of its session\'s queued turn back: passes started together send the queued turn into the held process', async () => {
   await withIsolatedDatabase(async (userId) => {
+    // A Monitor keeps the process held.
     const runs: RunCall[] = [];
     const { runtime, stops } = createHeldProcessRuntime(runs, SESSION_ID, {
       cwd: projectPathOf(SESSION_ID),
       effort: 'high',
-    });
+    }, { scheduledWork: false });
     const due = scheduledMessagesService.schedule({
       userId,
       sessionId: SESSION_ID,
@@ -1266,7 +1799,7 @@ test('a due message that has to wait keeps none of its session\'s queued turn ba
     assert.equal(dueClaimed, 0);
     assert.equal(queuedClaimed, 1);
     assert.deepEqual(runs.map((run) => run.command), ['also look at the logs']);
-    assert.deepEqual(stops, [], 'it went into the held process, and the loop goes on');
+    assert.deepEqual(stops, [], 'it went into the held process, and the Monitor goes on');
     assert.equal(scheduledMessagesDb.listForSession(userId, SESSION_ID).find((row) => row.id === due.id)?.status, 'pending');
     assert.equal(sessionDraftsDb.getDrafts(userId).length, 0);
   });
@@ -1712,7 +2245,7 @@ test('a queued turn waits while the dispatcher\'s previous turn for its session 
 test('once a due message\'s turn that started a /loop is over, the session\'s next due message goes into the process held for the loop, without waiting for the hold to end', { timeout: 10_000 }, async () => {
   await withIsolatedDatabase(async (userId) => {
     const runs: RunCall[] = [];
-    const { runtime, aborts, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID);
+    const { runtime, aborts, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID, { scheduledWork: true });
     scheduledMessagesService.schedule({
       userId,
       sessionId: SESSION_ID,
@@ -1752,7 +2285,7 @@ test('once a due message\'s turn that started a /loop is over, the session\'s ne
 test('once a queued turn that started a /loop is over, the session\'s next queued turn goes into the process held for the loop, without waiting for the hold to end', { timeout: 10_000 }, async () => {
   await withIsolatedDatabase(async (userId) => {
     const runs: RunCall[] = [];
-    const { runtime, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID);
+    const { runtime, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID, { scheduledWork: true });
     sessionDraftsDb.appendQueuedMessage(userId, SESSION_ID, { content: '/loop 5m check CI', attachments: [] });
 
     const firstPass = dispatchQueuedMessages(runtime);
@@ -1776,7 +2309,7 @@ test('once a queued turn that started a /loop is over, the session\'s next queue
 test('of two due messages, the second goes into the process the first one\'s /loop holds, in the same pass, as soon as the first one\'s turn is over', { timeout: 10_000 }, async () => {
   await withIsolatedDatabase(async (userId) => {
     const runs: RunCall[] = [];
-    const { runtime, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID);
+    const { runtime, handedOver, exitAll } = createHandOverRuntime(runs, SESSION_ID, { scheduledWork: true });
     for (const [content, secondsBefore] of [['/loop 5m check CI', 2], ['and summarize the last run', 1]] as const) {
       scheduledMessagesService.schedule({
         userId,

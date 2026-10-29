@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useBrowserUseEnabled } from '@/modules/browser-use';
 import { usePaletteOps, usePaletteOpsRegister } from '@/modules/command-palette';
+import { formatSessionTitle } from '@/modules/sidebar';
 import { useTasksSettings } from '@/modules/task-master';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { useElementWidth } from '@/shared/hooks/useElementWidth';
@@ -523,10 +524,11 @@ function WorkspacePane({
   ) : null;
 
   // The tab names the session and, only when tabs alone cannot tell, its project: a screen reader gets
-  // both at the top of the panel.
+  // both at the top of the panel, the session as the tab reads it.
   const activeTabDisplay = activeTab ? tabDisplay.get(activeTab.key) : undefined;
+  const activeTabLabel = activeTab ? formatSessionTitle(activeTabDisplay?.title ?? activeTab.title, t) : '';
   const panelHeading = hasTabBar && activeTab && liveContent
-    ? [activeTabDisplay?.title ?? activeTab.title, activeTabDisplay?.projectName || liveContent.project.displayName]
+    ? [activeTabLabel, activeTabDisplay?.projectName || liveContent.project.displayName]
       .filter(Boolean)
       .join(' · ')
     : null;

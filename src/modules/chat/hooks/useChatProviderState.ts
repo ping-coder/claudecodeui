@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import type { PendingPermissionRequest, PermissionMode,
@@ -308,6 +309,8 @@ export function useChatProviderState({
   selectedProject: _selectedProject,
   isFocusedPane = true,
 }: UseChatProviderStateArgs) {
+  // Words the errors a failed session choice throws, which the model picker shows as they are.
+  const { t } = useTranslation('chat');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
   // The provider the composer sends under. Held here rather than read from
@@ -927,7 +930,7 @@ export function useChatProviderState({
       model,
       () => api.providers.setSessionActiveModel(targetProvider, normalizedSessionId, model),
       (body) => body.data?.model?.trim() || model,
-      'Unable to change the active model for this session.',
+      t('misc.sessionModelChangeFailed'),
       // The answer also carries the session's recorded effort and ultracode.
       (body) => ({
         model: body.data?.model?.trim() || model,
@@ -936,7 +939,7 @@ export function useChatProviderState({
       }),
     );
     return { scope: 'session' as const, model: storedModel };
-  }, [saveSessionChoice, setStoredProviderModel]);
+  }, [saveSessionChoice, setStoredProviderModel, t]);
 
   /**
    * Applies an effort choice: it always becomes the per-provider default, and
@@ -960,10 +963,10 @@ export function useChatProviderState({
       effort,
       () => api.providers.setSessionActiveEffort(targetProvider, normalizedSessionId, effort),
       (body) => body.data?.effort?.trim() || effort,
-      'Unable to change the reasoning effort for this session.',
+      t('misc.sessionEffortChangeFailed'),
     );
     return { scope: 'session' as const, effort: storedEffort };
-  }, [saveSessionChoice, setStoredProviderEffort]);
+  }, [saveSessionChoice, setStoredProviderEffort, t]);
 
   /**
    * Applies an ultracode on/off choice the same way selectProviderEffort
@@ -988,10 +991,10 @@ export function useChatProviderState({
       ultracode,
       () => api.providers.setSessionActiveUltracode(targetProvider, normalizedSessionId, ultracode),
       (body) => readResponseUltracode(body) ?? ultracode,
-      'Unable to change ultracode for this session.',
+      t('misc.sessionUltracodeChangeFailed'),
     );
     return { scope: 'session' as const, ultracode: storedUltracode };
-  }, [saveSessionChoice, setStoredProviderUltracode]);
+  }, [saveSessionChoice, setStoredProviderUltracode, t]);
 
   // The open session's model wins over the per-provider default, so switching
   // sessions shows (and sends) what each session actually runs with.

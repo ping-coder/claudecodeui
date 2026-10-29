@@ -10,7 +10,7 @@ import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { clearQueuedMessage, readDraftText, readQueuedMessage, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
 import type * as ChatDrafts from '@/shared/chatDrafts';
 import { useSessionProtection } from '@/shared/hooks/useSessionProtection';
-import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, ServerEvent, SessionActivityMap } from '@/shared/types';
+import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, ScheduledWorkSummary, ServerEvent, SessionActivityMap } from '@/shared/types';
 
 /**
  * A session whose turn has ended with background work still running keeps
@@ -580,7 +580,7 @@ describe('a send the server refuses to run beside the work', () => {
     act(() => { view.result.current.handleSendRefused(refusal(['permissionMode'])); });
 
     assert.deepEqual(removeMessage.mock.calls, [['session-1', echoRowId]]);
-    assert.deepEqual(onSessionBackground.mock.calls, [['session-1', OWN_TASKS]]);
+    assert.deepEqual(onSessionBackground.mock.calls, [['session-1', OWN_TASKS, []]], 'with the scheduled work it had at the send: none');
     assert.equal(view.result.current.input, 'check the logs\n\ntyped since', 'back ahead of what was typed since, before any answer');
     assert.equal(readDraftText('session-1'), 'check the logs\n\ntyped since');
     await waitFor(() => assert.deepEqual(view.result.current.backgroundSendPrompt, {
@@ -725,7 +725,7 @@ describe('a send the server refuses to run beside the work', () => {
     });
     assert.equal(left.removeMessage.mock.calls.length, 1);
     assert.deepEqual(right.removeMessage.mock.calls, [['session-1', right.echoes[0]?.rowId]]);
-    assert.deepEqual(right.onSessionBackground.mock.calls, [['session-1', OWN_TASKS]]);
+    assert.deepEqual(right.onSessionBackground.mock.calls, [['session-1', OWN_TASKS, []]]);
     await waitFor(() => assert.notEqual(right.view.result.current.backgroundSendPrompt, null));
 
     await act(async () => {
@@ -963,5 +963,129 @@ describe('a send waiting for the hand-over plan', () => {
     assert.deepEqual(sends().map((frame) => frame.content), ['hello']);
     assert.equal(view.result.current.editingAnchorId, 'anchor-1');
     assert.equal(view.result.current.input, 'old');
+  });
+});
+
+describe('a session held only for scheduled work', () => {
+  // A /loop holds the process with no task running. Queueing a message until
+  // that work ends would wait as long as the loop runs, days for `*/5`, so
+  // nothing is queued behind it: the send key with Alt sends as the send key
+  // does, and a prompt for a send that needs a new process offers no Queue.
+  const takesInserts: Partial<ComposerArgs> = { supportsMidRunInsert: true, isConnected: true };
+  const LOOP: ScheduledWorkSummary = {
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: 1,
+    nextFireAt: 300_001,
+    recurring: true,
+    holdUntil: 691_200_001,
+    cron: '*/5 * * * *',
+  };
+  const onlyLoop: SessionActivityMap = new Map([[
+    'session-1',
+    { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [], scheduled: [LOOP] },
+  ]]);
+  const loopBesideTasks: SessionActivityMap = new Map([[
+    'session-1',
+    { ...backgroundOnly.get('session-1')!, scheduled: [LOOP] },
+  ]]);
+
+  const pressAltEnter = async (view: View) => {
+    await act(async () => {
+      view.result.current.handleKeyDown({
+        key: 'Enter',
+        altKey: true,
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+        nativeEvent: { isComposing: false },
+        preventDefault: () => undefined,
+      } as never);
+    });
+  };
+
+  test('the send key with Alt asks the server too, and sends into the held process when the turn can go there', async () => {
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const { view, sends } = render(onlyLoop, takesInserts);
+    await act(async () => { view.result.current.setInput('and also this'); });
+    await pressAltEnter(view);
+
+    await waitFor(() => assert.equal(sends().length, 1));
+    assert.equal(planRequests().length, 1);
+    assert.equal(sends()[0]?.options?.keepBackgroundWork, true);
+    assert.equal(appendQueuedMessage.mock.calls.length, 0, 'nothing waits for the loop');
+    assert.equal(view.result.current.backgroundSendPrompt, null);
+  });
+
+  test('when only a new process can run the message, asks without offering to queue, listing the loop', async () => {
+    handOverPlan = { heldWork: true, canHandOver: false, changes: ['effort'] };
+    const { view, sends } = render(onlyLoop, takesInserts);
+    await act(async () => { view.result.current.setInput('think harder'); });
+    await pressAltEnter(view);
+
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+    assert.deepEqual(view.result.current.backgroundSendPrompt, { work: ['Loop check CI'], queue: false, changes: ['effort'] });
+    assert.equal(sends().length, 0);
+    await act(async () => { view.result.current.resolveBackgroundSendPrompt('send'); });
+    await waitFor(() => assert.equal(sends().length, 1));
+    assert.equal(sends()[0]?.options?.keepBackgroundWork, undefined, 'the user chose to stop the loop');
+  });
+
+  test('an edit asks at once, without offering to queue', async () => {
+    const { view, sends } = render(onlyLoop, takesInserts);
+    await act(async () => {
+      view.result.current.beginEditMessage({ type: 'user', content: 'old', timestamp: new Date(), transcriptAnchorId: 'anchor-1' });
+    });
+    await act(async () => { view.result.current.setInput('replacement'); });
+
+    const pending = startSubmit(view);
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+    assert.deepEqual(view.result.current.backgroundSendPrompt, { work: ['Loop check CI'], queue: false });
+    assert.equal(planRequests().length, 0);
+    await act(async () => {
+      view.result.current.resolveBackgroundSendPrompt('cancel');
+      await pending;
+    });
+    assert.equal(sends().length, 0);
+  });
+
+  test('with tasks beside the loop, the send key with Alt still queues behind the tasks, and a prompt lists both and offers Queue', async () => {
+    const { view, sends } = render(loopBesideTasks, takesInserts);
+    await act(async () => { view.result.current.setInput('after the work'); });
+    await pressAltEnter(view);
+    await waitFor(() => assert.equal(appendQueuedMessage.mock.calls.length, 1));
+    assert.equal(planRequests().length, 0);
+
+    handOverPlan = { heldWork: true, canHandOver: false, changes: ['effort'] };
+    await act(async () => { view.result.current.setInput('think harder'); });
+    const pending = startSubmit(view);
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+    assert.deepEqual(view.result.current.backgroundSendPrompt, {
+      work: ['Workflow frontend-architecture-audit', 'Agent Survey the repo', 'Loop check CI'],
+      changes: ['effort'],
+    });
+    await act(async () => {
+      view.result.current.resolveBackgroundSendPrompt('cancel');
+      await pending;
+    });
+    assert.equal(sends().length, 0);
+  });
+
+  test('a refused send puts the loop back and asks without offering to queue', async () => {
+    handOverPlan = { heldWork: true, canHandOver: true, changes: [] };
+    const onSessionBackground = vi.fn();
+    const { view, sends } = render(onlyLoop, { ...takesInserts, onSessionBackground, removeMessage: () => undefined });
+    await act(async () => { view.result.current.setInput('check the logs'); });
+    await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+    assert.equal(sends()[0]?.options?.keepBackgroundWork, true);
+
+    act(() => {
+      view.result.current.handleSendRefused({ sessionId: 'session-1', reason: 'BACKGROUND_WORK_WOULD_STOP', changes: ['tools'], clientRequestId: sends()[0]?.clientRequestId });
+    });
+    assert.deepEqual(onSessionBackground.mock.calls, [['session-1', [], [LOOP]]]);
+    await waitFor(() => assert.deepEqual(view.result.current.backgroundSendPrompt, { work: ['Loop check CI'], queue: false, changes: ['tools'] }));
+    await act(async () => { view.result.current.resolveBackgroundSendPrompt('cancel'); });
   });
 });

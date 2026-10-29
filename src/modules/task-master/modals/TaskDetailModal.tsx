@@ -227,7 +227,7 @@ export default function TaskDetailModal({
                 onChange={(event) => {
                   void handleStatusSelect(event.target.value);
                 }}
-                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+                className="w-full rounded-md border border-gray-300 bg-white py-2 pe-10 ps-3 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
               >
                 {STATUS_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>

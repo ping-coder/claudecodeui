@@ -40,6 +40,7 @@ import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessageP
 import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
+import { holdsOnlyScheduledWork } from '@/modules/chat/utils/scheduledWork';
 
 type MentionableFile = {
   name: string;
@@ -344,9 +345,13 @@ export default function ChatComposer({
   // takes inserts (the reason is `provider` otherwise) runs the message as a
   // new turn of the process the work runs in: the send key sends, asking
   // first only when the message needs a new process, and the same key with
-  // Alt queues it until the work finishes. An edit asks first.
+  // Alt queues it until the work finishes. An edit asks first. Work that is
+  // only scheduled work (loops, reminders) leaves nothing to queue behind, as
+  // a loop can go on for days: the composer reads as idle, and a send that
+  // needs a new process still asks (see useChatComposerState).
   const sendsBesideBackgroundWork = !isLoading
     && activity?.background === true
+    && !holdsOnlyScheduledWork(activity)
     && insertUnavailableReason !== 'provider'
     && !isEditingSentMessage
     && Boolean(input.trim() || attachedFiles.length > 0);
@@ -548,7 +553,7 @@ export default function ChatComposer({
                     d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                   />
                 </svg>
-                <p className="text-sm font-medium">Drop files here</p>
+                <p className="text-sm font-medium">{t('input.dropFiles')}</p>
               </div>
             </div>
           )}

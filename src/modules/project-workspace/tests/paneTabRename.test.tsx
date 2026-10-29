@@ -661,3 +661,47 @@ test('the rename entries and the box speak the interface language', async () => 
   runFrames();
   assert.equal(screen.queryByRole('textbox', { name: '会话标题' }) !== null, true);
 });
+
+test('a server placeholder name reads in the interface language on its tab, tooltip and menus; a rename starts from the stored name', async () => {
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  // An overflowing strip, so the All tabs menu is offered.
+  vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(900);
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(300);
+  renderBar();
+  act(() => {
+    harness.setDisplay?.(new Map([
+      ...DISPLAY,
+      ['t1', { title: 'Untitled Claude Session', projectName: 'Alpha', activity: null }],
+      ['t4', { title: 'Untitled', projectName: 'Alpha', activity: null }],
+    ]));
+  });
+
+  const tabTitles = Array.from(document.querySelectorAll('[data-tab-title]')).map((title) => title.textContent);
+  assert.deepEqual(tabTitles, ['未命名的 Claude 会话', 'Second chat', 'New chat', '未命名会话', 'Gone chat']);
+  const firstTab = document.querySelector('[data-tab-key="t1"]') as HTMLElement;
+  assert.equal(firstTab.getAttribute('title')?.split('\n')[0], '未命名的 Claude 会话');
+
+  const allTabsButton = screen.getByRole('button', { name: i18n.t('common:workspace.allTabs') });
+  fireEvent.click(allTabsButton);
+  assert.deepEqual(
+    within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent?.replace('Alpha', '')),
+    ['未命名的 Claude 会话', 'Second chat', 'New chat', '未命名会话', 'Gone chat'],
+  );
+  fireEvent.click(allTabsButton);
+
+  fireEvent.contextMenu(firstTab, { clientX: 10, clientY: 10 });
+  const menu = screen.getByRole('menu');
+  assert.equal(menu.getAttribute('aria-label'), '未命名的 Claude 会话');
+  fireEvent.click(within(menu).getByRole('menuitem', { name: '重命名会话' }));
+  runFrames();
+  const box = screen.getByRole('textbox', { name: '会话标题' }) as HTMLInputElement;
+  assert.equal(box.value, 'Untitled Claude Session');
+
+  // Saved unchanged, the stored name is not overwritten with its translation.
+  await act(async () => {
+    fireEvent.keyDown(box, { key: 'Enter' });
+  });
+  assert.equal(onRenameSession.mock.calls.length, 0);
+});

@@ -16,7 +16,7 @@ import type {
   SidebarProjectListProps,
   SidebarSearchMode,
 } from '@/shared/types';
-import { formatCompactAge, getAllSessions } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { formatCompactAge, formatSessionTitle, getAllSessions } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SidebarFooter from '@/modules/sidebar/SidebarFooter';
 import SidebarHeader from '@/modules/sidebar/SidebarHeader';
 import SidebarPaneTargetBar from '@/modules/sidebar/SidebarPaneTargetBar';
@@ -40,8 +40,10 @@ function HighlightedSnippet({ snippet, highlights }: { snippet: string; highligh
   if (cursor < snippet.length) {
     parts.push(snippet.slice(cursor));
   }
+  // An excerpt of a message, laid out by its own first letter as the message is (dir="auto"): right
+  // to left, an English excerpt would end with its full stop at the start of the line.
   return (
-    <span className="min-w-0 flex-1 break-words text-xs leading-relaxed text-muted-foreground">
+    <span dir="auto" className="min-w-0 flex-1 break-words text-xs leading-relaxed text-muted-foreground">
       {parts}
     </span>
   );
@@ -246,7 +248,11 @@ export default function SidebarContent({
               <p className="text-sm text-muted-foreground">{t('search.searching')}</p>
               {searchProgress && (
                 <p className="mt-1 text-xs text-muted-foreground/60">
-                  {t('search.projectsScanned', { count: searchProgress.scannedProjects })}/{searchProgress.totalProjects}
+                  {t('search.scanProgress', {
+                    count: searchProgress.totalProjects,
+                    done: searchProgress.scannedProjects,
+                    total: searchProgress.totalProjects,
+                  })}
                 </p>
               )}
             </div>
@@ -275,7 +281,7 @@ export default function SidebarContent({
                   </div>
 
                   {conversationResults.titleResults.map((session) => {
-                    const age = formatCompactAge(session.lastActivity, projectListProps.currentTime);
+                    const age = formatCompactAge(session.lastActivity, projectListProps.currentTime, t);
 
                     return (
                       <button
@@ -295,11 +301,11 @@ export default function SidebarContent({
                           <LLMProviderLogo provider={session.provider} className="h-3.5 w-3.5" />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[13px] font-normal leading-4 text-foreground">
-                            {session.sessionTitle}
+                          <span className="bidi-auto block truncate text-[13px] font-normal leading-4 text-foreground">
+                            {formatSessionTitle(session.sessionTitle, t)}
                           </span>
                           <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
-                            <span className="truncate">{session.projectDisplayName}</span>
+                            <span className="bidi-auto truncate">{session.projectDisplayName}</span>
                             {age && (
                               <>
                                 <span className="flex-shrink-0 text-muted-foreground/40">·</span>
@@ -355,7 +361,7 @@ export default function SidebarContent({
                     <div key={projectResult.projectName} className="space-y-1">
                       <div className="flex items-center gap-1.5 px-1 py-1">
                         <Folder className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-                        <span className="truncate text-xs font-normal text-foreground">
+                        <span className="bidi-auto truncate text-xs font-normal text-foreground">
                           {projectResult.projectDisplayName}
                         </span>
                       </div>
@@ -378,8 +384,8 @@ export default function SidebarContent({
                         >
                           <div className="mb-1 flex items-center gap-1.5">
                             <MessageSquare className="h-3 w-3 flex-shrink-0 text-primary" />
-                            <span className="truncate text-xs font-normal text-foreground">
-                              {session.sessionSummary}
+                            <span className="bidi-auto truncate text-xs font-normal text-foreground">
+                              {formatSessionTitle(session.sessionSummary, t)}
                             </span>
                             {session.provider && session.provider !== 'claude' && (
                               <span className="flex-shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
@@ -522,7 +528,7 @@ export default function SidebarContent({
                 <span
                   className="rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 text-[10px] tabular-nums text-muted-foreground"
                   title={visibleArchivedItemsCount !== archivedSessionsCount
-                    ? `${visibleArchivedItemsCount} of ${archivedSessionsCount}`
+                    ? t('archived.visibleOfTotal', { visible: visibleArchivedItemsCount, total: archivedSessionsCount })
                     : undefined}
                 >
                   {visibleArchivedItemsCount !== archivedSessionsCount
@@ -544,7 +550,7 @@ export default function SidebarContent({
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-1.5">
-                          <h3 className="truncate text-[13px] font-medium text-foreground">
+                          <h3 className="bidi-auto truncate text-[13px] font-medium text-foreground">
                             {project.displayName}
                           </h3>
                           {projectSessions.length > 0 && (
@@ -553,7 +559,7 @@ export default function SidebarContent({
                             </span>
                           )}
                         </div>
-                        <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70" title={project.fullPath}>
+                        <p className="bidi-ltr mt-0.5 truncate text-[11px] text-muted-foreground/70" title={project.fullPath}>
                           {project.fullPath}
                         </p>
                       </div>
@@ -602,12 +608,15 @@ export default function SidebarContent({
                               <LLMProviderLogo provider={session.__provider} className="h-3.5 w-3.5" />
                             </span>
                             <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs text-foreground">
-                                {(typeof session.summary === 'string' && session.summary.trim().length > 0
-                                  ? session.summary
-                                  : typeof session.name === 'string' && session.name.trim().length > 0
-                                    ? session.name
-                                    : String(session.id))}
+                              <p className="bidi-auto truncate text-xs text-foreground">
+                                {formatSessionTitle(
+                                  typeof session.summary === 'string' && session.summary.trim().length > 0
+                                    ? session.summary
+                                    : typeof session.name === 'string' && session.name.trim().length > 0
+                                      ? session.name
+                                      : String(session.id),
+                                  t,
+                                )}
                               </p>
                               <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/70">
                                 <span className="uppercase tracking-wide">{session.__provider}</span>
@@ -622,6 +631,7 @@ export default function SidebarContent({
                                           ? session.created_at
                                           : null,
                                     projectListProps.currentTime,
+                                    t,
                                   )}
                                 </span>
                               </div>
@@ -644,7 +654,7 @@ export default function SidebarContent({
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-center gap-1.5">
-                        <h3 className="truncate text-[13px] font-medium text-foreground">
+                        <h3 className="bidi-auto truncate text-[13px] font-medium text-foreground">
                           {group.projectDisplayName}
                         </h3>
                         <span className="flex-shrink-0 rounded-md bg-muted/60 px-1.5 py-0.5 text-[9px] tabular-nums text-muted-foreground">
@@ -652,7 +662,7 @@ export default function SidebarContent({
                         </span>
                       </div>
                       {group.projectPath && (
-                        <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70" title={group.projectPath}>
+                        <p className="bidi-ltr mt-0.5 truncate text-[11px] text-muted-foreground/70" title={group.projectPath}>
                           {group.projectPath}
                         </p>
                       )}
@@ -672,8 +682,8 @@ export default function SidebarContent({
                             <LLMProviderLogo provider={session.provider} className="h-3.5 w-3.5" />
                           </span>
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-xs text-foreground">
-                              {session.sessionTitle}
+                            <p className="bidi-auto truncate text-xs text-foreground">
+                              {formatSessionTitle(session.sessionTitle, t)}
                             </p>
                             <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/70">
                               <span className="uppercase tracking-wide">{session.provider}</span>
@@ -681,7 +691,7 @@ export default function SidebarContent({
                                 <>
                                   <span aria-hidden>·</span>
                                   <span className="tabular-nums">
-                                    {formatCompactAge(session.lastActivity, projectListProps.currentTime)}
+                                    {formatCompactAge(session.lastActivity, projectListProps.currentTime, t)}
                                   </span>
                                 </>
                               )}

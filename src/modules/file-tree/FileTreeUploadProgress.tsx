@@ -10,8 +10,6 @@ type FileTreeUploadProgressProps = {
 
 const clampProgress = (progress: number) => Math.min(100, Math.max(0, progress));
 
-const pluralizeFiles = (count: number) => (count === 1 ? 'file' : 'files');
-
 /** Rendered by FileTree to report upload progress, completion and failures for drag-and-drop uploads. */
 export default function FileTreeUploadProgress({ upload }: FileTreeUploadProgressProps) {
   const { t } = useTranslation();
@@ -27,7 +25,11 @@ export default function FileTreeUploadProgress({ upload }: FileTreeUploadProgres
   const fileSummary =
     upload.fileCount === 1 && upload.fileName
       ? upload.fileName
-      : `${upload.fileCount} ${pluralizeFiles(upload.fileCount)}`;
+      : t('fileTree.filesCount', {
+          count: upload.fileCount,
+          defaultValue_one: '{{count}} file',
+          defaultValue_other: '{{count}} files',
+        });
 
   const title = isUploading
     ? t('fileTree.uploadingFiles', 'Uploading files')
@@ -38,10 +40,12 @@ export default function FileTreeUploadProgress({ upload }: FileTreeUploadProgres
   const detail = isError
     ? upload.error
     : isComplete && typeof upload.uploadedCount === 'number'
-    ? t('fileTree.uploadedCount', 'Uploaded {{uploaded}} of {{total}} {{label}}', {
+    ? t('fileTree.uploadedCount', {
         uploaded: upload.uploadedCount,
         total: upload.fileCount,
-        label: pluralizeFiles(upload.fileCount),
+        count: upload.fileCount,
+        defaultValue_one: 'Uploaded {{uploaded}} of {{total}} file',
+        defaultValue_other: 'Uploaded {{uploaded}} of {{total}} files',
       })
     : fileSummary;
 

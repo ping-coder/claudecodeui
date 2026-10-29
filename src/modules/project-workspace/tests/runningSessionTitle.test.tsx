@@ -209,6 +209,28 @@ test('with no turn running, agent and workflow work shows as [Background]; shell
   assert.equal(document.title, '[Running] Fix login');
 });
 
+test('a session held only for scheduled work (a /loop waiting for its next run) never shows as [Background]', () => {
+  const projects = projectsWith({ loop: 'Watch CI', audit: 'Audit deps' });
+  const onlyLoop: SessionActivity = {
+    ...backgroundWork(1000),
+    scheduled: [{
+      id: 'cron:b2148320',
+      kind: 'cron',
+      toolUseId: 'toolu_cron_1',
+      prompt: 'check CI',
+      startedAt: 1000,
+      nextFireAt: 301_000,
+      recurring: true,
+      holdUntil: 691_201_000,
+    }],
+  };
+  const view = renderTitle({ activities: activitiesOf({ loop: onlyLoop }), projects, layout: NOTHING_OPEN });
+  assert.equal(document.title, 'Page title');
+
+  view.rerender({ activities: activitiesOf({ loop: onlyLoop, audit: backgroundWork(2000, 'local_agent') }), projects, layout: NOTHING_OPEN });
+  assert.equal(document.title, '[Background] Audit deps', 'the loop is not counted');
+});
+
 test('the session is named by its live title, else its tab\'s snapshot, else Untitled session', () => {
   const activities = activitiesOf({ s1: turn(1000) });
   const snapshotOnly = layoutWith([makeTab('s1', 'Snapshot title')]);
@@ -236,6 +258,21 @@ test('the marker and the placeholder follow the interface language', async () =>
   assert.equal(document.title, '[后台] Session C');
 
   view.rerender({ activities: activitiesOf({ unknown: turn(4000) }), projects, layout: NOTHING_OPEN });
+  assert.equal(document.title, '[运行中] 未命名会话');
+});
+
+test('the server\'s placeholder names read in the interface language', async () => {
+  const projects = projectsWith({ a: 'Untitled Codex Session' });
+  const view = renderTitle({ activities: activitiesOf({ a: turn(1000) }), projects, layout: NOTHING_OPEN });
+  assert.equal(document.title, '[Running] Untitled Codex Session');
+
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  assert.equal(document.title, '[运行中] 未命名的 Codex 会话');
+
+  // agy's "Untitled", known only from the snapshot of the tab holding the session.
+  view.rerender({ activities: activitiesOf({ b: turn(2000) }), projects, layout: layoutWith([makeTab('b', 'Untitled')]) });
   assert.equal(document.title, '[运行中] 未命名会话');
 });
 

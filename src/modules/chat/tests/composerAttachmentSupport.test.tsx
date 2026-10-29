@@ -5,7 +5,7 @@ import { createRef } from 'react';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import type { LLMProvider, PermissionMode, Project, ProjectSession } from '@/shared/types';
@@ -214,6 +214,17 @@ test('dragging files over the composer shows the drop overlay only when attachme
 
   renderComposer({ isDragActive: true, providerLabel: 'Claude' });
   assert.ok(screen.getByText('Drop files here'));
+});
+
+test('the drop overlay speaks the interface language', async () => {
+  await i18n.changeLanguage('zh-CN');
+  try {
+    renderComposer({ isDragActive: true, providerLabel: 'Claude' });
+    assert.equal(screen.queryAllByText('把文件放到这里').length, 1);
+    assert.equal(screen.queryAllByText('Drop files here').length, 0);
+  } finally {
+    await i18n.changeLanguage('en');
+  }
 });
 
 /**

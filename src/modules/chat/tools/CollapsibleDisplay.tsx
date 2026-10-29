@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/shared/ui';
 import { CollapsibleSection } from '@/modules/chat/tools/CollapsibleSection';
@@ -51,6 +52,7 @@ export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
   className = '',
   toolCategory,
 }) => {
+  const { t } = useTranslation('chat');
   const borderColor = borderColorMap[toolCategory || 'default'] || borderColorMap.default;
 
   return (
@@ -77,7 +79,7 @@ export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
               >
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
-              raw params
+              {t('tools.rawParams')}
             </CollapsibleTrigger>
             <CollapsibleContent>
               <pre className="mt-1 overflow-hidden whitespace-pre-wrap break-words rounded border border-border/40 bg-muted p-2 font-mono text-[11px] text-muted-foreground">

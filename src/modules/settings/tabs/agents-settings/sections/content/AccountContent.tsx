@@ -3,7 +3,9 @@ import { Trans, useTranslation } from 'react-i18next';
 
 import { PROVIDER_TERMINAL_SIGN_IN_COMMANDS } from '@/shared/constants';
 import { Badge, Button, LLMProviderLogo } from '@/shared/ui';
+import { IsolateFreeCode } from '@/shared/ui/IsolateFreeCode';
 import type { AgentProvider, ProviderAuthStatus, ProviderAuthSubscriptionOverride } from '@/shared/types';
+import { localizeProviderAccount, localizeProviderAuthError } from '@/modules/provider-auth-text';
 
 type AccountContentProps = {
   agent: AgentProvider;
@@ -150,7 +152,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                   t('agents.authStatus.cliNotInstalled', { agent: config.name })
                 ) : authStatus.authenticated ? (
                   t('agents.authStatus.loggedInAs', {
-                    email: authStatus.email || t('agents.authStatus.authenticatedUser'),
+                    email: localizeProviderAccount(authStatus.email, t) || t('agents.authStatus.authenticatedUser'),
                   })
                 ) : (
                   t('agents.authStatus.notConnected')
@@ -218,7 +220,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                   ns="settings"
                   i18nKey={isNotInstalled ? 'agents.terminalLogin.installDescription' : 'agents.terminalLogin.description'}
                   values={{ command: terminalSignInCommand, agent: config.name }}
-                  components={{ code: <code className="rounded bg-background/70 px-1 font-mono text-xs" /> }}
+                  components={{ code: <IsolateFreeCode className="rounded bg-background/70 px-1 font-mono text-xs" /> }}
                 />
               </div>
             </div>
@@ -227,7 +229,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
           {authStatus.error && !hintExplainsStatus && (
             <div className="border-t border-border/50 pt-4">
               <div className="text-sm text-red-600 dark:text-red-400">
-                {t('agents.error', { error: authStatus.error })}
+                {t('agents.error', { error: localizeProviderAuthError(authStatus.error, t) })}
               </div>
             </div>
           )}

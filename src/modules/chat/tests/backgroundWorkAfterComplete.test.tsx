@@ -30,6 +30,8 @@ const renderHandlers = ({ reporter = true, activity }: { reporter?: boolean; act
   const stored: NormalizedMessage[] = [];
   const log: ActivityLog = [];
   const syncs: string[] = [];
+  // Every read of the running sessions the handler asks for.
+  const refreshes: string[] = [];
   // The activity map as the provider would hold it, so the handler's read of
   // "is this session background-only" sees its own earlier report.
   const activityBySession = new Map<string, SessionActivity>(activity ? [['viewed-session', activity]] : []);
@@ -65,6 +67,7 @@ const renderHandlers = ({ reporter = true, activity }: { reporter?: boolean; act
       log.push({ sessionId, tasks });
     },
     getSessionActivity: (sessionId) => activityBySession.get(sessionId),
+    refreshRunningSessions: async () => { refreshes.push('read'); },
     requestLatestMessages: async (sessionId) => { syncs.push(sessionId); },
     sessionStore: {
       appendRealtime: (_sessionId: string, msg: NormalizedMessage) => { stored.push(msg); },
@@ -75,7 +78,7 @@ const renderHandlers = ({ reporter = true, activity }: { reporter?: boolean; act
   }));
 
   const dispatch = (event: ServerEvent) => listener?.(event);
-  return { dispatch, log, syncs };
+  return { dispatch, log, syncs, refreshes, stored };
 };
 
 const event = (fields: Record<string, unknown>): ServerEvent => ({
@@ -312,4 +315,41 @@ test('a refused stop request does not idle the session it was sent on', () => {
   // Any other rejection still means the send never became a run.
   dispatch(event({ kind: 'protocol_error', code: 'SESSION_NOT_FOUND', error: 'gone' }));
   assert.deepEqual(log, [{ sessionId: 'viewed-session', idle: true }]);
+});
+
+test('a turn\'s end reads the running sessions at once, for the scheduled work only the server knows of', () => {
+  // A /loop the turn set up shows the moment the turn is over, not at the
+  // next poll; the read comes after the remaining tasks are reported.
+  const { dispatch, log, refreshes } = renderHandlers();
+
+  dispatch(event({ kind: 'text', role: 'assistant', content: 'I will check CI every 5 minutes.' }));
+  dispatch(event({ kind: 'complete', success: true }));
+  assert.equal(log.length, 1);
+  assert.deepEqual(refreshes, ['read']);
+
+  // A stop that left the held process's work going: read too.
+  dispatch(event({ kind: 'complete', aborted: true, backgroundWork: true }));
+  assert.deepEqual(refreshes, ['read', 'read']);
+
+  // A stop that took the process down: nothing is left to read about.
+  dispatch(event({ kind: 'complete', aborted: true }));
+  assert.deepEqual(refreshes, ['read', 'read']);
+});
+
+test('only the chat that reports the session\'s background work reads the running sessions at a turn\'s end', () => {
+  const { dispatch, refreshes } = renderHandlers({ reporter: false });
+
+  dispatch(event({ kind: 'complete', success: true }));
+  assert.deepEqual(refreshes, []);
+});
+
+test('the answer to a stop of scheduled work is no transcript row and changes no activity', () => {
+  const { dispatch, log, stored } = renderHandlers({
+    activity: { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [], scheduled: [] },
+  });
+
+  dispatch(event({ kind: 'stop_task_status', taskId: 'cron:b2148320', status: 'started' }));
+  dispatch(event({ kind: 'stop_task_status', taskId: 'cron:b2148320', status: 'finished', stillHeld: false }));
+  assert.equal(stored.length, 0);
+  assert.deepEqual(log, []);
 });

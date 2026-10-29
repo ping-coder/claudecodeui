@@ -141,20 +141,30 @@ export default function BrowserUseSettingsTab() {
 
           <div className="space-y-4 px-4 py-4">
             <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+              {/* "Label: value" comes from the translation, colon included (full width in Chinese). */}
               <span className="rounded-md border border-border px-2 py-1">
-                {t('browserUseSettings.playwrightLabel')}: {runtimeLabel(status?.playwrightInstalled)}
+                {t('browserUseSettings.statusChip', {
+                  label: t('browserUseSettings.playwrightLabel'),
+                  value: runtimeLabel(status?.playwrightInstalled),
+                })}
               </span>
               <span className="rounded-md border border-border px-2 py-1">
-                {t('browserUseSettings.chromiumLabel')}: {runtimeLabel(status?.chromiumInstalled)}
+                {t('browserUseSettings.statusChip', {
+                  label: t('browserUseSettings.chromiumLabel'),
+                  value: runtimeLabel(status?.chromiumInstalled),
+                })}
               </span>
               <span className="rounded-md border border-border px-2 py-1">
-                {t('browserUseSettings.statusPrefix')}: {isStatusLoading && !status
-                  ? t('browserUseSettings.checking')
-                  : status?.available
-                    ? t('browserUseSettings.ready')
-                    : browserEnabled
-                      ? t('browserUseSettings.setupRequired')
-                      : t('browserUseSettings.disabled')}
+                {t('browserUseSettings.statusChip', {
+                  label: t('browserUseSettings.statusPrefix'),
+                  value: isStatusLoading && !status
+                    ? t('browserUseSettings.checking')
+                    : status?.available
+                      ? t('browserUseSettings.ready')
+                      : browserEnabled
+                        ? t('browserUseSettings.setupRequired')
+                        : t('browserUseSettings.disabled'),
+                })}
               </span>
             </div>
 

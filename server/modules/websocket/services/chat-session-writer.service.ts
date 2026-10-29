@@ -36,7 +36,8 @@ type ChatSessionWriterOptions = {
    * Invoked when the provider runtime hands the process this run's turn ran
    * in, with the background work it is held for, to the session's next run
    * instead of stopping it. The registry records that run as this one's
-   * successor. A writer built without it ignores the report.
+   * successor and hands it this writer's sockets (`adoptAudienceOf`). A
+   * writer built without it ignores the report.
    */
   onProcessHandedOver?: () => void;
   /** The run's `startedAt`, exposed as `runStartedAt`; null when unknown. */
@@ -189,6 +190,21 @@ export class ChatSessionWriter {
    */
   updateWebSocket(newConnection: RealtimeClientConnection): void {
     this.connections.add(newConnection);
+  }
+
+  /**
+   * Adds every open socket watching `previous` to this writer's audience. The
+   * run registry calls it when the provider hands the process `previous`'s
+   * run left running to this writer's run: from then on the process writes
+   * here, and whoever watched it keeps hearing it. A closed socket stays
+   * behind, and one already here is not added twice.
+   */
+  adoptAudienceOf(previous: ChatSessionWriter): void {
+    for (const connection of previous.connections) {
+      if (connection.readyState === WS_OPEN_STATE) {
+        this.connections.add(connection);
+      }
+    }
   }
 
   setSessionId(sessionId: string): void {

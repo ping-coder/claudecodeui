@@ -49,7 +49,7 @@
     "title": "תחילת עבודה עם TaskMaster",
     "subtitle": "המדריך לניהול משימות פרודוקטיבי",
     "examples": {
-      "parsePRD": "💬 דוגמה:\n\"אתחלתי פרויקט חדש עם Claude Task Master. יש לי PRD בנתיב .taskmaster/docs/prd.txt. אפשר לעזור לי לנתח אותו ולהגדיר את המשימות הראשונות?\"",
+      "parsePRD": "💬 דוגמה:\n\"אתחלתי פרויקט חדש עם Claude Task Master. יש לי PRD בנתיב \u2066.taskmaster/docs/prd.txt\u2069. אפשר לעזור לי לנתח אותו ולהגדיר את המשימות הראשונות?\"",
       "expandTask": "💬 דוגמה:\n\"משימה 5 נראית מורכבת. אפשר לפרק אותה לתתי-משימות?\"",
       "addTask": "💬 דוגמה:\n\"נא להוסיף משימה חדשה למימוש העלאת תמונות פרופיל משתמש עם Cloudinary, ולבדוק מה הגישה הטובה ביותר.\""
     },
@@ -123,6 +123,58 @@
   },
   "prd": {
     "modified": "שונה: {{date}}"
+  },
+  "prdEditor": {
+    "fullscreen": "מסך מלא",
+    "exitFullscreen": "יציאה ממסך מלא",
+    "fileNamePlaceholder": "הזנת שם קובץ ל-PRD",
+    "focusFileName": "עריכת שם הקובץ",
+    "newBadge": "חדש",
+    "documentType": "מסמך דרישות מוצר",
+    "editMode": "מעבר למצב עריכה",
+    "previewMarkdown": "תצוגה מקדימה של Markdown",
+    "disableWordWrap": "ביטול גלישת שורות",
+    "enableWordWrap": "הפעלת גלישת שורות",
+    "toggleTheme": "החלפת ערכת נושא",
+    "download": "הורדת ה-PRD",
+    "generateTasks": "יצירת משימות",
+    "generateTasksHint": "יצירת משימות מתוכן ה-PRD",
+    "save": "שמירת ה-PRD",
+    "saving": "שומר…",
+    "saved": "נשמר!",
+    "close": "סגירה",
+    "loading": "טוען את ה-PRD…",
+    "footer": {
+      "lines": "שורות: {{lines}}",
+      "characters": "תווים: {{characters}}",
+      "words": "מילים: {{words}}",
+      "format": "פורמט: Markdown",
+      "shortcuts": "Ctrl+S לשמירה, Esc לסגירה"
+    },
+    "errors": {
+      "generateNeedsContent": "יש להוסיף תוכן ל-PRD לפני יצירת משימות.",
+      "emptyContent": "יש להוסיף תוכן לפני השמירה.",
+      "emptyFileName": "יש לתת ל-PRD שם קובץ.",
+      "noProject": "לא נבחר פרויקט. יש לפתוח את העורך מחדש.",
+      "saveStatus": "השמירה נכשלה: {{status}}",
+      "save": "שגיאה בשמירת ה-PRD: {{message}}",
+      "load": "לא ניתן לטעון את תוכן הקובץ: {{message}}"
+    },
+    "generateTasksModal": {
+      "title": "יצירת משימות מ-PRD",
+      "askTitle": "פנייה ישירה ל-Claude Code",
+      "askDescription": "יש לשמור את ה-PRD, ואז לבקש מ-Claude Code בצ'אט לנתח את הקובץ וליצור את המשימות הראשונות.",
+      "examplePrompt": "הנחיה לדוגמה",
+      "prompt": "יש לי PRD בנתיב \u2066.taskmaster/docs/{{fileName}}\u2069. אפשר לנתח אותו וליצור את המשימות הראשונות?",
+      "docs": "צפייה בתיעוד של TaskMaster",
+      "gotIt": "הבנתי"
+    },
+    "overwriteModal": {
+      "title": "הקובץ כבר קיים",
+      "message": "כבר קיים PRD בשם \"{{fileName}}\". להחליף אותו?",
+      "cancel": "ביטול",
+      "overwrite": "החלפה"
+    }
   },
   "statuses": {
     "pending": "ממתין",

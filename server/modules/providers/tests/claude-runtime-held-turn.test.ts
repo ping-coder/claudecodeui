@@ -20,6 +20,7 @@ import {
 } from '@/modules/notifications/index.js';
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
+import { nextScheduledFire } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import {
   abortClaudeSDKSession,
   claudeRuntime,
@@ -260,10 +261,16 @@ const assistantTexts = (sent: NormalizedMessage[]) => sent
 const listedTaskIds = (sessionId: string) => listClaudeSDKBackgroundWork()
   .filter((entry) => entry.sessionId === sessionId)
   .flatMap((entry) => entry.tasks.map((task) => task.taskId));
+/** The scheduled work the runtime lists for a session. */
+const scheduledOf = (sessionId: string) => claudeRuntime.listScheduledWork()
+  .filter((entry) => entry.sessionId === sessionId)
+  .flatMap((entry) => entry.scheduled);
 
 const MINUTE = 60 * 1000;
-// The runtime's default; the tests run without the env override.
+const DAY = 24 * 60 * MINUTE;
+// The runtime's defaults; the tests run without the env overrides.
 const HOLD_IDLE_MS = 30 * MINUTE;
+const SCHEDULE_HOLD_MAX_MS = 8 * DAY;
 
 /** Settles to true once `promise` has settled, checked within a flush. */
 function track(promise: Promise<unknown>): () => boolean {
@@ -286,6 +293,7 @@ type HeldRun = {
 /**
  * Starts a run whose turn launches background work and completes, so its
  * process is held: by default a workflow (`wf1`), which the tracker follows.
+ * `expectHeld: false` is for a turn whose work does not hold the process.
  */
 async function startHeldRun(
   launch: (script: Scripted) => void = launchWorkflow,
@@ -294,7 +302,8 @@ async function startHeldRun(
     behaviour = {},
     first = createWriter(1),
     context = createContext(),
-  }: { behaviour?: ScriptedBehaviour; first?: Writer; context?: Omit<ProviderRuntimeContext, 'createQuery'> } = {},
+    expectHeld = true,
+  }: { behaviour?: ScriptedBehaviour; first?: Writer; context?: Omit<ProviderRuntimeContext, 'createQuery'>; expectHeld?: boolean } = {},
 ): Promise<HeldRun> {
   const sessionId = `app-held-turn-${randomUUID()}`;
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-held-turn-'));
@@ -305,7 +314,9 @@ async function startHeldRun(
   launch(script);
   script.emit(result());
   await waitUntil(() => completes(first.sent) === 1);
-  assert.equal(script.released(), false, 'the first process is held for its work');
+  if (expectHeld) {
+    assert.equal(script.released(), false, 'the first process is held for its work');
+  }
   return { sessionId, cwd, script, first, firstRun, context, laterQueries: [] };
 }
 
@@ -2362,16 +2373,18 @@ function fireLoopWakeup(script: Scripted, scheduledFor: number, turn: () => void
  * A CronCreate and its result as CLI 2.1.312 writes them; `output: false`
  * leaves out the output it adds to the result's message, as an older CLI
  * may. `omitRecurring` leaves the call's choice out: a job recurs by default.
- * `nextFireAt` is when the job fires next (five minutes from now by default).
+ * `nextFireAt` is when the job fires next (five minutes from now by default,
+ * which is not when the CLI's defaults would fire a `*\/5` job: the run then
+ * knows its time until its first fire only).
  */
 function createCronJob(
   script: Scripted,
   jobId: string,
-  { recurring = true, omitRecurring = false, output = true, nextFireAt = Date.now() + 5 * MINUTE }: { recurring?: boolean; omitRecurring?: boolean; output?: boolean; nextFireAt?: number } = {},
+  { recurring = true, omitRecurring = false, output = true, nextFireAt = Date.now() + 5 * MINUTE, cron = '*/5 * * * *' }: { recurring?: boolean; omitRecurring?: boolean; output?: boolean; nextFireAt?: number; cron?: string } = {},
 ): void {
   const id = `toolu_cron_${jobId}`;
   const recurs = omitRecurring || recurring;
-  script.emit(toolUse(id, 'CronCreate', { cron: '*/5 * * * *', prompt: 'check the deploy', ...(omitRecurring ? {} : { recurring }) }));
+  script.emit(toolUse(id, 'CronCreate', { cron, prompt: 'check the deploy', ...(omitRecurring ? {} : { recurring }) }));
   const text = recurs
     ? `Scheduled recurring job ${jobId} (Every 5 minutes). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.`
     : `Scheduled one-shot task ${jobId} (at 2:30pm). Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete.`;
@@ -2734,27 +2747,42 @@ test('a CronCreate the CLI refused holds nothing', async () => {
   }
 });
 
-test('a recurring job keeps its process through HOLD_IDLE of silence between fires, and HOLD_MAX still lets it go', async (t) => {
+test('a recurring job that fires keeps its process through HOLD_IDLE of silence between fires; one whose result named no time is held for HOLD_MAX from its creation', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
-  // A one-shot job whose result named no time is held the same way.
-  const jobs: Array<[string, { recurring?: boolean; output?: boolean }]> = [
-    ['a recurring job', {}],
-    ['a one-shot job with no time', { recurring: false, output: false }],
-  ];
-  for (const [label, job] of jobs) {
-    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1', job)));
-    try {
-      t.mock.timers.tick(HOLD_IDLE_MS + MINUTE);
+  // Hourly, on the hour: the job's id puts no lag on its fires.
+  let nextFireAt = 0;
+  const hourly = await startHeldRun(announcingPrompt((script) => {
+    nextFireAt = nextScheduledFire({ cron: '0 * * * *', recurring: true, id: '00000000', createdAt: Date.now() }) as number;
+    createCronJob(script, '00000000', { cron: '0 * * * *', nextFireAt });
+  }));
+  try {
+    for (let fire = 1; fire <= 3; fire += 1) {
+      t.mock.timers.tick(nextFireAt - Date.now());
       await flush();
-      assert.equal(held.script.released(), false, `${label}: silence says nothing about it`);
-      t.mock.timers.tick(12 * 60 * MINUTE);
+      assert.equal(hourly.script.released(), false, `before fire ${fire}`);
+      fireCronJob(hourly.script);
       await flush();
-      assert.equal(held.script.released(), true, label);
-      assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), ['release'], `${label}: there is no task to stop`);
-      assert.equal(held.first.finishedReports(), 0, label);
-    } finally {
-      await finish(held);
+      nextFireAt = scheduledOf(hourly.sessionId)[0]?.nextFireAt as number;
+      assert.equal(nextFireAt - Date.now(), 60 * MINUTE, `the next fire counts from fire ${fire}`);
     }
+    assert.equal(hourly.first.finishedReports(), 0);
+  } finally {
+    await finish(hourly);
+  }
+
+  const untimed = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1', { output: false })));
+  try {
+    assert.equal(scheduledOf(untimed.sessionId)[0]?.nextFireAt, null);
+    t.mock.timers.tick(HOLD_IDLE_MS + MINUTE);
+    await flush();
+    assert.equal(untimed.script.released(), false, 'silence says nothing about it');
+    t.mock.timers.tick(12 * 60 * MINUTE);
+    await flush();
+    assert.equal(untimed.script.released(), true);
+    assert.deepEqual(untimed.script.calls.filter((call) => !call.startsWith('prompt:')), ['release'], 'there is no task to stop');
+    assert.equal(untimed.first.finishedReports(), 0);
+  } finally {
+    await finish(untimed);
   }
 });
 
@@ -2822,24 +2850,37 @@ test('a wake-up or a one-shot job that never fired does not cut short the hold f
   }
 });
 
-test('a one-shot job due after HOLD_MAX runs out holds its process through HOLD_IDLE of silence and no longer', async (t) => {
+test('a one-shot job due after HOLD_MAX runs out still holds its process until it fires; one due past the hold limit does not hold it at all', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   const HOLD_MAX_MS = 12 * 60 * MINUTE;
-  for (const dueIn of [20 * 60 * MINUTE, HOLD_MAX_MS + 10 * MINUTE]) {
-    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'once1', { recurring: false, nextFireAt: Date.now() + dueIn })));
-    try {
-      t.mock.timers.tick(HOLD_IDLE_MS - 1);
-      await flush();
-      assert.equal(held.script.released(), false, `due in ${dueIn} ms`);
-      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD, `due in ${dueIn} ms`);
-      t.mock.timers.tick(1);
-      await flush();
-      assert.equal(held.script.released(), true, `due in ${dueIn} ms: it would not fire before HOLD_MAX anyway`);
-      assert.equal(held.first.finishedReports(), 0, `due in ${dueIn} ms`);
-      assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd, effort: 'max' }), NOTHING_HELD, `due in ${dueIn} ms`);
-    } finally {
-      await finish(held);
-    }
+  let nextFireAt = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    nextFireAt = Date.now() + 20 * 60 * MINUTE;
+    createCronJob(script, 'once1', { recurring: false, nextFireAt });
+  }));
+  try {
+    t.mock.timers.tick(HOLD_MAX_MS + MINUTE);
+    await flush();
+    assert.equal(held.script.released(), false, 'HOLD_MAX finds no task to stop, and the job still holds the process');
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { cwd: held.cwd }), STILL_HELD);
+    t.mock.timers.tick(nextFireAt - Date.now());
+    fireCronJob(held.script);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+
+  const far = await startHeldRun(announcingPrompt((script) => {
+    createCronJob(script, 'once2', { recurring: false, nextFireAt: Date.now() + SCHEDULE_HOLD_MAX_MS + MINUTE });
+  }), {}, { expectHeld: false });
+  try {
+    assert.equal(far.script.released(), true, 'it would not fire in this process anyway');
+    assert.equal(far.first.finishedReports(), 0);
+    assert.deepEqual(scheduledOf(far.sessionId), []);
+  } finally {
+    await finish(far);
   }
 });
 
@@ -3012,6 +3053,547 @@ test('a wake-up turn that ends the loop ahead of a handed-over prompt lets the p
     assert.equal(next.writer.finishedReports(), 0);
   } finally {
     await finish(held, [next.run]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The scheduled work a held process lists (listScheduledWork), and turns that
+// accept the process's own settings.
+// ---------------------------------------------------------------------------
+
+test('a held process lists its cron job and its wake-up with what the client shows of them', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const start = Date.now();
+  const scheduledFor = Math.ceil((start + 20 * MINUTE) / MINUTE) * MINUTE;
+  const cronNext = nextScheduledFire({ cron: '*/5 * * * *', recurring: true, id: 'b2148320', createdAt: start }) as number;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    createCronJob(script, 'b2148320', { nextFireAt: cronNext });
+    armWakeup(script, scheduledFor, 1200, 'toolu_wakeup_first');
+  }));
+  try {
+    const [job, wakeup] = scheduledOf(held.sessionId);
+    assert.deepEqual(
+      [job.id, job.kind, job.toolUseId, job.prompt, job.startedAt, job.nextFireAt, job.recurring, job.holdUntil, job.cron, job.cadence, job.expiresAt, job.durable],
+      ['cron:b2148320', 'cron', 'toolu_cron_b2148320', 'check the deploy', start, cronNext, true, start + SCHEDULE_HOLD_MAX_MS, '*/5 * * * *', 'Every 5 minutes', start + 7 * DAY, false],
+    );
+    assert.deepEqual(
+      [wakeup.id, wakeup.kind, wakeup.toolUseId, wakeup.prompt, wakeup.startedAt, wakeup.nextFireAt, wakeup.recurring, wakeup.holdUntil, wakeup.reason],
+      ['wakeup:toolu_wakeup_first', 'wakeup', 'toolu_wakeup_first', '/loop check the build', start, scheduledFor, true, start + SCHEDULE_HOLD_MAX_MS, 'polling'],
+    );
+    // The job fires on its time: its next one counts from this fire.
+    t.mock.timers.tick(cronNext - Date.now());
+    fireCronJob(held.script);
+    await flush();
+    assert.equal(scheduledOf(held.sessionId)[0]?.nextFireAt, cronNext + 285 * 1000);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a dynamic loop keeps its id through the wake-up each fire sets, and leaves the list once a fire sets none', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const first = Math.ceil((Date.now() + 2 * MINUTE) / MINUTE) * MINUTE;
+  const second = first + 2 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => armWakeup(script, first, 60, 'toolu_wakeup_chain')));
+  try {
+    t.mock.timers.tick(first - Date.now());
+    fireLoopWakeup(held.script, first, () => armWakeup(held.script, second, 120, 'toolu_wakeup_next'));
+    await flush();
+    const [wakeup] = scheduledOf(held.sessionId);
+    assert.deepEqual([wakeup?.id, wakeup?.toolUseId, wakeup?.nextFireAt], ['wakeup:toolu_wakeup_chain', 'toolu_wakeup_next', second]);
+    assert.equal(held.first.finishedReports(), 0);
+    t.mock.timers.tick(second - Date.now());
+    fireLoopWakeup(held.script, second);
+    await flush();
+    assert.deepEqual(scheduledOf(held.sessionId), []);
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1, 'the loop ended on its own');
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a wake-up a fire\'s turn sets carries the chain on, even one whose result names no time', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const first = Math.ceil((Date.now() + 2 * MINUTE) / MINUTE) * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => armWakeup(script, first, 60, 'toolu_wakeup_exact')));
+  try {
+    t.mock.timers.tick(first - Date.now());
+    fireLoopWakeup(held.script, first, () => scheduleWakeup(held.script, 'toolu_wakeup_untimed'));
+    await flush();
+    assert.equal(held.script.released(), false, 'the wake-up the fire\'s turn set is still to come');
+    const [wakeup] = scheduledOf(held.sessionId);
+    assert.deepEqual([wakeup?.id, wakeup?.toolUseId], ['wakeup:toolu_wakeup_exact', 'toolu_wakeup_untimed']);
+    assert.equal(held.first.finishedReports(), 0);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('scheduled work leaves the list as its fire, stop: true or CronDelete ends it, and when the process is let go', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchWorkflow(script);
+    createCronJob(script, 'b2148320');
+    createCronJob(script, '7b7cd8fc', { recurring: false, nextFireAt: Date.now() - 1000 });
+    armWakeup(script, Date.now() + 20 * MINUTE, 1200, 'toolu_wakeup_list');
+  }));
+  const ids = () => scheduledOf(held.sessionId).map((item) => item.id);
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    assert.deepEqual(ids(), ['cron:b2148320', 'cron:7b7cd8fc', 'wakeup:toolu_wakeup_list']);
+    fireCronJob(held.script);
+    await flush();
+    assert.deepEqual(ids(), ['cron:b2148320', 'wakeup:toolu_wakeup_list'], 'the one-shot job has fired');
+    runs.push((await runHandedOverTurn(held, 'Stop the dynamic loop', () => stopLoop(held.script))).run);
+    assert.deepEqual(ids(), ['cron:b2148320']);
+    runs.push((await runHandedOverTurn(held, 'And the job', () => deleteCronJob(held.script, 'b2148320'))).run);
+    assert.deepEqual(ids(), []);
+    assert.equal(held.script.released(), false, 'the workflow still runs');
+    assert.equal(held.first.finishedReports(), 0);
+  } finally {
+    await finish(held, runs);
+  }
+
+  const shell = await startHeldRun(announcingPrompt((script) => armWakeup(script, Date.now() + 20 * MINUTE, 1200)));
+  try {
+    assert.equal(scheduledOf(shell.sessionId).length, 1);
+    const letGo = claudeRuntime.release(shell.sessionId);
+    await flush();
+    assert.deepEqual(scheduledOf(shell.sessionId), []);
+    shell.script.end();
+    await letGo;
+  } finally {
+    await finish(shell);
+  }
+});
+
+test('a recurring job is gone at its first fire seven days on, and the process lets go, reporting the work done once', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const created = Date.now();
+  const held = await startHeldRun(announcingPrompt((script) => {
+    const nextFireAt = nextScheduledFire({ cron: '0 9 * * *', recurring: true, id: '00000000', createdAt: Date.now() }) as number;
+    createCronJob(script, '00000000', { cron: '0 9 * * *', nextFireAt });
+  }));
+  try {
+    let fires = 0;
+    while (scheduledOf(held.sessionId).length > 0 && fires < 10) {
+      t.mock.timers.tick((scheduledOf(held.sessionId)[0]?.nextFireAt as number) - Date.now());
+      await flush();
+      assert.equal(held.script.released(), false, `before fire ${fires + 1}: neither HOLD_IDLE nor HOLD_MAX lets the job go`);
+      fireCronJob(held.script);
+      await flush();
+      fires += 1;
+    }
+    const age = Date.now() - created;
+    assert.equal(age >= 7 * DAY && age < SCHEDULE_HOLD_MAX_MS, true, `the last fire came ${age} ms after the job was created`);
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a ScheduleWakeup whose result sets no wake-up holds nothing', async () => {
+  // The loop reached its maximum duration: "Wakeup not scheduled".
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchWorkflow(script);
+    script.emit(toolUse('toolu_aged', 'ScheduleWakeup', { delaySeconds: 60, prompt: '/loop check the build', reason: 'polling' }));
+    script.emit({
+      ...toolResult('toolu_aged', 'Wakeup not scheduled. The loop reached its maximum duration.'),
+      tool_use_result: { scheduledFor: 0, clampedDelaySeconds: 0, wasClamped: false },
+    });
+  }));
+  try {
+    assert.deepEqual(scheduledOf(held.sessionId), []);
+    relayFinishedTask(held.script, 'wf1', 'toolu_wf');
+    await flush();
+    assert.equal(held.script.released(), true, 'the workflow was all there was');
+    assert.equal(held.first.finishedReports(), 1);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a Monitor the CLI reported no task for still gets its HOLD_IDLE of silence when the wake-up beside it is dropped earlier', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let scheduledFor = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    launchUntrackedMonitor(script);
+    scheduledFor = Math.ceil((Date.now() + 5 * MINUTE) / MINUTE) * MINUTE;
+    armWakeup(script, scheduledFor, 300);
+  }));
+  const heldSince = Date.now();
+  try {
+    // The wake-up never fires: dropped five minutes past its time.
+    t.mock.timers.tick(scheduledFor + 5 * MINUTE - Date.now());
+    await flush();
+    assert.deepEqual(scheduledOf(held.sessionId), []);
+    assert.equal(held.script.released(), false, 'the Monitor still has the rest of its silence');
+    t.mock.timers.tick(heldSince + HOLD_IDLE_MS - Date.now() - 1);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(held.script.released(), true);
+    assert.equal(held.first.finishedReports(), 0);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a job due while a handed-over turn runs is matched to the fire that comes once the turn is over', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let due = 0;
+  const held = await startHeldRun(announcingPrompt((script) => {
+    due = nextScheduledFire({ cron: '*/5 * * * *', recurring: true, id: 'b2148320', createdAt: Date.now() }) as number;
+    createCronJob(script, 'b2148320', { nextFireAt: due });
+  }));
+  const next = sendNext(held, 'Run the whole suite');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Run the whole suite'));
+    await flush();
+    // The turn runs twenty minutes, well past the job's time.
+    t.mock.timers.tick(due + 20 * MINUTE - Date.now());
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    t.mock.timers.tick(800);
+    fireCronJob(held.script);
+    await flush();
+    assert.equal(scheduledOf(held.sessionId)[0]?.nextFireAt, Date.now() + 285 * 1000, 'its next fire counts from this one');
+    assert.equal(held.script.released(), false);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+test('HOLD_MAX running out during a long handed-over turn lets go of work past its hold limit', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  // A job whose result named no time: held for HOLD_MAX from its creation.
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'job1', { output: false })));
+  const next = sendNext(held, 'Run the whole suite');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Run the whole suite'));
+    await flush();
+    t.mock.timers.tick(12 * 60 * MINUTE - 1);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(held.script.released(), true, 'nothing holds the process past the turn');
+    assert.deepEqual(scheduledOf(held.sessionId), []);
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    assert.equal(completes(next.writer.sent), 1);
+    assert.deepEqual([held.first.finishedReports(), next.writer.finishedReports()], [0, 0]);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+const ASK_INPUT = { questions: [{ question: 'Re-run CI?', header: 'CI', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] }] };
+
+test('a turn handed over behind a turn of the CLI\'s own that waits on a question nobody answers goes with the process HOLD_MAX after the CLI last spoke, though HOLD_MAX has run out before', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const HOUR = 60 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR })));
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    t.mock.timers.tick(12 * HOUR + MINUTE);
+    await flush();
+    assert.equal(held.script.released(), false, 'HOLD_MAX found the job still to fire');
+    t.mock.timers.tick(8 * HOUR - MINUTE);
+    held.script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+    held.script.emit(init());
+    held.script.emit(toolUse('toolu_ask', 'AskUserQuestion', ASK_INPUT));
+    await flush();
+    // The user stops the loop from its chip: the stop's turn waits behind the CLI's.
+    next = sendNext(held, 'Cancel scheduled job b2148320 now', { inheritUnset: true });
+    await waitUntil(() => held.script.prompts.length === 2);
+    t.mock.timers.tick(12 * HOUR - MINUTE);
+    await flush();
+    assert.equal(held.script.released(), false);
+    t.mock.timers.tick(MINUTE);
+    await flush();
+    assert.equal(held.script.released(), true, 'the hand-over left HOLD_MAX the only timer of the hold, and it kept watching');
+    assert.deepEqual(scheduledOf(held.sessionId), []);
+    assert.equal(next.later.script.created(), false);
+  } finally {
+    await finish(held, next ? [next.run] : []);
+  }
+});
+
+test('a handed-over turn whose agent keeps talking past HOLD_MAX is not let go while a loop holds the process', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const HOUR = 60 * MINUTE;
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR })));
+  const next = sendNext(held, 'Bisect the failure');
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Bisect the failure'));
+    held.script.emit(toolUse('toolu_agent', 'Agent', { prompt: 'Bisect the failure', subagent_type: 'general-purpose' }));
+    await flush();
+    for (let minutes = 10; minutes <= 13 * 60; minutes += 10) {
+      t.mock.timers.tick(10 * MINUTE);
+      held.script.emit({ ...assistantText(`Bisecting (${minutes} min)`), parent_tool_use_id: 'toolu_agent' });
+      await flush();
+    }
+    assert.equal(held.script.released(), false, 'the turn is busy, not stuck');
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    assert.equal(completes(next.writer.sent), 1);
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+const ACCEPT_PROCESS_SETTINGS = { inheritUnset: true, acceptProcessSettings: true };
+
+test('a plan that accepts the process\'s own settings lets in a turn that changes the effort or ultracode of a process held only for scheduled work, but not stricter tool rules or another working directory', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  try {
+    const plan = (options: Record<string, unknown>, planOptions?: Record<string, unknown>) => claudeRuntime.planHandOver(
+      held.sessionId,
+      { sessionId: held.sessionId, cwd: held.cwd, model: 'opus', effort: 'high', ...options },
+      planOptions,
+    );
+    const goesIn = { heldWork: true, canHandOver: true, changes: [], switches: [] };
+    assert.deepEqual(await plan({ effort: 'max' }, INHERIT_UNSET), { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] });
+    assert.deepEqual(await plan({ effort: 'max' }, ACCEPT_PROCESS_SETTINGS), goesIn);
+    assert.deepEqual(await plan({ effort: 'max', acceptProcessSettings: true }, INHERIT_UNSET), goesIn, 'set in the options, as its run will be');
+    assert.deepEqual(await plan({ ultracode: true }, ACCEPT_PROCESS_SETTINGS), goesIn);
+    assert.deepEqual(
+      await plan({ ultracode: true, toolsSettings: { disallowedTools: ['Bash'] } }, ACCEPT_PROCESS_SETTINGS),
+      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] },
+      'tool rules that deny what the process allows need a process of their own',
+    );
+    assert.deepEqual(await plan({ effort: 'max', model: 'sonnet' }, ACCEPT_PROCESS_SETTINGS), { ...goesIn, switches: ['model'] }, 'what it can switch is still switched');
+    assert.deepEqual(
+      await plan({ effort: 'max', cwd: '/elsewhere' }, ACCEPT_PROCESS_SETTINGS),
+      { heldWork: true, canHandOver: false, changes: ['cwd'], switches: [] },
+      'another working directory still needs a process of its own',
+    );
+    assert.deepEqual(held.script.calls, [`prompt:${promptUuid(held, 0)}`], 'nothing was written or switched');
+  } finally {
+    await finish(held);
+  }
+
+  const others: Array<[string, (script: Scripted) => void]> = [
+    ['a task', (script) => { createCronJob(script, 'b2148320'); launchWorkflow(script); }],
+    ['a task still to be relayed', (script) => {
+      createCronJob(script, 'b2148320');
+      launchWorkflow(script);
+      script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
+    }],
+    ['a Monitor the CLI reported no task for', (script) => { createCronJob(script, 'b2148320'); launchUntrackedMonitor(script); }],
+  ];
+  for (const [label, launch] of others) {
+    const busy = await startHeldRun(announcingPrompt(launch), { model: 'opus', effort: 'high' });
+    try {
+      assert.deepEqual(
+        await claudeRuntime.planHandOver(busy.sessionId, { sessionId: busy.sessionId, cwd: busy.cwd, model: 'opus', effort: 'max' }, ACCEPT_PROCESS_SETTINGS),
+        { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] },
+        `${label}: the process is not held only for scheduled work`,
+      );
+    } finally {
+      await finish(busy);
+    }
+  }
+
+  let failing = false;
+  const lookup = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), {}, { context: createFailingLookupContext(() => failing) });
+  try {
+    failing = true;
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(lookup.sessionId, { cwd: lookup.cwd, effort: 'max' }, { acceptProcessSettings: true }),
+      { heldWork: true, canHandOver: false, changes: ['lookup'], switches: [] },
+    );
+  } finally {
+    failing = false;
+    await finish(lookup);
+  }
+});
+
+test('a plan that accepts the process\'s own settings lets in tool rules no stricter than the process\'s, and keeps out rules that allow fewer tools or deny others', async () => {
+  const held = await startHeldRun(
+    announcingPrompt((script) => createCronJob(script, 'b2148320')),
+    { model: 'opus', effort: 'high', ...toolsSettings(['Bash(git status:*)'], ['WebFetch'], false) },
+  );
+  try {
+    const plan = (allowedTools: string[], disallowedTools: string[], planOptions: Record<string, unknown> = ACCEPT_PROCESS_SETTINGS) => claudeRuntime.planHandOver(
+      held.sessionId,
+      { sessionId: held.sessionId, cwd: held.cwd, model: 'opus', effort: 'high', ...toolsSettings(allowedTools, disallowedTools, false) },
+      planOptions,
+    );
+    const keptOut = { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] };
+    assert.deepEqual(await plan(['Bash(git status:*)', 'Read'], []), { heldWork: true, canHandOver: true, changes: [], switches: [] }, 'allows more, and denies less: the process denies WebFetch all the same');
+    assert.deepEqual(await plan(['Bash(git status:*)', 'Read'], [], INHERIT_UNSET), keptOut, 'without accepting, any other rules need a process of their own');
+    assert.deepEqual(await plan([], ['WebFetch']), keptOut, 'allows fewer tools than the process');
+    assert.deepEqual(await plan(['Bash(git status:*)'], ['WebFetch', 'Bash(git push:*)']), keptOut, 'denies a tool the process does not');
+  } finally {
+    await finish(held);
+  }
+
+  // A loop started in plan mode allows what plan mode allows; a message from
+  // the default mode with no rules of its own allows none of it.
+  const planned = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high', permissionMode: 'plan', ...toolsSettings([], [], false) });
+  try {
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(
+        planned.sessionId,
+        { sessionId: planned.sessionId, cwd: planned.cwd, model: 'opus', effort: 'max', permissionMode: 'default', ...toolsSettings([], [], false) },
+        ACCEPT_PROCESS_SETTINGS,
+      ),
+      { heldWork: true, canHandOver: false, changes: ['tools'], switches: ['permissionMode'] },
+    );
+  } finally {
+    await finish(planned);
+  }
+});
+
+test('a turn that accepts the process\'s own settings goes into a process held only for a loop on the process\'s deny rules; without accepting, the loop is stopped', async () => {
+  const launch = { model: 'opus', effort: 'high', ...toolsSettings(['Bash(git status:*)'], ['WebFetch'], false) };
+  const turn = { model: 'opus', effort: 'max', ...toolsSettings(['Bash(git status:*)', 'Read'], [], false) };
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), launch);
+  const next = sendNext(held, 'Post a summary', { ...turn, acceptProcessSettings: true });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    assert.equal(next.later.script.created(), false, 'no second CLI is started');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'nothing is switched, stopped or released');
+    assert.deepEqual(workStoppedNotices(next.writer.sent), []);
+    assert.deepEqual(held.script.options()?.allowedTools, ['Bash(git status:*)', 'Read'], 'the run\'s permission checks grant the turn\'s own allowed tools');
+    const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+    assert.equal((await canUseTool('WebFetch', { url: 'https://example.com' }, {})).behavior, 'deny', 'what the process denies stays denied');
+    held.script.emit(echo(promptUuid(held, 1), 'Post a summary'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.equal(completes(next.writer.sent), 1);
+    assert.equal(held.script.released(), false, 'the loop still holds the process');
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+  } finally {
+    await finish(held, [next.run]);
+  }
+
+  const plain = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), launch);
+  const replaced = sendNext(plain, 'Post a summary', turn);
+  try {
+    await waitUntil(() => plain.script.released());
+    assert.deepEqual(workStoppedNotices(replaced.writer.sent).map((notice) => notice.slice(0, 2)), [['BACKGROUND_WORK_STOPPED', ['effort', 'tools']]]);
+    plain.script.end();
+    await waitUntil(() => replaced.later.script.created());
+  } finally {
+    await finish(plain, [replaced.run]);
+  }
+});
+
+test('a turn that accepts the process\'s own settings but denies what the loop\'s process allows fails, and leaves the process and the loop as they are', async () => {
+  // The loop started while the user allowed Bash; the message was queued
+  // once they had stopped allowing it and denied git push.
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high', ...toolsSettings(['Bash'], [], false) });
+  const switchedBack: unknown[] = [];
+  const writer = createWriter(2);
+  const later = createScriptedQuery();
+  held.laterQueries.push(later);
+  const options = {
+    sessionId: held.sessionId,
+    cwd: held.cwd,
+    model: 'opus',
+    effort: 'high',
+    ...toolsSettings([], ['Bash(git push:*)'], false),
+    inheritUnset: true,
+    restoreSwitchesAfterTurn: true,
+    acceptProcessSettings: true,
+    onSwitchesRestored: (restored: unknown) => { switchedBack.push(restored); },
+  };
+  try {
+    const thrown = await queryClaudeSDK('Push the fix', options, writer.writer as never, { ...held.context, createQuery: later.createQuery })
+      .then(() => null, (error: Error & { code?: unknown; reason?: unknown }) => error);
+    const failure = thrown?.message;
+    assert.equal(failure, 'Not sent: this message changes the tool permissions, which only a new Claude process can apply, and a new process would stop the session\'s scheduled work.');
+    assert.deepEqual([thrown?.code, thrown?.reason], ['HAND_OVER_FAILED', 'stale-plan'], 'the run fails with the code and reason');
+    assert.deepEqual(
+      writer.sent.filter((message) => message.kind === 'error').map((message) => [message.code, message.reason, message.changes, message.content]),
+      [['HAND_OVER_FAILED', 'stale-plan', ['tools'], failure]],
+      'the turn\'s run hears why, by code and reason, and in English',
+    );
+    assert.equal(writer.sent.some((message) => message.code === 'BACKGROUND_WORK_STOPPED'), false, 'nothing was stopped');
+    await flush();
+    assert.deepEqual(switchedBack, [{ model: null, permissionMode: null }], 'the gateway hears that nothing was switched');
+    assert.equal(later.script.created(), false, 'no new CLI');
+    assert.equal(held.script.prompts.length, 1, 'nothing goes into the loop\'s process');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'nothing is interrupted, stopped or released');
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a turn that accepts the process\'s own settings fails when its lookups fail, and leaves the loop\'s process as it is', async () => {
+  let failing = false;
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), {}, { context: createFailingLookupContext(() => failing) });
+  const writer = createWriter(2);
+  const later = createScriptedQuery();
+  held.laterQueries.push(later);
+  try {
+    failing = true;
+    const thrown = await queryClaudeSDK(
+      'Post a summary',
+      { sessionId: held.sessionId, cwd: held.cwd, model: 'opus', acceptProcessSettings: true },
+      writer.writer as never,
+      { ...held.context, createQuery: later.createQuery },
+    ).then(() => null, (error: Error & { code?: unknown; reason?: unknown }) => error);
+    const failure = thrown?.message;
+    assert.equal(failure, 'Not sent: the message could not be handed to the process the work ran in, and a new process would stop the session\'s scheduled work.');
+    assert.deepEqual([thrown?.code, thrown?.reason], ['HAND_OVER_FAILED', 'lookup']);
+    assert.deepEqual(
+      writer.sent.filter((message) => message.kind === 'error').map((message) => [message.code, message.reason, message.changes, message.content]),
+      [['HAND_OVER_FAILED', 'lookup', ['lookup'], failure]],
+    );
+    assert.equal(writer.sent.some((message) => message.code === 'BACKGROUND_WORK_STOPPED'), false, 'nothing was stopped');
+    assert.equal(later.script.created(), false, 'no new CLI');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'nothing is interrupted, stopped or released');
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+  } finally {
+    failing = false;
+    await finish(held);
+  }
+});
+
+test('a turn planned to accept the process\'s own settings still goes in when the loop\'s fire starts a task before the hand-over', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  const turn = { model: 'opus', effort: 'max', inheritUnset: true, restoreSwitchesAfterTurn: true };
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...turn }, ACCEPT_PROCESS_SETTINGS),
+      { heldWork: true, canHandOver: true, changes: [], switches: [] },
+    );
+    // The job fires, and its turn backgrounds a command before the
+    // dispatcher's send reaches the runtime.
+    held.script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+    held.script.emit(init());
+    held.script.emit(toolUse('toolu_bg', 'Bash', { command: 'npm test', run_in_background: true }));
+    held.script.emit(taskStarted('bg1', 'toolu_bg', 'local_bash'));
+    await flush();
+    next = sendNext(held, 'Post the daily summary', { ...turn, acceptProcessSettings: true });
+    await waitUntil(() => held.script.prompts.length === 2);
+    assert.equal(next.later.script.created(), false, 'no second CLI is started');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'nothing is interrupted, stopped or released');
+    assert.deepEqual(workStoppedNotices(next.writer.sent), []);
+    assert.deepEqual(listedTaskIds(held.sessionId), ['bg1']);
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+    // The fire's turn ends, then the handed-over one runs.
+    held.script.emit(result());
+    held.script.emit(echo(promptUuid(held, 1), 'Post the daily summary'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next?.settled() === true);
+    assert.equal(completes(next.writer.sent), 1);
+    assert.equal(held.script.released(), false, 'the loop and the command still hold the process');
+  } finally {
+    await finish(held, next ? [next.run] : []);
   }
 });
 

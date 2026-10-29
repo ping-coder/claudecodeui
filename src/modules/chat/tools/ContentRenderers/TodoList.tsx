@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { Queue, QueueItem, QueueItemContent, QueueItemIndicator } from '@/modules/chat/tools/Queue';
 import type { QueueItemStatus, TodoItem } from '@/shared/types';
@@ -25,6 +26,7 @@ const TodoList = memo(
     todos: TodoItem[];
     isResult?: boolean;
   }) => {
+    const { t } = useTranslation('chat');
     const normalized = useMemo(
       () => todos.map((todo) => ({ ...todo, queueStatus: normalizeStatus(todo.status) })),
       [todos],
@@ -41,7 +43,7 @@ const TodoList = memo(
       <div>
         {isResult && (
           <div className="mb-1.5 text-xs font-medium text-muted-foreground">
-            Todo List ({normalized.length} {normalized.length === 1 ? 'item' : 'items'})
+            {t('todo.listTitle', { count: normalized.length })}
           </div>
         )}
         {/* The count lives in the row header; this only draws the shape of it. */}
@@ -57,7 +59,7 @@ const TodoList = memo(
           {normalized.map((todo, index) => (
             <QueueItem key={todo.id ?? `${todo.content}-${index}`} status={todo.queueStatus}>
               <QueueItemIndicator />
-              <QueueItemContent>{todo.content}</QueueItemContent>
+              <QueueItemContent dir="auto">{todo.content}</QueueItemContent>
             </QueueItem>
           ))}
         </Queue>

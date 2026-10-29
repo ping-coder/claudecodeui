@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import type { TFunction } from 'i18next';
 
 import { api } from '@/shared/api';
 import { copyTextToClipboard } from '@/shared/utils';
@@ -17,8 +18,9 @@ type CopyState = 'loading' | 'idle' | 'copying' | 'copied' | 'error';
  * `setOptionsOpen` and `reset` are stable for a given session: ActionMenu takes
  * the former as `onOpenChange` and depends on it in two document-listener
  * effects, which would otherwise be torn down and rebuilt on every keystroke.
+ * `t` is the sidebar namespace's.
  */
-export function useProviderSessionIdCopy(sessionId: string, providerLabel: string) {
+export function useProviderSessionIdCopy(sessionId: string, providerLabel: string, t: TFunction) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
   const [providerSessionId, setProviderSessionId] = useState<string | null>(null);
   const requestRef = useRef(0);
@@ -81,14 +83,14 @@ export function useProviderSessionIdCopy(sessionId: string, providerLabel: strin
   }, [copy, copyState, load, providerSessionId]);
 
   const copyLabel = copyState === 'loading'
-    ? `Loading ${providerLabel} session ID…`
+    ? t('sessionMenu.copyIdLoading', { provider: providerLabel })
     : copyState === 'copied'
-      ? `${providerLabel} session ID copied`
+      ? t('sessionMenu.copyIdCopied', { provider: providerLabel })
       : copyState === 'error'
         ? providerSessionId
-          ? `Couldn't copy ${providerLabel} session ID`
-          : `${providerLabel} session ID unavailable`
-        : `Copy ${providerLabel} session ID`;
+          ? t('sessionMenu.copyIdFailed', { provider: providerLabel })
+          : t('sessionMenu.copyIdUnavailable', { provider: providerLabel })
+        : t('sessionMenu.copyId', { provider: providerLabel });
 
   return {
     copyState,

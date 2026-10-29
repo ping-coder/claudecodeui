@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { usePaletteOpsRegister } from '@/modules/command-palette';
+import { formatSessionTitle } from '@/modules/sidebar';
 import { useProcessingSessions } from '@/shared/context/SessionProtectionContext';
 import { writeSelectedProvider } from '@/shared/selectedProvider';
 import { useProjectEffectsState } from '@/modules/project-workspace/context/ProjectsStateContext';
@@ -39,11 +40,15 @@ export default function ProjectEffects() {
 
   // Rendered here rather than in the sidebar, so the title keeps following the focused pane while the
   // sidebar is collapsed, switched to another mode or hidden by immersive mode. The focused session is
-  // named exactly as the running part names it (live title, its tab's snapshot, localized placeholder),
-  // so when it starts running the title only gains the marker.
+  // named exactly as the running part names it (live title, its tab's snapshot, localized placeholder;
+  // the server's placeholder names translated too), so when it starts running the title only gains the
+  // marker.
   const pageTitle = focusedSession
-    ? resolveDocumentSessionTitle(focusedSession.id, projects, findSessionTab(layout, focusedSession.id)?.tab.title, t)
-    : getPageTitle(focusedProject, null);
+    ? formatSessionTitle(
+      resolveDocumentSessionTitle(focusedSession.id, projects, findSessionTab(layout, focusedSession.id)?.tab.title, t),
+      t,
+    )
+    : getPageTitle(focusedProject, null, t);
   useEffect(() => {
     setDocumentPageTitle(pageTitle);
   }, [pageTitle]);

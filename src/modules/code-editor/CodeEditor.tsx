@@ -34,6 +34,9 @@ type CodeEditorProps = {
   onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
   projectPath?: string;
   isSidebar?: boolean;
+  // The editor's full screen, owned by EditorSidebar (it keeps the editor floating while it lasts).
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
   isExpanded?: boolean;
   onToggleExpand?: (() => void) | null;
   onPopOut?: (() => void) | null;
@@ -46,13 +49,14 @@ export default function CodeEditor({
   onUnsavedChangesChange,
   projectPath,
   isSidebar = false,
+  isFullscreen = false,
+  onToggleFullscreen = () => undefined,
   isExpanded = false,
   onToggleExpand = null,
   onPopOut = null,
 }: CodeEditorProps) {
   const { t } = useTranslation('codeEditor');
   const paletteOps = usePaletteOps();
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiff, setShowDiff] = useState(Boolean(file.diffInfo));
   const [markdownPreview, setMarkdownPreview] = useState(false);
 
@@ -199,6 +203,7 @@ export default function CodeEditor({
           showDiff: t('toolbar.showDiff'),
           collapse: t('toolbar.collapse'),
           expand: t('toolbar.expand'),
+          popOut: t('toolbar.popOut', 'Open in modal'),
         },
       })
     ),
@@ -242,8 +247,10 @@ export default function CodeEditor({
 
   useEditorKeyboardShortcuts({
     onSave: handleSave,
-    onClose: requestClose,
+    // In full screen Escape first leaves it, as the browser's own Escape would; the next one closes.
+    onClose: isFullscreen ? onToggleFullscreen : requestClose,
     dependency: content,
+    isDocked: isSidebar,
   });
 
   if (loading) {
@@ -267,7 +274,7 @@ export default function CodeEditor({
         isSidebar={isSidebar}
         isFullscreen={isFullscreen}
         onClose={requestClose}
-        onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
+        onToggleFullscreen={onToggleFullscreen}
         labels={{
           loading: t('filePreview.loading', 'Loading preview...'),
           error: t('filePreview.error', 'Unable to display this file.'),
@@ -288,7 +295,7 @@ export default function CodeEditor({
         isSidebar={isSidebar}
         isFullscreen={isFullscreen}
         onClose={requestClose}
-        onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
+        onToggleFullscreen={onToggleFullscreen}
         title={t('binaryFile.title', 'Binary File')}
         message={t('binaryFile.message', 'The file "{{fileName}}" cannot be displayed in the text editor because it is a binary file.', { fileName: file.name })}
       />
@@ -297,7 +304,8 @@ export default function CodeEditor({
 
   const outerContainerClassName = isSidebar
     ? 'w-full h-full flex flex-col'
-    : `fixed inset-0 z-[9999] md:bg-black/50 md:flex md:items-center md:justify-center md:p-4 ${isFullscreen ? 'md:p-0' : ''}`;
+    // One padding class only: with both, md:p-4 wins in the stylesheet and a maximized editor keeps a 16px frame.
+    : `fixed inset-0 z-[9999] md:bg-black/50 md:flex md:items-center md:justify-center ${isFullscreen ? 'md:p-0' : 'md:p-4'}`;
 
   const innerContainerClassName = isSidebar
     ? 'bg-background flex flex-col w-full h-full'
@@ -312,7 +320,6 @@ export default function CodeEditor({
         <div className={innerContainerClassName}>
           <CodeEditorHeader
             file={file}
-            isSidebar={isSidebar}
             isFullscreen={isFullscreen}
             isMarkdownFile={isMarkdownFile}
             isHtmlPreviewFile={isHtmlPreviewFile}
@@ -327,7 +334,7 @@ export default function CodeEditor({
             onOpenSettings={() => paletteOps.openSettings('appearance')}
             onDownload={handleDownload}
             onSave={handleSave}
-            onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
+            onToggleFullscreen={onToggleFullscreen}
             onClose={requestClose}
             labels={{
               showingChanges: t('header.showingChanges'),

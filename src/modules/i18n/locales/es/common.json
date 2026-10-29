@@ -165,10 +165,11 @@
       "loading": "Cargando..."
     },
     "delete": {
-      "title": "Eliminar elemento",
       "folderWarning": "Esta carpeta y todo su contenido se eliminarán permanentemente.",
       "fileWarning": "Este archivo se eliminará permanentemente.",
-      "confirm": "Eliminar"
+      "confirm": "Eliminar",
+      "titleFolder": "Eliminar carpeta",
+      "titleFile": "Eliminar archivo"
     },
     "toast": {
       "renamed": "Renombrado correctamente",

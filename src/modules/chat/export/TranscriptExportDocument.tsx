@@ -36,7 +36,7 @@ export function TranscriptExportDocument({
 }: TranscriptExportDocumentProps) {
   // Thinking blocks are included: an export is a record of what happened, and
   // the on-screen toggle is about noise in a live conversation.
-  const grouped = groupConsecutiveTools(messages, true);
+  const grouped = groupConsecutiveTools(messages, i18n.t, true);
   let previousMessage: ChatMessage | null = null;
 
   return (

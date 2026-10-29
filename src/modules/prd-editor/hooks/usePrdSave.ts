@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import type { ExistingPrdFile } from '@/shared/types';
@@ -35,6 +36,8 @@ export function usePrdSave({
   isExistingFile,
   onAfterSave,
 }: UsePrdSaveArgs): UsePrdSaveResult {
+  // A failure's message is shown to the user as it is, so it is worded here, in the UI language.
+  const { t } = useTranslation('tasks');
   const [saving, setSaving] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const saveSuccessTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -50,15 +53,15 @@ export function usePrdSave({
   const savePrd = useCallback(
     async ({ content, fileName, allowOverwrite = false }: SavePrdInput): Promise<SavePrdResult> => {
       if (!content.trim()) {
-        return { status: 'failed', message: 'Please add content before saving.' };
+        return { status: 'failed', message: t('prdEditor.errors.emptyContent', 'Please add content before saving.') };
       }
 
       if (!fileName.trim()) {
-        return { status: 'failed', message: 'Please provide a filename for the PRD.' };
+        return { status: 'failed', message: t('prdEditor.errors.emptyFileName', 'Please provide a filename for the PRD.') };
       }
 
       if (!projectId) {
-        return { status: 'failed', message: 'No project selected. Please reopen the editor.' };
+        return { status: 'failed', message: t('prdEditor.errors.noProject', 'No project selected. Please reopen the editor.') };
       }
 
       const finalFileName = ensurePrdExtension(fileName.trim());
@@ -78,7 +81,7 @@ export function usePrdSave({
         });
 
         if (!response.ok) {
-          const fallbackMessage = `Save failed: ${response.status}`;
+          const fallbackMessage = t('prdEditor.errors.saveStatus', { defaultValue: 'Save failed: {{status}}', status: response.status });
 
           try {
             const errorData = (await response.json()) as { message?: string };
@@ -104,13 +107,13 @@ export function usePrdSave({
 
         return { status: 'saved', fileName: finalFileName };
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        return { status: 'failed', message: `Error saving PRD: ${message}` };
+        const message = error instanceof Error ? error.message : String(error);
+        return { status: 'failed', message: t('prdEditor.errors.save', { defaultValue: 'Error saving PRD: {{message}}', message }) };
       } finally {
         setSaving(false);
       }
     },
-    [existingPrds, isExistingFile, onAfterSave, projectId],
+    [existingPrds, isExistingFile, onAfterSave, projectId, t],
   );
 
   return {

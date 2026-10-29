@@ -1,5 +1,13 @@
+import type { TFunction } from 'i18next';
+
 import type { ChatMessage, DiffLine, LLMProvider } from '@/shared/types';
+import { stripBidiIsolates } from '@/shared/direction';
 import { getToolConfig } from '@/modules/chat/tools';
+import {
+  describeTaskNotificationFallback,
+  formatDateTime,
+  formatUsageLimitText,
+} from '@/modules/chat/utils/chatFormatting';
 import { parseToolPayload, summarizeDiff } from '@/modules/chat/utils/messageTransforms';
 
 type BuildTranscriptMarkdownInput = {
@@ -8,6 +16,8 @@ type BuildTranscriptMarkdownInput = {
   provider: LLMProvider | string;
   exportedAt: Date;
   createDiff: (oldStr: string, newStr: string) => DiffLine[];
+  t: TFunction;
+  language: string;
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -49,6 +59,7 @@ function readString(value: unknown): string {
 function renderToolCall(
   message: ChatMessage,
   createDiff: (oldStr: string, newStr: string) => DiffLine[],
+  t: TFunction,
 ): string {
   const toolName = message.toolName || 'Tool';
   const input = parseToolPayload(message.toolInput);
@@ -81,7 +92,8 @@ function renderToolCall(
 
   const result = readString(message.toolResult?.content);
   if (result.trim()) {
-    lines.push('', message.toolResult?.isError ? '_Failed:_' : '_Result:_', '', codeBlock(result));
+    const label = message.toolResult?.isError ? t('chat:export.document.failed') : t('chat:export.document.result');
+    lines.push('', `_${label}_`, '', codeBlock(result));
   }
 
   return lines.join('\n');
@@ -89,14 +101,18 @@ function renderToolCall(
 
 /**
  * Renders a transcript as Markdown that reads well in a plain text editor and
- * on any Markdown host, with tool calls, diffs and thinking blocks intact.
+ * on any Markdown host, with tool calls, diffs and thinking blocks intact. Its
+ * headings and labels are in the interface language (`input.t`), without the
+ * bidi isolates a right-to-left interface puts around values on screen: the
+ * file leaves the screen, as a copy does.
  */
 export function buildTranscriptMarkdown(input: BuildTranscriptMarkdownInput): string {
-  const providerLabel = PROVIDER_LABELS[String(input.provider)] ?? 'Assistant';
+  const t = ((...args: Parameters<TFunction>) => stripBidiIsolates(String(input.t(...args)))) as TFunction;
+  const providerLabel = PROVIDER_LABELS[String(input.provider)] ?? t('chat:export.document.assistant');
   const sections: string[] = [
     `# ${input.sessionTitle}`,
     '',
-    `_${input.messages.length} messages · exported ${input.exportedAt.toLocaleString()}_`,
+    `_${t('chat:export.meta', { count: input.messages.length, time: formatDateTime(input.exportedAt, input.language) })}_`,
     '',
     '---',
   ];
@@ -105,37 +121,42 @@ export function buildTranscriptMarkdown(input: BuildTranscriptMarkdownInput): st
     sections.push('');
 
     if (message.isToolUse) {
-      sections.push(renderToolCall(message, input.createDiff));
+      sections.push(renderToolCall(message, input.createDiff, t));
       continue;
     }
 
     if (message.type === 'user') {
-      sections.push(`### You`);
+      sections.push(`### ${t('chat:export.document.you')}`);
       sections.push('', readString(message.content));
       if (message.images?.length) {
-        sections.push('', `_${message.images.length} image attachment(s)_`);
+        sections.push('', `_${t('chat:export.document.images', { count: message.images.length })}_`);
       }
       if (message.files?.length) {
-        sections.push('', `_Attached: ${message.files.map((file) => file.name).join(', ')}_`);
+        sections.push('', `_${t('chat:export.document.attached', { files: message.files.map((file) => file.name).join(', ') })}_`);
       }
       continue;
     }
 
     if (message.type === 'error') {
-      sections.push('### Error', '', codeBlock(readString(message.content)));
+      // An error the server sent no words for reads as the transcript says it.
+      const content = readString(message.content).trim() ? readString(message.content) : t('chat:misc.unknownError');
+      sections.push(`### ${t('chat:messageTypes.error')}`, '', codeBlock(content));
       continue;
     }
 
     if (message.isThinking) {
-      sections.push(`### ${providerLabel} — thinking`, '', readString(message.content));
+      sections.push(`### ${t('chat:export.document.thinking', { provider: providerLabel })}`, '', readString(message.content));
       continue;
     }
 
     sections.push(`### ${providerLabel}`);
     if (message.reasoning) {
-      sections.push('', '<details><summary>Reasoning</summary>', '', readString(message.reasoning), '', '</details>');
+      sections.push('', `<details><summary>${t('chat:export.document.reasoning')}</summary>`, '', readString(message.reasoning), '', '</details>');
     }
-    sections.push('', readString(message.content));
+    const content = message.isTaskNotification && !readString(message.content).trim()
+      ? describeTaskNotificationFallback(message.taskNotificationStatus, t)
+      : readString(message.content);
+    sections.push('', formatUsageLimitText(content, t, input.language));
   }
 
   return `${sections.join('\n').replace(/\n{4,}/g, '\n\n\n')}\n`;

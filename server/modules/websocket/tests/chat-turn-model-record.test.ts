@@ -322,3 +322,87 @@ test('a composer\'s send keeps its model recorded, and its run gets no callback,
     assert.equal(recordedModel(), 'opus');
   });
 });
+
+const recordedEffort = () => sessionsDb.getSessionById(SESSION_ID)?.effort ?? null;
+const recordedUltracode = () => sessionsDb.getSessionById(SESSION_ID)?.ultracode ?? null;
+
+/** The session's row as the /loop's composer send left it: high effort, ultracode off. */
+function recordLoopSettings(): void {
+  sessionsDb.setSessionEffort(SESSION_ID, 'high');
+  sessionsDb.setSessionUltracode(SESSION_ID, false);
+}
+
+test('a message\'s turn that went in on the held process\'s own effort and ultracode leaves the session\'s recorded ones as they were once the process is switched back', async () => {
+  await withSession(async () => {
+    recordLoopSettings();
+    const held = createHeldProcessRuntime('sonnet');
+
+    await runMessage(held.dependencies, 'summarize the last run', 'sonnet', { effort: 'low', ultracode: true, acceptProcessSettings: true });
+
+    assert.equal(held.options[0]?.effort, 'low', 'a process of its own would still run at the message\'s effort');
+    assert.equal(recordedEffort(), 'low', 'recorded while the switch back is still to come');
+    assert.equal(recordedUltracode(), 1);
+    held.confirmSwitchBacks();
+    assert.equal(recordedEffort(), 'high', 'the user\'s next send goes on at the loop\'s effort');
+    assert.equal(recordedUltracode(), 0, 'off, as recorded before, not missing');
+  });
+});
+
+test('with no switch back (the process let go after the turn), the turn\'s effort and ultracode stay recorded', async () => {
+  await withSession(async () => {
+    recordLoopSettings();
+    const held = createHeldProcessRuntime('sonnet', { letsGo: true });
+
+    await runMessage(held.dependencies, 'summarize the last run', 'sonnet', { effort: 'low', ultracode: true });
+    held.confirmSwitchBacks();
+
+    assert.equal(recordedEffort(), 'low');
+    assert.equal(recordedUltracode(), 1);
+  });
+});
+
+test('an effort or ultracode the user picks while the message\'s turn runs is kept once the process is switched back', async () => {
+  await withSession(async () => {
+    recordLoopSettings();
+    const held = createHeldProcessRuntime('sonnet');
+
+    await runMessage(held.dependencies, 'summarize the last run', 'sonnet', { effort: 'low', ultracode: true });
+    // POST active-effort and active-ultracode, from a composer.
+    sessionsDb.setSessionEffort(SESSION_ID, 'medium');
+    sessionsDb.setSessionUltracode(SESSION_ID, false);
+    held.confirmSwitchBacks();
+
+    assert.equal(recordedEffort(), 'medium');
+    assert.equal(recordedUltracode(), 0);
+  });
+});
+
+test('two messages\' turns faster than the first one\'s switch back leave the effort recorded before the first, and one that records no effort leaves its own switch back nothing to put back', async () => {
+  for (const second of ['low', 'medium'] as const) {
+    await withSession(async () => {
+      recordLoopSettings();
+      const held = createHeldProcessRuntime('sonnet');
+
+      await runMessage(held.dependencies, 'first', 'sonnet', { effort: 'low' });
+      await runMessage(held.dependencies, 'second', 'sonnet', { effort: second });
+      held.confirmSwitchBacks(1);
+      assert.equal(recordedEffort(), second, `the second one's turn is still on its own (${second})`);
+      held.confirmSwitchBacks();
+      assert.equal(recordedEffort(), 'high', `low then ${second}`);
+    });
+  }
+
+  await withSession(async () => {
+    recordLoopSettings();
+    const held = createHeldProcessRuntime('sonnet');
+
+    await runMessage(held.dependencies, 'first', 'sonnet', { effort: 'low' });
+    await runMessage(held.dependencies, 'second, at the effort the session has', 'opus');
+    held.confirmSwitchBacks(1);
+    assert.equal(recordedEffort(), 'high', 'the first one\'s switch back puts the effort back');
+    assert.equal(recordedModel(), 'opus', 'the second one\'s model is still its own');
+    held.confirmSwitchBacks();
+    assert.equal(recordedEffort(), 'high');
+    assert.equal(recordedModel(), 'sonnet');
+  });
+});

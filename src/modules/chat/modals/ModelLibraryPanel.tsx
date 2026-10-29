@@ -20,6 +20,7 @@ import type {
   ProviderModelOption,
   ProviderModelsDefinition,
 } from '@/shared/types';
+import { describeEffortLevel, describeModelOption } from '@/modules/chat/utils/catalogLabels';
 
 const PROVIDERS: Array<{ id: LLMProvider; label: string }> = [
   { id: 'claude', label: 'Claude' },
@@ -181,7 +182,7 @@ export default function ModelLibraryPanel({
       return;
     }
     if (/\s/.test(normalizedId)) {
-      setError('Model IDs cannot contain spaces.');
+      setError(t('chat:modelLibrary.idHasSpaces'));
       return;
     }
 
@@ -196,14 +197,14 @@ export default function ModelLibraryPanel({
           id: normalizedId,
           ...(effort === undefined ? {} : { effort }),
         });
-        setNotice(`${normalizedModel} was updated.`);
+        setNotice(t('chat:modelLibrary.updated', { model: normalizedModel }));
       } else {
         await actions.create(selectedProvider, {
           model: normalizedModel,
           id: normalizedId,
           ...(effort === undefined ? {} : { effort }),
         });
-        setNotice(`${normalizedModel} was added.`);
+        setNotice(t('chat:modelLibrary.added', { model: normalizedModel }));
       }
       resetForm();
     } catch (caughtError) {
@@ -227,7 +228,7 @@ export default function ModelLibraryPanel({
         resetForm();
       }
       setConfirmDeleteRecordId(null);
-      setNotice(`${option.label} was deleted.`);
+      setNotice(t('chat:modelLibrary.deleted', { model: option.label }));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : t('chat:misc.modelDeleteFailed'));
     } finally {
@@ -244,9 +245,9 @@ export default function ModelLibraryPanel({
               <Plus className="h-4 w-4" />
             </span>
             <div>
-              <p className="text-base font-semibold tracking-tight text-foreground">Model library</p>
+              <p className="text-base font-semibold tracking-tight text-foreground">{t('chat:modelLibrary.title')}</p>
               <p className="text-xs leading-5 text-muted-foreground">
-                Add model IDs supported by your provider. Built-in models stay locked.
+                {t('chat:modelLibrary.subtitle')}
               </p>
             </div>
           </div>
@@ -254,7 +255,7 @@ export default function ModelLibraryPanel({
         {onDone && (
           <Button type="button" variant="outline" size="sm" onClick={onDone} className="shrink-0 rounded-xl">
             <ArrowLeft className="h-3.5 w-3.5" />
-            Back to models
+            {t('chat:modelLibrary.backToModels')}
           </Button>
         )}
       </div>
@@ -289,10 +290,10 @@ export default function ModelLibraryPanel({
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-semibold text-foreground">
-                {editing ? 'Edit custom model' : 'Add a custom model'}
+                {editing ? t('chat:modelLibrary.editTitle') : t('chat:modelLibrary.addTitle')}
               </p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                The ID is sent to {selectedProviderLabel} exactly as written.
+                {t('chat:modelLibrary.idSentAsWritten', { provider: selectedProviderLabel })}
               </p>
             </div>
             {editing && (
@@ -310,33 +311,33 @@ export default function ModelLibraryPanel({
           </div>
 
           <label className="mt-4 block text-xs font-semibold text-foreground" htmlFor="custom-model-name">
-            Model name
+            {t('chat:modelLibrary.nameLabel')}
           </label>
           <Input
             id="custom-model-name"
             value={model}
             onChange={(event) => setModel(event.target.value)}
             maxLength={80}
-            placeholder="e.g. GPT-5.5 Pro"
+            placeholder={t('chat:modelLibrary.namePlaceholder')}
             autoComplete="off"
             className="mt-1.5 h-10 rounded-xl bg-background"
           />
 
           <label className="mt-4 block text-xs font-semibold text-foreground" htmlFor="custom-model-id">
-            Model ID
+            {t('chat:modelLibrary.idLabel')}
           </label>
           <Input
             id="custom-model-id"
             value={modelId}
             onChange={(event) => setModelId(event.target.value)}
             maxLength={200}
-            placeholder="e.g. gpt-5.5-pro"
+            placeholder={t('chat:modelLibrary.idPlaceholder')}
             autoComplete="off"
             spellCheck={false}
             className="mt-1.5 h-10 rounded-xl bg-background font-mono"
           />
           <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground">
-            Use the exact identifier accepted by the provider CLI. IDs cannot contain spaces.
+            {t('chat:modelLibrary.idHint')}
           </p>
 
           {providerEffortLevels.length > 0 && (
@@ -359,7 +360,7 @@ export default function ModelLibraryPanel({
                           : 'border-border/70 bg-background text-muted-foreground hover:text-foreground'
                       }`}
                     >
-                      {level}
+                      {describeEffortLevel(level, t)}
                     </button>
                   );
                 })}
@@ -384,7 +385,11 @@ export default function ModelLibraryPanel({
 
           <Button type="submit" disabled={saving} className="mt-4 w-full rounded-xl">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : editing ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-            {saving ? 'Saving…' : editing ? 'Save changes' : 'Add model'}
+            {saving
+              ? t('chat:modelLibrary.saving')
+              : editing
+                ? t('chat:modelLibrary.saveChanges')
+                : t('chat:modelLibrary.addModel')}
           </Button>
         </form>
 
@@ -392,8 +397,8 @@ export default function ModelLibraryPanel({
           <section>
             <div className="mb-2 flex items-center justify-between gap-3 px-1">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground">Your models</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">Editable and stored in auth.db</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground">{t('chat:modelLibrary.yourModels')}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('chat:modelLibrary.yourModelsHint')}</p>
               </div>
               <Badge variant="secondary" className="rounded-full text-[10px]">{customModels.length}</Badge>
             </div>
@@ -423,8 +428,8 @@ export default function ModelLibraryPanel({
 
             {customModels.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border bg-background/60 px-4 py-7 text-center">
-                <p className="text-sm font-medium text-foreground">No custom models yet</p>
-                <p className="mt-1 text-xs text-muted-foreground">Add one with the form and it will appear in every model picker.</p>
+                <p className="text-sm font-medium text-foreground">{t('chat:modelLibrary.noCustomModels')}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{t('chat:modelLibrary.noCustomModelsHint')}</p>
               </div>
             ) : (
               <div className="space-y-2">
@@ -437,13 +442,13 @@ export default function ModelLibraryPanel({
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <p className="truncate text-sm font-semibold text-foreground">{option.label}</p>
-                            <Badge className="rounded-full px-2 py-0 text-[9px]">Custom</Badge>
+                            <Badge className="rounded-full px-2 py-0 text-[9px]">{t('chat:modelLibrary.customBadge')}</Badge>
                           </div>
                           <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{option.value}</p>
                           {option.effort && option.effort.values.length > 0 && (
                             <p className="mt-0.5 text-[11px] text-muted-foreground">
                               {t('chat:modelLibrary.effortSummary', {
-                                levels: option.effort.values.map((level) => level.value).join(' · '),
+                                levels: option.effort.values.map((level) => describeEffortLevel(level.value, t)).join(' · '),
                               })}
                             </p>
                           )}
@@ -456,7 +461,7 @@ export default function ModelLibraryPanel({
                               size="icon"
                               onClick={() => startEditing(option)}
                               className="h-8 w-8 rounded-lg"
-                              aria-label={`Edit ${option.label}`}
+                              aria-label={t('chat:modelLibrary.editModel', { model: option.label })}
                             >
                               <Pencil className="h-3.5 w-3.5" />
                             </Button>
@@ -466,7 +471,7 @@ export default function ModelLibraryPanel({
                               size="icon"
                               onClick={() => setConfirmDeleteRecordId(option.recordId ?? null)}
                               className="h-8 w-8 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                              aria-label={`Delete ${option.label}`}
+                              aria-label={t('chat:modelLibrary.deleteModel', { model: option.label })}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
@@ -475,14 +480,14 @@ export default function ModelLibraryPanel({
                       </div>
                       {confirming && (
                         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3">
-                          <p className="text-xs text-muted-foreground">Delete this model from all pickers?</p>
+                          <p className="text-xs text-muted-foreground">{t('chat:modelLibrary.deleteConfirm')}</p>
                           <div className="flex items-center gap-2">
                             <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDeleteRecordId(null)} className="h-8 rounded-lg">
-                              Cancel
+                              {t('chat:modelLibrary.cancel')}
                             </Button>
                             <Button type="button" variant="destructive" size="sm" disabled={deleting} onClick={() => void handleDelete(option)} className="h-8 rounded-lg">
                               {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                              Delete
+                              {t('chat:modelLibrary.delete')}
                             </Button>
                           </div>
                         </div>
@@ -497,8 +502,8 @@ export default function ModelLibraryPanel({
           <section>
             <div className="mb-2 flex items-center justify-between gap-3 px-1">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground">Built-in models</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">Maintained by CloudCLI and read-only</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-foreground">{t('chat:modelLibrary.builtInModels')}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('chat:modelLibrary.builtInModelsHint')}</p>
               </div>
               {!builtInModelsHidden && (
                 <Badge variant="secondary" className="rounded-full text-[10px]">{predefinedModels.length}</Badge>
@@ -515,7 +520,7 @@ export default function ModelLibraryPanel({
                   <div key={option.recordId ?? option.value} className="flex items-center gap-3 border-b border-border/60 px-3 py-2.5 last:border-b-0">
                     <LockKeyhole className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-medium text-foreground">{option.label}</p>
+                      <p className="truncate text-xs font-medium text-foreground">{describeModelOption(option, t)}</p>
                       <p className="truncate font-mono text-[10px] text-muted-foreground">{option.value}</p>
                     </div>
                   </div>

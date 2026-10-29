@@ -105,7 +105,7 @@ test('inside the desktop app immersive mode comes without the browser fullscreen
   assert.equal(requestFullscreen.mock.calls.length, 0);
   assert.equal(result.current.isImmersive, true);
   assert.equal(result.current.isBrowserFullscreen, false);
-  // Nothing was asked of the browser, so there is nothing to explain.
+  // Nothing was asked of the browser; the desktop app's window menu has the native full screen.
   assert.equal(result.current.browserFullscreenIssue, null);
 });
 
@@ -117,7 +117,8 @@ test('where the Fullscreen API is off (iPhone) immersive mode comes alone', asyn
 
   assert.equal(requestFullscreen.mock.calls.length, 0);
   assert.equal(result.current.isImmersive, true);
-  assert.equal(result.current.browserFullscreenIssue, null);
+  // Phones do not show it (the shell decides); the reason is there for a desktop browser without the API.
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'unavailable', cause: 'noApi' });
 });
 
 test('a refused request leaves immersive mode on and says why', async () => {
@@ -480,13 +481,14 @@ test('a grant the window never shows is reported as full screen kept inside the 
 
   await enterOrLeave(result.current.toggleImmersive);
   assert.equal(result.current.isBrowserFullscreen, true);
-  assert.deepEqual(displayMode.queries, ['(display-mode: fullscreen)']);
+  // The report reads the other display modes too; only the fullscreen one is waited on.
+  assert.equal(displayMode.queries.includes('(display-mode: fullscreen)'), true);
   assert.equal(displayMode.listeners.size, 1);
   advanceTime(2999);
   assert.equal(result.current.browserFullscreenIssue, null);
   advanceTime(1);
 
-  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow' });
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow', kind: 'tab' });
   assert.equal(displayMode.listeners.size, 0);
   assert.equal(vi.getTimerCount(), 0);
   assert.equal(result.current.isImmersive, true);
@@ -557,8 +559,8 @@ test('outside Chromium a granted fullscreen element is taken as the whole screen
 
   await enterOrLeave(result.current.toggleImmersive);
 
-  // Safari's display-mode does not follow the window, so it is not even asked.
-  assert.deepEqual(displayMode.queries, []);
+  // Safari's display-mode does not follow the window: read for the report, never waited on.
+  assert.equal(displayMode.listeners.size, 0);
   assert.equal(vi.getTimerCount(), 0);
   advanceTime(3000);
   assert.equal(result.current.browserFullscreenIssue, null);
@@ -575,7 +577,7 @@ test('a grant that leaves nothing fullscreen (an extension\'s stand-in) is repor
   assert.equal(result.current.browserFullscreenIssue, null);
   advanceTime(1);
 
-  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow' });
+  assert.deepEqual(result.current.browserFullscreenIssue, { reason: 'inWindow', kind: 'tab' });
 });
 
 test('the prefixed request (Safari before 16.4) is not checked: only webkitfullscreenchange reports it', async () => {

@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next';
 
+import { stripBidiIsolates } from '@/shared/direction';
 import type { LLMProvider, RunAlertOutcome } from '@/shared/types';
 
 /**
@@ -310,8 +311,10 @@ export const showRunAlertSystemNotification = async ({
     }
 
     // `renotify` is missing from TypeScript's NotificationOptions, though browsers read it.
+    // The isolates a right-to-left interface puts around values would hide every letter from
+    // the system's guess of the text's direction; without them it goes by the first letter.
     const options: NotificationOptions & { renotify: boolean } = {
-      body,
+      body: stripBidiIsolates(body),
       tag,
       data,
       icon: '/logo-256.png',
@@ -319,7 +322,7 @@ export const showRunAlertSystemNotification = async ({
       silent,
       renotify: !silent,
     };
-    await registration.showNotification(title, options);
+    await registration.showNotification(stripBidiIsolates(title), options);
     return true;
   } catch {
     return false;

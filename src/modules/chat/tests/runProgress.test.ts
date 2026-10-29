@@ -239,6 +239,24 @@ describe('the progress of a busy session', () => {
     expect(`${progress?.unit} ${progress?.done}/${progress?.total}`).toBe('tasks 1/2');
   });
 
+  it('keeps counting the turn\'s checklist past a local command written while it runs, such as a model switch', () => {
+    const modelSwitch: ChatMessage = {
+      type: 'user',
+      content: '/model claude-opus-5-5',
+      timestamp: '2026-10-26T10:00:20.000Z',
+      commandName: '/model',
+      isLocalCommand: true,
+    };
+    const progress = deriveActivityProgress([
+      userTurn(),
+      checklist([{ content: 'Read', status: 'completed' }, { content: 'Write', status: 'in_progress' }]),
+      modelSwitch,
+    ], runningTurn);
+
+    expect(progress === null).toBe(false);
+    expect(`${progress?.unit} ${progress?.done}/${progress?.total}`).toBe('tasks 1/2');
+  });
+
   it('never borrows a checklist from an earlier turn', () => {
     const earlier = checklist([{ content: 'Read', status: 'completed' }, { content: 'Write', status: 'pending' }]);
 

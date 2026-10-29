@@ -99,7 +99,7 @@ export default function GithubAuthenticationCard({
               <select
                 value={selectedGithubToken}
                 onChange={(event) => onSelectedGithubTokenChange(event.target.value)}
-                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800"
+                className="w-full rounded-lg border border-gray-300 bg-white py-2 pe-10 ps-3 text-sm dark:border-gray-600 dark:bg-gray-800"
               >
                 <option value="">{t('projectWizard.step2.selectTokenPlaceholder')}</option>
                 {availableTokens.map((token) => (

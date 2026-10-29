@@ -153,6 +153,30 @@ describe('the pinned question', () => {
     assert.equal(result.current.inserts.length === 1, true);
   });
 
+  it('stays on the turn\'s question past a local command written into it, such as a model switch', () => {
+    // A local command asks the model nothing, so it opens no turn and is no insert either.
+    const modelSwitch = user(at(21), '/model claude-opus-5-5', { commandName: '/model', isLocalCommand: true });
+    const switched: ChatMessage = { type: 'assistant', timestamp: at(21), content: 'Set model to claude-opus-5-5', isLocalCommandStdout: true };
+    const { container } = createTranscript([
+      { timestamp: q1.timestamp as string, top: -900 },
+      { timestamp: q2.timestamp as string, top: -300 },
+    ]);
+    const scrollContainerRef = { current: container };
+    const messages = [q1, a1, q2, a2, modelSwitch, switched, assistant(at(25))];
+    const { result } = renderHook(() => usePinnedQuestion({
+      scrollContainerRef,
+      chatMessages: messages,
+      renderedCount: messages.length,
+      isUserScrolledUp: false,
+      hasMoreMessages: false,
+      readEarlierQuestion: neverRead,
+    }));
+    flushFrames();
+
+    assert.equal(result.current.question === q2, true);
+    assert.equal(result.current.inserts.length === 0, true);
+  });
+
   it('is the turn of the first rendered row when no turn opens above the line, even with its question loaded but not rendered', () => {
     const a2b = assistant(at(22));
     const a2c = assistant(at(24));

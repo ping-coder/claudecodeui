@@ -12,14 +12,23 @@ import type {
 // Presentation data the sidebar derives from a session before rendering its row.
 type SessionViewModel = {
   isActive: boolean;
+  /** The title as stored: what a rename starts from. */
   sessionName: string;
+  /** The title as the row shows it (formatSessionTitle). */
+  sessionTitle: string;
   sessionTime: string;
   messageCount: number;
 };
 
+/**
+ * How long ago, in a few characters of the interface language ("<1m", "5m", "23hr", "2d" in
+ * English): under a minute, minutes, hours, then days. Empty for a missing or unreadable date.
+ * `t` is the sidebar namespace's.
+ */
 export const formatCompactAge = (
   dateString: string | null | undefined,
   currentTime: Date,
+  t: TFunction,
 ): string => {
   if (!dateString) return '';
 
@@ -27,11 +36,36 @@ export const formatCompactAge = (
   if (Number.isNaN(date.getTime())) return '';
 
   const minutes = Math.floor(Math.max(0, currentTime.getTime() - date.getTime()) / 60000);
-  if (minutes < 1) return '<1m';
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 1) return t('time.compactNow');
+  if (minutes < 60) return t('time.compactMinutes', { count: minutes });
 
   const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}hr` : `${Math.floor(hours / 24)}d`;
+  return hours < 24
+    ? t('time.compactHours', { count: hours })
+    : t('time.compactDays', { count: Math.floor(hours / 24) });
+};
+
+/** "Untitled Claude Session" and the like: the names the server gives a session that has no title yet. */
+const SERVER_UNTITLED_SESSION = /^Untitled (Claude|Codex|Cursor|OpenCode) Session$/;
+
+/**
+ * A session title as the sidebar shows it: the server's placeholder names ("Untitled Claude Session",
+ * "Untitled Session", agy's "Untitled", the conversation search's "New Session") in the interface
+ * language, any other title as it is. A rename starts from the stored title, so saving it unchanged
+ * does not store the translation. The keys name their namespace, so any `t` will do. Exported for
+ * project-workspace, which names sessions this way too (pane tabs, the phone header, an empty pane's
+ * recent list, the browser tab title, the palette's session rows, the terminal's header), and for
+ * run-notifications (a session the workspace does not know, by the server's name).
+ */
+export const formatSessionTitle = (title: string, t: TFunction): string => {
+  const provider = SERVER_UNTITLED_SESSION.exec(title)?.[1];
+  if (provider) {
+    return t('sidebar:projects.untitledProviderSession', { provider });
+  }
+  if (title === 'New Session') {
+    return t('sidebar:projects.newSession');
+  }
+  return title === 'Untitled Session' || title === 'Untitled' ? t('sidebar:projects.untitledSession') : title;
 };
 
 const getCreatedTimestamp = (session: SessionWithProvider): string => {
@@ -68,10 +102,12 @@ export const createSessionViewModel = (
 ): SessionViewModel => {
   const sessionDate = getSessionDate(session);
   const diffInMinutes = Math.floor((currentTime.getTime() - sessionDate.getTime()) / (1000 * 60));
+  const sessionName = getSessionName(session, t);
 
   return {
     isActive: diffInMinutes < 10,
-    sessionName: getSessionName(session, t),
+    sessionName,
+    sessionTitle: formatSessionTitle(sessionName, t),
     sessionTime: getSessionTime(session),
     messageCount: Number(session.messageCount || 0),
   };

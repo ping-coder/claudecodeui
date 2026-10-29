@@ -244,6 +244,19 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
 
 // ---------------------------
 
+//----------------- PROVIDER NAMES ------------
+
+/** Each provider's name as lists show it beside a session, the same in every language (the command palette). */
+export const PROVIDER_DISPLAY_NAMES: Record<LLMProvider, string> = {
+  claude: 'Claude',
+  cursor: 'Cursor',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  agy: 'Antigravity',
+};
+
+// ---------------------------
+
 //----------------- PROVIDER SIGN-IN ------------
 
 /**
@@ -360,8 +373,9 @@ export const FILES_TREE_RATIO_DEFAULT = 0.4;
 
 /**
  * Class on the always-mounted wrapper of every transcript row that opens a turn (a user message that was
- * not inserted mid-turn; see isTurnOpener). Set by chat's ChatMessagesPane through LazyMessageRow, read by
- * chat's usePinnedQuestion, which finds these wrappers in document order to tell which turn sits at the top
- * of the transcript. Kept off `.chat-message`, so the scroll restore never takes a wrapper for a row.
+ * neither inserted mid-turn nor a local command; see isTurnOpener). Set by chat's ChatMessagesPane through
+ * LazyMessageRow, read by chat's usePinnedQuestion, which finds these wrappers in document order to tell
+ * which turn sits at the top of the transcript. Kept off `.chat-message`, so the scroll restore never takes
+ * a wrapper for a row.
  */
 export const TURN_OPENER_ROW_CLASS = 'chat-turn-opener-row';

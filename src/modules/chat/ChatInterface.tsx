@@ -4,6 +4,7 @@ import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '@/modules/task-master';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
+import { hasFloatingEditor } from '@/modules/code-editor';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { useChatInstanceCoordinator } from '@/modules/chat/context/ChatInstancesContext';
@@ -11,6 +12,7 @@ import PermissionContext from '@/modules/chat/context/PermissionContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
+import { hasMaximizedOverlay } from '@/shared/browserFullscreen';
 import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
 import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { buildModelRunOptions } from '@/shared/utils';
@@ -60,16 +62,16 @@ type ChatInterfaceProps = {
 };
 
 /**
- * The longest Escape press that still stops a run while the workspace's
- * fullscreen holds the key; a longer one is the user holding Escape to leave
- * fullscreen, as the browser tells them to.
+ * The longest Escape press that still stops a run while the fullscreen holds
+ * the key; a longer one is the user holding Escape to leave fullscreen, as the
+ * browser tells them to.
  */
 const SHORT_ESCAPE_PRESS_MS = 500;
 
 
 /**
- * Whether the browser holds Escape for the page: the workspace's fullscreen of
- * the root element locks the key where Keyboard Lock exists (Chromium, secure
+ * Whether the browser holds Escape for the page: the shared fullscreen of the
+ * root element locks the key where Keyboard Lock exists (Chromium, secure
  * origins). A press then reaches the page as it starts and only holding it on
  * leaves fullscreen, so its start cannot tell the two apart.
  */
@@ -137,6 +139,7 @@ function ChatInterface({
     markSessionIdle: onSessionIdle,
     markSessionBackground: onSessionBackground,
     getSessionActivity,
+    refreshRunningSessions,
   } = useSessionProtectionActions();
 
   const sessionStore = useSessionStore();
@@ -475,6 +478,7 @@ function ChatInterface({
     onSessionIdle,
     onSessionBackground,
     getSessionActivity,
+    refreshRunningSessions,
     onWebSocketReconnect: handleWebSocketReconnect,
     onInsertStatus: handleInsertStatus,
     onInsertRunEnded: handleInsertRunEnded,
@@ -508,9 +512,11 @@ function ChatInterface({
   // Esc stops the run on screen: only while Chat is the visible view of the
   // focused pane, so another pane's run, or one behind the Files view, is
   // never stopped by a key meant for something else, and never while a menu,
-  // dialog or drawer that owns Escape is open: that Escape closes it alone.
-  // Where the workspace's fullscreen holds the key, a press stops the run when
-  // it is released early, since holding it is how fullscreen is left.
+  // dialog or drawer that owns Escape is open, or a floating editor or a
+  // maximized view (the editor, the PRD editor, Browser Use's preview) covers
+  // the page: that Escape closes it, or ends its maximize, alone.
+  // Where the fullscreen holds the key, a press stops the run when it is
+  // released early, since holding it is how fullscreen is left.
   useEffect(() => {
     if (!canAbortSession || !isActive || !isFocusedPane) {
       return;
@@ -535,7 +541,7 @@ function ChatInterface({
       // first. One whose listener came before this one has claimed it, and a
       // browser may have committed its close in between, so it can be gone
       // from the page by now; one whose listener comes after is still open.
-      if (event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR)) {
+      if (event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR) || hasMaximizedOverlay() || hasFloatingEditor()) {
         return;
       }
 
@@ -798,6 +804,7 @@ function ChatInterface({
                 loadEarlierMessages={loadEarlierMessages}
                 revealMessage={revealMessage}
                 backgroundTasks={sessionActivity?.tasks}
+                backgroundScheduled={sessionActivity?.scheduled}
                 canStopBackgroundTasks={canStopBackgroundTasks}
                 sendMessage={sendMessage}
                 loadAllMessages={loadAllMessages}

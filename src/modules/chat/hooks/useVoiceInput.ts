@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { transcribeVoice } from '@/shared/api';
 import type { VoiceInputState } from '@/shared/types';
@@ -33,6 +34,7 @@ export function useVoiceInput(
   onTranscript: (text: string, send?: boolean) => void,
   onError?: (msg: string) => void,
 ) {
+  const { t } = useTranslation('chat');
   const [state, setState] = useState<VoiceInputState>('idle');
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -90,7 +92,7 @@ export function useVoiceInput(
         const blob = new Blob(chunksRef.current, { type });
         if (blob.size < 800) {
           setState('idle');
-          onError?.('Recording too short');
+          onError?.(t('voice.errors.tooShort'));
           return;
         }
         setState('transcribing');
@@ -102,10 +104,10 @@ export function useVoiceInput(
           if (cancelledRef.current) return;
           const text = String(data?.text || '').trim();
           if (text) onTranscript(text, shouldSend);
-          else onError?.('No speech detected');
+          else onError?.(t('voice.errors.noSpeech'));
         } catch (e) {
           if (!cancelledRef.current) {
-            onError?.(`Transcription failed: ${e instanceof Error ? e.message : String(e)}`);
+            onError?.(t('voice.errors.transcriptionFailed', { error: e instanceof Error ? e.message : String(e) }));
           }
         } finally {
           if (!cancelledRef.current) setState('idle');
@@ -119,15 +121,15 @@ export function useVoiceInput(
       stopTracks();
       if (cancelledRef.current) return;
       const err = e as { name?: string; message?: string };
-      let msg = `Mic error: ${err?.message || e}`;
-      if (err?.name === 'NotAllowedError') msg = 'Microphone access denied.';
-      else if (err?.name === 'NotFoundError') msg = 'No microphone found.';
+      let msg = t('voice.errors.micError', { error: err?.message || String(e) });
+      if (err?.name === 'NotAllowedError') msg = t('voice.errors.micDenied');
+      else if (err?.name === 'NotFoundError') msg = t('voice.errors.noMic');
       onError?.(msg);
       setState('idle');
     } finally {
       startingRef.current = false;
     }
-  }, [onTranscript, onError]);
+  }, [onTranscript, onError, t]);
 
   // Stop recording. Pass { send: true } to auto-send the transcript once it's ready.
   // Guard on the recorder's own state (not React state) so a double tap, or the mic

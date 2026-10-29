@@ -14,6 +14,7 @@ import type {
   LLMProvider,
   NormalizedMessage,
   RunEndedEvent,
+  ScheduledWorkSummary,
   WorkflowAgentActivity,
 } from '@/shared/types.js';
 import { AppError, sliceTailPage } from '@/shared/utils.js';
@@ -27,6 +28,12 @@ import { AppError, sliceTailPage } from '@/shared/utils.js';
  * (the runtime accepts a new turn while the work runs) and there is no run to
  * abort — a task is stopped by id through `chat.stop-task` instead. `tasks`
  * rides along on both kinds whenever the session has any.
+ *
+ * Asked with `scheduled`, each entry also carries the scheduled work the
+ * session's process holds (a /loop's next wake-up, a CronCreate job) as
+ * `scheduled`, and a session with only that is listed as background work
+ * with no tasks. Without it, such a session is left out, as a client that
+ * cannot show scheduled work expects.
  *
  * A turn driven outside CloudCLI — the Claude CLI in the Shell view, or a
  * terminal the user opened themselves — is listed the same way, with
@@ -42,6 +49,7 @@ type RunningSessionEntry = {
   canInterrupt?: false;
   statusText?: string;
   tasks?: BackgroundTaskSummary[];
+  scheduled?: ScheduledWorkSummary[];
 };
 
 type CreateAppSessionResult = {
@@ -143,7 +151,10 @@ function resolveProjectDisplayName(
  * Whether a history row opens a turn, making it the question the pinned
  * question bar shows for every row up to the next one: user text with
  * something to show, other than a message inserted into a running turn, a
- * compaction row or its summary, or a `<task-notification>` the CLI injected.
+ * local command (`isLocalCommand`: `/model`, `/cost`, which Claude Code runs
+ * without asking the model), a compaction row or its summary, or a
+ * `<task-notification>` the CLI injected. A slash command that hands the model
+ * a turn, such as `/review` or a custom command, opens one like any message.
  *
  * Mirrors the client, where a row opens a turn when `normalizedToChatMessages`
  * (src/modules/chat/hooks/useChatMessages.ts) draws it as a user row and
@@ -153,7 +164,7 @@ function resolveProjectDisplayName(
  * question with how far the pane had paged back.
  */
 function isTurnQuestion(message: NormalizedMessage): boolean {
-  if (message.kind !== 'text' || message.role !== 'user' || message.inserted) {
+  if (message.kind !== 'text' || message.role !== 'user' || message.inserted || message.isLocalCommand) {
     return false;
   }
   if (message.compact || message.isCompactSummary) {
@@ -187,12 +198,14 @@ export const sessionsService = {
 
   /**
    * Returns app-facing ids for provider runs that are currently processing,
-   * plus every session whose background work outlived its turn.
+   * plus every session whose background work outlived its turn, and with
+   * `scheduled` every session whose process holds scheduled work (see
+   * `RunningSessionEntry`).
    *
    * This is intentionally status-only: callers that only need sidebar activity
    * indicators should not attach to chat streams or request replayed messages.
    */
-  async listRunningSessions(): Promise<RunningSessionEntry[]> {
+  async listRunningSessions({ scheduled: listScheduled = false }: { scheduled?: boolean } = {}): Promise<RunningSessionEntry[]> {
     const entries: RunningSessionEntry[] = chatRunRegistry.listRunningRuns();
     const runningById = new Map(entries.map((entry) => [entry.sessionId, entry]));
 
@@ -222,11 +235,47 @@ export const sessionsService = {
       }
     }
 
+    for (const provider of providerRegistry.listProviders()) {
+      for (const { sessionId, scheduled } of provider.runtime.listScheduledWork?.() ?? []) {
+        if (scheduled.length === 0) {
+          continue;
+        }
+        const listed = runningById.get(sessionId);
+        if (listed) {
+          if (listScheduled) {
+            listed.scheduled = scheduled;
+            if (listed.background) {
+              listed.startedAt = Math.min(listed.startedAt, ...scheduled.map((item) => item.startedAt));
+            }
+          }
+          continue;
+        }
+        const scheduledEntry: RunningSessionEntry = {
+          sessionId,
+          provider: provider.id,
+          startedAt: Math.min(...scheduled.map((item) => item.startedAt)),
+          lastSeq: chatRunRegistry.getRun(sessionId)?.lastSeq ?? 0,
+          background: true,
+          canInterrupt: false,
+          tasks: [],
+          scheduled,
+        };
+        if (listScheduled) {
+          entries.push(scheduledEntry);
+        }
+        // Listed or not, the session's process is CloudCLI's own: each firing
+        // runs a turn in it, which registers it `busy`, and the loop below
+        // must not report that as a turn of a CLI CloudCLI does not own.
+        runningById.set(sessionId, scheduledEntry);
+      }
+    }
+
     // The chat-run registry only knows about turns CloudCLI drives itself, so
     // without this a session working under the Claude CLI — including one
     // CloudCLI spawned for its own Shell view — looks idle. A session already
     // listed above, for a chat run or the background work CloudCLI holds for
-    // it, keeps its richer entry.
+    // it, keeps its richer entry; one held only for scheduled work is skipped
+    // whether or not it was listed.
     for (const live of await listBusyClaudeCliSessions()) {
       const session = sessionsDb.getSessionByProviderSessionId(live.providerSessionId);
       if (!session || runningById.has(session.session_id)) {

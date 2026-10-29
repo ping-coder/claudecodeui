@@ -146,6 +146,7 @@
   "deleteConfirmation": {
     "deleteProject": "Supprimer le projet",
     "deleteSession": "Supprimer la session",
+    "confirmDeleteNamed": "Que souhaitez-vous faire avec {{name}}?",
     "confirmDelete": "Que souhaitez-vous faire avec",
     "sessionCount_one": "Ce projet contient {{count}} conversation.",
     "sessionCount_other": "Ce projet contient {{count}} conversations.",
@@ -161,6 +162,8 @@
     "confirmDeleteSessions": "Que souhaitez-vous faire avec",
     "deleteSessions_one": "Supprimer {{count}} session",
     "deleteSessions_other": "Supprimer {{count}} sessions",
+    "confirmDeleteSelected_one": "Que souhaitez-vous faire avec <strong>{{count}} session sélectionnée</strong>?",
+    "confirmDeleteSelected_other": "Que souhaitez-vous faire avec <strong>{{count}} sessions sélectionnées</strong>?",
     "selectedSessions_one": "{{count}} session sélectionnée",
     "selectedSessions_other": "{{count}} sessions sélectionnées",
     "archiveSessions_one": "Archiver {{count}} session",

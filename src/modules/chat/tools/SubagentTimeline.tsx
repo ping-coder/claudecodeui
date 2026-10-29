@@ -1,4 +1,5 @@
 import { memo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Brain, MessageSquareText } from 'lucide-react';
 
 import type { DiffLine, Project, SubagentActivity } from '@/shared/types';
@@ -30,7 +31,9 @@ const SubagentNote = memo(({ activity }: { activity: SubagentActivity }) => {
   return (
     <div className="flex gap-2 py-1">
       <Icon className={cn('mt-0.5 h-3 w-3 flex-shrink-0', isThinking ? 'text-muted-foreground/50' : 'text-muted-foreground/70')} />
+      {/* The agent's words, laid out by their own first letter, as the assistant's reply is. */}
       <div
+        dir="auto"
         className={cn(
           'min-w-0 flex-1 whitespace-pre-wrap break-words text-xs leading-relaxed',
           isThinking ? 'italic text-muted-foreground/70' : 'text-muted-foreground',
@@ -53,6 +56,7 @@ SubagentNote.displayName = 'SubagentNote';
  * hundred tool renderers.
  */
 export const SubagentTimeline = memo(({ activity, activityCount, onFileOpen, createDiff, selectedProject }: SubagentTimelineProps) => {
+  const { t } = useTranslation('chat');
   const isExporting = useIsExportingTranscript();
   // Raised by the "show more" step so a long run can be inspected in full
   // without paying for it up front.
@@ -98,13 +102,13 @@ export const SubagentTimeline = memo(({ activity, activityCount, onFileOpen, cre
           onClick={() => setRenderLimit((previous) => previous + INITIALLY_RENDERED_ACTIVITIES * 4)}
           className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
         >
-          Show {hiddenCount} more {hiddenCount === 1 ? 'step' : 'steps'}
+          {t('subagent.showMoreSteps', { count: hiddenCount })}
         </button>
       )}
 
       {untransmittedCount > 0 && hiddenCount === 0 && (
         <div className="text-[11px] text-muted-foreground/60">
-          {untransmittedCount} earlier {untransmittedCount === 1 ? 'step is' : 'steps are'} not included
+          {t('subagent.stepsNotIncluded', { count: untransmittedCount })}
         </div>
       )}
     </>

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 
-import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import type {
   Project,
   WorkspaceLayout,
@@ -789,4 +789,47 @@ test('a pane showing a conversation names it and its project in a visually hidde
   assert.equal(heading?.classList.contains('sr-only'), true);
   assert.equal(heading?.closest('[role="tabpanel"]') !== null, true);
   assert.equal(within(pane('right') as HTMLElement).queryByRole('heading', { name: /·/ }) === null, true, 'an empty pane has none');
+});
+
+test('the server\'s placeholder names read in the interface language in the hidden heading and the phone header, whose rename starts from the stored name', async () => {
+  // A language switch saves the choice to the server; it must not reach the network.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    const untitled = { id: 'session-a1', summary: 'Untitled Claude Session', __provider: 'claude' as const };
+    setLayout({ left: makePane([makeTab('a1', 'alpha')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+    panes.state = { ...panes.state, projects: [{ ...ALPHA, sessions: [untitled] }, BETA] };
+    const view = render(regionElement());
+    const headings = within(pane('left') as HTMLElement).getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent);
+    assert.deepEqual(headings, ['未命名的 Claude 会话 · Alpha']);
+    view.unmount();
+
+    render(
+      <WorkspaceHeader
+        activeTab="chat"
+        setActiveTab={vi.fn()}
+        selectedProject={ALPHA}
+        selectedSession={untitled}
+        shouldShowTasksTab={false}
+        shouldShowBrowserTab={false}
+        isMobile
+        onMenuClick={vi.fn()}
+        onRenameSession={vi.fn(async () => true)}
+      />,
+    );
+    const title = screen.getByRole('heading', { level: 2 });
+    assert.equal(title.textContent, '未命名的 Claude 会话');
+    assert.equal(title.getAttribute('title'), '未命名的 Claude 会话（双击重命名）');
+    fireEvent.doubleClick(title);
+    assert.equal((screen.getByRole('textbox', { name: '会话标题' }) as HTMLInputElement).value, 'Untitled Claude Session');
+  } finally {
+    // Unmount first, so restoring the language cannot re-render this test's tree.
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
 });

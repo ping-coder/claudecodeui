@@ -34,4 +34,14 @@ export const visualPaneSide = (side: 'left' | 'right', element?: Element | null)
   return side === 'left' ? 'right' : 'left';
 };
 
+/** LRI, RLI, FSI and PDI: the isolates right-to-left interface strings carry (modules/i18n/bidi.ts). */
+const BIDI_ISOLATES = /[\u2066-\u2069]/g;
+
+/**
+ * Interface text without its bidi isolates, for text that leaves the screen: a system
+ * notification, a message sent to a model, a manual copy. Other marks (LRM, RLM) stay, since
+ * the interface never adds them and the user may have typed them.
+ */
+export const stripBidiIsolates = (text: string): string => text.replace(BIDI_ISOLATES, '');
+
 // ---------------------------

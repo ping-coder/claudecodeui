@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, KeyboardEvent, RefObject, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import { safeLocalStorage } from '@/modules/chat/utils/chatStorage';
+import { describeSlashCommand } from '@/modules/chat/utils/catalogLabels';
 import { useProjectSlashCommands } from '@/shared/hooks/useProjectSlashCommands';
 import type { LLMProvider, Project, SlashCommand } from '@/shared/types';
 import { isSkillCommand } from '@/shared/utils';
@@ -44,6 +47,7 @@ const isPromiseLike = (value: unknown): value is Promise<unknown> =>
 const filterSlashCommands = (
   commands: SlashCommand[],
   query: string,
+  t: TFunction,
 ): SlashCommand[] => {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) {
@@ -70,8 +74,11 @@ const filterSlashCommands = (
     return nameSubstringMatches;
   }
 
+  // By the description the menu shows, a built-in command's in the interface
+  // language (describeSlashCommand), and by the one the server sent.
   return commands.filter((command) =>
-    command.description?.toLowerCase().includes(normalizedQuery),
+    [describeSlashCommand(command, t), command.description]
+      .some((description) => description?.toLowerCase().includes(normalizedQuery)),
   );
 };
 
@@ -83,6 +90,7 @@ export function useSlashCommands({
   textareaRef,
   onExecuteCommand,
 }: UseSlashCommandsOptions) {
+  const { t } = useTranslation('chat');
   const { commands: projectCommands } = useProjectSlashCommands(selectedProject, provider);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
   const [showCommandMenu, setShowCommandMenu] = useState(false);
@@ -129,8 +137,8 @@ export function useSlashCommands({
   }, [showCommandMenu]);
 
   useEffect(() => {
-    setFilteredCommands(filterSlashCommands(slashCommands, commandQuery));
-  }, [commandQuery, slashCommands]);
+    setFilteredCommands(filterSlashCommands(slashCommands, commandQuery, t));
+  }, [commandQuery, slashCommands, t]);
 
   const frequentCommands = useMemo(() => {
     if (!selectedProject || slashCommands.length === 0) {

@@ -139,7 +139,8 @@ export default function GitPanelHeader({
   return (
     <>
       {/* Branch row + action buttons */}
-      <div className={`flex items-center justify-between border-b border-border/60 ${isMobile ? 'px-3 py-2' : 'px-4 py-3'}`}>
+      {/* In a narrow pane the buttons move under the branch rather than break their labels or leave the pane. */}
+      <div className={`flex flex-wrap items-center justify-between gap-y-2 border-b border-border/60 ${isMobile ? 'px-3 py-2' : 'px-4 py-3'}`}>
         {/* Branch selector */}
         <div className="relative" ref={dropdownRef}>
           <button
@@ -229,7 +230,7 @@ export default function GitPanelHeader({
         </div>
 
         {/* Action buttons */}
-        <div className={`flex items-center ${isMobile ? 'gap-1' : 'gap-2'}`}>
+        <div className={`ms-auto flex items-center whitespace-nowrap ${isMobile ? 'gap-1' : 'gap-2'}`}>
           {remoteStatus?.hasRemote && (
             <>
               {!remoteStatus.hasUpstream ? (

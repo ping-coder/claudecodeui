@@ -3,6 +3,8 @@ import os from 'node:os';
 import spawn from 'cross-spawn';
 import type { Router } from 'express';
 
+import { createClientDiagnosticsService } from './client-diagnostics.service.js';
+import { resolveDeploymentEnvironment } from './deployment-environment.service.js';
 import { createSystemRouter } from './system.routes.js';
 import { createSystemUpdateService } from './system.service.js';
 
@@ -46,7 +48,8 @@ function runShellCommand(
 
 /**
  * Builds the authenticated system router for the server entrypoint using the
- * installation details it already resolves for health and startup metadata.
+ * installation details it already resolves for health and startup metadata,
+ * plus the browser diagnostics log.
  */
 export function createSystemModule(options: SystemModuleOptions): Router {
   const systemUpdateService = createSystemUpdateService({
@@ -58,5 +61,11 @@ export function createSystemModule(options: SystemModuleOptions): Router {
     logError: (message, detail) => console.error(message, detail ?? ''),
   });
 
-  return createSystemRouter(systemUpdateService);
+  const clientDiagnosticsService = createClientDiagnosticsService({
+    logInfo: (line) => console.log(line),
+    now: () => Date.now(),
+    environment: resolveDeploymentEnvironment(process.env.CLOUDCLI_DEPLOY_ENV) ?? 'production',
+  });
+
+  return createSystemRouter(systemUpdateService, clientDiagnosticsService);
 }

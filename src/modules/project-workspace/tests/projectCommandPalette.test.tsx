@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 
-import { act, render } from '@testing-library/react';
+import { act, cleanup, render } from '@testing-library/react';
 import { useSyncExternalStore } from 'react';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import type { CommandPalette as CommandPaletteComponent } from '@/modules/command-palette';
 import type {
   Project,
@@ -310,4 +310,60 @@ test('when a palette command moves the focused pane, DOM focus follows into it',
   act(() => workspaceCommands().onToggleFullscreen());
   await nextFrame();
   assert.equal(document.activeElement === sidebarButton, true);
+});
+
+test('Open tabs reads the server\'s placeholder names in the interface language', async () => {
+  // A language switch saves the choice to the server; it must not reach the network.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    projectsState = [{ ...repo, sessions: [{ id: 'session-codex', summary: 'Untitled Codex Session', __provider: 'codex' }] }];
+    setLayoutState({
+      left: createPane([
+        createTab('tab-codex', 'session-codex', { provider: 'codex' }),
+        // Not in the loaded pages: its tab's snapshot names it.
+        createTab('tab-agy', 'session-agy', { provider: 'agy', title: 'Untitled' }),
+      ], 'tab-codex'),
+      right: null,
+      focusedSide: 'left',
+      splitRatio: 0.5,
+    });
+    renderBinding();
+
+    assert.deepEqual(workspaceCommands().openTabs.map((tab) => tab.title), ['未命名的 Codex 会话', '未命名会话']);
+  } finally {
+    // Unmount first, so restoring the language cannot re-render this test's tree.
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
+});
+
+
+test('the palette\'s session rows read the server\'s placeholder names in the interface language', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  setLayoutState({ left: createPane([createTab('tab-a', 'session-a')], 'tab-a'), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  renderBinding();
+  assert.equal(palette().formatSessionTitle?.('Untitled Claude Session'), 'Untitled Claude Session');
+
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    assert.equal(palette().formatSessionTitle?.('Untitled Claude Session'), '未命名的 Claude 会话');
+    assert.equal(palette().formatSessionTitle?.('Fix login bug'), 'Fix login bug');
+    // An untitled tab's generic name follows the language too.
+    act(() => setLayoutState({ left: createPane([createTab('tab-untitled', 'session-untitled')], 'tab-untitled'), right: null, focusedSide: 'left', splitRatio: 0.5 }));
+    assert.deepEqual(workspaceCommands().openTabs.map((tab) => tab.title), ['新会话']);
+  } finally {
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
 });

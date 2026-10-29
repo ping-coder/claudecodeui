@@ -81,8 +81,8 @@
   "branches": {
     "current": "נוכחי",
     "remoteBadge": "remote",
-    "ahead": "↑{{n}} לפני",
-    "behind": "↓{{n}} מאחור",
+    "ahead": "\u2066↑{{n}}\u2069 לפני",
+    "behind": "\u2066↓{{n}}\u2069 מאחור",
     "switchTo": "מעבר אל {{name}}",
     "switch": "מעבר",
     "deleteTo": "מחיקת {{name}}",
@@ -162,17 +162,6 @@
     "scroll": "גלילה",
     "wrap": "גלישה"
   },
-  "selection": {
-    "selectedOfFiles": "נבחרו {{selected}} מתוך {{total}} קבצים",
-    "selectedOf": "נבחרו {{selected}} מתוך {{total}}",
-    "all": "הכול",
-    "selectAll": "בחירת הכול",
-    "none": "כלום",
-    "deselectAll": "ביטול הבחירה",
-    "selectedOfFiles_one": "נבחרו {{selected}} מתוך קובץ אחד",
-    "selectedOfFiles_two": "נבחרו {{selected}} מתוך שני קבצים",
-    "selectedOfFiles_other": "נבחרו {{selected}} מתוך {{count}} קבצים"
-  },
   "legend": {
     "title": "מדריך סטטוס קבצים"
   },
@@ -198,7 +187,7 @@
     "commitsCount_one": "commit אחד",
     "commitsCount_two": "שני commits",
     "commitsCount_other": "{{count}} commits",
-    "title": "Merge של worktree",
+    "title": "מיזוג worktree",
     "squashLabel": "Squash ל-commits",
     "squashDesc_one": "איחוד ה-commit ל-commit יחיד ב-{{branch}}",
     "squashDesc_two": "איחוד שני ה-commits ל-commit יחיד ב-{{branch}}",
@@ -206,9 +195,9 @@
     "messageLabel": "הודעת commit",
     "cleanupLabel": "ניקוי אחרי המיזוג",
     "cleanupDesc": "הסרת ה-worktree ומחיקת הענף שלו אחרי המיזוג",
-    "merging": "ממזג...",
-    "squashAndMerge": "Squash ו-Merge",
-    "merge": "Merge"
+    "merging": "ממזג…",
+    "squashAndMerge": "Squash ומיזוג",
+    "merge": "מיזוג"
   },
   "newWorktree": {
     "title": "Worktree חדש",
@@ -234,8 +223,8 @@
     "description": "להסיר את ה-worktree של {{branch}}? התיקייה שלו תימחק והפרויקט המקושר יועבר לארכיון — סשנים של צ'אט יישארו ניתנים לשחזור."
   },
   "worktrees": {
-    "detachedAt": "detached @ {{sha}}",
-    "detached": "detached",
+    "detachedAt": "מנותק ב-{{sha}}",
+    "detached": "מנותק",
     "current": "נוכחי",
     "mainWorktree": "worktree ראשי",
     "locked": "נעול",
@@ -245,7 +234,7 @@
     "switchTo": "מעבר אל {{name}}",
     "open": "פתיחה",
     "nothingToMerge": "אין מה למזג — אין commits לפני ענף הבסיס",
-    "mergeInto": "Merge של {{branch}} לענף הבסיס",
+    "mergeInto": "מיזוג {{branch}} לענף הבסיס",
     "removeTitle": "הסרת ה-worktree של {{branch}}",
     "noWorktrees": "אין worktrees",
     "count_one": "worktree אחד",

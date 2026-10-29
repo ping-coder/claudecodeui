@@ -6,7 +6,7 @@ import { ChevronUp } from 'lucide-react';
 
 import { Shimmer } from '@/shared/ui';
 import type { ActivityDetails, ActivityProgress, BackgroundTaskSummary, SessionActivity } from '@/shared/types';
-import { cn, describeBackgroundTask, ownBackgroundTasks } from '@/shared/utils';
+import { cn, countScheduledWork, describeBackgroundTask, describeScheduledWork, ownBackgroundTasks } from '@/shared/utils';
 import {
   computeProgressPercent,
   estimateRemainingMs,
@@ -111,12 +111,29 @@ const DETAIL_RESERVE_PX = 96;
  */
 const DETAILS_CLEARANCE_PX = 14;
 
-/** What the background work is: the one task by kind and name, or how many when there are several. */
+/** What the background tasks are: the one task by kind and name, or how many when there are several. */
 function describeBackgroundTasks(allTasks: BackgroundTaskSummary[], t: TFunction): string {
   const tasks = ownBackgroundTasks(allTasks);
   return tasks.length === 1
     ? describeBackgroundTask(tasks[0], t)
     : t('claudeStatus.backgroundTask.count', { count: tasks.length, defaultValue: '{{count}} tasks' });
+}
+
+/**
+ * What the background work is: the tasks as above; scheduled work alone as
+ * its one loop or reminder, or how many when there are several; both as the
+ * tasks, then how much scheduled work.
+ */
+function describeBackgroundWork(activity: SessionActivity, t: TFunction): string {
+  const tasks = activity.tasks ?? [];
+  const scheduled = activity.scheduled ?? [];
+  if (scheduled.length === 0) {
+    return describeBackgroundTasks(tasks, t);
+  }
+  if (tasks.length === 0) {
+    return scheduled.length === 1 ? describeScheduledWork(scheduled[0], t) : countScheduledWork(scheduled, t);
+  }
+  return `${describeBackgroundTasks(tasks, t)} · ${countScheduledWork(scheduled, t)}`;
 }
 
 /**
@@ -261,9 +278,10 @@ function measureDetailsRoom(transcript: HTMLElement, tabRow: HTMLElement): numbe
  * session has an entry in the processing map; it disappears the instant that
  * entry is removed.
  *
- * A session whose turn has ended while the tasks it launched still run is
- * drawn in the workflow and agent cards' purple, naming the work, and with no
- * Stop: nothing is responding, and the composer can send.
+ * A session whose turn has ended while the tasks it launched still run, or
+ * its held process keeps scheduled work (a /loop, a reminder), is drawn in
+ * the workflow and agent cards' purple, naming the work, and with no Stop:
+ * nothing is responding, and the composer can send.
  *
  * When the work has something to count, a progress readout follows, like the
  * CLI's workflow row: a segmented bar, the workflow's phase, `3/7 agents`,
@@ -277,10 +295,10 @@ function measureDetailsRoom(transcript: HTMLElement, tabRow: HTMLElement): numbe
  *
  * Given a details reader, the tab is also the toggle of a panel above it
  * that lists the work in full: each workflow with its agents, the turn's
- * checklist, the background tasks. A click anywhere on the tab opens or
- * closes it; Esc keeps its meaning of stopping the turn. The panel fits the
- * room above the composer, which an on-screen keyboard or a long draft can
- * leave short, and scrolls within.
+ * checklist, the background tasks, the scheduled work. A click anywhere on
+ * the tab opens or closes it; Esc keeps its meaning of stopping the turn. The
+ * panel fits the room above the composer, which an on-screen keyboard or a
+ * long draft can leave short, and scrolls within.
  *
  * Rendered by chat's ChatComposer above the input so the user can see and
  * interrupt the in-flight turn without leaving the composer.
@@ -454,7 +472,7 @@ export default function ActivityIndicator({
     ? t('claudeStatus.backgroundWork', 'Background work')
     : (renderedActivity.statusText || actionWords[Math.floor(elapsedSeconds / 4) % actionWords.length])
       .replace(/\.+$/, '');
-  const detail = isBackground ? describeBackgroundTasks(renderedActivity.tasks ?? [], t) : '';
+  const detail = isBackground ? describeBackgroundWork(renderedActivity, t) : '';
   const elapsedLabel = formatElapsed(elapsedSeconds * 1000, t);
   const canOpenDetails = Boolean(readDetails);
   const toggleDetails = () => setIsDetailsOpen((isOpen) => !isOpen);

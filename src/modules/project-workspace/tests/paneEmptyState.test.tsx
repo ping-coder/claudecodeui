@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import type { Project, ProjectSession, WorkspaceLayoutActions } from '@/shared/types';
 
 /**
@@ -180,4 +180,41 @@ test('without any project the pane shows the create-a-project guidance', () => {
 
   assert.ok(screen.getByRole('heading', { name: 'Choose Your Project' }));
   assert.equal(screen.queryByRole('button', { name: /New chat/ }) === null, true);
+});
+
+test('the recent list reads the server\'s placeholder names in the interface language', async () => {
+  // A language switch saves the choice to the server; it must not reach the network.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    const gamma: Project = {
+      projectId: 'gamma',
+      displayName: 'Gamma',
+      fullPath: '/repo/gamma',
+      sessions: [
+        session('u1', '2026-10-27T10:00:00Z', { summary: 'Untitled Claude Session' }),
+        session('u2', '2026-10-26T10:00:00Z', { summary: 'Untitled', __provider: 'agy' }),
+        session('u3', '2026-10-25T10:00:00Z', { summary: 'Untitled Session', __provider: 'cursor' }),
+        session('u4', '2026-10-24T10:00:00Z', { summary: 'Untitled draft' }),
+      ],
+    };
+    renderEmpty({ side: 'left', projects: [gamma], defaultProject: gamma, isSplit: false, otherPaneSession: null, otherPaneSessionIds: new Set() });
+
+    const list = screen.getByRole('region', { name: '最近的对话' });
+    assert.deepEqual(within(list).getAllByRole('button').map((button) => button.textContent), [
+      '未命名的 Claude 会话Gamma',
+      '未命名会话Gamma',
+      '未命名会话Gamma',
+      'Untitled draftGamma',
+    ]);
+  } finally {
+    // Unmount first, so restoring the language cannot re-render this test's tree.
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
 });

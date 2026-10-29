@@ -11,6 +11,7 @@ type EditorToolbarLabels = {
   showDiff: string;
   collapse: string;
   expand: string;
+  popOut: string;
 };
 
 type CreateEditorToolbarPanelParams = {
@@ -32,12 +33,16 @@ const getDiffVisibilityIcon = (showDiff: boolean) => {
   return '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />';
 };
 
+// Left-right arrows, not the four-corner full-screen glyph: this only widens the docked editor to
+// its pane, and the full-screen look made it read as the browser's full screen.
 const getExpandIcon = (isExpanded: boolean) => {
   if (isExpanded) {
-    return '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" />';
+    // lucide fold-horizontal
+    return '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 12h6M22 12h-6M12 2v2M12 8v2M12 14v2M12 20v2M19 9l-3 3 3 3M5 15l3-3-3-3" />';
   }
 
-  return '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />';
+  // lucide move-horizontal
+  return '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 8l4 4-4 4M2 12h20M6 8l-4 4 4 4" />';
 };
 
 const escapeHtml = (value: string): string => (
@@ -85,6 +90,7 @@ export const createEditorToolbarPanelExtension = ({
         showDiff: escapeHtml(labels.showDiff),
         collapse: escapeHtml(labels.collapse),
         expand: escapeHtml(labels.expand),
+        popOut: escapeHtml(labels.popOut),
       };
       // Icons are static SVG path fragments controlled by this module.
       const diffVisibilityIcon = getDiffVisibilityIcon(showDiff);
@@ -124,7 +130,7 @@ export const createEditorToolbarPanelExtension = ({
 
       if (isSidebar && onPopOut) {
         toolbarHtml += `
-          <button class="cm-toolbar-btn cm-popout-btn" title="Open in modal">
+          <button class="cm-toolbar-btn cm-popout-btn" title="${escapedLabels.popOut}">
             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
             </svg>

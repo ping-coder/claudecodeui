@@ -6,6 +6,9 @@ import { i18n } from '@/modules/i18n';
 import type { Project, ProjectSession } from '@/shared/types';
 import { findLiveSessionTitle, getPageTitle, resolveDocumentSessionTitle } from '@/shared/utils';
 
+/** English, as the browser tab read before the session placeholders followed the interface language. */
+const en = i18n.getFixedT('en');
+
 const project: Project = {
   projectId: 'project-1',
   displayName: 'My Project',
@@ -19,7 +22,7 @@ test('uses the selected session summary as the page title', () => {
     __provider: 'claude',
   };
 
-  assert.equal(getPageTitle(project, session), 'Fix browser tab title');
+  assert.equal(getPageTitle(project, session, en), 'Fix browser tab title');
 });
 
 test('uses the selected Cursor session name as the page title', () => {
@@ -29,7 +32,7 @@ test('uses the selected Cursor session name as the page title', () => {
     __provider: 'cursor',
   };
 
-  assert.equal(getPageTitle(project, session), 'Cursor session name');
+  assert.equal(getPageTitle(project, session, en), 'Cursor session name');
 });
 
 test('prefers the persisted summary of a Cursor session, as the sessions API returns it', () => {
@@ -41,16 +44,23 @@ test('prefers the persisted summary of a Cursor session, as the sessions API ret
     __provider: 'cursor',
   };
 
-  assert.equal(getPageTitle(project, session), 'Cursor session renamed');
-  assert.equal(getPageTitle(project, { id: 'session-2', summary: '', __provider: 'cursor' }), 'Untitled Session');
+  assert.equal(getPageTitle(project, session, en), 'Cursor session renamed');
+  assert.equal(getPageTitle(project, { id: 'session-2', summary: '', __provider: 'cursor' }, en), 'Untitled Session');
+});
+
+test('names a session without a title in the interface language', () => {
+  const zh = i18n.getFixedT('zh-CN');
+  assert.equal(getPageTitle(project, { id: 'session-3', __provider: 'claude' }, zh), '新会话');
+  assert.equal(getPageTitle(project, { id: 'session-4', summary: '', __provider: 'cursor' }, zh), '未命名会话');
+  assert.equal(getPageTitle(project, { id: 'session-3', __provider: 'claude' }, en), 'New Session');
 });
 
 test('falls back to the project title when no session is selected', () => {
-  assert.equal(getPageTitle(project, null), 'My Project - CloudCLI UI');
+  assert.equal(getPageTitle(project, null, en), 'My Project - CloudCLI UI');
 });
 
 test('falls back to the app title when no project or session is selected', () => {
-  assert.equal(getPageTitle(null, null), 'CloudCLI UI');
+  assert.equal(getPageTitle(null, null, en), 'CloudCLI UI');
 });
 
 /** Loaded projects as the workspace holds them, one per list of sessions. */

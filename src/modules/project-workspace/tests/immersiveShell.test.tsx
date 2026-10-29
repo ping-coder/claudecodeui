@@ -8,6 +8,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
+import { useBrowserFullscreen } from '@/shared/hooks/useBrowserFullscreen';
 import type { CommandPaletteWorkspaceCommands, WorkspaceLayout, WorkspaceLayoutActions } from '@/shared/types';
 
 /**
@@ -100,8 +101,15 @@ function MainRegionProbe() {
       <button type="button" onClick={chrome.toggleImmersive}>Toggle full screen</button>
       <button type="button" onClick={chrome.exitImmersive}>Pane exit full screen</button>
       <button type="button" onClick={() => chrome.setSidebarPeekOpen(true)}>Pane show sidebar</button>
+      <EditorFullscreenProbe />
     </div>
   );
+}
+
+/** Stands in for the floating editor's full-screen button: another holder of the browser fullscreen. */
+function EditorFullscreenProbe() {
+  const { isMaximized, toggle } = useBrowserFullscreen({ source: 'codeEditor' });
+  return <button type="button" data-maximized={String(isMaximized)} onClick={toggle}>Editor full screen</button>;
 }
 
 // How many run-notification bindings are mounted, and what the last one rendered with.
@@ -558,4 +566,23 @@ test('a full screen kept inside the window is explained after three seconds, wit
   assert.equal(hasButton('Retry'), false);
   clickButton('Pane exit full screen');
   assert.equal(hasInWindowNotice(), false);
+});
+
+test('a refusal for another maximize (the editor) shows the same notice outside immersive mode, but not on phones', async () => {
+  stubFullscreenApi(['refuse']);
+  const desktop = renderShell();
+
+  clickButton('Editor full screen');
+  await settle();
+  assert.equal(isImmersive(), 'false');
+  assert.equal(screen.getByRole('button', { name: 'Editor full screen' }).dataset.maximized, 'true');
+  assert.equal(hasRefusedNotice(), true);
+  clickButton('Editor full screen');
+  assert.equal(hasRefusedNotice(), false);
+  desktop.unmount();
+
+  renderShell({ isMobile: true });
+  clickButton('Editor full screen');
+  await settle();
+  assert.equal(hasRefusedNotice(), false);
 });

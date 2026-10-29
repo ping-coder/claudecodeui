@@ -204,7 +204,7 @@ for (const withOpenTabs of [true, false]) {
     openPalette(withOpenTabs ? workspace : undefined);
     search('claude');
     // The best match until the files land: an open tab, or Settings: Agents through its "claude code" keywords.
-    const firstBest = withOpenTabs ? 'Fix login bugclaudecodeuiclaude' : 'Settings: Agents';
+    const firstBest = withOpenTabs ? 'Fix login bugclaudecodeuiClaude' : 'Settings: Agents';
     assert.deepEqual(highlightedOptionTexts(), [firstBest]);
     scrolledIntoView.length = 0;
 
@@ -262,16 +262,16 @@ for (const [how, moveToFirstTab] of MOVES_TO_FIRST_TAB) {
     assert.deepEqual(highlightedOptionTexts(), ['CLAUDE.mdCLAUDE.md']);
 
     moveToFirstTab();
-    assert.deepEqual(highlightedOptionTexts(), ['Fix login bugclaudecodeuiclaude']);
+    assert.deepEqual(highlightedOptionTexts(), ['Fix login bugclaudecodeuiClaude']);
     // cmdk still makes this move itself, and points screen readers at the row it moved to.
-    assert.equal(activeOptionText(), 'Fix login bugclaudecodeuiclaude');
+    assert.equal(activeOptionText(), 'Fix login bugclaudecodeuiClaude');
 
     await land(() => {
       sources.messageMatches = MESSAGE_MATCHES;
     });
 
     assert.equal(shownGroupHeadings()[0], 'Sessions');
-    assert.deepEqual(highlightedOptionTexts(), ['Fix login bugclaudecodeuiclaude']);
+    assert.deepEqual(highlightedOptionTexts(), ['Fix login bugclaudecodeuiClaude']);
 
     pressKey('Enter');
     assert.deepEqual(onActivateTab.mock.calls, [['left', 'tab-login']]);

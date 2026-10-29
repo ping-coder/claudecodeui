@@ -195,7 +195,7 @@ const renderOptions = (props: {
 );
 
 const openMenu = () => {
-  fireEvent.click(screen.getByRole('button', { name: 'Session options for session one' }));
+  fireEvent.click(screen.getByRole('button', { name: 'sessionMenu.optionsFor' }));
   return screen.getByRole('menu');
 };
 
@@ -208,7 +208,7 @@ test('the side buttons sit left of the "…" and give way to an open rename', ()
   const controls = [...container.querySelectorAll('button')];
   assert.deepEqual(
     controls.map((button) => button.getAttribute('aria-label')),
-    ['sessions.openOnLeft', 'sessions.openOnRight', 'Session options for session one'],
+    ['sessions.openOnLeft', 'sessions.openOnRight', 'sessionMenu.optionsFor'],
   );
   // Hung off the "…" rather than laid out beside it: the controls' box stays the "…" button's
   // size, so while the side buttons are hidden the row's time label still takes the click.
@@ -250,9 +250,9 @@ test('split, the menu leads with absolute left and right, set apart from the res
   renderOptions({ isWorkspaceSplit: true, onOpenInPane });
   const menu = openMenu();
 
-  assert.deepEqual(menuItemLabels(menu).slice(0, 3), ['sessions.openOnLeft', 'sessions.openOnRight', 'Rename session']);
+  assert.deepEqual(menuItemLabels(menu).slice(0, 3), ['sessions.openOnLeft', 'sessions.openOnRight', 'common:workspace.renameSession']);
   // The divider sits right before the first item that is not a side.
-  const renameItem = within(menu).getByRole('menuitem', { name: 'Rename session' });
+  const renameItem = within(menu).getByRole('menuitem', { name: 'common:workspace.renameSession' });
   assert.ok(renameItem.previousElementSibling?.classList.contains('h-px'));
 
   fireEvent.click(within(menu).getByRole('menuitem', { name: 'sessions.openOnLeft' }));
@@ -264,7 +264,7 @@ test('unsplit, the menu offers only the right side, as the split view', () => {
   renderOptions({ isWorkspaceSplit: false, onOpenInPane });
   const menu = openMenu();
 
-  assert.deepEqual(menuItemLabels(menu).slice(0, 2), ['sessions.openOnRightSplit', 'Rename session']);
+  assert.deepEqual(menuItemLabels(menu).slice(0, 2), ['sessions.openOnRightSplit', 'common:workspace.renameSession']);
   fireEvent.click(within(menu).getByRole('menuitem', { name: 'sessions.openOnRightSplit' }));
   assert.deepEqual(onOpenInPane.mock.calls, [['right']]);
 });
@@ -273,8 +273,8 @@ test('where sides cannot be targeted the menu is as it was', () => {
   renderOptions({ canTargetSides: false });
   const menu = openMenu();
 
-  assert.equal(menuItemLabels(menu)[0], 'Rename session');
-  const renameItem = within(menu).getByRole('menuitem', { name: 'Rename session' });
+  assert.equal(menuItemLabels(menu)[0], 'common:workspace.renameSession');
+  const renameItem = within(menu).getByRole('menuitem', { name: 'common:workspace.renameSession' });
   assert.equal(renameItem.previousElementSibling?.classList.contains('h-px') ?? false, false);
   assert.ok(document.querySelector('button[data-pane-side]') === null, 'no side buttons either');
 });

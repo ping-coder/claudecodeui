@@ -5,6 +5,7 @@ import { deriveActivityDetails, formatElapsed } from '@/modules/chat/utils/runPr
 import type {
   BackgroundTaskSummary,
   ChatMessage,
+  ScheduledWorkSummary,
   SessionActivity,
   WorkflowAgentProgress,
   WorkflowInfo,
@@ -569,6 +570,39 @@ describe('the run the details panel describes', () => {
   });
 });
 
+describe('the scheduled work the details panel lists', () => {
+  const loop: ScheduledWorkSummary = {
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: LAUNCH,
+    nextFireAt: NOW + 60_000,
+    recurring: true,
+    holdUntil: NOW + 8 * 86_400_000,
+    cron: '*/5 * * * *',
+  };
+  const wake: ScheduledWorkSummary = { ...loop, id: 'wakeup:toolu_wake_1', kind: 'wakeup', startedAt: LAUNCH + 1_000, cron: undefined };
+
+  it('lists the loops and reminders the server reported, in its order, with the clock their next runs are told against', () => {
+    const details = deriveActivityDetails([], { ...backgroundWork([backgroundTask()]), scheduled: [loop, wake] }, NOW);
+
+    expect(details?.scheduled.map((item) => item.id)).toEqual([loop.id, wake.id]);
+    expect(details?.nowMs).toBe(NOW);
+  });
+
+  it('tells a session with scheduled work alone as background work, with nothing else to list', () => {
+    const details = deriveActivityDetails([userTurn()], { statusText: null, canInterrupt: false, startedAt: LAUNCH, background: true, tasks: [], scheduled: [loop] }, NOW);
+
+    expect(details).toMatchObject({ run: { isBackground: true, isCliDriven: false }, workflows: [], checklist: null, tasks: [] });
+    expect(details?.scheduled.length).toBe(1);
+  });
+
+  it('lists none for a session that has none', () => {
+    expect(deriveActivityDetails([userTurn()], runningTurn, NOW)?.scheduled).toEqual([]);
+  });
+});
+
 describe('an elapsed time', () => {
   it('prints whole seconds, then minutes and seconds, as the tab does', () => {
     expect(formatElapsed(45_000, en)).toBe('45s');
@@ -576,6 +610,6 @@ describe('an elapsed time', () => {
     expect(formatElapsed(192_000, en)).toBe('3m 12s');
     expect(formatElapsed(75 * 60_000, en)).toBe('75m 0s');
     expect(formatElapsed(-1_000, en)).toBe('0s');
-    expect(formatElapsed(192_000, zh)).toBe('3m 12s');
+    expect(formatElapsed(192_000, zh)).toBe('3 分 12 秒');
   });
 });

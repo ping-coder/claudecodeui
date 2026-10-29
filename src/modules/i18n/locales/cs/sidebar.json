@@ -185,6 +185,7 @@
   "deleteConfirmation": {
     "deleteProject": "Odstranit projekt",
     "deleteSession": "Smazat relaci",
+    "confirmDeleteNamed": "Co chcete udělat s položkou {{name}}?",
     "confirmDelete": "Co chcete udělat s položkou",
     "sessionCount_one": "Tento projekt obsahuje {{count}} konverzaci.",
     "sessionCount_few": "Tento projekt obsahuje {{count}} konverzace.",

@@ -261,6 +261,28 @@ test('an untitled focused session reads Untitled session in the interface langua
   assert.equal(document.title, '[运行中] 未命名会话');
 });
 
+test('the server\'s placeholder names read in the interface language, idle and running', async () => {
+  const projects = [{ ...ALPHA, sessions: [{ id: 's1', summary: 'Untitled Claude Session', __provider: 'claude' as const }] }];
+  effects.state = makeState({ projects, ...focusing({ id: 's1', summary: 'Untitled Claude Session', __provider: 'claude' }) });
+  const view = render(<ProjectEffects />);
+  assert.equal(document.title, 'Untitled Claude Session');
+
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  assert.equal(document.title, '未命名的 Claude 会话');
+
+  processing.activities = new Map([['s1', turnStartedAt(1000)]]);
+  view.rerender(<ProjectEffects />);
+  assert.equal(document.title, '[运行中] 未命名的 Claude 会话');
+
+  // agy's "Untitled", known only from the snapshot of the tab holding the session.
+  processing.activities = new Map();
+  effects.state = makeState(focusing({ id: 's2', __provider: 'agy' }, 'Untitled'));
+  view.rerender(<ProjectEffects />);
+  assert.equal(document.title, '未命名会话');
+});
+
 test('the provider renews the effects state when only the projects or only the layout changes, so renames and opened tabs reach the title', () => {
   const navigate = vi.fn() as unknown as NavigateFunction;
   const renderProvider = () => (

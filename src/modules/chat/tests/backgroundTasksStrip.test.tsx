@@ -1,12 +1,52 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import type { ComponentProps } from 'react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import { BackgroundTasksStrip } from '@/modules/chat/transcript/BackgroundTasksStrip';
 import { visibleCountToReveal } from '@/modules/chat/hooks/useChatSessionState';
 import { SESSION_MESSAGES_PAGE_SIZE } from '@/modules/chat/utils/sessionMessagePagination';
-import type { ChatMessage } from '@/shared/types';
+import type { ChatMessage, ScheduledWorkSummary } from '@/shared/types';
+
+// The socket the scheduled work's stop is answered on, the running-sessions
+// read a stop that ended asks for, and the activity map a started stop marks
+// the session busy in; the chips for scheduled work use all three.
+const page = vi.hoisted(() => {
+  const listeners = new Set<(frame: Record<string, unknown>) => void>();
+  const state = { refreshes: 0, releaseRefresh: null as (() => void) | null, processing: [] as Array<string | null> };
+  return {
+    listeners,
+    state,
+    subscribe: (listener: (frame: Record<string, unknown>) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    // Held until a test lets it settle, as a read in flight is.
+    refreshRunningSessions: () => {
+      state.refreshes += 1;
+      return new Promise<void>((resolve) => {
+        state.releaseRefresh = resolve;
+      });
+    },
+    markSessionProcessing: (sessionId: string | null) => {
+      state.processing.push(sessionId);
+    },
+  };
+});
+
+vi.mock('@/shared/context/WebSocketContext', () => ({
+  useWebSocket: () => ({ subscribe: page.subscribe }),
+}));
+
+vi.mock('@/shared/context/SessionProtectionContext', () => ({
+  useSessionProtectionActions: () => ({
+    refreshRunningSessions: page.refreshRunningSessions,
+    markSessionProcessing: page.markSessionProcessing,
+  }),
+}));
 
 const toolRow = (overrides: Partial<ChatMessage>): ChatMessage => ({
   type: 'assistant',
@@ -504,6 +544,478 @@ describe('the background tasks strip, for tasks only a Claude CLI outside CloudC
       { type: 'chat.stop-task', sessionId: 'app-session', taskId: 'wcli1' },
       { type: 'chat.stop-task', sessionId: 'app-session', taskId: 'acli2' },
     ]);
+  });
+});
+
+describe('the background tasks strip, for scheduled work', () => {
+  // Local times: the strip tells a next run against the browser's clock and day.
+  const NOW = new Date(2026, 9, 29, 10, 0).getTime();
+  const at = (day: number, hour: number, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();
+  const clock = (time: number) => new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit' }).format(new Date(time));
+
+  const loop = (overrides: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: NOW - 60_000,
+    nextFireAt: at(29, 14, 5),
+    recurring: true,
+    holdUntil: NOW + 8 * 86_400_000,
+    cron: '*/5 * * * *',
+    cadence: 'Every 5 minutes',
+    expiresAt: NOW + 7 * 86_400_000,
+    ...overrides,
+  });
+  const reminder = (overrides: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => loop({
+    id: 'cron:7b7cd8fc',
+    toolUseId: 'toolu_cron_2',
+    prompt: 'stretch',
+    nextFireAt: at(29, 14, 30),
+    recurring: false,
+    cron: '30 14 29 10 *',
+    cadence: 'Once at 2:30 PM',
+    expiresAt: undefined,
+    ...overrides,
+  });
+  const selfPaced = (overrides: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+    id: 'wakeup:toolu_wake_1',
+    kind: 'wakeup',
+    toolUseId: 'toolu_wake_3',
+    prompt: 'check the deploy',
+    startedAt: NOW - 600_000,
+    nextFireAt: at(29, 14, 5),
+    recurring: true,
+    holdUntil: NOW + 8 * 86_400_000,
+    reason: 'waiting for the deploy',
+    ...overrides,
+  });
+
+  type StripProps = ComponentProps<typeof BackgroundTasksStrip>;
+  // The id the latest stop carried, which the server's answers to it carry back.
+  let lastStopId: string | undefined;
+  const renderStrip = (overrides: Partial<StripProps> = {}) => {
+    const sendMessage = vi.fn((message: unknown) => {
+      const frame = message as Record<string, unknown>;
+      if (frame.type === 'chat.stop-task' && typeof frame.clientRequestId === 'string') {
+        lastStopId = frame.clientRequestId;
+      }
+    });
+    const onReveal = vi.fn();
+    const onLoadAll = vi.fn();
+    const view = render(
+      <BackgroundTasksStrip
+        sessionId="session-1"
+        canStopTasks
+        sendMessage={sendMessage}
+        onReveal={onReveal}
+        onLoadAll={onLoadAll}
+        messages={[]}
+        scheduled={[loop()]}
+        {...overrides}
+      />,
+    );
+    return { ...view, sendMessage, onReveal, onLoadAll };
+  };
+
+  /** The chip that names an item, by its prompt. */
+  const chip = (prompt: string) => screen.getAllByRole('button').find((button) => button.textContent?.includes(prompt));
+  const stopButtons = () => screen.queryAllByRole('button', { name: 'Stop' });
+  const emit = (frame: Record<string, unknown>) => act(() => {
+    for (const listener of [...page.listeners]) {
+      listener(frame);
+    }
+  });
+  /** An answer to the latest stop, as the server sends it: with the id that stop carried. */
+  const status = (fields: Record<string, unknown>) => ({
+    kind: 'stop_task_status',
+    sessionId: 'session-1',
+    taskId: 'cron:b2148320',
+    ...(lastStopId ? { clientRequestId: lastStopId } : {}),
+    timestamp: '2026-10-29T02:00:00.000Z',
+    ...fields,
+  });
+  type SentFrames = { mock: { calls: unknown[][] } };
+  /** The frames a strip sent, less the id each stop carries, which `stopIds` reads. */
+  const framesSent = (sendMessage: SentFrames) => sendMessage.mock.calls.map(([frame]) => {
+    const { clientRequestId: _clientRequestId, ...rest } = frame as Record<string, unknown>;
+    return JSON.stringify(rest);
+  });
+  const stopIds = (sendMessage: SentFrames) => sendMessage.mock.calls.map(([frame]) => (frame as Record<string, unknown>).clientRequestId);
+  const settleRefresh = () => act(async () => {
+    page.state.releaseRefresh?.();
+    await Promise.resolve();
+  });
+  /** Clicks an item's ✕ and confirms on the strip, with Stop or Stop all. */
+  const confirmStop = (index: number, choice: RegExp = /^Stop$/) => {
+    fireEvent.click(stopButtons()[index]);
+    fireEvent.click(within(screen.getByRole('group')).getByRole('button', { name: choice }));
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    page.state.refreshes = 0;
+    page.state.releaseRefresh = null;
+    page.state.processing = [];
+    lastStopId = undefined;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('lists each kind after the tasks: a clock in blue, no pulse, how often and when it runs next', () => {
+    renderStrip({
+      messages: [toolRow({ toolName: 'Agent', toolId: 'toolu_agent_1', taskStatus: { status: 'running', description: 'Survey the repo' } })],
+      scheduled: [loop(), reminder(), selfPaced()],
+    });
+
+    const chips = screen.getAllByRole('button').filter((button) => button.getAttribute('aria-label') !== 'Stop');
+    expect(chips.map((button) => button.textContent)).toEqual([
+      'AgentSurvey the repo',
+      `Loopcheck CI· Every 5 minutes · Next: ${clock(at(29, 14, 5))}`,
+      `Reminderstretch· ${clock(at(29, 14, 30))}`,
+      `Loopcheck the deploy· Self-paced · Next: ${clock(at(29, 14, 5))}`,
+    ]);
+    const loopChip = chip('check CI');
+    expect(loopChip?.querySelector('.text-blue-500') !== null).toBe(true);
+    expect(loopChip?.querySelector('.animate-pulse') === null).toBe(true);
+  });
+
+  it('keeps the details in the tooltip, and says when a run has come or will not happen', () => {
+    renderStrip({
+      scheduled: [
+        loop({ durable: true }),
+        selfPaced({ nextFireAt: NOW - 1_000 }),
+        reminder({ nextFireAt: NOW + 10 * 86_400_000 }),
+      ],
+    });
+
+    expect(chip('check CI')?.title.split('\n').slice(0, 2)).toEqual(['check CI', '*/5 * * * * · Every 5 minutes (server time)']);
+    expect(chip('check CI')?.title.includes('Kept in the project\'s .claude/scheduled_tasks.json')).toBe(true);
+    expect(chip('check the deploy')?.title).toBe('check the deploy\nReason: waiting for the deploy');
+    expect(chip('check the deploy')?.textContent).toBe('Loopcheck the deploy· Self-paced · Due now');
+    expect(chip('stretch')?.textContent?.endsWith('· Past the hold limit, will not run')).toBe(true);
+  });
+
+  it('scrolls to the call that made an item, or loads the rest of the transcript when that row is not loaded', () => {
+    const call = toolRow({ toolName: 'CronCreate', toolId: 'toolu_cron_1', toolInput: '{}' });
+    const { onReveal, onLoadAll } = renderStrip({ messages: [call], scheduled: [loop(), selfPaced()] });
+
+    fireEvent.click(chip('check CI')!);
+    fireEvent.click(chip('check the deploy')!);
+    expect(onReveal.mock.calls.length === 1 && onReveal.mock.calls[0][0] === call).toBe(true);
+    expect(onLoadAll.mock.calls.length).toBe(1);
+  });
+
+  it('offers no ✕ for a job an older CLI gave no id, nor for a session CloudCLI does not drive', () => {
+    renderStrip({ scheduled: [loop({ id: 'cron:call:toolu_cron_1' })] });
+    expect(stopButtons().length).toBe(0);
+    expect(chip('check CI') !== undefined).toBe(true);
+
+    renderStrip({ canStopTasks: false, scheduled: [selfPaced()] });
+    expect(stopButtons().length).toBe(0);
+  });
+
+  it('asks on the strip first, in words that follow what the stop takes', () => {
+    const { unmount } = renderStrip({ scheduled: [selfPaced()] });
+    fireEvent.click(stopButtons()[0]);
+    expect(within(screen.getByRole('group')).getByText('Stop this loop?').textContent).toBe('Stop this loop?');
+    expect(document.activeElement?.textContent).toBe('Cancel');
+    unmount();
+
+    renderStrip({ scheduled: [loop(), reminder()] });
+    fireEvent.click(stopButtons()[0]);
+    expect(screen.getByRole('group').textContent?.startsWith('Stop this loop? CloudCLI runs one turn with the current model to have Claude cancel it.')).toBe(true);
+    fireEvent.click(stopButtons()[1]);
+    expect(screen.getByRole('group').textContent?.startsWith('Cancel this reminder? CloudCLI runs one turn')).toBe(true);
+  });
+
+  it('asks for a turn to stop a self-paced loop while a task keeps the process held', () => {
+    renderStrip({
+      scheduled: [selfPaced()],
+      tasks: [{ taskId: 't1', toolUseId: 'toolu_t1', taskType: 'local_bash', description: 'npm run dev', startedAt: NOW }],
+    });
+    fireEvent.click(stopButtons().at(-1)!);
+    expect(screen.getByRole('group').textContent?.startsWith('Stop this loop? CloudCLI runs one turn')).toBe(true);
+  });
+
+  it('sends the stop and shows the item stopping; with two or more it can stop them all at once', () => {
+    const { sendMessage, unmount } = renderStrip({ scheduled: [loop()] });
+    fireEvent.click(stopButtons()[0]);
+    expect(within(screen.getByRole('group')).queryAllByRole('button', { name: /^Stop all/ }).length).toBe(0);
+    fireEvent.click(within(screen.getByRole('group')).getByRole('button', { name: 'Stop' }));
+    expect(framesSent(sendMessage)).toEqual([
+      JSON.stringify({ type: 'chat.stop-task', sessionId: 'session-1', taskId: 'cron:b2148320' }),
+    ]);
+    // An id of its own, in the shape the server hands back.
+    const [sentId] = stopIds(sendMessage);
+    expect(typeof sentId === 'string' && /^[\w-]{1,128}$/.test(sentId)).toBe(true);
+    expect(screen.queryAllByRole('group').length).toBe(0);
+    expect(screen.getByText('Stopping…').textContent).toBe('Stopping…');
+    expect(stopButtons().length).toBe(0);
+    unmount();
+
+    const all = renderStrip({ scheduled: [loop(), selfPaced(), loop({ id: 'cron:call:toolu_old', prompt: 'old job' })] });
+    confirmStop(1, /^Stop all \(2\)$/);
+    expect(framesSent(all.sendMessage)).toEqual([
+      JSON.stringify({ type: 'chat.stop-task', sessionId: 'session-1', taskId: 'wakeup:toolu_wake_1', allScheduled: true }),
+    ]);
+    expect(screen.getAllByText('Stopping…').length).toBe(2);
+  });
+
+  it('greys the ✕ out while a turn runs, saying to stop it after the turn', () => {
+    const { sendMessage } = renderStrip({ isTurnRunning: true });
+    const stop = stopButtons()[0];
+    expect(stop.getAttribute('aria-disabled')).toBe('true');
+    expect(stop.title).toBe('Stop it after this turn ends');
+
+    fireEvent.click(stop);
+    expect(screen.queryAllByRole('group').length).toBe(0);
+    expect(screen.queryAllByText('Stop it after this turn ends').length).toBe(1);
+    expect(sendMessage.mock.calls.length).toBe(0);
+  });
+
+  it('keeps an item stopping through the turn that cancels it, and once it is gone reads the running sessions again', async () => {
+    renderStrip();
+    confirmStop(0);
+
+    emit(status({ status: 'started' }));
+    expect(screen.queryAllByText('Stopping…').length).toBe(1);
+    // The turn shows as the session's at once, a turn the pane can stop.
+    expect(page.state.processing).toEqual(['session-1']);
+    emit(status({ status: 'finished', stillHeld: false }));
+    expect(page.state.refreshes).toBe(1);
+    expect(screen.queryAllByText('Stopping…').length).toBe(1);
+
+    // The read is back; here the item is still listed, so its ✕ is too.
+    await settleRefresh();
+    expect(screen.queryAllByText('Stopping…').length).toBe(0);
+    expect(stopButtons().length).toBe(1);
+  });
+
+  it('reads the running sessions again when the process was let go, or there was no such item', async () => {
+    renderStrip({ scheduled: [selfPaced(), loop()] });
+    confirmStop(0);
+    emit(status({ taskId: 'wakeup:toolu_wake_1', status: 'stopped' }));
+    expect(page.state.refreshes).toBe(1);
+    await settleRefresh();
+
+    confirmStop(1);
+    emit(status({ status: 'not_found' }));
+    expect(page.state.refreshes).toBe(2);
+  });
+
+  it('gives the ✕ back with a hint when the turn did not cancel it, or none could run', () => {
+    renderStrip();
+    const hint = 'It was not cancelled. Try again, or ask Claude in the message box to cancel it.';
+
+    confirmStop(0);
+    emit(status({ status: 'finished', stillHeld: true }));
+    expect(stopButtons().length).toBe(1);
+    expect(screen.queryAllByText(hint).length).toBe(1);
+
+    confirmStop(0);
+    expect(screen.queryAllByText(hint).length).toBe(0);
+    emit(status({ status: 'failed' }));
+    expect(stopButtons().length).toBe(1);
+    expect(screen.queryAllByText(hint).length).toBe(1);
+    expect(page.state.refreshes).toBe(0);
+  });
+
+  it('gives the ✕ back, to try after the turn, when a turn was under way', () => {
+    renderStrip();
+    confirmStop(0);
+    emit(status({ status: 'busy' }));
+
+    expect(stopButtons().length).toBe(1);
+    expect(screen.queryAllByText('Stop it after this turn ends').length).toBe(1);
+  });
+
+  it('heeds only the stops it asked for, and ends them all when the socket reconnects', () => {
+    renderStrip();
+    // Another pane on the session, or another session, asked for these.
+    emit(status({ status: 'failed' }));
+    emit(status({ sessionId: 'session-2', status: 'failed' }));
+    expect(screen.queryAllByText(/^It was not cancelled/).length).toBe(0);
+
+    confirmStop(0);
+    emit(status({ sessionId: 'session-2', status: 'failed' }));
+    expect(screen.queryAllByText('Stopping…').length).toBe(1);
+
+    emit({ kind: 'websocket_reconnected', timestamp: Date.now() });
+    expect(screen.queryAllByText('Stopping…').length).toBe(0);
+    expect(stopButtons().length).toBe(1);
+  });
+
+  it('closes the question when a turn starts while it asks, and does not ask again once the turn is over', () => {
+    const props = { sessionId: 'session-1', canStopTasks: true, sendMessage: () => {}, onReveal: () => {}, onLoadAll: () => {}, messages: [], scheduled: [loop()] };
+    const { rerender } = render(<BackgroundTasksStrip {...props} />);
+    fireEvent.click(stopButtons()[0]);
+    expect(screen.queryAllByRole('group').length).toBe(1);
+
+    rerender(<BackgroundTasksStrip {...props} isTurnRunning />);
+    expect(screen.queryAllByRole('group').length).toBe(0);
+    rerender(<BackgroundTasksStrip {...props} />);
+    expect(screen.queryAllByRole('group').length).toBe(0);
+  });
+
+  it('forgets a stop asked for in one session once the pane shows another', () => {
+    const { rerender } = renderStrip();
+    confirmStop(0);
+    expect(screen.queryAllByText('Stopping…').length).toBe(1);
+
+    rerender(
+      <BackgroundTasksStrip
+        sessionId="session-2"
+        canStopTasks
+        sendMessage={() => {}}
+        onReveal={() => {}}
+        onLoadAll={() => {}}
+        messages={[]}
+        scheduled={[loop()]}
+      />,
+    );
+    expect(screen.queryAllByText('Stopping…').length).toBe(0);
+    expect(stopButtons().length).toBe(1);
+  });
+
+  it('closes the question on a press outside it, or on Escape wherever the focus is, but not on a press of its own buttons', () => {
+    const { sendMessage } = renderStrip({ scheduled: [loop(), selfPaced()] });
+
+    fireEvent.click(stopButtons()[0]);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryAllByRole('group').length).toBe(0);
+
+    fireEvent.click(stopButtons()[0]);
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.queryAllByRole('group').length).toBe(0);
+
+    // Safari and Firefox on macOS leave the focus where it was on a click.
+    fireEvent.click(stopButtons()[0]);
+    const stop = within(screen.getByRole('group')).getByRole('button', { name: 'Stop' });
+    fireEvent.pointerDown(stop);
+    fireEvent.click(stop);
+    expect(sendMessage.mock.calls.length).toBe(1);
+  });
+
+  it('lays out task names and prompts by their own first letter: right to left, "/loop" stays "/loop" and a long prompt is cut at its end', () => {
+    renderStrip({
+      messages: [toolRow({ toolName: 'Workflow', toolId: 'toolu_workflow_1', taskStatus: { status: 'running', workflowName: 'release-check' } })],
+      tasks: [{ taskId: 'task-1', toolUseId: 'toolu_bash_1', taskType: 'local_bash', description: 'npm test -- --watch', startedAt: NOW - 1000 }],
+      scheduled: [selfPaced({ prompt: '/loop' }), loop()],
+    });
+    const laidOutByContent = [...document.querySelectorAll('.bidi-auto')].map((element) => element.textContent);
+    expect(laidOutByContent).toEqual(['release-check', 'npm test -- --watch', '/loop', 'check CI']);
+  });
+
+  it('closes the question on Escape, which it owns while open, and on Cancel', () => {
+    const { sendMessage } = renderStrip();
+
+    fireEvent.click(stopButtons()[0]);
+    const question = screen.getByRole('group');
+    expect(question.hasAttribute('data-escape-layer')).toBe(true);
+    fireEvent.keyDown(document.activeElement ?? question, { key: 'Escape' });
+    expect(screen.queryAllByRole('group').length).toBe(0);
+    expect(document.activeElement === stopButtons()[0]).toBe(true);
+
+    fireEvent.click(stopButtons()[0]);
+    fireEvent.click(within(screen.getByRole('group')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryAllByRole('group').length).toBe(0);
+    expect(sendMessage.mock.calls.length).toBe(0);
+  });
+
+  it('tells its stops from another pane\'s on the socket they share: the other pane\'s answer about the same item leaves its own stopping', async () => {
+    // The session open in two panes of one page, each with its strip.
+    const left = renderStrip();
+    const right = renderStrip();
+    const inLeft = within(left.container);
+    const inRight = within(right.container);
+    const confirmIn = (pane: typeof inLeft) => {
+      fireEvent.click(pane.getByRole('button', { name: 'Stop' }));
+      fireEvent.click(within(pane.getByRole('group')).getByRole('button', { name: 'Stop' }));
+    };
+    confirmIn(inLeft);
+    confirmIn(inRight);
+    const [leftId] = stopIds(left.sendMessage);
+    const [rightId] = stopIds(right.sendMessage);
+    expect(leftId === rightId).toBe(false);
+
+    emit(status({ status: 'started', clientRequestId: leftId }));
+    // The left pane's turn runs, so the right pane's stop of the same item waits for it.
+    emit(status({ status: 'busy', clientRequestId: rightId }));
+    expect(inLeft.queryAllByText('Stopping…').length).toBe(1);
+    expect(inLeft.queryAllByText('Stop it after this turn ends').length).toBe(0);
+    expect(inRight.queryAllByText('Stopping…').length).toBe(0);
+    expect(inRight.queryAllByText('Stop it after this turn ends').length).toBe(1);
+
+    emit(status({ status: 'finished', stillHeld: false, clientRequestId: leftId }));
+    expect(page.state.refreshes).toBe(1);
+    await settleRefresh();
+    expect(inLeft.queryAllByText('Stopping…').length).toBe(0);
+  });
+
+  it('settles a stop by the item it named when the server hands no id back', () => {
+    renderStrip();
+    confirmStop(0);
+
+    emit(status({ status: 'failed', clientRequestId: undefined }));
+    expect(stopButtons().length).toBe(1);
+    expect(screen.queryAllByText(/^It was not cancelled/).length).toBe(1);
+  });
+
+  it('keeps how often and when an item runs in view: short of room, the prompt gives way first', () => {
+    renderStrip({ scheduled: [loop({ prompt: 'Reply with exactly the word TICK and nothing else, then wait for the next run' })] });
+
+    const prompt = [...document.querySelectorAll('.bidi-auto')].find((element) => element.textContent?.startsWith('Reply with'));
+    const timing = prompt?.nextElementSibling;
+    expect(timing?.textContent?.startsWith('· Every 5 minutes')).toBe(true);
+    // The two share a row of their own, which gives way inside the chip; in
+    // it the prompt shrinks, to nothing if it has to, and the timing only
+    // ever narrows to the row's width, cut there with an ellipsis.
+    expect(prompt?.parentElement?.className.split(' ').includes('min-w-0')).toBe(true);
+    expect(prompt?.className.split(' ').includes('min-w-0')).toBe(true);
+    const timingClasses = timing?.className.split(' ') ?? [];
+    expect(['flex-shrink-0', 'max-w-full', 'truncate'].every((name) => timingClasses.includes(name))).toBe(true);
+    expect(timingClasses.includes('min-w-0')).toBe(false);
+  });
+});
+
+describe('the background tasks strip, in another language', () => {
+  afterEach(async () => {
+    await i18n.changeLanguage('en');
+  });
+
+  const renderAgent = (toolUses: number) => render(
+    <BackgroundTasksStrip
+      sessionId="session-1"
+      canStopTasks
+      sendMessage={() => {}}
+      onReveal={() => {}}
+      onLoadAll={() => {}}
+      messages={[
+        toolRow({
+          toolName: 'Agent',
+          toolId: 'toolu_agent_1',
+          isSubagentContainer: true,
+          taskStatus: { status: 'running', description: 'Survey the repo', usage: { totalTokens: 1, toolUses, durationMs: 1 } },
+        }),
+      ]}
+    />,
+  );
+
+  it('counts an agent\'s tool uses in the interface language', async () => {
+    await i18n.changeLanguage('zh-CN');
+    renderAgent(12);
+    expect(screen.getByRole('status').textContent?.includes('12 次工具调用')).toBe(true);
+  });
+
+  it('counts one tool use in Hebrew\'s singular', async () => {
+    await i18n.changeLanguage('he');
+    renderAgent(1);
+    expect(screen.getByRole('status').textContent?.includes('שימוש אחד בכלי')).toBe(true);
   });
 });
 

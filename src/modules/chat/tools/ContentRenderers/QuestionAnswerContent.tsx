@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { Question } from '@/shared/types';
 
@@ -18,6 +19,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
   answers,
   className = '',
 }) => {
+  const { t } = useTranslation('chat');
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
   // Tool inputs are runtime data loaded from session transcripts and may be
@@ -83,7 +85,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   {q.header && (
-                    <span className="inline-flex items-center rounded border border-blue-100/80 bg-blue-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-blue-600 dark:border-blue-800/40 dark:bg-blue-900/30 dark:text-blue-400">
+                    <span dir="auto" className="inline-flex items-center rounded border border-blue-100/80 bg-blue-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-blue-600 dark:border-blue-800/40 dark:bg-blue-900/30 dark:text-blue-400">
                       {q.header}
                     </span>
                   )}
@@ -93,7 +95,8 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
                     </span>
                   )}
                 </div>
-                <div className="mt-0.5 text-xs leading-snug text-gray-600 dark:text-gray-400">
+                {/* The model's words (question, options, answers), each laid out by its own first letter. */}
+                <div dir="auto" className="mt-0.5 text-xs leading-snug text-gray-600 dark:text-gray-400">
                   {q.question}
                 </div>
 
@@ -106,9 +109,9 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
                           key={lbl}
                           className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
                         >
-                          {lbl}
+                          <span dir="auto">{lbl}</span>
                           {isCustom && (
-                            <span className="text-[9px] font-normal text-blue-400 dark:text-blue-500">(custom)</span>
+                            <span className="text-[9px] font-normal text-blue-400 dark:text-blue-500">{t('askQuestion.custom')}</span>
                           )}
                         </span>
                       );
@@ -118,7 +121,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
 
                 {!isExpanded && skipped && hasAnyAnswer && (
                   <span className="mt-1 inline-block text-[10px] italic text-gray-400 dark:text-gray-500">
-                    Skipped
+                    {t('askQuestion.skipped')}
                   </span>
                 )}
               </div>
@@ -159,11 +162,11 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <span className={wasSelected ? 'font-medium text-gray-900 dark:text-gray-100' : ''}>
+                          <span dir="auto" className={wasSelected ? 'font-medium text-gray-900 dark:text-gray-100' : ''}>
                             {opt.label}
                           </span>
                           {opt.description && (
-                            <span className={`mt-0.5 block text-[11px] ${
+                            <span dir="auto" className={`mt-0.5 block text-[11px] ${
                               wasSelected ? 'text-blue-600/70 dark:text-blue-300/70' : 'text-gray-400 dark:text-gray-600'
                             }`}>
                               {opt.description}
@@ -185,15 +188,15 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
                         </svg>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <span className="font-medium text-gray-900 dark:text-gray-100">{lbl}</span>
-                        <span className="ms-1 text-[10px] text-blue-500 dark:text-blue-400">(custom)</span>
+                        <span dir="auto" className="font-medium text-gray-900 dark:text-gray-100">{lbl}</span>
+                        <span className="ms-1 text-[10px] text-blue-500 dark:text-blue-400">{t('askQuestion.custom')}</span>
                       </div>
                     </div>
                   ))}
 
                   {skipped && hasAnyAnswer && (
                     <div className="px-2.5 py-1 text-[11px] italic text-gray-400 dark:text-gray-500">
-                      No answer provided
+                      {t('askQuestion.noAnswer')}
                     </div>
                   )}
                 </div>
@@ -205,7 +208,7 @@ export const QuestionAnswerContent: React.FC<QuestionAnswerContentProps> = ({
 
       {!hasAnyAnswer && total === 1 && (
         <div className="text-[11px] italic text-gray-400 dark:text-gray-500">
-          Skipped
+          {t('askQuestion.skipped')}
         </div>
       )}
     </div>

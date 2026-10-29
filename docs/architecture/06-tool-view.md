@@ -97,13 +97,20 @@ Three lookups happen before the switch, all inside `ToolRenderer`:
 
 - `getToolConfig(toolName)` picks the entry. Lookups always use the provider's real tool
   name, never the display name.
-- `formatToolDisplayName(toolName)` produces the header text. `UNIFIED_TOOL_LABELS` maps
-  `TodoWrite` and `TodoRead` to `Checklist` and `AskUserQuestion` to `Question`; otherwise
-  `mcp__<server>__<tool>` becomes `<tool> (<server>)`; otherwise the name passes through.
+- `formatToolDisplayName(toolName, t)` produces the header text. `UNIFIED_TOOL_LABELS` maps
+  `TodoWrite` and `TodoRead` to the key of `Checklist` and `AskUserQuestion` to the key of
+  `Question`, which `t` words in the interface language; otherwise `mcp__<server>__<tool>`
+  becomes `<tool> (<server>)`; otherwise the name passes through.
 - `parseToolPayload(payload)` (`src/modules/chat/utils/messageTransforms.ts`) parses the
   payload for the current mode. `normalizedToChatMessages` serializes `toolInput` to a JSON
   string on every row, so every `getValue`, `title` and `getContentProps` receives a parsed
   object — or the original string, when it is not JSON.
+
+Text the reader sees is in the interface language. A function that words a value, a
+secondary line or a title takes the `t` of whoever draws it (`ToolRenderer`,
+`ToolGroupContainer`, the group preview). A fixed `label` or `title` is worded by its key
+(`labelKey`, `titleKey`) when it has one and stays as the English fallback; tool names such
+as `Grep` have none. The keys carry their namespace, so any `t` will do.
 
 ### The config shape
 
@@ -113,23 +120,26 @@ Three lookups happen before the switch, all inside `ToolRenderer`:
 | --- | --- | --- |
 | `type` | `'one-line' \| 'collapsible' \| 'plan' \| 'hidden'` | Picks the base pattern. `hidden` is declared but no entry uses it; it falls through the switch and renders nothing |
 | `label` | `string` | Text before the separator. Defaults to the display name |
+| `labelKey` | `string` | Translation key of `label` |
 | `icon` | `string` | Replaces the label in `OneLineDisplay`. Only `'terminal'` is used, and every variant special-cases it |
 | `style` | `string` | `'terminal'` switches `OneLineDisplay` to the dark command pill |
-| `getValue` | `(input) => string` | The main text of a one-line row |
-| `getSecondary` | `(input) => string \| undefined` | Italic trailing text, such as Grep's `in <path>` |
+| `getValue` | `(input, t) => string` | The main text of a one-line row |
+| `getSecondary` | `(input, t) => string \| undefined` | Italic trailing text, such as Grep's `in <path>` |
 | `action` | `'copy' \| 'open-file' \| 'jump-to-results' \| 'none'` | What a click does, and which of the last three layouts renders |
 | `wrapText` | `boolean` | Wrap instead of truncate the value |
 | `colorScheme` | `{primary, secondary, background, border, icon}` | Tailwind classes. `border` and `icon` are also read by `ToolGroupContainer` for the collapsed group row |
-| `title` | `string \| (input) => string` | Header of a collapsible or plan card |
+| `title` | `string \| (input, t) => string` | Header of a collapsible or plan card |
+| `titleKey` | `string` | Translation key of a fixed `title` |
 | `defaultOpen` | `boolean` | Initial open state. Forced open while exporting |
 | `contentType` | `'diff' \| 'markdown' \| 'file-list' \| 'todo-list' \| 'text' \| 'task' \| 'question-answer'` | Which content renderer fills a collapsible body |
-| `getContentProps` | `(input, helpers) => object` | Props for that renderer. `helpers` carries `{selectedProject, createDiff, onFileOpen}` |
+| `getContentProps` | `(input, helpers) => object` | Props for that renderer. `helpers` carries `{selectedProject, createDiff, onFileOpen, t}` |
 | `actionButton` | `'file-button' \| 'none'` | Never read. Edit, Write and ApplyPatch set it to `'none'`; nothing sets `'file-button'` |
 
 `config.result` — how a successful result renders. **Its unions are not the same as
 `input`'s.** `type` drops `'hidden'` and adds `'special'`. `contentType` drops `'diff'` and
-adds `'success-message'`. `getContentProps` and `title` take the result object and receive
-no `helpers`.
+adds `'success-message'`. `getContentProps` and `title` take the result object in place of
+the input, `title` with `t` and `getContentProps` with the same `helpers`; a fixed `title`
+has its `titleKey` here too.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -311,7 +321,7 @@ flowchart TD
   I -->|"when expanded or exporting"| L
 ```
 
-`groupConsecutiveTools(messages, showThinking = true)` walks the list once. A message is
+`groupConsecutiveTools(messages, t, showThinking = true)` walks the list once. A message is
 groupable when `isToolUse && toolName && !isSubagentContainer`. A run extends while the
 next message is groupable and has the same `toolName`. A message that renders nothing —
 reasoning while `showThinking` is off — is skipped rather than treated as a break, because
@@ -320,21 +330,22 @@ consumed: they do not reappear in the returned list. `TOOL_GROUP_THRESHOLD` is 2
 of one is pushed through unchanged. The group carries the run's **first** timestamp, which
 is the `data-message-timestamp` the transcript search jump matches on.
 
-The preview is built during grouping, not during render, by `buildGroupPreview`. The first
-`PREVIEWED_TOOL_COUNT = 2` messages are named by `getToolInputPreview`, which prefers the
-config's `getValue` then its `title`; empties are filtered out. The remainder is
-`messages.length - named.length`, so **the names printed plus the remainder always equal
-the `x{n}` badge**. That is the invariant
+The preview is built during grouping, not during render, by `buildGroupPreview`, in the
+language of `t`. The first `PREVIEWED_TOOL_COUNT = 2` messages are named by
+`getToolInputPreview`, which prefers the config's `getValue` then its `title`; empties are
+filtered out. The remainder is `messages.length - named.length`, so **the names printed
+plus the remainder always equal the `x{n}` badge**. That is the invariant
 `src/modules/chat/tests/toolGrouping.test.ts` is built around: a run of two where one input
 yields no text reads `/a.ts, +1 more`, and a run of five that names nothing reads
 `+5 more`.
 
 `ToolGroupContainer` builds the collapsed button from the same config the cards use:
-`config.label` or the tool name, `config.colorScheme.border`, `config.colorScheme.icon`
-with `terminal` mapped to `$` and anything absent to the tool's uppercased first letter,
-the `x{n}` badge, the preview, and — via `useGroupDiffStats` — the summed `+N -M` for a run
-whose config has `contentType: 'diff'`. Expanding it renders the run's real
-`MessageComponent` rows.
+`config.label` (worded by its `labelKey`) or the display name, `config.colorScheme.border`,
+`config.colorScheme.icon` with `terminal` mapped to `$` and anything absent to the first
+letter of the group's worded label (bidi isolates stripped, upper-cased), so a group reads
+「问」 in Chinese and "Q" in English, the `x{n}` badge, the preview, and — via `useGroupDiffStats` — the
+summed `+N -M` for a run whose config has `contentType: 'diff'`. Expanding it renders the
+run's real `MessageComponent` rows.
 
 ## Subagents
 
@@ -520,13 +531,13 @@ memoized, and four with no other reason to know exports exist.
 
 ## Gotchas and why the code looks like this
 
-- **The group preview is computed during grouping and not cached, on purpose.** Grouping
-  re-runs on every 100 ms stream tick because `visibleMessages` is a fresh array. Measured
-  at 0.18 ms per tick over a 100-message window, a seventh of the store's own per-tick
-  merge. The obvious cache is unsound: a run's preview depends on the second message *and*
-  the run length, so keying on first-message identity pins `/a.ts, /b.ts` while the badge
-  climbs to `x5`. `ToolGroupContainer` is memoized anyway but cannot bail during streaming
-  for the same reason (commit `2a11562f`).
+- **A group is reused only while its run is the very same rows.** Grouping re-runs on
+  every 100 ms stream tick because `visibleMessages` is a fresh array. `toolGroupCache`, a
+  `WeakMap` on the run's first row, hands back the same group object while every row of the
+  run keeps its identity and `showThinking` and `t` are unchanged, so the memoized
+  `ToolGroupContainer` can bail. Keying on the first row alone is unsound: a run's preview
+  depends on the second message *and* the run length, so it would pin `/a.ts, /b.ts` while
+  the badge climbs to `x5` (commits `2a11562f`, `3576232e`).
 - **`extraCount` subtracts the previews that produced text, not the two slots the line
   reserves.** The alternative was tried and reverted. Counting slots makes a group of three
   whose first preview is empty render `/b.ts, +1 more` beside an `x3` badge — the line and

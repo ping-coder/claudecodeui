@@ -2,6 +2,7 @@ import { Loader2, MessageSquarePlus, X } from 'lucide-react';
 import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { formatSessionTitle } from '@/modules/sidebar';
 import type {
   PaneTabActivity,
   PaneTabDisplay,
@@ -121,7 +122,8 @@ export default function PaneTabsSheet({
               <ul className="space-y-1">
                 {pane.tabs.map((tab) => {
                   const display = tabDisplay.get(tab.key);
-                  const title = display?.title ?? tab.title;
+                  // The server's placeholder names ("Untitled Claude Session") read in the interface language.
+                  const title = formatSessionTitle(display?.title ?? tab.title, t);
                   const isCurrent = layout.focusedSide === side && pane.activeTabKey === tab.key;
                   return (
                     <li key={tab.key} className="flex items-center gap-1">

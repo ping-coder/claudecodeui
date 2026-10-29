@@ -23,6 +23,13 @@ import type { ChatMessage, Project, ProjectSession, SessionActivity } from '@/sh
 
 const noop = () => undefined;
 
+// The arguments ChatInterface last handed its realtime handlers, and the
+// activity map's read of the running sessions it should hand on.
+const wiring = vi.hoisted(() => ({
+  realtimeArgs: null as Record<string, unknown> | null,
+  refreshRunningSessions: async () => undefined,
+}));
+
 // A Workflow launch as a history load returns it: read running, its
 // acknowledgement naming the task.
 const runningLaunch: ChatMessage = {
@@ -106,7 +113,11 @@ vi.mock('@/modules/chat/hooks/useChatProviderState', () => ({
 vi.mock('@/modules/chat/hooks/useChatComposerState', () => ({
   useChatComposerState: () => ({ input: '', setInput: noop, textareaRef: createRef<HTMLTextAreaElement>() }),
 }));
-vi.mock('@/modules/chat/hooks/useChatRealtimeHandlers', () => ({ useChatRealtimeHandlers: () => undefined }));
+vi.mock('@/modules/chat/hooks/useChatRealtimeHandlers', () => ({
+  useChatRealtimeHandlers: (args: Record<string, unknown>) => {
+    wiring.realtimeArgs = args;
+  },
+}));
 vi.mock('@/modules/chat/hooks/useSessionStore', () => ({ useSessionStore: () => ({}) }));
 vi.mock('@/modules/chat/composer/useScheduledMessages', () => ({
   useScheduledMessages: () => ({ scheduledMessages: [], schedule: async () => false, cancel: noop }),
@@ -123,6 +134,7 @@ vi.mock('@/shared/context/SessionProtectionContext', () => ({
     markSessionIdle: noop,
     markSessionBackground: noop,
     getSessionActivity: noop,
+    refreshRunningSessions: wiring.refreshRunningSessions,
   }),
 }));
 
@@ -173,5 +185,41 @@ describe('the background-tasks strip\'s Stop, by who drives the viewed session',
     expect(stops).toHaveLength(1);
     fireEvent.click(stops[0]!);
     expect(sendMessage).toHaveBeenCalledWith({ type: 'chat.stop-task', sessionId: 'session-1', taskId: 'w1' });
+  });
+});
+
+describe('the scheduled work the strip lists', () => {
+  const loop = {
+    id: 'cron:b2148320',
+    kind: 'cron' as const,
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: 1,
+    nextFireAt: null,
+    recurring: true,
+    holdUntil: 691_200_001,
+    cron: '*/5 * * * *',
+  };
+
+  it('comes from the viewed session\'s activity entry, stoppable once no turn runs', () => {
+    renderChat({ statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [], scheduled: [loop] });
+    const strip = screen.getByRole('status', { name: 'Background tasks' });
+    const chips = within(strip).queryAllByRole('button').map((button) => button.textContent);
+    expect(chips.includes('Loopcheck CI· Every 5 minutes')).toBe(true);
+    const stops = within(strip).queryAllByRole('button', { name: 'Stop' });
+    // The workflow's ✕, then the loop's, which can be pressed.
+    expect(stops.map((stop) => stop.getAttribute('aria-disabled'))).toEqual([null, null]);
+  });
+
+  it('greys the loop\'s ✕ out while a turn runs in the session', () => {
+    renderChat({ statusText: null, canInterrupt: true, startedAt: 1, scheduled: [loop] });
+    const strip = screen.getByRole('status', { name: 'Background tasks' });
+    const stops = within(strip).queryAllByRole('button', { name: 'Stop' });
+    expect(stops.map((stop) => stop.getAttribute('aria-disabled'))).toEqual([null, 'true']);
+  });
+
+  it('hands the realtime handlers the read of the running sessions a turn\'s end asks for', () => {
+    renderChat(null);
+    expect(wiring.realtimeArgs?.refreshRunningSessions === wiring.refreshRunningSessions).toBe(true);
   });
 });

@@ -11,7 +11,7 @@ import type {
   SessionRowActions,
   SidebarConversationOpenRequest,
 } from '@/shared/types';
-import { formatCompactAge } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { formatCompactAge, formatSessionTitle } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import SessionOptions from '@/modules/sidebar/SessionOptions';
 import { PanePlacementMarker } from '@/modules/sidebar/SessionPaneButtons';
 
@@ -120,7 +120,7 @@ export default function SidebarRecentConversations({
         {conversations.map((conversation) => {
           const panePlacement = paneTargeting?.placements.get(conversation.sessionId) ?? null;
           const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
-          const age = formatCompactAge(conversation.lastActivity, currentTime);
+          const age = formatCompactAge(conversation.lastActivity, currentTime, t);
           const hasBackgroundWork = sessionActions.backgroundSessionIds.has(conversation.sessionId);
           const isProcessing = sessionActions.activeSessions.has(conversation.sessionId) && !hasBackgroundWork;
           const showAttentionIndicator =
@@ -238,7 +238,7 @@ export default function SidebarRecentConversations({
 
                 <span className="min-w-0 flex-1">
                   <span className="bidi-auto block truncate text-[13px] font-normal leading-4">
-                    {conversation.sessionTitle}
+                    {formatSessionTitle(conversation.sessionTitle, t)}
                   </span>
                   <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
                     <span className="bidi-auto truncate">{conversation.projectDisplayName}</span>

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import '@/modules/i18n';
 import ToolGroupContainer from '@/modules/chat/transcript/ToolGroupContainer';
 import { ToolRenderer } from '@/modules/chat/tools/ToolRenderer';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';

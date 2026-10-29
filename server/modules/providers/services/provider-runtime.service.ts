@@ -17,6 +17,9 @@ import type {
   ProviderRunFunction,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
+  ScheduledWorkStopOptions,
+  ScheduledWorkStopResult,
+  ScheduledWorkSummary,
   SessionHold,
 } from '@/shared/types.js';
 import { AppError, buildTurnRunOptions } from '@/shared/utils.js';
@@ -85,6 +88,19 @@ export function createProviderRuntimeService(
     return provider.runtime.run(command, options, writer, createRuntimeContext(provider));
   };
 
+  // Every runtime's scheduled work for one session, oldest first.
+  const listSessionScheduledWork = (sessionId: string): ScheduledWorkSummary[] => dependencies.listProviders()
+    .flatMap((provider) => (provider.runtime.listScheduledWork?.() ?? [])
+      .filter((entry) => entry.sessionId === sessionId)
+      .flatMap((entry) => entry.scheduled))
+    .sort((first, second) => first.startedAt - second.startedAt);
+
+  // Whether a piece of scheduled work keeps its process held: its next fire
+  // is unknown, or no later than its hold limit (see `ScheduledWorkSummary`).
+  // Work due later is listed all the same, and goes with the process.
+  const holdsProcess = (item: ScheduledWorkSummary): boolean => item.nextFireAt === null
+    || item.nextFireAt <= item.holdUntil;
+
   const planHandOver = async (
     providerName: LLMProvider,
     sessionId: string,
@@ -117,7 +133,10 @@ export function createProviderRuntimeService(
      * message's, and `planSessionHandOver` builds them from a client's.
      * `planOptions` go to the runtime as given (see
      * `ProviderHandOverPlanOptions`): the dispatcher counts the settings a
-     * message leaves out as the live process's own.
+     * message leaves out as the live process's own, and takes the process's
+     * own effort, ultracode and tool rules when it is held only for
+     * scheduled work (`acceptProcessSettings`), unless the message's tool
+     * rules are stricter than the process's.
      */
     planHandOver,
 
@@ -198,11 +217,46 @@ export function createProviderRuntimeService(
     },
 
     /**
+     * Whether any runtime's live process is held for scheduled work of the
+     * session (see `ScheduledWorkSummary`): work whose next fire is past its
+     * hold limit does not count, as it keeps no process. Apart from
+     * `hasBackgroundWork`, which counts tasks only.
+     */
+    hasScheduledWork(sessionId: string): boolean {
+      return listSessionScheduledWork(sessionId).some(holdsProcess);
+    },
+
+    /**
+     * The scheduled work every runtime's live process holds for the session,
+     * oldest first, including work due past its hold limit.
+     */
+    listScheduledWork(sessionId: string): ScheduledWorkSummary[] {
+      return listSessionScheduledWork(sessionId);
+    },
+
+    /**
+     * Works out how to stop scheduled work of the session (see
+     * `IProviderRuntime.stopScheduledWork`): `id` is a
+     * `ScheduledWorkSummary.id`, `options.all` takes every piece that can be
+     * stopped. A runtime that holds none answers `not_found`.
+     */
+    async stopScheduledWork(
+      providerName: LLMProvider,
+      sessionId: string,
+      id: string,
+      options: ScheduledWorkStopOptions = {},
+    ): Promise<ScheduledWorkStopResult> {
+      const { runtime } = dependencies.resolveProvider(providerName);
+      return (await runtime.stopScheduledWork?.(sessionId, id, options)) ?? { status: 'not_found' };
+    },
+
+    /**
      * What this server's own provider processes still hold for one session
      * (see `SessionHold`): `running` when any runtime still runs it, else
      * `exiting` when a process of it is winding down, with every runtime's
-     * outstanding tasks for it. Null when nothing holds it. The websocket
-     * module's Shell handler reads it before starting a CLI on the session.
+     * outstanding tasks and scheduled work for it. Null when nothing holds
+     * it. The websocket module's Shell handler reads it before starting a CLI
+     * on the session.
      */
     describeSessionHold(sessionId: string): SessionHold | null {
       let processState: ProviderProcessState | null = null;
@@ -218,7 +272,10 @@ export function createProviderRuntimeService(
           }
         }
       }
-      return processState === null && tasks.length === 0 ? null : { processState, tasks };
+      const scheduled = listSessionScheduledWork(sessionId);
+      return processState === null && tasks.length === 0 && scheduled.length === 0
+        ? null
+        : { processState, tasks, scheduled };
     },
 
     /**
@@ -249,10 +306,10 @@ export function createProviderRuntimeService(
 /**
  * The composition root (server/index.ts) hands this to the websocket module
  * as the chat gateway's runtime (runs, aborts, approvals, background tasks,
- * mid-run inserts and whether a send keeps background work) and as the Shell
- * handler's (what a session's processes still hold, and letting go of it),
- * to the scheduled-messages dispatcher, and to the git and agent modules as
- * their per-provider runners. The providers routes ask it for a session's
- * hand-over plan.
+ * scheduled work, mid-run inserts and whether a send keeps background work)
+ * and as the Shell handler's (what a session's processes still hold, and
+ * letting go of it), to the scheduled-messages dispatcher, and to the git and
+ * agent modules as their per-provider runners. The providers routes ask it
+ * for a session's hand-over plan.
  */
 export const providerRuntimeService = createProviderRuntimeService();

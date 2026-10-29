@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import { describe, expect, it } from 'vitest';
 
+import { i18n } from '@/modules/i18n';
 import type { ChatMessage } from '@/shared/types';
 import { buildTranscriptExport, toExportFileStem } from '@/modules/chat/utils/chatExport';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
@@ -42,6 +43,8 @@ const input = {
   sessionTitle: 'Rename the helper',
   provider: 'claude' as const,
   createDiff,
+  t: i18n.getFixedT('en'),
+  language: 'en',
 };
 
 describe('markdown export', () => {

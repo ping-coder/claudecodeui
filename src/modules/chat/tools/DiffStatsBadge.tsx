@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next';
+
 import { cn } from '@/shared/utils';
 import type { DiffStats } from '@/shared/types';
 
@@ -19,6 +21,7 @@ type DiffStatsBadgeProps = {
  * `+40`, and a deletion reads `-40`.
  */
 export function DiffStatsBadge({ stats, className }: DiffStatsBadgeProps) {
+  const { t } = useTranslation('chat');
   const { added, removed } = stats;
 
   // An edit whose replacement is identical to the original produces neither,
@@ -30,7 +33,7 @@ export function DiffStatsBadge({ stats, className }: DiffStatsBadgeProps) {
   return (
     <span
       className={cn('inline-flex items-center gap-1 font-mono text-[10px] tabular-nums', className)}
-      aria-label={`${added} lines added, ${removed} removed`}
+      aria-label={t('tools.diffStats', { added, removed })}
     >
       {/* bidi-ltr: right to left "+3" would read "3+". */}
       {added > 0 && <span className="bidi-ltr text-green-600 dark:text-green-400">+{added}</span>}

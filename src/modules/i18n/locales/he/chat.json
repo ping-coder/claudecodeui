@@ -20,7 +20,8 @@
     "claude": "Claude",
     "cursor": "Cursor",
     "codex": "Codex",
-    "opencode": "OpenCode"
+    "opencode": "OpenCode",
+    "agy": "Antigravity"
   },
   "tools": {
     "settings": "הגדרות כלים",
@@ -35,7 +36,88 @@
     "readFile": "קריאת קובץ",
     "updateTodo": "עדכון רשימת משימות",
     "readTodo": "קריאת רשימת משימות",
-    "searchResults": "תוצאות"
+    "searchResults": "תוצאות",
+    "output": "פלט",
+    "rawParams": "פרמטרים גולמיים",
+    "details": "פרטים",
+    "plan": "תוכנית",
+    "success": "הצליח",
+    "diffStats": "נוספו {{added}} שורות, הוסרו {{removed}}",
+    "moreInGroup_one": "ועוד אחד",
+    "moreInGroup_two": "ועוד שניים",
+    "moreInGroup_other": "ועוד {{count}}",
+    "taskListCompleted": "{{done}}/{{total}} הושלמו",
+    "outputLines_one": "שורה אחת",
+    "outputLines_two": "שתי שורות",
+    "outputLines_other": "{{count}} שורות",
+    "status": {
+      "running": "פועל",
+      "completed": "הסתיים",
+      "error": "שגיאה",
+      "denied": "נדחה"
+    },
+    "taskStatus": {
+      "completed": "הושלם",
+      "in_progress": "בתהליך",
+      "pending": "ממתין"
+    },
+    "names": {
+      "checklist": "רשימת משימות",
+      "question": "שאלה"
+    },
+    "labels": {
+      "search": "חיפוש",
+      "fetch": "אחזור",
+      "task": "משימה",
+      "tasks": "משימות"
+    },
+    "titles": {
+      "searchResults": "תוצאות חיפוש",
+      "fetchedPage": "הדף שאוחזר",
+      "taskList": "רשימת משימות",
+      "taskDetails": "פרטי המשימה",
+      "subagent": "סוכן משנה",
+      "subagentTask": "סוכן משנה {{type}}: {{description}}",
+      "subagentResult": "תוצאת סוכן המשנה",
+      "implementationPlan": "תוכנית מימוש",
+      "sandboxScript": "סקריפט בסביבה מבודדת",
+      "updatingChecklist": "מעדכן את רשימת המשימות",
+      "checklistDone": "הכול הושלם — {{done}}/{{total}}",
+      "checklistProgress": "{{done}}/{{total}} הושלמו",
+      "foundFiles_one": "נמצא קובץ אחד",
+      "foundFiles_two": "נמצאו שני קבצים",
+      "foundFiles_other": "נמצאו {{count}} קבצים",
+      "question": "שאלה",
+      "questions_one": "שאלה אחת",
+      "questions_two": "שתי שאלות",
+      "questions_other": "{{count}} שאלות",
+      "questionsAnswered_one": "שאלה אחת, {{answered}} נענו",
+      "questionsAnswered_two": "שתי שאלות, {{answered}} נענו",
+      "questionsAnswered_other": "{{count}} שאלות, {{answered}} נענו"
+    },
+    "values": {
+      "inPath": "ב-{{path}}",
+      "readingList": "קורא את הרשימה",
+      "listingTasks": "מציג את המשימות",
+      "fetchingTask": "מאחזר",
+      "updatingTask": "מעדכן",
+      "creatingTask": "יוצר משימה",
+      "runningTask": "מריץ משימה",
+      "file": "קובץ",
+      "parameters": "פרמטרים"
+    },
+    "task": {
+      "model": "מודל:",
+      "prompt": "פרומפט:",
+      "resumingFrom": "המשך של ההרצה:",
+      "noResponseText": "אין טקסט בתשובה",
+      "noResponse": "אין תשובה"
+    },
+    "badges": {
+      "new": "חדש",
+      "edit": "עריכה",
+      "patch": "Patch"
+    }
   },
   "search": {
     "found_one": "נמצא {{type}} אחד",
@@ -58,16 +140,41 @@
     "viewFullOutput_other": "הצגת הפלט המלא ({{count}} תווים)",
     "contentDisplayed": "תוכן הקובץ מוצג בתצוגת ה-diff למעלה"
   },
-  "interactive": {
-    "title": "פרומפט אינטראקטיבי",
-    "waiting": "ממתין לתשובה ב-CLI",
-    "instruction": "יש לבחור אפשרות בטרמינל שבו Claude רץ.",
-    "selectedOption": "✓ Claude בחר באפשרות {{number}}",
-    "instructionDetail": "ב-CLI בוחרים באפשרות הזו באופן אינטראקטיבי בעזרת מקשי החיצים או בהקלדת המספר."
+  "bashEditDiff": {
+    "created": "נוצר",
+    "updated": "עודכן",
+    "deleted": "נמחק",
+    "emptyFile": "קובץ ריק",
+    "moreLines_one": "… עוד שורה אחת",
+    "moreLines_two": "… עוד שתי שורות",
+    "moreLines_other": "… עוד {{count}} שורות",
+    "moreFiles_one": "… עוד קובץ אחד השתנה",
+    "moreFiles_two": "… עוד שני קבצים השתנו",
+    "moreFiles_other": "… עוד {{count}} קבצים השתנו",
+    "filesNotShown_one": "קובץ אחד השתנה (בינארי, שינוי הרשאות בלבד או גדול מדי להצגה)",
+    "filesNotShown_two": "שני קבצים השתנו (בינאריים, שינוי הרשאות בלבד או גדולים מדי להצגה)",
+    "filesNotShown_other": "{{count}} קבצים השתנו (בינאריים, שינוי הרשאות בלבד או גדולים מדי להצגה)",
+    "filesUnavailable_one": "קובץ אחד השתנה (ה-diff לא זמין)",
+    "filesUnavailable_two": "שני קבצים השתנו (ה-diff לא זמין)",
+    "filesUnavailable_other": "{{count}} קבצים השתנו (ה-diff לא זמין)",
+    "filesChanged_one": "קובץ אחד השתנה",
+    "filesChanged_two": "שני קבצים השתנו",
+    "filesChanged_other": "{{count}} קבצים השתנו",
+    "morePaths_one": "ועוד אחד",
+    "morePaths_two": "ועוד שניים",
+    "morePaths_other": "ועוד {{count}}",
+    "diffUnavailable": "(ה-diff של הקבצים לא זמין עבור הפקודה הזו)",
+    "partUnavailable": "(חלק מה-diff לא זמין)",
+    "skipped": "(ה-diff של הקבצים דולג עבור פקודת ה-git הזו)",
+    "shared": "(פקודה אחרת רצה במאגר הזה באותו זמן; שינוי שאחת מהן ביצעה עשוי להופיע תחת כל אחת מהתוצאות)"
   },
   "thinking": {
     "title": "חושב…",
-    "emoji": "💭 חושב…"
+    "emoji": "💭 חושב…",
+    "thoughtBriefly": "חשב כמה שניות",
+    "thoughtFor_one": "חשב שנייה אחת",
+    "thoughtFor_two": "חשב שתי שניות",
+    "thoughtFor_other": "חשב {{count}} שניות"
   },
   "json": {
     "response": "תגובת JSON"
@@ -78,15 +185,32 @@
     "addTo": "מוסיף את {{entry}} לכלים המורשים.",
     "retry": "ההרשאה נשמרה. יש לנסות שוב את הבקשה כדי להשתמש בכלי.",
     "error": "לא ניתן לעדכן את ההרשאות. יש לנסות שוב.",
-    "openSettings": "פתיחת ההגדרות"
+    "openSettings": "פתיחת ההגדרות",
+    "request": {
+      "title": "נדרשת הרשאה",
+      "tool": "כלי:",
+      "rule": "כלל הרשאה:",
+      "viewInput": "הצגת הקלט של הכלי",
+      "deny": "דחייה",
+      "allowSaved": "אישור (נשמר)",
+      "allowRemember": "אישור ושמירה",
+      "allowOnce": "אישור הפעם"
+    }
   },
   "todo": {
     "updated": "רשימת המשימות עודכנה בהצלחה",
-    "current": "רשימת המשימות הנוכחית"
+    "current": "רשימת המשימות הנוכחית",
+    "listTitle_one": "רשימת משימות (פריט אחד)",
+    "listTitle_two": "רשימת משימות (שני פריטים)",
+    "listTitle_other": "רשימת משימות ({{count}} פריטים)"
   },
   "plan": {
     "viewPlan": "📋 הצגת תוכנית המימוש",
-    "title": "תוכנית מימוש"
+    "title": "תוכנית מימוש",
+    "toggle": "הצגה או הסתרה של התוכנית",
+    "generating": "יוצר תוכנית…",
+    "revise": "שינוי",
+    "build": "ביצוע"
   },
   "usageLimit": {
     "resetAt": "מגבלת השימוש של Claude מוצתה. המגבלה תתאפס ב-**{{time}} {{timezone}}** - {{date}}"
@@ -115,7 +239,15 @@
     "transcribing": "מתמלל…",
     "speak": "הקראה",
     "stopSpeaking": "עצירה",
-    "loading": "טוען…"
+    "loading": "טוען…",
+    "errors": {
+      "tooShort": "ההקלטה קצרה מדי",
+      "noSpeech": "לא זוהה דיבור",
+      "transcriptionFailed": "התמלול נכשל: {{error}}",
+      "micError": "שגיאת מיקרופון: {{error}}",
+      "micDenied": "הגישה למיקרופון נחסמה.",
+      "noMic": "לא נמצא מיקרופון."
+    }
   },
   "input": {
     "placeholder": "/ לפקודות, @ לקבצים, או כל שאלה ל-{{provider}}…",
@@ -123,13 +255,17 @@
     "disabled": "הקלט מושבת",
     "attachFiles": "צירוף קבצים",
     "attachImages": "צירוף תמונות",
+    "attachmentsUnsupported": "{{provider}} עדיין לא תומך בקבצים מצורפים",
     "send": "שליחה",
     "stop": "עצירה",
     "hintText": {
       "ctrlEnter": "Ctrl+Enter לשליחה • Shift+Enter לשורה חדשה • Tab להחלפת מצב • / לפקודות סלאש",
       "enter": "Enter לשליחה • Shift+Enter לשורה חדשה • Tab להחלפת מצב • / לפקודות סלאש",
       "queue": "Enter להוספת ההודעה הבאה לתור",
-      "appendQueued": "Enter להוספה להודעה שבתור"
+      "appendQueued": "Enter להוספה להודעה שבתור",
+      "insert": "{{insertKey}} להוספה לסבב • {{queueKey}} להוספה לתור",
+      "insertAppendQueued": "{{insertKey}} להוספה לסבב • {{queueKey}} להוספה להודעה שבתור",
+      "sendBesideBackgroundWork": "{{sendKey}} לשליחה • {{queueKey}} להוספה לתור עד שהעבודה ברקע תסתיים"
     },
     "clickToChangeMode": "לחיצה להחלפת מצב ההרשאות (או Tab בשדה הקלט)",
     "showAllCommands": "הצגת כל הפקודות",
@@ -142,8 +278,40 @@
       "label": "בתור",
       "willSend": "תישלח כשזה יסתיים",
       "edit": "עריכת ההודעה שבתור",
-      "delete": "מחיקת ההודעה שבתור"
-    }
+      "delete": "מחיקת ההודעה שבתור",
+      "filesAttached_one": "קובץ אחד מצורף",
+      "filesAttached_two": "שני קבצים מצורפים",
+      "filesAttached_other": "{{count}} קבצים מצורפים"
+    },
+    "insert": {
+      "send": "הוספת ההודעה לסבב",
+      "moreOptions": "אפשרויות שליחה נוספות",
+      "menuLabel": "שליחה בזמן ש-{{provider}} עובד",
+      "insert": "הוספה לסבב",
+      "willRead": "{{provider}} יקרא אותה בצעד הבא",
+      "queue": "הוספה לתור",
+      "queueDescription": "שליחה כשהסבב הזה וכל העבודה ברקע יסתיימו",
+      "queueAppend": "הוספה להודעה שבתור",
+      "unsupported": "{{provider}} לא תומך בהוספה לסבב, ולכן ההודעה תתווסף לתור",
+      "slashCommand": "אי אפשר להוסיף פקודת סלאש לסבב, ולכן היא תתווסף לתור",
+      "attachments": "עדיין אי אפשר להוסיף לסבב הודעה עם קבצים מצורפים, ולכן היא תתווסף לתור",
+      "unavailable": "הוספה לסבב לא זמינה כרגע, ולכן ההודעה תתווסף לתור",
+      "label": "בהוספה לסבב",
+      "afterApproval": "תימסר כשהבקשה שלמעלה תיענה",
+      "withdraw": "ביטול הוספת ההודעה לסבב",
+      "delivering": "כבר נמסרת, אי אפשר לבטל",
+      "withdrawFailed": "הביטול נכשל",
+      "notDelivered": "ההודעה לא נוספה לסבב, ולכן היא חזרה לשדה הקלט.",
+      "noResponse": "לא התקבלה תשובה על ההוספה לסבב, ולכן ההודעה חזרה לשדה הקלט.",
+      "deliveredLate": "ההודעה בכל זאת נוספה לסבב, ואין צורך לשלוח אותה שוב."
+    },
+    "backgroundSend": {
+      "menuLabel": "שליחה בזמן שהעבודה ברקע פועלת",
+      "send": "שליחה",
+      "sendDescription": "מתחיל סבב חדש, והעבודה ברקע ממשיכה לפעול",
+      "queueDescription": "שליחה כשהעבודה ברקע תסתיים"
+    },
+    "dropFiles": "אפשר לשחרר כאן את הקבצים"
   },
   "composer": {
     "reasoning": "חשיבה",
@@ -161,12 +329,81 @@
       "title": "החלפת הודעה קודמת",
       "filesNotReverted": "קבצים שהסוכן כבר שינה לא משוחזרים",
       "cancel": "ביטול"
+    },
+    "bashCommandConfirm": "הפקודה הזו מכילה פקודות bash שיופעלו. להמשיך?",
+    "commandCancelled": "הפעלת הפקודה בוטלה",
+    "commandFailedStatus": "הפעלת הפקודה נכשלה ({{status}})",
+    "commandError": "שגיאה בהפעלת הפקודה: {{message}}",
+    "queueFailed": "לא ניתן להוסיף את ההודעה לתור: {{message}}",
+    "uploadFailed": "העלאת הקבצים נכשלה: {{message}}",
+    "sessionStartFailed": "לא ניתן להתחיל סשן חדש: {{message}}",
+    "sessionStartNoId": "לא ניתן להתחיל סשן חדש: השרת לא החזיר מזהה סשן."
+  },
+  "effortLevels": {
+    "none": "ללא",
+    "minimal": "מינימלית",
+    "low": "נמוכה",
+    "medium": "בינונית",
+    "high": "גבוהה",
+    "xhigh": "גבוהה מאוד",
+    "max": "מקסימלית",
+    "ultra": "אולטרה",
+    "thinking": "חשיבה"
+  },
+  "modelCatalog": {
+    "defaultRecommended": "ברירת מחדל (מומלץ)",
+    "bestAvailable": "הטוב ביותר הזמין",
+    "auto": "אוטומטי",
+    "contextVariant": "{{model}} (הקשר של {{context}})",
+    "descriptions": {
+      "claudeDefault": "שימוש במודל המומלץ לחשבון ולפריסה של Claude שלך.",
+      "claudeBest": "שימוש ב-Fable 5.1 כשהוא זמין, ואחרת ב-Opus 5.5.",
+      "claudeFable": "מודל Claude החזק ביותר, למשימות הקשות והארוכות ביותר.",
+      "claudeSonnet": "מודל Sonnet העדכני ביותר למשימות קוד יומיומיות.",
+      "claudeSonnet1m": "מודל Sonnet העדכני ביותר עם חלון הקשר של 1M.",
+      "claudeOpus": "מודל Opus העדכני ביותר לחשיבה מורכבת ולמשימות קוד.",
+      "claudeOpus1m": "מודל Opus העדכני ביותר עם חלון הקשר של 1M.",
+      "claudeHaiku": "מודל Claude מהיר ויעיל למשימות פשוטות.",
+      "claudeOpusPlan": "שימוש ב-Opus 5.5 בזמן התכנון, ומעבר ל-Sonnet 5.5 לביצוע.",
+      "codexMostCapable": "המודל החזק ביותר לעבודה מורכבת ותובענית.",
+      "codexWorkhorse": "מודל עבודה מרכזי לקוד ולעבודה יומיומית.",
+      "codexFast": "מודל מהיר וזול למשימות קלות יותר.",
+      "codexAgenticFrontier": "מודל הקוד הסוכני המתקדם העדכני ביותר.",
+      "codexAgenticBalanced": "מודל קוד סוכני מאוזן לעבודה יומיומית.",
+      "codexAgenticFast": "מודל קוד סוכני מהיר וזול.",
+      "codexFrontier": "מודל מתקדם לקוד מורכב, למחקר ולעבודה בעולם האמיתי.",
+      "codexStrong": "מודל חזק לקוד יומיומי.",
+      "codexSmall": "מודל קטן, מהיר וחסכוני למשימות קוד פשוטות יותר.",
+      "cursorAuto": "Cursor יבחר את המודל.",
+      "cursorComposerFast": "Cursor Composer 2.5 עם הסקה מהירה יותר.",
+      "cursorComposer": "מודל של Cursor למשימות קוד יעילות וארוכות."
+    }
+  },
+  "slashCommands": {
+    "empty": "אין פקודות זמינות",
+    "builtinBadge": "מובנית",
+    "groups": {
+      "frequent": "בשימוש תדיר",
+      "builtin": "פקודות מובנות",
+      "skill": "Skills",
+      "project": "פקודות הפרויקט",
+      "user": "פקודות המשתמש",
+      "other": "פקודות אחרות"
+    },
+    "builtin": {
+      "help": "הצגת תיעוד העזרה של Claude Code",
+      "models": "הצגת המודלים הזמינים לספק הנוכחי",
+      "cost": "הצגת השימוש בטוקנים",
+      "memory": "פתיחת קובץ הזיכרון CLAUDE.md לעריכה",
+      "config": "פתיחת ההגדרות והתצורה",
+      "status": "הצגת מצב המערכת ופרטי הגרסה"
     }
   },
   "providerSelection": {
     "title": "בחירת עוזר AI",
     "description": "יש לבחור ספק כדי להתחיל שיחה חדשה",
     "selectModel": "בחירת מודל",
+    "modelSelector": "בחירת מודל",
     "providerInfo": {
       "anthropic": "מאת Anthropic",
       "openai": "מאת OpenAI",
@@ -174,10 +411,11 @@
       "google": "מאת Google"
     },
     "readyPrompt": {
-      "claude": "Claude מוכן לשימוש עם {{model}}. אפשר להתחיל להקליד הודעה למטה.",
-      "cursor": "Cursor מוכן לשימוש עם {{model}}. אפשר להתחיל להקליד הודעה למטה.",
-      "codex": "Codex מוכן לשימוש עם {{model}}. אפשר להתחיל להקליד הודעה למטה.",
-      "opencode": "OpenCode מוכן לשימוש עם {{model}}. אפשר להתחיל להקליד הודעה למטה.",
+      "claude": "Claude מוכן לשימוש. המודל: {{model}}. אפשר להתחיל להקליד הודעה למטה.",
+      "cursor": "Cursor מוכן לשימוש. המודל: {{model}}. אפשר להתחיל להקליד הודעה למטה.",
+      "codex": "Codex מוכן לשימוש. המודל: {{model}}. אפשר להתחיל להקליד הודעה למטה.",
+      "opencode": "OpenCode מוכן לשימוש. המודל: {{model}}. אפשר להתחיל להקליד הודעה למטה.",
+      "agy": "Antigravity מוכן לשימוש. המודל: {{model}}. אפשר להתחיל להקליד הודעה למטה.",
       "default": "יש לבחור ספק למעלה כדי להתחיל"
     },
     "pressToSearch": "<kbd>{{shortcut}}</kbd> לחיפוש סשנים, קבצים ו-commits",
@@ -189,6 +427,9 @@
     "manageModels": "ניהול מודלים",
     "noModelsFound": "לא נמצאו מודלים.",
     "loadingModels": "טוען מודלים…",
+    "hiddenModels_one": "מודל אחד מוסתר — לחיצה להצגה",
+    "hiddenModels_two": "שני מודלים מוסתרים — לחיצה להצגה",
+    "hiddenModels_other": "{{count}} מודלים מוסתרים — לחיצה להצגה",
     "clickToChange": "לחיצה להחלפת המודל"
   },
   "session": {
@@ -221,7 +462,8 @@
     "status": {
       "newSession": "סשן חדש",
       "initializing": "מאתחל…",
-      "restarting": "מפעיל מחדש…"
+      "restarting": "מפעיל מחדש…",
+      "themeRestartHint": "יש להפעיל מחדש כדי להחיל את ערכת הנושא החדשה ב-Claude Code"
     },
     "actions": {
       "disconnect": "ניתוק",
@@ -240,7 +482,30 @@
     "resumeSession": "המשך סשן: {{displayName}}…",
     "runCommand": "הרצת {{command}} ב-{{projectName}}",
     "startCli": "מפעיל את Claude CLI ב-{{projectName}}",
-    "defaultCommand": "פקודה"
+    "defaultCommand": "פקודה",
+    "selectionMenu": {
+      "copy": "העתקה",
+      "selectAll": "בחירת הכול"
+    },
+    "sessionBusy": {
+      "title": "CloudCLI עדיין משתמש בסשן הזה",
+      "changed": "מאז שהסתכלת לאחרונה, התחילה בסשן הזה עבודה חדשה, ולכן שום דבר לא נעצר. יש לבדוק מה פועל עכשיו לפני שעוצרים.",
+      "reason": {
+        "turn": "סבב בצ'אט עדיין פועל.",
+        "background": "משימות ברקע עדיין פועלות:",
+        "held": "תהליך ה-Claude של CloudCLI עדיין מחזיק את הסשן הזה פתוח, כנראה בהמתנה ל-Monitor או להתעוררות מתוזמנת.",
+        "exiting": "תהליך ה-Claude של CloudCLI מסתיים עכשיו. בדרך כלל זה לוקח כמה שניות, לכל היותר כ-6 דקות.",
+        "queued": "הודעת צ'אט שבתור תישלח ברגע שהסשן יתפנה.",
+        "heldScheduled": "בסשן הזה יש לולאות שממתינות להפעלה הבאה:",
+        "backgroundScheduled": "משימות ברקע ולולאות עדיין פועלות:"
+      },
+      "consequence": "פתיחה בטרמינל עכשיו תגרום לשני תהליכים לכתוב לסשן הזה, ומשימות שפועלות יירשמו כעצורות.",
+      "queuedHint": "יש קודם לשלוח או למחוק את ההודעה שבתור בצ'אט.",
+      "moreTasks": "ועוד {{count}}",
+      "retry": "ניסיון חוזר",
+      "takeOver": "עצירה ופתיחה כאן",
+      "takingOver": "עוצר…"
+    }
   },
   "claudeStatus": {
     "actions": {
@@ -271,7 +536,35 @@
       "command": "פקודה {{description}}",
       "count_one": "משימה אחת",
       "count_two": "שתי משימות",
-      "count_other": "{{count}} משימות"
+      "count_other": "{{count}} משימות",
+      "toolUses_one": "שימוש אחד בכלי",
+      "toolUses_two": "שני שימושים בכלים",
+      "toolUses_other": "{{count}} שימושים בכלים",
+      "stopped": "העבודה ברקע נעצרה: ההודעה הזו משנה את {{changes}}, ואת זה אפשר להחיל רק בתהליך Claude חדש.",
+      "stoppedLookupFailed": "העבודה ברקע נעצרה: לא ניתן היה להעביר את ההודעה לתהליך שבו העבודה רצה.",
+      "prompt": {
+        "title": "בסשן הזה עדיין יש עבודה שפועלת ברקע",
+        "description": "הודעה חדשה תתחיל סבב חדש, וזה יעצור את העבודה הזו. מה שהיא עוד לא דיווחה יאבד. אפשר להוסיף את ההודעה לתור, והיא תישלח כשהעבודה תסתיים.",
+        "descriptionNewProcess": "שליחה בכל זאת תפעיל תהליך חדש, וזה יעצור את העבודה הזו. מה שהיא עוד לא דיווחה יאבד. אפשר להוסיף את ההודעה לתור, והיא תישלח כשהעבודה תסתיים.",
+        "descriptionScheduled": "ההודעה הזו צריכה לרוץ בתהליך חדש, וזה יעצור את הלולאות האלה.",
+        "changes_one": "ההודעה הזו משנה את {{changes}}, ואפשר להחיל שינוי כזה רק בתהליך חדש. כדי לשלוח אותה בלי לעצור את העבודה, יש לבטל אותו.",
+        "changes_two": "ההודעה הזו משנה את {{changes}}, ואפשר להחיל שינויים כאלה רק בתהליך חדש. כדי לשלוח אותה בלי לעצור את העבודה, יש לבטל את שניהם.",
+        "changes_other": "ההודעה הזו משנה את {{changes}}, ואפשר להחיל שינויים כאלה רק בתהליך חדש. כדי לשלוח אותה בלי לעצור את העבודה, יש לבטל אותם.",
+        "changeSeparator": ", ",
+        "changeLastSeparator": " ו",
+        "change": {
+          "model": "המודל",
+          "effort": "רמת החשיבה",
+          "ultracode": "הגדרת Ultracode",
+          "permissionMode": "מצב ההרשאות",
+          "tools": "הרשאות הכלים",
+          "cwd": "תיקיית העבודה"
+        },
+        "lookupFailed": "לא ניתן היה להעביר את ההודעה לתהליך שבו העבודה רצה.",
+        "cancel": "ביטול",
+        "queue": "הוספה לתור",
+        "sendAnyway": "שליחה בכל זאת"
+      }
     },
     "controls": {
       "stopGeneration": "עצירת היצירה",
@@ -279,7 +572,108 @@
     },
     "providers": {
       "assistant": "עוזר"
+    },
+    "handOverFailed": {
+      "stalePlan": "לא נשלחה: התהליך שמריץ את הלולאות והתזכורות של הסשן כבר לא מקבל את ההודעה כמתוכנן, ותהליך חדש יעצור אותן.",
+      "lookup": "לא נשלחה: לא ניתן היה להעביר את ההודעה לתהליך שמריץ את הלולאות והתזכורות של הסשן.",
+      "other": "לא נשלחה: ההודעה לא נכנסה לתהליך שמריץ את הלולאות והתזכורות של הסשן, ותהליך חדש יעצור אותן."
     }
+  },
+  "runProgress": {
+    "agents_one": "{{done}}/{{count}} סוכן",
+    "agents_two": "{{done}}/{{count}} סוכנים",
+    "agents_other": "{{done}}/{{count}} סוכנים",
+    "tasks_one": "{{done}}/{{count}} משימה",
+    "tasks_two": "{{done}}/{{count}} משימות",
+    "tasks_other": "{{done}}/{{count}} משימות",
+    "percent": "{{percent}}%",
+    "eta": {
+      "underMinute": "עוד פחות מדקה",
+      "minutes": "עוד כ-{{minutes}} ד'",
+      "hours": "עוד כ-{{hours}} שע'",
+      "hoursMinutes": "עוד כ-{{hours}} שע' {{minutes}} ד'",
+      "hint": "הערכה לפי הקצב עד עכשיו"
+    }
+  },
+  "activityDetails": {
+    "title": "פרטי ההתקדמות",
+    "turnInProgress": "הסבב בתהליך",
+    "cliDriven": "ההרצה הזו מופעלת על ידי Claude CLI מחוץ לתצוגה, ולכן הפרטים מתעדכנים ככל שהיומן שלה נכתב.",
+    "empty": "עדיין אין פרטי התקדמות — בהרצה הזו אין תהליך עבודה, רשימת משימות או משימה ברקע.",
+    "workflow": "תהליך עבודה",
+    "noAgentsYet": "עדיין אין סוכנים ברשימה",
+    "checklist": "רשימת משימות",
+    "backgroundTasks": "משימות ברקע",
+    "moreAgents": "ועוד {{count}}",
+    "moreWorkflows_one": "ועוד תהליך עבודה אחד",
+    "moreWorkflows_two": "ועוד שני תהליכי עבודה",
+    "moreWorkflows_other": "ועוד {{count}} תהליכי עבודה",
+    "status": {
+      "queued": "בתור",
+      "running": "פועל",
+      "completed": "הסתיים",
+      "failed": "נכשל",
+      "stopped": "ללא תוצאה"
+    },
+    "checklistStatus": {
+      "completed": "הושלמה",
+      "in_progress": "בתהליך",
+      "pending": "לביצוע"
+    }
+  },
+  "scheduledWork": {
+    "loop": "לולאה {{prompt}}",
+    "reminder": "תזכורת {{prompt}}",
+    "kind": {
+      "loop": "לולאה",
+      "reminder": "תזכורת"
+    },
+    "count": {
+      "loops_one": "לולאה אחת",
+      "loops_two": "שתי לולאות",
+      "loops_other": "{{count}} לולאות",
+      "items_one": "פריט מתוזמן אחד",
+      "items_two": "שני פריטים מתוזמנים",
+      "items_other": "{{count}} פריטים מתוזמנים"
+    },
+    "cadence": {
+      "everyMinute": "כל דקה",
+      "everyMinutes": "כל {{n}} דקות",
+      "hourly": "כל שעה",
+      "everyHours": "כל {{n}} שעות",
+      "daily": "כל יום",
+      "weekdays": "שני עד שישי",
+      "weekly": "כל {{day}}",
+      "everyDays": "כל {{n}} ימים"
+    },
+    "selfPaced": "בקצב עצמי",
+    "next": "הפעלה הבאה: {{time}}",
+    "dueNow": "עומד לפעול",
+    "tomorrow": "מחר {{time}}",
+    "pastHold": "אחרי סוף תקופת ההחזקה, לא יפעל",
+    "serverSchedule": "{{schedule}} (שעון השרת)",
+    "expires": "יפוג ב-{{time}}",
+    "durable": "נשמר בקובץ \u2066.claude/scheduled_tasks.json\u2069 של הפרויקט",
+    "reason": "סיבה: {{reason}}",
+    "listTitle": "לולאות ותזכורות",
+    "stop": "עצירה",
+    "stopAfterTurn": "אפשר לעצור אחרי שהסבב יסתיים",
+    "confirm": {
+      "release": "לעצור את הלולאה?",
+      "turnLoop": "לעצור את הלולאה? CloudCLI יריץ סבב אחד עם המודל הנוכחי כדי ש-Claude יבטל אותה. משימות אחרות ברקע לא יושפעו.",
+      "turnReminder": "לבטל את התזכורת? CloudCLI יריץ סבב אחד עם המודל הנוכחי כדי ש-Claude יבטל אותה. משימות אחרות ברקע לא יושפעו.",
+      "stop": "עצירה",
+      "cancel": "ביטול",
+      "stopAll": "עצירת הכול ({{n}})",
+      "sameLoops_one": "בסשן הזה יש עוד לולאה אחת עם אותו פרומפט.",
+      "sameLoops_two": "בסשן הזה יש עוד שתי לולאות עם אותו פרומפט.",
+      "sameLoops_other": "בסשן הזה יש עוד {{count}} לולאות עם אותו פרומפט.",
+      "sameReminders_one": "בסשן הזה יש עוד תזכורת אחת עם אותו פרומפט.",
+      "sameReminders_two": "בסשן הזה יש עוד שתי תזכורות עם אותו פרומפט.",
+      "sameReminders_other": "בסשן הזה יש עוד {{count}} תזכורות עם אותו פרומפט."
+    },
+    "stopping": "עוצר…",
+    "stopFailed": "הביטול לא הצליח. אפשר לנסות שוב, או לבקש מ-Claude בשדה הקלט לבטל אותה."
   },
   "projectSelection": {
     "startChatWithProvider": "יש לבחור פרויקט כדי להתחיל צ'אט עם {{provider}}"
@@ -290,14 +684,32 @@
   "message": {
     "editAndResend": "עריכה ושליחה מחדש",
     "forkFromHere": "פיצול מכאן",
-    "answeredBy": "נענה על ידי {{model}}"
+    "answeredBy": "נענה על ידי {{model}}",
+    "inserted": "נוספה לסבב",
+    "insertedHint": "נשלחה בזמן ש-Claude עבד, ונקראה בצעד הבא שלו",
+    "memoriesUsed_one": "נעשה שימוש בזיכרון אחד",
+    "memoriesUsed_two": "נעשה שימוש בשני זיכרונות",
+    "memoriesUsed_other": "נעשה שימוש ב-{{count}} זיכרונות"
+  },
+  "pinnedQuestion": {
+    "label": "השאלה של הסבב הזה",
+    "jump": "מעבר להודעה הזו",
+    "loadAndJump": "טעינת כל ההודעות ומעבר להודעה הזו",
+    "reading": "קורא את השאלה של הסבב הזה…",
+    "notLoaded": "השאלה של הסבב הזה נמצאת בהודעות קודמות",
+    "inserts_one": "נוספה עוד אחת",
+    "inserts_two": "נוספו עוד שתיים",
+    "inserts_other": "נוספו עוד {{count}}",
+    "attachments_one": "קובץ מצורף אחד",
+    "attachments_two": "שני קבצים מצורפים",
+    "attachments_other": "{{count}} קבצים מצורפים"
   },
   "export": {
     "trigger": "ייצוא השיחה",
     "heading": "ייצוא בתור",
     "untitled": "שיחה",
     "html": {
-      "label": "דף אינטרנט (.html)",
+      "label": "דף אינטרנט (\u2066.html\u2069)",
       "description": "עצמאי, נראה כמו האפליקציה, אפשר להדפיס ל-PDF."
     },
     "markdown": {
@@ -307,6 +719,22 @@
     "json": {
       "label": "JSON (.json)",
       "description": "כל ההודעות, בלי עיצוב, לשימוש בכלים."
+    },
+    "meta_one": "הודעה אחת · יוצאה ב-{{time}}",
+    "meta_two": "שתי הודעות · יוצאו ב-{{time}}",
+    "meta_other": "{{count}} הודעות · יוצאו ב-{{time}}",
+    "toggleTheme": "החלפת ערכת נושא",
+    "document": {
+      "you": "את/ה",
+      "assistant": "עוזר",
+      "thinking": "החשיבה של {{provider}}",
+      "reasoning": "תהליך החשיבה",
+      "result": "תוצאה:",
+      "failed": "נכשל:",
+      "images_one": "תמונה מצורפת אחת",
+      "images_two": "שתי תמונות מצורפות",
+      "images_other": "{{count}} תמונות מצורפות",
+      "attached": "מצורפים: {{files}}"
     }
   },
   "schedule": {
@@ -323,25 +751,25 @@
     "pending": "מתוזמנת ל-{{when}}",
     "failed": "לא נשלחה — {{reason}}",
     "cancel": "ביטול ההודעה המתוזמנת",
-    "dismiss": "סגירת הודעת הכישלון"
+    "dismiss": "סגירת הודעת הכישלון",
+    "failureReason": {
+      "stalePlan": "התהליך שמריץ את הלולאות והתזכורות של הסשן כבר לא מקבל את ההודעה כמתוכנן, ותהליך חדש יעצור אותן.",
+      "lookup": "לא ניתן היה להעביר את ההודעה לתהליך שמריץ את הלולאות והתזכורות של הסשן."
+    }
   },
   "misc": {
     "copyToClipboard": "העתקה ללוח",
     "copyCommand": "העתקת הפקודה",
-    "runningTask": "משימה פועלת",
     "userAskedRevise": "המשתמש ביקש לשנות את התוכנית",
     "typeAnswer": "הקלדת תשובה…",
     "skipOne": "דילוג",
     "skipAll": "דילוג על הכול",
-    "exportChat": "ייצוא הצ'אט",
     "closeImagePreview": "סגירת תצוגה מקדימה של תמונה",
     "availableCommands": "פקודות זמינות",
     "filterCommands": "סינון פקודות…",
     "closeModal": "סגירת חלון תוצאת הפקודה",
     "noDescription": "אין תיאור.",
     "modelChangeFailed": "לא ניתן להחליף את המודל כרגע.",
-    "choiceSavedHint": "הבחירה נשמרת לסשן הזה והופכת לברירת המחדל לצ'אטים חדשים.",
-    "docsSearchSubtitle": "חיפוש פקודות מובנות, תחביר ושימוש בפקודות בלי לצאת מהצ'אט.",
     "enterModelInfo": "יש להזין גם שם מודל וגם מזהה מודל.",
     "modelSaveFailed": "לא ניתן לשמור את המודל.",
     "modelDeleteFailed": "לא ניתן למחוק את המודל.",
@@ -383,12 +811,124 @@
     "tokensLabel_two": "טוקנים",
     "tokensLabel_other": "טוקנים",
     "escClosesModal": "Esc סוגר את החלון.",
-    "close": "סגירה"
+    "close": "סגירה",
+    "removeAttachment": "הסרת {{name}}",
+    "attachedFile": "קובץ מצורף",
+    "attachedImage": "תמונה מצורפת",
+    "downloadFile": "הורדת {{name}}",
+    "fileAttachment": "קובץ מצורף",
+    "unknownError": "שגיאה לא ידועה",
+    "sessionModelChangeFailed": "לא ניתן להחליף את המודל של הסשן הזה.",
+    "sessionEffortChangeFailed": "לא ניתן לשנות את רמת החשיבה של הסשן הזה.",
+    "sessionUltracodeChangeFailed": "לא ניתן לשנות את Ultracode בסשן הזה.",
+    "backgroundTaskFinished": "משימה ברקע הסתיימה",
+    "backgroundTaskUpdate": "עדכון ממשימה ברקע"
+  },
+  "commandResult": {
+    "unknown": "לא ידוע",
+    "provider": "ספק",
+    "model": "מודל",
+    "help": {
+      "noMatch": "אין פקודות שמתאימות לסינון.",
+      "syntax": "תחביר",
+      "allArgs": "<code>{{token}}</code> מעביר את כל הארגומנטים.",
+      "positionalArgs": "<code>{{first}}</code>, <code>{{second}}</code> מעבירים ארגומנטים לפי המיקום.",
+      "fileContents": "<code>{{token}}</code> מוסיף את תוכן הקובץ.",
+      "quickTip": "טיפ",
+      "quickTipText": "יש להקליד <code>/</code> בשדה הקלט כדי לפתוח את תפריט הפקודות, ואז לבחור פקודה בחיצים ולהריץ אותה ב-Enter."
+    },
+    "models": {
+      "active": "מודל פעיל · {{provider}}",
+      "next": "בסבב הבא: {{model}}",
+      "search": "חיפוש מודלים של {{provider}}…",
+      "select": "בחירת המודל {{model}}",
+      "currentSelection": "הבחירה הנוכחית",
+      "sessionModel": "מודל הסשן",
+      "noMatch": "אין מודלים שמתאימים לחיפוש.",
+      "sessionUses": "הסשן הזה משתמש עכשיו ב-{{model}}.",
+      "defaultSet": "מודל ברירת המחדל של {{provider}} הוגדר ל-{{model}}."
+    },
+    "cost": {
+      "totalTokens": "סך הטוקנים שנוצלו",
+      "inputTokens": "טוקני קלט",
+      "outputTokens": "טוקני פלט",
+      "breakdown": "פירוט",
+      "unavailable": "לא זמין",
+      "contextWindow": "חלון הקשר"
+    },
+    "status": {
+      "package": "חבילה",
+      "version": "גרסה",
+      "uptime": "זמן פעולה",
+      "uptimeMinutes": "{{minutes}} ד'",
+      "uptimeHours": "{{hours}} שע' {{minutes}} ד'",
+      "platform": "פלטפורמה",
+      "memory": "זיכרון",
+      "memoryRss": "\u2066{{mb}} MB RSS\u2069",
+      "online": "השרת פעיל",
+      "responding": "התהליך \u2066#{{pid}}\u2069 מגיב.",
+      "respondingNoPid": "התהליך מגיב.",
+      "healthy": "תקין"
+    }
   },
   "modelLibrary": {
+    "effortLevels": "רמות חשיבה",
+    "effortLevelsHint": "יש לבחור את רמות החשיבה שהמודל הזה תומך בהן. אם לא נבחרה אף רמה, אי אפשר לבחור רמת חשיבה למודל הזה בשדה הקלט.",
+    "effortSummary": "חשיבה: {{levels}}",
     "customModelsOnly": "שימוש רק במודלים שלי",
     "customModelsOnlyHint": "מסתיר את המודלים המובנים של {{provider}} מכל בוחרי המודלים, והמודל הראשון שלך הופך לברירת המחדל. המודלים המובנים ממשיכים להופיע עד להוספת מודל.",
     "builtInModelsHidden": "מוסתרים מבוחרי המודלים כל עוד „שימוש רק במודלים שלי” פעיל.",
-    "customModelsOnlyFailed": "לא ניתן לשנות את ההגדרה הזו."
+    "customModelsOnlyFailed": "לא ניתן לשנות את ההגדרה הזו.",
+    "addModel": "הוספת מודל",
+    "saveChanges": "שמירת שינויים",
+    "saving": "שומר…",
+    "title": "ספריית מודלים",
+    "subtitle": "אפשר להוסיף מזהי מודלים שהספק תומך בהם. המודלים המובנים נעולים.",
+    "backToModels": "חזרה למודלים",
+    "addTitle": "הוספת מודל מותאם אישית",
+    "editTitle": "עריכת מודל מותאם אישית",
+    "idSentAsWritten": "המזהה נשלח ל-{{provider}} בדיוק כפי שנכתב.",
+    "nameLabel": "שם המודל",
+    "namePlaceholder": "לדוגמה GPT-5.5 Pro",
+    "idLabel": "מזהה המודל",
+    "idPlaceholder": "לדוגמה gpt-5.5-pro",
+    "idHint": "יש להזין את המזהה המדויק שה-CLI של הספק מקבל. מזהים לא יכולים להכיל רווחים.",
+    "idHasSpaces": "מזהי מודלים לא יכולים להכיל רווחים.",
+    "added": "המודל {{model}} נוסף.",
+    "updated": "המודל {{model}} עודכן.",
+    "deleted": "המודל {{model}} נמחק.",
+    "yourModels": "המודלים שלך",
+    "yourModelsHint": "ניתנים לעריכה ונשמרים ב-auth.db",
+    "noCustomModels": "עדיין אין מודלים מותאמים אישית",
+    "noCustomModelsHint": "אפשר להוסיף מודל בטופס, והוא יופיע בכל בוחרי המודלים.",
+    "customBadge": "מותאם אישית",
+    "editModel": "עריכת {{model}}",
+    "deleteModel": "מחיקת {{model}}",
+    "deleteConfirm": "למחוק את המודל מכל בוחרי המודלים?",
+    "cancel": "ביטול",
+    "delete": "מחיקה",
+    "builtInModels": "מודלים מובנים",
+    "builtInModelsHint": "מתוחזקים על ידי CloudCLI, לקריאה בלבד"
+  },
+  "subagent": {
+    "task": "משימה",
+    "stoppedHint": "ההרצה הסתיימה לפני שהסוכן החזיר תוצאה",
+    "showMoreSteps_one": "הצגת עוד צעד אחד",
+    "showMoreSteps_two": "הצגת עוד שני צעדים",
+    "showMoreSteps_other": "הצגת עוד {{count}} צעדים",
+    "stepsNotIncluded_one": "צעד מוקדם אחד לא נכלל",
+    "stepsNotIncluded_two": "שני צעדים מוקדמים לא נכללו",
+    "stepsNotIncluded_other": "{{count}} צעדים מוקדמים לא נכללו"
+  },
+  "askQuestion": {
+    "needsInput": "Claude צריך תשובה ממך",
+    "selectAll": "אפשר לבחור כמה",
+    "other": "אחר…",
+    "back": "הקודם",
+    "submit": "שליחה",
+    "next": "הבא",
+    "custom": "(מותאם אישית)",
+    "skipped": "דולג",
+    "noAnswer": "לא ניתנה תשובה"
   }
 }

@@ -79,6 +79,8 @@ type UsePrdDocumentResult = {
   fileName: string;
   setFileName: (nextFileName: string) => void;
   loading: boolean;
+  // Why the file could not be read: the HTTP status or the error's message. The words around it
+  // are the workspace's, in the UI language.
   loadError: string | null;
 };
 
@@ -152,7 +154,7 @@ export function usePrdDocument({
         // readFile uses the DB projectId to resolve the project's path server-side.
         const response = await api.readFile(file.projectId, file.path);
         if (!response.ok) {
-          throw new Error(`Failed to load file: ${response.status} ${response.statusText}`);
+          throw new Error(`${response.status} ${response.statusText}`.trim());
         }
 
         const data = (await response.json()) as { content?: string };
@@ -163,13 +165,13 @@ export function usePrdDocument({
         setContent(data.content || PRD_TEMPLATE);
         setLoadError(null);
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
+        const message = error instanceof Error ? error.message : String(error);
         if (!isMounted) {
           return;
         }
 
         setContent(initialContent || PRD_TEMPLATE);
-        setLoadError(`Unable to load file content: ${message}`);
+        setLoadError(message);
       } finally {
         if (isMounted) {
           setLoading(false);

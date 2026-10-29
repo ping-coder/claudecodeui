@@ -7,6 +7,7 @@ import type { ProviderModelOption } from '@/shared/types';
 import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
 import { cn } from '@/shared/utils';
 import { useComposerMenuAnchor } from '@/modules/chat/hooks/useComposerMenuAnchor';
+import { describeEffortLevel, describeModelOption } from '@/modules/chat/utils/catalogLabels';
 import { formatAnsweringModelLabel } from '@/modules/chat/utils/modelLabel';
 import {
   ComposerMenuHeading,
@@ -89,12 +90,13 @@ function ComposerModelMenu({
     }
   }, [isOpen]);
 
-  const defaultEffortLabel = t('composer.effortDefault', { defaultValue: 'Default' });
   const resolvedEffortOptions = useMemo<EffortOption[]>(
     () => (effortOptions.length > 0 ? [{ value: DEFAULT_EFFORT_VALUE }, ...effortOptions] : []),
     [effortOptions],
   );
-  const effortLabel = effort === DEFAULT_EFFORT_VALUE ? defaultEffortLabel : effort;
+  // The levels come from the catalog by name (low, xhigh): known ones read in
+  // the interface language, any other as the catalog has it.
+  const effortLabel = describeEffortLevel(effort, t);
 
   const selectedModelOption = useMemo(
     () => modelOptions.find((option) => option.value === model) ?? null,
@@ -102,7 +104,9 @@ function ComposerModelMenu({
   );
   // A model missing from the catalog (an external session reporting a raw id
   // such as `claude-opus-5-5`) is named the way replies name it.
-  const modelLabel = selectedModelOption?.label || formatAnsweringModelLabel(model) || model;
+  const modelLabel = (selectedModelOption?.label ? describeModelOption(selectedModelOption, t) : '')
+    || formatAnsweringModelLabel(model)
+    || model;
 
   const hasEffortSection = resolvedEffortOptions.length > 0;
   const hasModelSection = modelOptions.length > 0 || modelsLoading;
@@ -176,7 +180,7 @@ function ComposerModelMenu({
               {resolvedEffortOptions.map((option) => (
                 <ComposerMenuItem
                   key={option.value}
-                  label={option.value === DEFAULT_EFFORT_VALUE ? defaultEffortLabel : option.value}
+                  label={describeEffortLevel(option.value, t)}
                   description={option.description}
                   isSelected={option.value === effort}
                   onSelect={() => {
@@ -236,7 +240,7 @@ function ComposerModelMenu({
                   {modelOptions.map((option) => (
                     <ComposerMenuItem
                       key={option.value}
-                      label={option.label || option.value}
+                      label={describeModelOption(option, t)}
                       isSelected={option.value === model}
                       onSelect={() => {
                         onSelectModel(option.value);

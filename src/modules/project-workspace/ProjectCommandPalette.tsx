@@ -1,7 +1,9 @@
+import type { TFunction } from 'i18next';
 import { memo, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { CommandPalette } from '@/modules/command-palette';
+import { formatSessionTitle } from '@/modules/sidebar';
 import {
   useProjectCommandState,
   useProjectPanesState,
@@ -42,20 +44,22 @@ const getOpenTabProjectName = (tab: WorkspaceSessionTab, projects: Project[], pa
 };
 
 /**
- * Both panes' tabs, left first. isActive marks only the focused pane's active tab: the one the
- * palette's tab commands act on, which also tells the palette which pane is focused.
+ * Both panes' tabs, left first, titled as their tabs read (the server's placeholder names in the
+ * interface language). isActive marks only the focused pane's active tab: the one the palette's tab
+ * commands act on, which also tells the palette which pane is focused.
  */
 const collectOpenTabs = (
   layout: WorkspaceLayout,
   projects: Project[],
   paneProjects: Readonly<Record<WorkspacePaneSide, Project | null>>,
   labels: UntitledPaneTabLabels,
+  t: TFunction,
 ): WorkspaceOpenTabSummary[] => {
   const focusedTabKey = getActiveTab(getPane(layout, layout.focusedSide))?.key ?? null;
   return WORKSPACE_PANE_SIDES.flatMap((side) => (getPane(layout, side)?.tabs ?? []).map((tab) => ({
     side,
     tabKey: tab.key,
-    title: resolvePaneTabTitle(tab, getLiveTabTitle(tab, projects), labels),
+    title: formatSessionTitle(resolvePaneTabTitle(tab, getLiveTabTitle(tab, projects), labels, t), t),
     provider: tab.provider,
     projectName: getOpenTabProjectName(tab, projects, paneProjects[side]),
     isActive: side === layout.focusedSide && tab.key === focusedTabKey,
@@ -114,11 +118,14 @@ function ProjectCommandPalette() {
     runMovingFocus(() => openSessionById(sessionId, options));
   }, [openSessionById, runMovingFocus]);
 
+  // The palette's session rows name sessions as the tab bar does: the server's placeholder names in the interface language.
+  const formatPaletteSessionTitle = useCallback((title: string) => formatSessionTitle(title, t), [t]);
+
   const newChatLabel = t('workspace.newChat');
   const missingLabel = t('workspace.missingSession');
   const openTabs = useMemo(
-    () => collectOpenTabs(layout, projects, paneProjects, { newChat: newChatLabel, missing: missingLabel }),
-    [layout, missingLabel, newChatLabel, paneProjects, projects],
+    () => collectOpenTabs(layout, projects, paneProjects, { newChat: newChatLabel, missing: missingLabel }, t),
+    [layout, missingLabel, newChatLabel, paneProjects, projects, t],
   );
 
   const isSplit = layout.right !== null;
@@ -161,6 +168,7 @@ function ProjectCommandPalette() {
       onShowTab={setActiveTab}
       onOpenSession={openSession}
       workspace={workspace}
+      formatSessionTitle={formatPaletteSessionTitle}
     />
   );
 }

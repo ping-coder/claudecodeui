@@ -1,10 +1,13 @@
+import type { TFunction } from 'i18next';
 import { memo, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useProjectPanesState } from '@/modules/project-workspace/context/ProjectsStateContext';
 import { useWorkspaceChrome } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import { findLoadedSession } from '@/modules/project-workspace/utils/resolveSessionTarget';
 import { findSessionTab, getActiveTab, getPane } from '@/modules/project-workspace/utils/workspaceLayout';
 import { RunNotifications } from '@/modules/run-notifications';
+import { formatSessionTitle } from '@/modules/sidebar';
 import type {
   Project,
   RunAlertBannerPlacement,
@@ -20,18 +23,20 @@ type ProjectRunNotificationsProps = {
 
 /**
  * How the workspace names a session in a run alert: its live title (where renames and generated summaries land),
- * else the title its pane tab last knew; its project's display name from the loaded projects, else from the tab's
- * project among the pane projects (an archived project the list does not hold). Null when the workspace knows
- * neither, so run-notifications falls back to the server's session name.
+ * else the title its pane tab last knew, the server's placeholder names in the interface language; its project's
+ * display name from the loaded projects, else from the tab's project among the pane projects (an archived project
+ * the list does not hold). Null when the workspace knows neither, so run-notifications falls back to the server's
+ * session name.
  */
 const resolveRunSessionLabel = (
   sessionId: string,
   projects: Project[],
   paneProjects: Readonly<Record<WorkspacePaneSide, Project | null>>,
   layout: WorkspaceLayout,
+  t: TFunction,
 ): RunSessionLabel | null => {
   const tab = findSessionTab(layout, sessionId)?.tab ?? null;
-  const title = findLiveSessionTitle(sessionId, projects) || tab?.title.trim() || '';
+  const title = formatSessionTitle(findLiveSessionTitle(sessionId, projects) || tab?.title.trim() || '', t);
 
   let projectName = findLoadedSession(sessionId, projects)?.project.displayName?.trim() || null;
   if (!projectName && tab?.projectId) {
@@ -67,12 +72,13 @@ const collectOnScreenChatSessionKey = (layout: WorkspaceLayout, showsBothPanes: 
  * session from a banner's "Open" (kept, on Chat, in the focused pane) and where the banners sit.
  */
 function ProjectRunNotifications({ isMobile }: ProjectRunNotificationsProps) {
+  const { t } = useTranslation();
   const { projects, paneProjects, layout, actions, setSidebarOpen } = useProjectPanesState();
   const { canSplit, isImmersive } = useWorkspaceChrome();
 
   const resolveSessionLabel = useCallback(
-    (sessionId: string) => resolveRunSessionLabel(sessionId, projects, paneProjects, layout),
-    [layout, paneProjects, projects],
+    (sessionId: string) => resolveRunSessionLabel(sessionId, projects, paneProjects, layout, t),
+    [layout, paneProjects, projects, t],
   );
 
   const showsBothPanes = layout.right !== null && canSplit && !isMobile;

@@ -12,6 +12,7 @@ import { useWorkspaceChrome } from '@/modules/project-workspace/context/Workspac
 import { useHorizontalWheelScroll } from '@/modules/project-workspace/hooks/useHorizontalWheelScroll';
 import PaneTabContextMenu from '@/modules/project-workspace/PaneTabContextMenu';
 import PaneTabRenameInput from '@/modules/project-workspace/PaneTabRenameInput';
+import { formatSessionTitle } from '@/modules/sidebar';
 import {
   PANE_TAB_DRAG_EFFECT,
   WORKSPACE_FULLSCREEN_SHORTCUT,
@@ -206,6 +207,12 @@ export default function PaneTabBar({
   const activeTabAtPressRef = useRef<string | null>(null);
 
   const tabs = pane.tabs;
+  // What a tab reads on screen. A rename starts from the title tabDisplay holds and a drag carries it,
+  // while the strip, its tooltips and menus show the server's placeholder names ("Untitled Claude
+  // Session") in the interface language.
+  const getTabLabel = (tab: WorkspaceSessionTab): string => (
+    formatSessionTitle(tabDisplay.get(tab.key)?.title ?? tab.title, t)
+  );
   // Changes only when tabs open, close or move, unlike `tabs`, which a session update replaces too.
   const tabKeys = tabs.map((tab) => tab.key).join('\n');
   // The tabs shrink before the strip scrolls, so it only overflows once they are all at their minimum
@@ -592,7 +599,7 @@ export default function PaneTabBar({
     const display = tabDisplay.get(tab.key);
     return {
       key: tab.key,
-      label: display?.title ?? tab.title,
+      label: getTabLabel(tab),
       description: display?.projectName || undefined,
       onSelect: () => actions.activateTab(side, tab.key),
     };
@@ -628,12 +635,15 @@ export default function PaneTabBar({
   const fullscreenShortcut = formatShortcut(WORKSPACE_FULLSCREEN_SHORTCUT);
   const isSplitUnavailable = !isSplit && !canSplit;
   const splitLabel = isSplit ? t('workspace.merge', { defaultValue: 'Merge panes' }) : t('workspace.split', { defaultValue: 'Split view' });
+  // The shortcut goes in as a value, which a right-to-left language isolates: written into the
+  // sentence, "Ctrl+\" would read "\+Ctrl" and "⌘⇧↵" "↵⇧⌘".
   const splitTooltip = isSplitUnavailable
     ? t('workspace.splitDisabled', { defaultValue: 'Widen the window to split' })
-    : `${splitLabel} (${splitShortcut})`;
+    : t('workspace.labelWithShortcut', { label: splitLabel, shortcut: splitShortcut });
   const fullscreenLabel = isImmersive
     ? t('workspace.exitFullscreen', { defaultValue: 'Exit full screen' })
     : t('workspace.fullscreen', { defaultValue: 'Full screen' });
+  const fullscreenTooltip = t('workspace.labelWithShortcut', { label: fullscreenLabel, shortcut: fullscreenShortcut });
   const newChatLabel = newChatProject
     ? t('workspace.newChatIn', { project: newChatProject.displayName, defaultValue: 'New chat in {{project}}' })
     : t('workspace.newChat', { defaultValue: 'New chat' });
@@ -730,7 +740,7 @@ export default function PaneTabBar({
         >
           {tabs.map((tab, index) => {
             const display = tabDisplay.get(tab.key);
-            const title = display?.title ?? tab.title;
+            const title = getTabLabel(tab);
             const projectName = display?.projectName ?? '';
             const isActive = tab.key === pane.activeTabKey;
             const isRenamable = canRenameTab(tab);
@@ -876,8 +886,10 @@ export default function PaneTabBar({
           />
         )}
         {showWorkspaceControls && (
+          // The tooltips open toward the start of the line: these buttons end the row at the edge of
+          // the window (its left edge right to left), where a tooltip centred below them was cut off.
           <div data-workspace-control="" className="flex items-center gap-0.5">
-            <Tooltip content={splitTooltip} position="bottom">
+            <Tooltip content={splitTooltip} position="left">
               <button
                 type="button"
                 data-workspace-split-toggle=""
@@ -893,7 +905,7 @@ export default function PaneTabBar({
                 <Columns2 className="h-4 w-4" />
               </button>
             </Tooltip>
-            <Tooltip content={`${fullscreenLabel} (${fullscreenShortcut})`} position="bottom">
+            <Tooltip content={fullscreenTooltip} position="left">
               <button
                 type="button"
                 aria-label={fullscreenLabel}
@@ -910,7 +922,7 @@ export default function PaneTabBar({
       {tabMenu && menuTab && (
         <PaneTabContextMenu
           anchor={tabMenu.anchor}
-          label={tabDisplay.get(menuTab.key)?.title ?? menuTab.title}
+          label={getTabLabel(menuTab)}
           items={menuItems}
           onClose={closeTabMenu}
         />

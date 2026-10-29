@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 type TaskItem = {
   id: string;
@@ -73,6 +74,7 @@ const statusConfig = {
  * Rendered by chat's ToolRenderer as the content of a task-list tool result.
  */
 export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => {
+  const { t } = useTranslation('chat');
   const tasks = parseTaskContent(content);
 
   // If we couldn't parse any tasks, fall back to text display
@@ -84,14 +86,14 @@ export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => 
     );
   }
 
-  const completed = tasks.filter(t => t.status === 'completed').length;
+  const completed = tasks.filter((task) => task.status === 'completed').length;
   const total = tasks.length;
 
   return (
     <div>
       <div className="mb-1.5 flex items-center gap-2">
         <span className="text-[11px] text-gray-500 dark:text-gray-400">
-          {completed}/{total} completed
+          {t('tools.taskListCompleted', { done: completed, total })}
         </span>
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
           <div
@@ -116,7 +118,7 @@ export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => 
                 {task.subject}
               </span>
               <span className={`flex-shrink-0 rounded border px-1 py-px text-[10px] ${config.badgeClass}`}>
-                {task.status.replace('_', ' ')}
+                {t(`tools.taskStatus.${task.status}`, { defaultValue: task.status.replace('_', ' ') })}
               </span>
             </div>
           );

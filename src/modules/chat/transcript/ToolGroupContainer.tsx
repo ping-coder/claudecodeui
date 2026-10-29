@@ -1,12 +1,15 @@
 import { memo, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronRight } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,DiffStats,Project,ToolGroupItem } from '@/shared/types';
 import { getToolConfig } from '@/modules/chat/tools';
+import { formatToolDisplayName } from '@/modules/chat/tools/configs/toolConfigs';
 import MessageComponent from '@/modules/chat/transcript/MessageComponent';
 import { useIsExportingTranscript } from '@/modules/chat/context/TranscriptRenderContext';
 import { DiffStatsBadge } from '@/modules/chat/tools/DiffStatsBadge';
 import { parseToolPayload, summarizeDiff } from '@/modules/chat/utils/messageTransforms';
+import { stripBidiIsolates } from '@/shared/direction';
 
 type ToolGroupContainerProps = {
   group: ToolGroupItem;
@@ -61,12 +64,17 @@ function useGroupDiffStats(
   }, [createDiff, messages, toolName]);
 }
 
-function getToolGroupIcon(icon: string | undefined, toolName: string): string {
+/**
+ * The letter in the group's badge: `$` for a terminal tool, else the first letter of the group's
+ * label as it reads, so it matches the name beside it in any language ("Q" for Question, "问" for 问题).
+ */
+function getToolGroupIcon(icon: string | undefined, label: string): string {
   if (icon === 'terminal') {
     return '$';
   }
 
-  return icon || toolName.slice(0, 1).toUpperCase();
+  const [first = ''] = Array.from(stripBidiIsolates(label).trim());
+  return icon || first.toUpperCase();
 }
 
 /**
@@ -86,6 +94,7 @@ function ToolGroupContainer({
   selectedProject,
   provider,
 }: ToolGroupContainerProps) {
+  const { t } = useTranslation();
   const isExporting = useIsExportingTranscript();
   // Collapsed on screen, always open in an export: the whole point of the
   // group row is to hide detail the reader can ask for, and an exported file
@@ -93,10 +102,11 @@ function ToolGroupContainer({
   const [isExpanded, setIsExpanded] = useState(false);
   const showChildren = isExpanded || isExporting;
   const config = getToolConfig(group.toolName).input;
-  const label = config.label || group.toolName;
+  // A tool with no label of its own is named as its cards are ("Question", "Checklist", an MCP tool's short name).
+  const label = (config.labelKey ? t(config.labelKey, { defaultValue: config.label }) : config.label) || formatToolDisplayName(group.toolName, t);
   const borderClass = config.colorScheme?.border || 'border-border';
   const iconClass = config.colorScheme?.icon || 'text-muted-foreground';
-  const icon = getToolGroupIcon(config.icon, group.toolName);
+  const icon = getToolGroupIcon(config.icon, label);
 
   const preview = group.preview;
   const groupDiffStats = useGroupDiffStats(group.toolName, group.messages, createDiff);

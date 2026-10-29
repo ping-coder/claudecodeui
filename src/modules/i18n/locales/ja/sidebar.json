@@ -133,6 +133,7 @@
   "deleteConfirmation": {
     "deleteProject": "プロジェクトを除去",
     "deleteSession": "セッションを削除",
+    "confirmDeleteNamed": "このプロジェクトをどうしますか： {{name}}?",
     "confirmDelete": "このプロジェクトをどうしますか：",
     "sessionCount": "このプロジェクトには{{count}}件の会話があります。",
     "removeFromSidebar": "サイドバーからのみ除去",
@@ -146,6 +147,7 @@
     "cannotUndo": "後からプロジェクトを再追加できます。",
     "confirmDeleteSessions": "次のセッションをどうしますか：",
     "deleteSessions": "{{count}}件のセッションを削除",
+    "confirmDeleteSelected_other": "次のセッションをどうしますか： <strong>選択した{{count}}件のセッション</strong>?",
     "selectedSessions": "選択した{{count}}件のセッション",
     "archiveSessions": "{{count}}件のセッションをアーカイブ",
     "archiveSessionsNotice": "アーカイブすると、セッションはアクティブな一覧から外れますが、履歴は保持されます。"

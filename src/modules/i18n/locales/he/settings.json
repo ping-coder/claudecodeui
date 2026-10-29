@@ -139,14 +139,33 @@
   "notifications": {
     "title": "התראות",
     "description": "בחירת אירועי ההתראות שיתקבלו.",
+    "page": {
+      "title": "כש-CloudCLI פתוח",
+      "description": "איך הדפדפן הזה מודיע על משימה שהסתיימה כשלשונית של CloudCLI פתוחה.",
+      "banner": {
+        "title": "באנר",
+        "description": "הצגת באנר כשמשימה מסתיימת, עם כפתור לפתיחת השיחה שלה."
+      },
+      "system": {
+        "title": "התראת מערכת",
+        "description": "הצגת התראת מערכת כשמשימה מסתיימת ואף לשונית של CloudCLI לא נמצאת בחזית.",
+        "allow": "מתן הרשאה להתראות",
+        "denied": "ההתראות חסומות באתר הזה. אפשר לאשר אותן בהגדרות האתר בדפדפן.",
+        "unsupported": "לא זמין כאן. התראות מערכת דורשות HTTPS או localhost.",
+        "viaPush": "התראות push מופעלות בדפדפן הזה, ולכן ההתראות האלה יגיעו דרכן."
+      }
+    },
     "webPush": {
       "title": "התראות בדפדפן הזה",
+      "description": "ההתראות מגיעות לדפדפן הזה גם כש-CloudCLI סגור. כשלשונית של CloudCLI בחזית, התראות על משימות מגיעות בלי צליל.",
       "enable": "הפעלת התראות",
       "disable": "השבתת התראות",
       "enabled": "ההתראות מופעלות בדפדפן הזה",
       "loading": "מעדכן…",
       "unsupported": "הדפדפן הזה לא תומך בהתראות push.",
-      "denied": "התראות push חסומות. יש לאשר אותן בהגדרות הדפדפן."
+      "denied": "התראות push חסומות. יש לאשר אותן בהגדרות הדפדפן.",
+      "dismissed": "ההתראות לא אושרו. יש ללחוץ שוב על \"הפעלת התראות\" ולאשר כשהדפדפן שואל.",
+      "failed": "לא ניתן להפעיל התראות push בדפדפן הזה. אפשר לנסות שוב מאוחר יותר."
     },
     "desktop": {
       "title": "התראות באפליקציית הדסקטופ הזו",
@@ -157,14 +176,17 @@
     },
     "sound": {
       "title": "צליל",
+      "description": "השמעת צליל קצר כשמשימה מסתיימת או כשכלי ממתין לאישור.",
       "enabled": "מופעל",
       "test": "בדיקת צליל"
     },
     "events": {
+      "title": "אירועים של התראות push ודסקטופ",
       "actionRequired": "נדרשת פעולה",
       "stop": "הריצה נעצרה",
       "error": "הריצה נכשלה"
-    }
+    },
+    "loadFailed": "לא ניתן לטעון את הגדרות ההתראות. כדי לנסות שוב, יש לסגור את ההגדרות ולפתוח אותן מחדש."
   },
   "appearanceSettings": {
     "darkMode": {
@@ -190,6 +212,14 @@
         "label": "ערכת נושא לעורך",
         "description": "ערכת הנושא שמוגדרת כברירת מחדל לעורך הקוד"
       },
+      "textWordWrap": {
+        "label": "גלישת שורות בקובצי Markdown וטקסט",
+        "description": "גלישת שורות ארוכות בקובצי Markdown וטקסט פשוט, כמו \u2066.md\u2069 ו-\u2066.txt\u2069"
+      },
+      "codeWordWrap": {
+        "label": "גלישת שורות בקובצי קוד",
+        "description": "גלישת שורות ארוכות בקוד מקור ובכל שאר הקבצים"
+      },
       "showMinimap": {
         "label": "הצגת מפה מוקטנת",
         "description": "הצגת מפה מוקטנת לניווט נוח יותר בתצוגת diff"
@@ -202,6 +232,11 @@
         "label": "גודל גופן",
         "description": "גודל הגופן בעורך בפיקסלים"
       }
+    },
+    "keepProjectsExpanded": {
+      "section": "סרגל הצד",
+      "label": "השארת פרויקטים מורחבים",
+      "description": "אפשר להרחיב כמה פרויקטים יחד, והם יישארו מורחבים גם אחרי טעינה מחדש."
     }
   },
   "mcpForm": {
@@ -233,7 +268,8 @@
       "selectProject": "בחירת פרויקט…"
     },
     "placeholders": {
-      "serverName": "my-server"
+      "serverName": "my-server",
+      "args": "\u2066--port\u2069\n3000"
     },
     "validation": {
       "missingType": "חסר שדה חובה: type",
@@ -347,7 +383,7 @@
     },
     "loading": "טוען…",
     "version": {
-      "updateAvailable": "יש עדכון זמין: v{{version}}"
+      "updateAvailable": "יש עדכון זמין: \u2066v{{version}}\u2069"
     }
   },
   "tasks": {
@@ -375,9 +411,34 @@
       "connected": "מחובר",
       "notConnected": "לא מחובר",
       "disconnected": "מנותק",
+      "notInstalled": "לא מותקן",
+      "cliNotInstalled": "ה-CLI של {{agent}} לא מותקן במחשב הזה",
       "checkingAuth": "בודק את סטטוס האימות…",
       "loggedInAs": "מחובר בתור {{email}}",
-      "authenticatedUser": "משתמש מאומת"
+      "authenticatedUser": "משתמש מאומת",
+      "server": {
+        "notAuthenticated": "לא מחובר",
+        "notLoggedIn": "לא מחובר",
+        "cliNotInstalled": "ה-CLI של {{agent}} לא מותקן",
+        "cliNotFound": "ה-CLI של {{agent}} לא נמצא או לא מותקן",
+        "agyNotInstalled": "ה-CLI של Antigravity (agy) לא מותקן",
+        "agyNotSignedIn": "לא מחובר. כדי להתחבר, יש להריץ פעם אחת את agy בטרמינל.",
+        "claudeNotAuthenticated": "ה-CLI של Claude לא מחובר. יש להריץ claude /login או להגדיר את ANTHROPIC_API_KEY.",
+        "claudeLoginExpired": "תוקף ההתחברות ל-Claude פג. יש להריץ שוב את claude /login.",
+        "claudeCredentialsUnreadable": "לא ניתן לקרוא את פרטי ההתחברות של Claude. יש להריץ שוב את claude /login.",
+        "claudeCredentialsCorrupt": "קובץ פרטי ההתחברות של Claude פגום. יש להריץ שוב את claude /login.",
+        "noValidTokens": "לא נמצאו טוקנים תקפים",
+        "notConfigured": "{{agent}} לא מוגדר",
+        "readFailed": "קריאת פרטי ההתחברות של {{agent}} נכשלה",
+        "agyStatusFailed": "קריאת הסטטוס של ה-CLI של Antigravity נכשלה",
+        "commandTimeout": "הפקודה חרגה מזמן ההמתנה",
+        "checkFailed": "בדיקת סטטוס ההתחברות נכשלה",
+        "apiKey": "מפתח API",
+        "authToken": "טוקן אימות",
+        "settingsFile": "הוגדר דרך settings.json",
+        "oauthToken": "טוקן OAuth (לטווח ארוך)",
+        "providerCredentials": "פרטי ההתחברות של {{provider}}"
+      }
     },
     "account": {
       "claude": {
@@ -391,6 +452,9 @@
       },
       "opencode": {
         "description": "OpenCode, עוזר CLI"
+      },
+      "agy": {
+        "description": "Antigravity, עוזר CLI"
       }
     },
     "connectionStatus": "סטטוס חיבור",
@@ -400,11 +464,11 @@
       "descriptionWithEmail": "{{variable}} מוגדר ב-{{source}}, ולכן Claude Code מחייב כל בקשה על המפתח הזה כשימוש API בתשלום לפי שימוש, במקום להשתמש בהתחברות המנוי ({{email}}).",
       "source": {
         "process_env": "סביבת השרת",
-        "settings_file": "~/.claude/settings.json"
+        "settings_file": "\u2066~/.claude/settings.json\u2069"
       },
       "fix": {
-        "process_env": "כדי להשתמש במנוי, יש לבטל את {{variable}} במקום שבו השרת מופעל (.env, פרופיל shell, יחידת שירות) ולהפעיל מחדש את השרת.",
-        "settings_file": "כדי להשתמש במנוי, יש להסיר את {{variable}} מבלוק \"env\" בקובץ ~/.claude/settings.json."
+        "process_env": "כדי להשתמש במנוי, יש לבטל את {{variable}} במקום שבו השרת מופעל (\u2066.env\u2069, פרופיל shell, יחידת שירות) ולהפעיל מחדש את השרת.",
+        "settings_file": "כדי להשתמש במנוי, יש להסיר את {{variable}} מבלוק \"env\" בקובץ \u2066~/.claude/settings.json\u2069."
       }
     },
     "login": {
@@ -415,14 +479,19 @@
       "button": "התחברות",
       "reLoginButton": "התחברות מחדש"
     },
+    "terminalLogin": {
+      "title": "התחברות מטרמינל",
+      "description": "כדי להתחבר, יש להריץ פעם אחת את <code>{{command}}</code> בטרמינל במחשב הזה.",
+      "installDescription": "יש להתקין את ה-CLI של {{agent}} במחשב הזה, ואז להריץ פעם אחת את <code>{{command}}</code> בטרמינל כדי להתחבר."
+    },
     "error": "שגיאה: {{error}}"
   },
   "permissions": {
     "title": "הגדרות הרשאות",
     "skipPermissions": {
       "label": "דילוג על בקשות הרשאה (בזהירות)",
-      "claudeDescription": "שקול לדגל --dangerously-skip-permissions",
-      "cursorDescription": "שקול לדגל -f ב-Cursor CLI"
+      "claudeDescription": "שקול לדגל \u2066--dangerously-skip-permissions\u2069",
+      "cursorDescription": "שקול לדגל \u2066-f\u2069 ב-Cursor CLI"
     },
     "allowedTools": {
       "title": "כלים מאושרים",
@@ -436,6 +505,25 @@
       "description": "כלים שנחסמים אוטומטית בלי לבקש הרשאה",
       "placeholder": "למשל, \"Bash(rm:*)\"",
       "empty": "לא הוגדרו כלים חסומים"
+    },
+    "settingsFiles": {
+      "title": "כללים מקובצי ההגדרות של Claude",
+      "description": "גם Claude CLI מחיל את הכללים האלה, בנוסף לרשימות שלמעלה. כלל \"אסור\" גובר בכל מקום שבו הוא מוגדר, אבל כלל \"דורש אישור\" לא חל על כלי שכבר מופיע ברשימה \"כלים מאושרים\". כאן אפשר רק לצפות בכללים; כדי לשנות אותם יש לערוך את הקבצים.",
+      "sources": {
+        "user": "ההגדרות שלך",
+        "managed": "הגדרות מנוהלות (מנהל המערכת)"
+      },
+      "groups": {
+        "allow": "מותר",
+        "ask": "דורש אישור",
+        "deny": "אסור"
+      },
+      "missing": "הקובץ לא נמצא, ולכן לא נוספים ממנו כללים.",
+      "invalid": "לא ניתן לקרוא את הקובץ. יש לוודא שהוא JSON תקין.",
+      "empty": "אין כללי הרשאות בקובץ הזה.",
+      "loading": "טוען כללים…",
+      "loadFailed": "לא ניתן לטעון את הכללים מקובצי ההגדרות של Claude.",
+      "projectNote": "גם קובצי ההגדרות של הפרויקט עצמו, \u2066.claude/settings.json\u2069 ו-\u2066.claude/settings.local.json\u2069, חלים על שיחות בפרויקט. Claude CLI מתעלם מכללי \"מותר\" ב-\u2066.claude/settings.json\u2069 עד שהתיקייה מוגדרת כמהימנה: יש להריץ שם את Claude Code פעם אחת במצב אינטראקטיבי ולאשר את השאלה אם לסמוך על התיקייה."
     },
     "allowedCommands": {
       "title": "פקודות shell מאושרות",
@@ -512,16 +600,17 @@
       "command": "פקודה",
       "url": "URL",
       "args": "ארגומנטים",
-      "environment": "סביבה"
+      "environment": "סביבה",
+      "line": "{{label}}: {{value}}"
     },
     "tools": {
       "title": "כלים",
       "count_one": "({{count}}):",
       "count_two": "({{count}}):",
       "count_other": "({{count}}):",
-      "more_one": "+{{count}} נוסף",
-      "more_two": "+{{count}} נוספים",
-      "more_other": "+{{count}} נוספים"
+      "more_one": "ועוד אחד",
+      "more_two": "ועוד שניים",
+      "more_other": "ועוד {{count}}"
     },
     "actions": {
       "edit": "עריכת שרת",
@@ -538,7 +627,7 @@
   },
   "pluginSettings": {
     "title": "תוספים",
-    "description": "הרחבת הממשק עם תוספים מותאמים אישית. אפשר להתקין מ-git או להניח תיקייה ב-~/.claude-code-ui/plugins/",
+    "description": "הרחבת הממשק עם תוספים מותאמים אישית. אפשר להתקין מ-git או להניח תיקייה ב-\u2066~/.claude-code-ui/plugins/\u2069",
     "installPlaceholder": "https://github.com/user/my-plugin",
     "installButton": "התקנה",
     "installing": "מתקין…",
@@ -610,25 +699,27 @@
     "githubIssuesBoardPlugin": {
       "name": "לוח GitHub Issues",
       "badge": "לא רשמי",
-      "description": "לוח קנבן ל-GitHub Issues עם סנכרון דו-כיווני ל-TaskMaster והתקנה אוטומטית של CLI skill בשם /github-task",
+      "description": "לוח קנבן ל-GitHub Issues עם סנכרון דו-כיווני ל-TaskMaster והתקנה אוטומטית של CLI skill בשם \u2066/github-task\u2069",
       "install": "התקנה"
     },
     "claudeUsagePlugin": {
       "name": "שימוש ב-Claude",
-      "badge": "לא רשמי",
       "description": "מעקב חי אחרי מגבלות התוכנית של Claude Code והיסטוריית טוקנים ועלויות של 30 יום.",
       "install": "התקנה"
     },
     "codexUsagePlugin": {
       "name": "שימוש ב-Codex",
-      "badge": "לא רשמי",
       "description": "מעקב חי אחרי מגבלות התוכנית של Codex, זמני איפוס ופעילות טוקנים בחשבון ב-30 הימים האחרונים.",
       "install": "התקנה"
     },
     "glmUsagePlugin": {
       "name": "שימוש ב-GLM",
-      "badge": "לא רשמי",
       "description": "מעקב חי אחרי מכסות תוכנית הקוד של GLM/Zhipu והיסטוריית טוקנים של 30 יום.",
+      "install": "התקנה"
+    },
+    "agentMonitorPlugin": {
+      "name": "ניטור סוכנים",
+      "description": "צפייה בתתי-סוכנים ובתהליכי shell שממשיכים לפעול ברקע אחרי שהשיחה מסתיימת, ועצירה שלהם.",
       "install": "התקנה"
     },
     "morePlugins": "עוד",
@@ -711,7 +802,6 @@
     "runtimeSetupRequired": "נדרשת הגדרה",
     "loadFailed": "טעינת הדפדפן נכשלה",
     "actionFailed": "פעולת הדפדפן נכשלה",
-    "requestFailed": "הבקשה נכשלה ({{status}})",
     "never": "אף פעם",
     "unknown": "לא ידוע",
     "justNow": "הרגע",
@@ -730,7 +820,7 @@
     "installRuntime": "התקנת סביבת ריצה",
     "promptLabel": "פרומפט",
     "prompt1": "להשתמש בדפדפן כדי לבדוק את תהליך התשלום ולדווח על מצבי UI שבורים.",
-    "prompt2": "לפתוח את <url> בדפדפן, לבצע פעולות בדף ולסכם מה השתנה אחרי כל שלב.",
+    "prompt2": "לפתוח את \u2066<url>\u2069 בדפדפן, לבצע פעולות בדף ולסכם מה השתנה אחרי כל שלב.",
     "screenshotAlt": "צילום מסך של סשן הדפדפן",
     "waitingScreenshot": "ממתין לצילום מסך",
     "waitingScreenshotHint": "צילום הדפדפן הבא של הסוכן יוצג כאן.",
@@ -745,7 +835,6 @@
     "noSessions": "אין סשנים של סוכנים בדפדפן.",
     "selected": "נבחר",
     "statusLabel": "סטטוס",
-    "none": "אין",
     "lastAction": "פעולה אחרונה",
     "profileLabel": "פרופיל",
     "temporaryProfile": "זמני",
@@ -767,6 +856,7 @@
     "playwrightLabel": "Playwright",
     "chromiumLabel": "Chromium",
     "statusPrefix": "סטטוס",
+    "statusChip": "{{label}}: {{value}}",
     "checking": "בודק…",
     "installed": "מותקן",
     "missing": "חסר",
@@ -800,10 +890,6 @@
     "proLink": "זמין ב-CloudCLI Pro"
   },
   "mcpServersAddErrors": {
-    "loadFailedProvider": "טעינת שרתי ה-MCP של {{provider}} נכשלה",
-    "deleteFailed": "מחיקת שרת ה-MCP נכשלה",
-    "saveFailed": "שמירת שרת ה-MCP נכשלה",
-    "saveGlobalFailed": "שמירת שרת ה-MCP לכל הספקים נכשלה",
     "selectProjectRequired": "יש לבחור פרויקט עבור שרתי MCP בהיקף פרויקט",
     "globalScopeUnsupported": "הוספת שרת MCP תומכת רק בהיקף משתמש או פרויקט בכל הספקים.",
     "globalAddFailed": "הוספת שרת ה-MCP לכל הספקים נכשלה. {{details}}",
@@ -813,10 +899,10 @@
   "about": {
     "tagline": "ממשק קוד פתוח לעוזר תכנות מבוסס AI",
     "starOnGitHub": "כוכב ב-GitHub",
-    "docs": "תיעוד",
     "hostedTitle": "לנסות את CloudCLI Hosted",
     "hostedDescription": "שיתוף פעולה בצוות, תצורות MCP משותפות, סנכרון הגדרות בין סביבות ותשתית מנוהלת.",
     "learnMore": "מידע נוסף",
+    "docs": "תיעוד",
     "proFeaturesTitle": "יכולות CloudCLI Pro",
     "syncSettingsTitle": "סנכרון הגדרות",
     "syncSettingsDescription": "ההעדפות, תצורות ה-MCP וערכת הנושא נשארים מסונכרנים בכל הסביבות.",

@@ -9,7 +9,9 @@
     "copied": "消息已复制",
     "selectFormat": "选择复制格式",
     "copyAsMarkdown": "复制为 Markdown",
-    "copyAsText": "复制为纯文本"
+    "copyAsText": "复制为纯文本",
+    "markdownShort": "MD",
+    "textShort": "TXT"
   },
   "messageTypes": {
     "user": "U",
@@ -34,7 +36,78 @@
     "readFile": "读取文件",
     "updateTodo": "更新待办列表",
     "readTodo": "读取待办列表",
-    "searchResults": "结果"
+    "searchResults": "结果",
+    "output": "输出",
+    "rawParams": "原始参数",
+    "details": "详情",
+    "plan": "计划",
+    "success": "成功",
+    "diffStats": "新增 {{added}} 行，删除 {{removed}} 行",
+    "moreInGroup_other": "另有 {{count}} 个",
+    "taskListCompleted": "已完成 {{done}}/{{total}}",
+    "outputLines_other": "{{count}} 行",
+    "status": {
+      "running": "运行中",
+      "completed": "已完成",
+      "error": "出错",
+      "denied": "已拒绝"
+    },
+    "taskStatus": {
+      "completed": "已完成",
+      "in_progress": "进行中",
+      "pending": "待办"
+    },
+    "names": {
+      "checklist": "清单",
+      "question": "问题"
+    },
+    "labels": {
+      "search": "搜索",
+      "fetch": "抓取",
+      "task": "任务",
+      "tasks": "任务"
+    },
+    "titles": {
+      "searchResults": "搜索结果",
+      "fetchedPage": "抓取的网页",
+      "taskList": "任务列表",
+      "taskDetails": "任务详情",
+      "subagent": "子智能体",
+      "subagentTask": "子智能体 / {{type}}：{{description}}",
+      "subagentResult": "子智能体结果",
+      "implementationPlan": "实施计划",
+      "sandboxScript": "沙箱脚本",
+      "updatingChecklist": "正在更新清单",
+      "checklistDone": "全部完成 — {{done}}/{{total}}",
+      "checklistProgress": "已完成 {{done}}/{{total}}",
+      "foundFiles_other": "找到 {{count}} 个文件",
+      "question": "问题",
+      "questions_other": "{{count}} 个问题",
+      "questionsAnswered_other": "{{count}} 个问题，已回答 {{answered}} 个"
+    },
+    "values": {
+      "inPath": "位于 {{path}}",
+      "readingList": "正在读取清单",
+      "listingTasks": "正在列出任务",
+      "fetchingTask": "正在获取",
+      "updatingTask": "正在更新",
+      "creatingTask": "正在创建任务",
+      "runningTask": "正在运行任务",
+      "file": "文件",
+      "parameters": "参数"
+    },
+    "task": {
+      "model": "模型：",
+      "prompt": "提示词：",
+      "resumingFrom": "继续自：",
+      "noResponseText": "没有回复文本",
+      "noResponse": "没有回复"
+    },
+    "badges": {
+      "new": "新建",
+      "edit": "编辑",
+      "patch": "补丁"
+    }
   },
   "search": {
     "found": "找到 {{count}} 个{{type}}",
@@ -70,8 +143,10 @@
     "shared": "（同一时间有另一个命令在此仓库中运行；任一命令所做的更改都可能显示在任一结果下）"
   },
   "thinking": {
-    "title": "思考中...",
-    "emoji": "💭 思考中..."
+    "title": "思考中…",
+    "emoji": "💭 思考中…",
+    "thoughtBriefly": "思考了几秒",
+    "thoughtFor_other": "思考了 {{count}} 秒"
   },
   "json": {
     "response": "JSON 响应"
@@ -82,18 +157,33 @@
     "addTo": "将 {{entry}} 添加到允许的工具。",
     "retry": "权限已保存。重试请求以使用该工具。",
     "error": "无法更新权限。请重试。",
-    "openSettings": "打开设置"
+    "openSettings": "打开设置",
+    "request": {
+      "title": "需要权限",
+      "tool": "工具：",
+      "rule": "允许规则：",
+      "viewInput": "查看工具输入",
+      "deny": "拒绝",
+      "allowSaved": "允许（已保存）",
+      "allowRemember": "允许并记住",
+      "allowOnce": "仅允许这次"
+    }
   },
   "todo": {
     "updated": "待办列表已成功更新",
-    "current": "当前待办列表"
+    "current": "当前待办列表",
+    "listTitle_other": "待办列表（{{count}} 项）"
   },
   "plan": {
     "viewPlan": "📋 查看实施计划",
-    "title": "实施计划"
+    "title": "实施计划",
+    "toggle": "展开或收起计划",
+    "generating": "正在生成计划…",
+    "revise": "修改",
+    "build": "执行"
   },
   "usageLimit": {
-    "resetAt": "Claude 使用限制已达到。您的限制将在 **{{time}} {{timezone}}** - {{date}} 重置"
+    "resetAt": "Claude 用量已达上限，将在 **{{time}} {{timezone}}** - {{date}} 重置"
   },
   "codex": {
     "permissionMode": "权限模式",
@@ -119,11 +209,19 @@
     "transcribing": "转写中…",
     "speak": "朗读",
     "stopSpeaking": "停止",
-    "loading": "加载中…"
+    "loading": "加载中…",
+    "errors": {
+      "tooShort": "录音太短",
+      "noSpeech": "没有识别到语音",
+      "transcriptionFailed": "转写失败：{{error}}",
+      "micError": "麦克风出错：{{error}}",
+      "micDenied": "没有麦克风权限。",
+      "noMic": "没有找到麦克风。"
+    }
   },
   "input": {
-    "placeholder": "输入 / 调用命令，@ 选择文件，或向 {{provider}} 提问...",
-    "placeholderDefault": "输入您的消息...",
+    "placeholder": "输入 / 调用命令，@ 选择文件，或向 {{provider}} 提问…",
+    "placeholderDefault": "输入消息…",
     "disabled": "输入已禁用",
     "attachFiles": "附加文件",
     "attachImages": "附加图片",
@@ -150,7 +248,8 @@
       "label": "已排队",
       "willSend": "将在当前完成后发送",
       "edit": "编辑排队消息",
-      "delete": "删除排队消息"
+      "delete": "删除排队消息",
+      "filesAttached_other": "附带 {{count}} 个文件"
     },
     "insert": {
       "send": "插入消息",
@@ -179,12 +278,14 @@
       "send": "发送",
       "sendDescription": "开始新一轮，后台工作继续运行",
       "queueDescription": "后台工作结束后发送"
-    }
+    },
+    "dropFiles": "把文件放到这里"
   },
   "providerSelection": {
-    "title": "选择您的 AI 助手",
-    "description": "选择一个供应商以开始新对话",
+    "title": "选择 AI 助手",
+    "description": "选择一个提供商，开始新对话",
     "selectModel": "选择模型",
+    "modelSelector": "选择模型",
     "providerInfo": {
       "anthropic": "由 Anthropic 提供",
       "openai": "由 OpenAI 提供",
@@ -192,24 +293,33 @@
       "google": "由 Google 提供"
     },
     "readyPrompt": {
-      "claude": "准备好使用带有 {{model}} 的 Claude。请在下方开始输入您的消息。",
-      "cursor": "准备好使用带有 {{model}} 的 Cursor。请在下方开始输入您的消息。",
-      "codex": "准备好使用带有 {{model}} 的 Codex。请在下方开始输入您的消息。",
-      "opencode": "准备好使用带有 {{model}} 的 OpenCode。请在下方开始输入您的消息。",
-      "agy": "准备好使用带有 {{model}} 的 Antigravity。请在下方开始输入您的消息。",
-      "default": "请在上方选择一个提供者以开始"
+      "claude": "Claude 已就绪，模型：{{model}}。在下方输入消息开始对话。",
+      "cursor": "Cursor 已就绪，模型：{{model}}。在下方输入消息开始对话。",
+      "codex": "Codex 已就绪，模型：{{model}}。在下方输入消息开始对话。",
+      "opencode": "OpenCode 已就绪，模型：{{model}}。在下方输入消息开始对话。",
+      "agy": "Antigravity 已就绪，模型：{{model}}。在下方输入消息开始对话。",
+      "default": "先在上方选择一个提供商"
     },
     "pressToSearch": "按 <kbd>{{shortcut}}</kbd> 搜索会话、文件和提交",
-    "chooseModelDescriptionCustomOnly": "{{providers, list}} 仅列出您的模型"
+    "chooseModel": "选择模型",
+    "chooseModelDescription": "内置和自定义模型都在这里",
+    "chooseModelDescriptionCustomOnly": "{{providers, list}} 只列出你添加的模型",
+    "addModel": "添加模型",
+    "searchModels": "搜索模型…",
+    "manageModels": "管理模型",
+    "noModelsFound": "没有找到模型。",
+    "loadingModels": "正在加载模型…",
+    "hiddenModels_other": "已隐藏 {{count}} 个，点击显示",
+    "clickToChange": "点击更换模型"
   },
   "session": {
     "continue": {
-      "title": "继续您的对话",
+      "title": "继续对话",
       "description": "询问有关代码的问题、请求更改或获取开发任务的帮助"
     },
     "loading": {
-      "olderMessages": "正在加载更早的消息...",
-      "sessionMessages": "正在加载会话消息..."
+      "olderMessages": "正在加载更早的消息…",
+      "sessionMessages": "正在加载会话消息…"
     },
     "messages": {
       "showingOf": "显示 {{shown}} / {{total}} 条消息",
@@ -217,7 +327,7 @@
       "showingLast": "显示最近 {{count}} 条消息（共 {{total}} 条）",
       "loadEarlier": "加载更早的消息",
       "loadAll": "加载全部消息",
-      "loadingAll": "正在加载全部消息...",
+      "loadingAll": "正在加载全部消息…",
       "allLoaded": "全部消息已加载",
       "perfWarning": "已加载全部消息 - 滚动可能变慢。点击「滚动到底部」恢复性能。"
     }
@@ -229,8 +339,8 @@
     },
     "status": {
       "newSession": "新会话",
-      "initializing": "初始化中...",
-      "restarting": "重启中...",
+      "initializing": "初始化中…",
+      "restarting": "重启中…",
       "themeRestartHint": "重启以将新主题应用到 Claude Code"
     },
     "actions": {
@@ -244,13 +354,17 @@
       "bypassOnTitle": "权限绕过已开启 — 点击关闭（将重启 CLI）",
       "bypassOffTitle": "权限绕过已关闭 — 点击开启（将重启 CLI）"
     },
-    "loading": "正在加载终端...",
-    "connecting": "正在连接到 Shell...",
+    "loading": "正在加载终端…",
+    "connecting": "正在连接到 Shell…",
     "startSession": "启动新的 Claude 会话",
-    "resumeSession": "恢复会话：{{displayName}}...",
+    "resumeSession": "恢复会话：{{displayName}}…",
     "runCommand": "在 {{projectName}} 中运行 {{command}}",
     "startCli": "在 {{projectName}} 中启动 Claude CLI",
     "defaultCommand": "命令",
+    "selectionMenu": {
+      "copy": "复制",
+      "selectAll": "全选"
+    },
     "sessionBusy": {
       "title": "CloudCLI 还在用这个会话",
       "changed": "你上次看过之后，这个会话又开始了新的工作，所以什么都没停。先看清现在在跑什么，再决定要不要停。",
@@ -259,7 +373,9 @@
         "background": "后台还有任务在跑：",
         "held": "CloudCLI 的 Claude 进程还开着这个会话，多半在等 Monitor 或定时唤醒。",
         "exiting": "CloudCLI 的 Claude 进程正在退出，一般几秒，最长约 6 分钟。",
-        "queued": "聊天里有一条排队消息，会话一空就会发出。"
+        "queued": "聊天里有一条排队消息，会话一空就会发出。",
+        "heldScheduled": "这个会话还有循环在等下一次触发：",
+        "backgroundScheduled": "后台任务和循环还在跑："
       },
       "consequence": "现在在终端里打开，会有两个进程同时写这个会话，还在跑的任务也会被记成已停止。",
       "queuedHint": "先在聊天里发出或撤回这条排队消息。",
@@ -271,20 +387,20 @@
   },
   "claudeStatus": {
     "actions": {
-      "thinking": "Thinking",
-      "processing": "Processing",
-      "analyzing": "Analyzing",
-      "working": "Working",
-      "computing": "Computing",
-      "reasoning": "Reasoning"
+      "thinking": "思考中",
+      "processing": "处理中",
+      "analyzing": "分析中",
+      "working": "工作中",
+      "computing": "计算中",
+      "reasoning": "推理中"
     },
     "state": {
       "live": "Live",
       "paused": "Paused"
     },
     "elapsed": {
-      "seconds": "{{count}}s",
-      "minutesSeconds": "{{minutes}}m {{seconds}}s",
+      "seconds": "{{count}} 秒",
+      "minutesSeconds": "{{minutes}} 分 {{seconds}} 秒",
       "label": "{{time}} elapsed",
       "startingNow": "Starting now"
     },
@@ -295,12 +411,14 @@
       "agent": "智能体 {{description}}",
       "command": "命令 {{description}}",
       "count": "{{count}} 个任务",
+      "toolUses_other": "{{count}} 次工具调用",
       "stopped": "后台工作已停止：这条消息改了{{changes}}，只有新的 Claude 进程才能生效。",
       "stoppedLookupFailed": "后台工作已停止：无法把这条消息交给后台工作所在的进程。",
       "prompt": {
         "title": "这个会话还有后台工作在运行",
         "description": "新消息会开始新的一轮，并停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
         "descriptionNewProcess": "仍然发送会启动新进程，停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
+        "descriptionScheduled": "这条消息要在新进程里运行，这些循环会停掉。",
         "changes_other": "这条消息改了{{changes}}，只有新进程才能生效。改回原来的设置再发送，后台工作就不会停。",
         "changeSeparator": "、",
         "changeLastSeparator": "和",
@@ -324,6 +442,11 @@
     },
     "providers": {
       "assistant": "Assistant"
+    },
+    "handOverFailed": {
+      "stalePlan": "没有发送：运行这个会话循环和定时的进程已不再按计划接收这条消息，换新进程会停掉它们。",
+      "lookup": "没有发送：无法把这条消息交给运行这个会话循环和定时的进程。",
+      "other": "没有发送：这条消息进不了运行这个会话循环和定时的进程，换新进程会停掉它们。"
     }
   },
   "runProgress": {
@@ -362,6 +485,52 @@
       "pending": "待办"
     }
   },
+  "scheduledWork": {
+    "loop": "循环 {{prompt}}",
+    "reminder": "定时 {{prompt}}",
+    "kind": {
+      "loop": "循环",
+      "reminder": "定时"
+    },
+    "count": {
+      "loops_other": "{{count}} 个循环",
+      "items_other": "{{count}} 个定时项"
+    },
+    "cadence": {
+      "everyMinute": "每分钟",
+      "everyMinutes": "每 {{n}} 分钟",
+      "hourly": "每小时",
+      "everyHours": "每 {{n}} 小时",
+      "daily": "每天",
+      "weekdays": "工作日",
+      "weekly": "每{{day}}",
+      "everyDays": "每 {{n}} 天"
+    },
+    "selfPaced": "自定节奏",
+    "next": "下次 {{time}}",
+    "dueNow": "即将触发",
+    "tomorrow": "明天 {{time}}",
+    "pastHold": "超出保留期，不会触发",
+    "serverSchedule": "{{schedule}}（服务器时间）",
+    "expires": "{{time}} 到期",
+    "durable": "存在项目的 .claude/scheduled_tasks.json 里",
+    "reason": "理由：{{reason}}",
+    "listTitle": "循环和定时",
+    "stop": "停掉",
+    "stopAfterTurn": "这一轮结束后再停",
+    "confirm": {
+      "release": "停掉这个循环？",
+      "turnLoop": "停掉这个循环？CloudCLI 会用当前模型跑一轮，让 Claude 取消它，其他后台任务不受影响。",
+      "turnReminder": "取消这个定时？CloudCLI 会用当前模型跑一轮，让 Claude 取消它，其他后台任务不受影响。",
+      "stop": "停掉",
+      "cancel": "取消",
+      "stopAll": "全部停掉（{{n}}）",
+      "sameLoops_other": "这个会话里还有 {{count}} 个提示词一样的循环。",
+      "sameReminders_other": "这个会话里还有 {{count}} 个提示词一样的定时。"
+    },
+    "stopping": "取消中…",
+    "stopFailed": "没取消成功，可以再试，或在输入框里让 Claude 取消。"
+  },
   "projectSelection": {
     "startChatWithProvider": "选择一个项目以开始与 {{provider}} 聊天"
   },
@@ -373,7 +542,8 @@
     "forkFromHere": "从此处派生",
     "answeredBy": "由 {{model}} 回答",
     "inserted": "插入",
-    "insertedHint": "在 Claude 工作时发送，在它的下一步读到"
+    "insertedHint": "在 Claude 工作时发送，在它的下一步读到",
+    "memoriesUsed_other": "用到 {{count}} 条记忆"
   },
   "pinnedQuestion": {
     "label": "本回合的问题",
@@ -385,6 +555,11 @@
     "attachments_other": "{{count}} 个附件"
   },
   "composer": {
+    "reasoning": "推理级别",
+    "model": "模型",
+    "effortDefault": "默认",
+    "loadingModels": "正在加载模型…",
+    "modelMenu": "选择模型和推理级别",
     "ultracode": "Ultracode",
     "ultracodeDescription": "在任意推理级别下编排工作流",
     "ultracodeOn": "Ultracode 已开启",
@@ -395,6 +570,74 @@
       "title": "正在替换先前的消息",
       "filesNotReverted": "已修改的文件不会被还原",
       "cancel": "取消"
+    },
+    "bashCommandConfirm": "这个命令里有会执行的 bash 命令，确定继续吗？",
+    "commandCancelled": "已取消执行命令",
+    "commandFailedStatus": "命令执行失败（{{status}}）",
+    "commandError": "执行命令出错：{{message}}",
+    "queueFailed": "无法排队发送消息：{{message}}",
+    "uploadFailed": "文件上传失败：{{message}}",
+    "sessionStartFailed": "无法开始新会话：{{message}}",
+    "sessionStartNoId": "无法开始新会话：服务器没有返回会话 ID。"
+  },
+  "effortLevels": {
+    "none": "无",
+    "minimal": "最低",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "超高",
+    "max": "最高",
+    "ultra": "极限",
+    "thinking": "思考"
+  },
+  "modelCatalog": {
+    "defaultRecommended": "默认（推荐）",
+    "bestAvailable": "最佳可用",
+    "auto": "自动",
+    "contextVariant": "{{model}}（{{context}} 上下文）",
+    "descriptions": {
+      "claudeDefault": "使用你的 Claude 账号和部署推荐的模型。",
+      "claudeBest": "有 Fable 5.1 时用 Fable 5.1，否则用 Opus 5.5。",
+      "claudeFable": "能力最强的 Claude 模型，适合最难、运行最久的任务。",
+      "claudeSonnet": "最新的 Sonnet 模型，适合日常编码。",
+      "claudeSonnet1m": "最新的 Sonnet 模型，上下文窗口 1M。",
+      "claudeOpus": "最新的 Opus 模型，适合复杂推理和编码。",
+      "claudeOpus1m": "最新的 Opus 模型，上下文窗口 1M。",
+      "claudeHaiku": "快速高效的 Claude 模型，适合简单任务。",
+      "claudeOpusPlan": "规划时用 Opus 5.5，执行时换成 Sonnet 5.5。",
+      "codexMostCapable": "能力最强的模型，适合复杂、要求高的工作。",
+      "codexWorkhorse": "主力模型，适合编码和日常工作。",
+      "codexFast": "快速实惠的模型，适合较简单的任务。",
+      "codexAgenticFrontier": "最新的前沿智能体编码模型。",
+      "codexAgenticBalanced": "均衡的智能体编码模型，适合日常工作。",
+      "codexAgenticFast": "快速实惠的智能体编码模型。",
+      "codexFrontier": "前沿模型，适合复杂编码、研究和实际工作。",
+      "codexStrong": "强大的模型，适合日常编码。",
+      "codexSmall": "小巧、快速、性价比高的模型，适合较简单的编码任务。",
+      "cursorAuto": "让 Cursor 选择模型。",
+      "cursorComposerFast": "推理更快的 Cursor Composer 2.5。",
+      "cursorComposer": "Cursor 的模型，适合高效、长时间运行的编码任务。"
+    }
+  },
+  "slashCommands": {
+    "empty": "没有可用的命令",
+    "builtinBadge": "内置",
+    "groups": {
+      "frequent": "常用",
+      "builtin": "内置命令",
+      "skill": "技能",
+      "project": "项目命令",
+      "user": "用户命令",
+      "other": "其他命令"
+    },
+    "builtin": {
+      "help": "查看 Claude Code 的帮助文档",
+      "models": "查看当前提供商可用的模型",
+      "cost": "查看 Token 用量",
+      "memory": "打开 CLAUDE.md 记忆文件编辑",
+      "config": "打开设置",
+      "status": "查看系统状态和版本信息"
     }
   },
   "export": {
@@ -412,6 +655,18 @@
     "json": {
       "label": "JSON (.json)",
       "description": "全部消息原样输出，供工具使用。"
+    },
+    "meta_other": "{{count}} 条消息 · 导出于 {{time}}",
+    "toggleTheme": "切换主题",
+    "document": {
+      "you": "你",
+      "assistant": "助手",
+      "thinking": "{{provider}} 的思考",
+      "reasoning": "推理过程",
+      "result": "结果：",
+      "failed": "失败：",
+      "images_other": "{{count}} 张图片附件",
+      "attached": "附件：{{files}}"
     }
   },
   "schedule": {
@@ -428,15 +683,176 @@
     "pending": "将于 {{when}} 发送",
     "failed": "未发送 — {{reason}}",
     "cancel": "取消定时消息",
-    "dismiss": "关闭失败提示"
+    "dismiss": "关闭失败提示",
+    "failureReason": {
+      "stalePlan": "运行这个会话循环和定时的进程已不再按计划接收这条消息，换新进程会停掉它们。",
+      "lookup": "无法把这条消息交给运行这个会话循环和定时的进程。"
+    }
+  },
+  "misc": {
+    "copyToClipboard": "复制到剪贴板",
+    "copyCommand": "复制命令",
+    "userAskedRevise": "用户要求修改计划",
+    "typeAnswer": "输入回答…",
+    "skipOne": "跳过",
+    "skipAll": "全部跳过",
+    "closeImagePreview": "关闭图片预览",
+    "availableCommands": "可用命令",
+    "filterCommands": "筛选命令…",
+    "closeModal": "关闭命令结果窗口",
+    "noDescription": "暂无说明。",
+    "modelChangeFailed": "现在无法切换模型。",
+    "enterModelInfo": "模型名称和模型 ID 都要填写。",
+    "modelSaveFailed": "无法保存这个模型。",
+    "modelDeleteFailed": "无法删除这个模型。",
+    "cancelEditing": "取消编辑",
+    "userDeniedTool": "用户拒绝了这次工具调用",
+    "showTokenUsage": "查看 Token 用量",
+    "fallbackCommands": {
+      "models": "浏览当前提供商可用的模型。",
+      "cost": "查看当前会话的 Token 用量。",
+      "status": "查看运行时、版本、提供商和环境状态。",
+      "memory": "打开项目的 CLAUDE.md 记忆文件。",
+      "config": "打开设置。",
+      "help": "显示命令文档和语法。"
+    },
+    "modalMeta": {
+      "helpEyebrow": "命令中心",
+      "helpTitle": "帮助和快捷键",
+      "helpSubtitle": "不用离开对话，就能查内置命令、语法格式和命令用法。",
+      "modelsEyebrow": "模型选择",
+      "modelsTitle": "选择模型",
+      "modelsSubtitle": "选择这个提供商要用的模型。",
+      "costEyebrow": "会话统计",
+      "costTitle": "Token 用量",
+      "costSubtitle": "这个会话的输入、输出和总 Token 数。",
+      "statusEyebrow": "运行状况",
+      "statusTitle": "系统状态",
+      "statusSubtitle": "版本、提供商、运行时和环境信息都在这里。",
+      "commandResult": "命令结果"
+    },
+    "choiceSavedSession": "选中的模型会保存到这个会话，新对话也默认用它。",
+    "choiceSavedDefault": "选中的模型会成为新对话的默认模型。",
+    "tokensUsed_other": "已用 {{count}} 个 Token",
+    "compacted": "对话已压缩",
+    "compactionSummary": "完整摘要",
+    "expandImage": "放大 {{name}}",
+    "tokensLabel_other": "Token",
+    "escClosesModal": "按 Esc 关闭窗口。",
+    "close": "关闭",
+    "removeAttachment": "移除 {{name}}",
+    "attachedFile": "附件",
+    "attachedImage": "附带的图片",
+    "downloadFile": "下载 {{name}}",
+    "fileAttachment": "文件附件",
+    "unknownError": "未知错误",
+    "sessionModelChangeFailed": "无法切换这个会话的模型。",
+    "sessionEffortChangeFailed": "无法切换这个会话的推理级别。",
+    "sessionUltracodeChangeFailed": "无法切换这个会话的 Ultracode。",
+    "backgroundTaskFinished": "后台任务已完成",
+    "backgroundTaskUpdate": "后台任务有更新"
+  },
+  "commandResult": {
+    "unknown": "未知",
+    "provider": "提供商",
+    "model": "模型",
+    "help": {
+      "noMatch": "没有符合筛选条件的命令。",
+      "syntax": "语法",
+      "allArgs": "<code>{{token}}</code> 传入全部参数。",
+      "positionalArgs": "<code>{{first}}</code>、<code>{{second}}</code> 按位置传入参数。",
+      "fileContents": "<code>{{token}}</code> 插入文件内容。",
+      "quickTip": "小提示",
+      "quickTipText": "在输入框里输入 <code>/</code> 打开命令菜单，再用方向键选择、按 Enter 运行。"
+    },
+    "models": {
+      "active": "当前模型 · {{provider}}",
+      "next": "下一轮改用 {{model}}",
+      "search": "搜索 {{provider}} 模型…",
+      "select": "选择模型 {{model}}",
+      "currentSelection": "当前选择",
+      "sessionModel": "会话模型",
+      "noMatch": "没有符合搜索的模型。",
+      "sessionUses": "这个会话现在使用 {{model}}。",
+      "defaultSet": "{{provider}} 的默认模型已设为 {{model}}。"
+    },
+    "cost": {
+      "totalTokens": "已用 Token 总数",
+      "inputTokens": "输入 Token",
+      "outputTokens": "输出 Token",
+      "breakdown": "明细",
+      "unavailable": "暂无",
+      "contextWindow": "上下文窗口"
+    },
+    "status": {
+      "package": "包名",
+      "version": "版本",
+      "uptime": "运行时长",
+      "uptimeMinutes": "{{minutes}} 分钟",
+      "uptimeHours": "{{hours}} 小时 {{minutes}} 分钟",
+      "platform": "平台",
+      "memory": "内存",
+      "memoryRss": "{{mb}} MB RSS",
+      "online": "服务在线",
+      "responding": "进程 #{{pid}} 正常响应。",
+      "respondingNoPid": "进程正常响应。",
+      "healthy": "正常"
+    }
   },
   "modelLibrary": {
     "effortLevels": "推理级别",
     "effortLevelsHint": "选择此模型支持的推理强度级别。若未选择任何级别，将无法在输入框中为此模型选择级别。",
     "effortSummary": "推理：{{levels}}",
     "customModelsOnly": "仅使用我的模型",
-    "customModelsOnlyHint": "在所有模型选择器中隐藏 {{provider}} 的内置模型，并将您的第一个模型设为默认模型。在您添加模型之前，内置模型仍会显示。",
+    "customModelsOnlyHint": "在所有模型选择器里隐藏 {{provider}} 的内置模型，并把你添加的第一个模型设为默认。添加模型之前，内置模型仍会显示。",
     "builtInModelsHidden": "开启“仅使用我的模型”时，这些模型不会出现在模型选择器中。",
-    "customModelsOnlyFailed": "无法更改此设置。"
+    "customModelsOnlyFailed": "无法更改此设置。",
+    "addModel": "添加模型",
+    "saveChanges": "保存更改",
+    "saving": "正在保存…",
+    "title": "模型库",
+    "subtitle": "添加提供商支持的模型 ID。内置模型不能改动。",
+    "backToModels": "返回模型列表",
+    "addTitle": "添加自定义模型",
+    "editTitle": "编辑自定义模型",
+    "idSentAsWritten": "ID 会原样发给 {{provider}}。",
+    "nameLabel": "模型名称",
+    "namePlaceholder": "例如 GPT-5.5 Pro",
+    "idLabel": "模型 ID",
+    "idPlaceholder": "例如 gpt-5.5-pro",
+    "idHint": "填写提供商 CLI 接受的准确标识符，ID 不能包含空格。",
+    "idHasSpaces": "模型 ID 不能包含空格。",
+    "added": "已添加 {{model}}。",
+    "updated": "已更新 {{model}}。",
+    "deleted": "已删除 {{model}}。",
+    "yourModels": "我的模型",
+    "yourModelsHint": "可以编辑，保存在 auth.db 里",
+    "noCustomModels": "还没有自定义模型",
+    "noCustomModelsHint": "用表单添加一个，它会出现在所有模型选择器里。",
+    "customBadge": "自定义",
+    "editModel": "编辑 {{model}}",
+    "deleteModel": "删除 {{model}}",
+    "deleteConfirm": "从所有模型选择器里删除这个模型？",
+    "cancel": "取消",
+    "delete": "删除",
+    "builtInModels": "内置模型",
+    "builtInModelsHint": "由 CloudCLI 维护，只读"
+  },
+  "subagent": {
+    "task": "任务",
+    "stoppedHint": "这次运行在智能体回报结果之前就结束了",
+    "showMoreSteps_other": "再显示 {{count}} 步",
+    "stepsNotIncluded_other": "前面还有 {{count}} 步没有包含在内"
+  },
+  "askQuestion": {
+    "needsInput": "Claude 需要你回答",
+    "selectAll": "可多选",
+    "other": "其他…",
+    "back": "上一步",
+    "submit": "提交",
+    "next": "下一步",
+    "custom": "（自定义）",
+    "skipped": "已跳过",
+    "noAnswer": "没有回答"
   }
 }

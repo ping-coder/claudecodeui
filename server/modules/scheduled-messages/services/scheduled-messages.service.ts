@@ -6,6 +6,13 @@ import { AppError } from '@/shared/utils.js';
 const MAX_SCHEDULE_AHEAD_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_CONTENT_LENGTH = 100_000;
 
+/**
+ * The failure reason of a due message the process held for the session's
+ * scheduled work turned away at the hand-over (HAND_OVER_FAILED), by the
+ * runtime's `reason`. The composer's list words these in the user's language.
+ */
+export type HandOverFailureCode = 'hand_over_failed:stale-plan' | 'hand_over_failed:lookup';
+
 export type ScheduledMessage = {
   id: string;
   sessionId: string;
@@ -13,6 +20,11 @@ export type ScheduledMessage = {
   options: Record<string, unknown>;
   scheduledFor: string;
   status: ScheduledMessageRow['status'];
+  /**
+   * Why a `failed` message did not go: a `HandOverFailureCode`, or English
+   * text for any other failure (and for hand-over failures recorded before
+   * the codes), which the list shows as it is.
+   */
   failureReason: string | null;
   createdAt: string;
 };

@@ -144,7 +144,7 @@ export default function NewWorktreeModal({
                 id="worktree-base-branch"
                 value={selectedBaseBranch}
                 onChange={(event) => setSelectedBaseBranch(event.target.value)}
-                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-foreground focus:border-primary/30 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                className="w-full rounded-xl border border-border bg-background py-2 pe-10 ps-3 text-foreground focus:border-primary/30 focus:outline-none focus:ring-2 focus:ring-primary/20"
               >
                 {localBranches.map((branch) => (
                   <option key={branch} value={branch}>

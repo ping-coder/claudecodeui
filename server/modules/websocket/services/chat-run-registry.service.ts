@@ -28,7 +28,9 @@ type ChatRunStatus = 'running' | 'completed';
  * - `handedOverTo`: the session's next run, when the provider ran that run's
  *   turn in the process this run's turn left running for background work
  *   instead of stopping it. That work goes on, so its end, reported later,
- *   still counts as this run's even though the next run holds the slot.
+ *   still counts as this run's even though the next run holds the slot. The
+ *   process writes through that run's writer from then on, so this run's
+ *   sockets go over to it.
  * - `handedOver` / `settleHandedOver`: settles once this run's turn has
  *   completed and its process went on to another run (`handedOverTo`), and
  *   never for a run whose process is not handed over. `runDetachedChatTurn`
@@ -109,10 +111,11 @@ let recentRunEnds: RunEndedEvent[] = [];
 
 /**
  * Answers whether a completed run must stay registered a while longer. Set by
- * the composition root to the provider runtimes' background-work check: a
- * session whose turn ended but whose agents, workflows or commands are still
- * running keeps sending live events through this run's writer, and a tab that
- * subscribes meanwhile needs the run to attach to.
+ * the composition root to the provider runtimes' check for work past the turn
+ * (`holdsWorkPastTurn`): a session whose turn ended but whose agents,
+ * workflows or commands are still running, or whose /loop still waits for its
+ * next firing, keeps sending live events through this run's writer, and a tab
+ * that subscribes meanwhile needs the run to attach to.
  */
 let retainCompletedRun: (appSessionId: string) => boolean = () => false;
 
@@ -352,7 +355,7 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
  * regardless of which provider runtime produced them.
  */
 export const chatRunRegistry = {
-  /** Installs the check that keeps a completed run registered while its session still has background work. */
+  /** Installs the check that keeps a completed run registered while its session still has background or scheduled work. */
   setRetentionGuard(guard: (appSessionId: string) => boolean): void {
     retainCompletedRun = guard;
   },
@@ -425,8 +428,16 @@ export const chatRunRegistry = {
         }
       },
       onProcessHandedOver: () => {
-        // The run the provider is handing the process to has just taken the slot.
-        run.handedOverTo = runs.get(run.appSessionId) ?? null;
+        // The run the provider is handing the process to has just taken the
+        // slot, and the process writes through that run's writer from now on:
+        // its turn, and the work this run left going (a /loop's firing, a
+        // task's progress, a permission request). Whoever watched this run
+        // watches that one too. The turn has written nothing yet.
+        const successor = runs.get(run.appSessionId) ?? null;
+        run.handedOverTo = successor;
+        if (successor && successor !== run) {
+          successor.writer.adoptAudienceOf(run.writer);
+        }
         settleHandedOverIfDone(run);
       },
     });

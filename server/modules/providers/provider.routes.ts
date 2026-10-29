@@ -967,10 +967,13 @@ router.post(
   }),
 );
 
+// `?scheduled=1` asks for the scheduled work each session holds as well, and
+// for the sessions that hold nothing else (see listRunningSessions); a client
+// that cannot show scheduled work leaves it out.
 router.get(
   '/sessions/running',
-  asyncHandler(async (_req: Request, res: Response) => {
-    const sessions = await sessionsService.listRunningSessions();
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessions = await sessionsService.listRunningSessions({ scheduled: req.query.scheduled === '1' });
     res.json(createApiSuccessResponse({ sessions }));
   }),
 );

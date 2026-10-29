@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Circle, CircleAlert, CircleCheck, CircleDashed, Workflow } from 'lucide-react';
+import { Circle, CircleAlert, CircleCheck, CircleDashed, Clock, Workflow } from 'lucide-react';
 
 import type {
   ActivityDetails,
@@ -7,8 +7,9 @@ import type {
   ActivityDetailsTask,
   ActivityDetailsWorkflow,
   BackgroundTaskStatus,
+  ScheduledWorkSummary,
 } from '@/shared/types';
-import { cn, describeBackgroundTask } from '@/shared/utils';
+import { cn, describeBackgroundTask, describeScheduledWork } from '@/shared/utils';
 import { Queue, QueueItem, QueueItemContent, QueueItemIndicator } from '@/modules/chat/tools/Queue';
 import { RunProgressBar } from '@/modules/chat/tools/RunProgressBar';
 import { formatTaskDuration } from '@/modules/chat/utils/backgroundTasks';
@@ -18,6 +19,7 @@ import {
   formatProgressCount,
   formatRemainingEstimate,
 } from '@/modules/chat/utils/runProgress';
+import { describeScheduledTiming } from '@/modules/chat/utils/scheduledWork';
 
 type ActivityDetailsPanelProps = {
   /** The id the activity tab's toggle names in `aria-controls`. */
@@ -222,12 +224,46 @@ function BackgroundTaskDetails({ tasks }: { tasks: ActivityDetailsTask[] }) {
 }
 
 /**
+ * The scheduled work by kind and prompt, each with how often and when it runs
+ * next, told against the panel's clock. No time spent: it waits, it does not
+ * run.
+ */
+function ScheduledWorkDetails({ items, nowMs }: { items: ScheduledWorkSummary[]; nowMs: number }) {
+  const { t, i18n } = useTranslation('chat');
+  return (
+    <section>
+      <div className={SECTION_HEADING_CLASS}>
+        <span>{t('scheduledWork.listTitle', 'Loops and reminders')}</span>
+      </div>
+      <ul className="space-y-1">
+        {items.map((item) => {
+          const name = describeScheduledWork(item, t);
+          const timing = describeScheduledTiming(item, nowMs, t, i18n.language).join(' · ');
+          return (
+            <li key={item.id} className="min-w-0">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden>
+                  <Clock className="h-3 w-3 text-blue-500 dark:text-blue-400" />
+                </span>
+                <span className="min-w-0 truncate text-foreground" title={name}>{name}</span>
+              </div>
+              {timing && <div className="truncate ps-5 tabular-nums text-muted-foreground/70" title={timing}>{timing}</div>}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+/**
  * Rendered by chat's ActivityIndicator above the activity tab once the user
  * opens it: in full what the tab's readout sums up — each workflow with its
- * agents, the turn's checklist item by item, the background tasks — under a
- * line naming the run, its elapsed time and, for a run the Claude CLI drives
- * outside this view, why its details arrive only as its transcript is
- * written. With none of that to list, it says so plainly.
+ * agents, the turn's checklist item by item, the background tasks, the loops
+ * and reminders waiting for their next run — under a line naming the run,
+ * its elapsed time and, for a run the Claude CLI drives outside this view,
+ * why its details arrive only as its transcript is written. With none of
+ * that to list, it says so plainly.
  *
  * It grows upward from the tab, so it is capped by the room above the
  * composer as well as its own ceiling: past the top of the chat column it
@@ -236,11 +272,11 @@ function BackgroundTaskDetails({ tasks }: { tasks: ActivityDetailsTask[] }) {
  */
 export default function ActivityDetailsPanel({ id, details, maxHeightPx = null }: ActivityDetailsPanelProps) {
   const { t } = useTranslation('chat');
-  const { run, workflows, hiddenWorkflowCount, checklist, tasks } = details;
+  const { run, workflows, hiddenWorkflowCount, checklist, tasks, scheduled, nowMs } = details;
   const runLabel = run.isBackground
     ? t('claudeStatus.backgroundWork', 'Background work')
     : run.statusText?.replace(/\.+$/, '') || t('activityDetails.turnInProgress', 'Turn in progress');
-  const isEmpty = workflows.length === 0 && !checklist && tasks.length === 0;
+  const isEmpty = workflows.length === 0 && !checklist && tasks.length === 0 && scheduled.length === 0;
 
   return (
     <div
@@ -281,6 +317,7 @@ export default function ActivityDetailsPanel({ id, details, maxHeightPx = null }
 
       {checklist && <ChecklistDetails checklist={checklist} />}
       {tasks.length > 0 && <BackgroundTaskDetails tasks={tasks} />}
+      {scheduled.length > 0 && <ScheduledWorkDetails items={scheduled} nowMs={nowMs} />}
 
       {isEmpty && (
         <p>

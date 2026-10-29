@@ -11,10 +11,12 @@ import { useChatProviderState } from '@/modules/chat/hooks/useChatProviderState'
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { ChatInstancesProvider } from '@/modules/chat/context/ChatInstancesContext';
 import { ImageLightbox } from '@/modules/chat/transcript/ChatMessageImages';
+import { EditorSidebar } from '@/modules/code-editor';
+import { holdBrowserFullscreen } from '@/shared/browserFullscreen';
 import { SessionProtectionProvider, useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { ActionMenu, Dialog, DialogContent } from '@/shared/ui';
-import type { ChatMessage, NormalizedMessage, Project, ProjectSession, WorkspacePaneSide } from '@/shared/types';
+import type { ChatMessage, CodeEditorFile, NormalizedMessage, Project, ProjectSession, WorkspacePaneSide } from '@/shared/types';
 
 /**
  * Two chats share the page in a split workspace, but a key press, text handed
@@ -84,8 +86,18 @@ vi.mock('@/modules/command-palette', async () => {
         };
       }, [insertComposerText]);
     },
+    // Read by the code editor, which one test floats over the chat.
+    usePaletteOps: () => ({ openSettings: () => undefined }),
   };
 });
+
+// The floating editor's surface and theme, as the code editor's own tests stub them.
+vi.mock('@uiw/react-codemirror', () => ({
+  default: ({ value }: { value: string }) => <textarea data-testid="editor" value={value} readOnly />,
+}));
+vi.mock('@/shared/context/ThemeContext', () => ({
+  useTheme: () => ({ isDarkMode: false, toggleDarkMode: () => undefined }),
+}));
 
 vi.mock('@/shared/selectedProvider', () => ({
   readSelectedProvider: () => 'claude',
@@ -108,7 +120,9 @@ vi.mock('@/shared/api', () => {
         sessionTokenUsage: notOk,
         sessionMessages: () => okJson({ success: true, data: { messages: [], total: 0, hasMore: false } }),
       },
+      readFile: () => okJson({ content: 'hello' }),
     },
+    readApiJson: async (response: { json: () => Promise<unknown> }) => response.json(),
   };
 });
 
@@ -336,12 +350,62 @@ describe('Esc', () => {
     }
   });
 
+  it('leaves Escape to a maximized editor or preview over the page, which ends its maximize with it', async () => {
+    await renderWorkspace({ focused: true }, { focused: false });
+    act(() => {
+      sessionProtection.markSessionProcessing?.('session-a');
+    });
+    // The editor's full screen as jsdom gets it: no Fullscreen API, so only the CSS maximize holds.
+    const release = holdBrowserFullscreen({ source: 'codeEditor', onBrowserExit: () => undefined });
+    try {
+      fireEvent.keyDown(document, { key: 'Escape' });
+      fireEvent.keyUp(document, { key: 'Escape' });
+      assert.deepEqual(page.aborts, []);
+    } finally {
+      release();
+    }
+    fireEvent.keyDown(document, { key: 'Escape' });
+    assert.deepEqual(page.aborts, ['session-a']);
+  });
+
+  it('closes a floating editor over the page first, and stops the run on the next press', async () => {
+    await renderWorkspace({ focused: true }, { focused: false });
+    act(() => {
+      sessionProtection.markSessionProcessing?.('session-a');
+    });
+    const onCloseEditor = vi.fn();
+    // Floating, not maximized: on a phone, as a popped-out editor floats on a desktop.
+    const editorSidebar = (editingFile: CodeEditorFile | null) => (
+      <EditorSidebar
+        editingFile={editingFile}
+        isMobile
+        editorExpanded={false}
+        editorWidth={600}
+        resizeHandleRef={{ current: null }}
+        onResizeStart={() => undefined}
+        onCloseEditor={onCloseEditor}
+        onToggleEditorExpand={() => undefined}
+      />
+    );
+    const editor = render(editorSidebar({ name: 'a.txt', path: '/repo/a.txt', projectId: PROJECT.projectId }));
+    await screen.findByTestId('editor');
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    assert.equal(String(onCloseEditor.mock.calls.length), '1');
+    assert.deepEqual(page.aborts, []);
+
+    // The pane closes it; with nothing over the chat, Escape is the run's again.
+    editor.rerender(editorSidebar(null));
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    assert.deepEqual(page.aborts, ['session-a']);
+  });
+
   describe('in the workspace\'s fullscreen, which holds the key', () => {
     let now = 0;
     const secureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
 
     beforeEach(() => {
-      // Chromium on a secure origin: the root fullscreen locked Escape (useImmersiveMode).
+      // Chromium on a secure origin: the root fullscreen locked Escape (the shared browserFullscreen controller).
       Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => document.documentElement });
       Object.defineProperty(navigator, 'keyboard', { configurable: true, value: { lock: async () => undefined } });
       Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });

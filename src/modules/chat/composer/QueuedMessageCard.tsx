@@ -45,7 +45,7 @@ export default function QueuedMessageCard({
           </p>
           {attachmentCount > 0 && (
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {attachmentCount} {attachmentCount === 1 ? 'file' : 'files'} attached
+              {t('input.queue.filesAttached', { count: attachmentCount })}
             </p>
           )}
         </div>

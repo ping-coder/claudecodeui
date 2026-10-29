@@ -1,4 +1,5 @@
 import { memo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { BookMarked, ChevronRight } from 'lucide-react';
 
 import type { MemoryCitation } from '@/shared/types';
@@ -16,6 +17,7 @@ import { cn } from '@/shared/utils';
  * provider reported citations.
  */
 export const MemoryCitations = memo(({ citations }: { citations: MemoryCitation[] }) => {
+  const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
 
   if (citations.length === 0) {
@@ -31,9 +33,7 @@ export const MemoryCitations = memo(({ citations }: { citations: MemoryCitation[
         className="flex items-center gap-1.5 rounded-md border border-border/50 bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
       >
         <BookMarked className="h-3 w-3 flex-shrink-0" />
-        <span>
-          Used {citations.length} {citations.length === 1 ? 'memory' : 'memories'}
-        </span>
+        <span>{t('message.memoriesUsed', { count: citations.length })}</span>
         <ChevronRight className={cn('h-3 w-3 flex-shrink-0 transition-transform duration-150', isOpen && 'rotate-90')} />
       </button>
 

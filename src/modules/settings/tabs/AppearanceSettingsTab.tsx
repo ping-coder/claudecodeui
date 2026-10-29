@@ -50,7 +50,7 @@ export default function AppearanceSettingsTab({
               value={themeMode}
               onChange={(event) => setThemeMode(event.target.value as ThemeMode)}
               aria-label={t('appearanceSettings.theme.label')}
-              className="w-full touch-manipulation rounded-lg border border-input bg-card p-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:w-36"
+              className="w-auto min-w-36 max-w-48 touch-manipulation truncate rounded-lg border border-input bg-card py-2.5 pe-10 ps-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:max-w-72"
             >
               <option value="light">{t('appearanceSettings.theme.light')}</option>
               <option value="dark">{t('appearanceSettings.theme.dark')}</option>
@@ -75,7 +75,7 @@ export default function AppearanceSettingsTab({
             <select
               value={projectSortOrder}
               onChange={(event) => onProjectSortOrderChange(event.target.value as ProjectSortOrder)}
-              className="w-full touch-manipulation rounded-lg border border-input bg-card p-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:w-36"
+              className="w-auto min-w-36 max-w-48 touch-manipulation truncate rounded-lg border border-input bg-card py-2.5 pe-10 ps-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:max-w-72"
             >
               <option value="name">{t('appearanceSettings.projectSorting.alphabetical')}</option>
               <option value="date">{t('appearanceSettings.projectSorting.recentActivity')}</option>
@@ -152,7 +152,7 @@ export default function AppearanceSettingsTab({
             <select
               value={codeEditorSettings.fontSize}
               onChange={(event) => onCodeEditorFontSizeChange(event.target.value)}
-              className="w-full touch-manipulation rounded-lg border border-input bg-card p-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:w-28"
+              className="w-full touch-manipulation rounded-lg border border-input bg-card py-2.5 pe-10 ps-2.5 text-sm text-foreground focus:border-primary focus:ring-1 focus:ring-primary sm:w-28"
             >
               <option value="10">10px</option>
               <option value="11">11px</option>

@@ -145,6 +145,7 @@
   "deleteConfirmation": {
     "deleteProject": "移除專案",
     "deleteSession": "刪除工作階段",
+    "confirmDeleteNamed": "您想如何處理 {{name}}?",
     "confirmDelete": "您想如何處理",
     "sessionCount_one": "此專案包含 {{count}} 個對話。",
     "sessionCount_other": "此專案包含 {{count}} 個對話。",
@@ -160,6 +161,8 @@
     "confirmDeleteSessions": "您想如何處理",
     "deleteSessions_one": "刪除 {{count}} 個工作階段",
     "deleteSessions_other": "刪除 {{count}} 個工作階段",
+    "confirmDeleteSelected_one": "您想如何處理 <strong>選取的 {{count}} 個工作階段</strong>?",
+    "confirmDeleteSelected_other": "您想如何處理 <strong>選取的 {{count}} 個工作階段</strong>?",
     "selectedSessions_one": "選取的 {{count}} 個工作階段",
     "selectedSessions_other": "選取的 {{count}} 個工作階段",
     "archiveSessions_one": "封存 {{count}} 個工作階段",

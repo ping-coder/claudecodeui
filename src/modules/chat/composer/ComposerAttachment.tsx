@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileIcon, XIcon } from 'lucide-react';
 
 import { ImageLightbox } from '@/modules/chat/transcript/ChatMessageImages';
@@ -20,6 +21,7 @@ const formatFileSize = (size: number) => {
  * thumbnail or file chip, upload progress and remove control.
  */
 const ComposerAttachment = ({ file, onRemove, error }: ComposerAttachmentProps) => {
+  const { t } = useTranslation('chat');
   const [preview, setPreview] = useState<string | undefined>(undefined);
   const [expanded, setExpanded] = useState(false);
   const isImage = file.type.startsWith('image/');
@@ -40,7 +42,7 @@ const ComposerAttachment = ({ file, onRemove, error }: ComposerAttachmentProps) 
         <button
           type="button"
           onClick={() => preview && setExpanded(true)}
-          aria-label={`Expand ${file.name}`}
+          aria-label={t('misc.expandImage', { name: file.name })}
           className="block overflow-hidden rounded-xl border border-border/50 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/60"
         >
           {preview
@@ -69,7 +71,7 @@ const ComposerAttachment = ({ file, onRemove, error }: ComposerAttachmentProps) 
         type="button"
         onClick={onRemove}
         className="absolute -end-1.5 -top-1.5 rounded-full border border-border/40 bg-background/90 p-1 text-foreground shadow-sm backdrop-blur transition-opacity hover:bg-background focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
-        aria-label={`Remove ${file.name}`}
+        aria-label={t('misc.removeAttachment', { name: file.name })}
       >
         <XIcon className="h-3 w-3" aria-hidden />
       </button>

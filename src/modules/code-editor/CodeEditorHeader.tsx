@@ -6,7 +6,6 @@ import type { CodeEditorFile } from '@/shared/types';
 
 type CodeEditorHeaderProps = {
   file: CodeEditorFile;
-  isSidebar: boolean;
   isFullscreen: boolean;
   isMarkdownFile: boolean;
   isHtmlPreviewFile: boolean;
@@ -48,7 +47,6 @@ type CodeEditorHeaderProps = {
 /** Rendered by CodeEditor inside the code-editor module to show the open file's path and the save, preview, line-wrap, download and window controls. */
 export default function CodeEditorHeader({
   file,
-  isSidebar,
   isFullscreen,
   isMarkdownFile,
   isHtmlPreviewFile,
@@ -213,16 +211,15 @@ export default function CodeEditorHeader({
           )}
         </button>
 
-        {!isSidebar && (
-          <button
-            type="button"
-            onClick={onToggleFullscreen}
-            className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
-            title={isFullscreen ? labels.exitFullscreen : labels.fullscreen}
-          >
-            {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-          </button>
-        )}
+        {/* Docked or floating: full screen floats the editor over the whole screen until it ends. */}
+        <button
+          type="button"
+          onClick={onToggleFullscreen}
+          className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
+          title={isFullscreen ? labels.exitFullscreen : labels.fullscreen}
+        >
+          {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+        </button>
 
         <button
           type="button"

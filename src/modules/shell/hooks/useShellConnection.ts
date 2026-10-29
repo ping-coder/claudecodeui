@@ -13,6 +13,7 @@ import type {
 import { TERMINAL_INIT_DELAY_MS } from '@/shared/constants';
 import { getShellWebSocketUrl, parseShellMessage, sendSocketMessage } from '@/modules/shell/utils/socket';
 import { readSelectedProvider } from '@/shared/selectedProvider';
+import { parseScheduledWork } from '@/shared/utils';
 
 const ANSI_ESCAPE_REGEX =
   /(?:\u001B\[[0-?]*[ -/]*[@-~]|\u009B[0-?]*[ -/]*[@-~]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|\u009D[^\u0007\u009C]*(?:\u0007|\u009C)|\u001B[PX^_][^\u001B]*\u001B\\|[\u0090\u0098\u009E\u009F][^\u009C]*\u009C|\u001B[@-Z\\-_])/g;
@@ -48,33 +49,50 @@ function readBusyTask(value: unknown): BackgroundTaskSummary | null {
 
 /**
  * Reads a `session_busy` frame. A reason this client does not know reads as
- * `held`, the plainest "CloudCLI still has the session open".
+ * `held`, the plainest "CloudCLI still has the session open". Scheduled work
+ * is kept only when the frame lists some, so a frame without any reads as
+ * one from a server that never reports it.
  */
 function readSessionBusyFrame(message: Record<string, unknown>): ShellSessionBusy {
   const reason = SESSION_BUSY_REASONS.find((known) => known === message.reason) ?? 'held';
   const tasks = Array.isArray(message.tasks)
     ? message.tasks.map(readBusyTask).filter((task): task is BackgroundTaskSummary => task !== null)
     : [];
-  return { reason, tasks, hasQueuedMessage: message.hasQueuedMessage === true, changed: message.changed === true };
+  const scheduled = parseScheduledWork(message.scheduled) ?? [];
+  return {
+    reason,
+    tasks,
+    ...(scheduled.length > 0 ? { scheduled } : {}),
+    hasQueuedMessage: message.hasQueuedMessage === true,
+    changed: message.changed === true,
+  };
 }
+
+/** The string each entry of a frame's list names under `field`, skipping the entries that name none. */
+const readIds = (list: unknown, field: string): string[] => (Array.isArray(list)
+  ? list.flatMap((entry: unknown) => {
+    const id = entry && typeof entry === 'object' ? (entry as Record<string, unknown>)[field] : undefined;
+    return typeof id === 'string' ? [id] : [];
+  })
+  : []);
 
 /**
  * What a `session_busy` frame showed, for a takeover to send back: the
  * running turn's start, and the id of every task in the frame. That includes
  * tasks the notice leaves out (nested, past the listed few, or missing a
  * field it names them by), which are running all the same: the server would
- * count a task missing here as new and refuse every takeover.
+ * count a task missing here as new and refuse every takeover. The same goes
+ * for the scheduled work of a frame that lists it (a server that reports it
+ * always does, empty or not); a frame without the list sends none back.
  */
 function readTakeOverSnapshot(message: Record<string, unknown>): ShellTakeOverSnapshot {
   const turnStartedAt =
     typeof message.turnStartedAt === 'number' && Number.isFinite(message.turnStartedAt) ? message.turnStartedAt : null;
-  const taskIds = Array.isArray(message.tasks)
-    ? message.tasks.flatMap((task: unknown) => {
-      const taskId = task && typeof task === 'object' ? (task as Record<string, unknown>).taskId : undefined;
-      return typeof taskId === 'string' ? [taskId] : [];
-    })
-    : [];
-  return { turnStartedAt, taskIds };
+  return {
+    turnStartedAt,
+    taskIds: readIds(message.tasks, 'taskId'),
+    ...(Array.isArray(message.scheduled) ? { scheduledIds: readIds(message.scheduled, 'id') } : {}),
+  };
 }
 
 type UseShellConnectionOptions = {

@@ -2,10 +2,21 @@ import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Clock, X } from 'lucide-react';
 
 import type { ScheduledMessage } from '@/shared/types';
+import { formatDateTime } from '@/modules/chat/utils/chatFormatting';
 
 type ScheduledMessageListProps = {
   scheduledMessages: ScheduledMessage[];
   onCancel: (id: string) => void;
+};
+
+/**
+ * The failure reasons the server records as a code (the scheduled-messages dispatcher, when the
+ * process held for the session's scheduled work turned the message away), with the key that words
+ * each after "Not sent —". Any other reason is the server's own text, shown as it is.
+ */
+const FAILURE_REASON_KEYS: Readonly<Record<string, string>> = {
+  'hand_over_failed:stale-plan': 'chat:schedule.failureReason.stalePlan',
+  'hand_over_failed:lookup': 'chat:schedule.failureReason.lookup',
 };
 
 /**
@@ -17,7 +28,7 @@ type ScheduledMessageListProps = {
  * through the same cancel endpoint, so it stays gone across reloads.
  */
 export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledMessageListProps) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const visible = scheduledMessages.filter(
     (message) => message.status === 'pending' || message.status === 'failed',
   );
@@ -30,6 +41,10 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
     <div className="mx-auto mb-2 flex max-w-[54.25rem] flex-col gap-1.5">
       {visible.map((message) => {
         const isFailed = message.status === 'failed';
+        const failureReason = message.failureReason ?? '';
+        const failureReasonKey = Object.prototype.hasOwnProperty.call(FAILURE_REASON_KEYS, failureReason)
+          ? FAILURE_REASON_KEYS[failureReason]
+          : null;
 
         return (
           <div
@@ -48,14 +63,15 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
             <div className="min-w-0 flex-1">
               <p className="text-[11px] text-muted-foreground">
                 {isFailed
-                  ? t('schedule.failed', { reason: message.failureReason ?? '' })
+                  ? t('schedule.failed', { reason: failureReasonKey ? t(failureReasonKey) : failureReason })
                   : t('schedule.pending', {
-                    // In the browser's locale, inside a translated sentence: isolated (FSI…PDI, as a <bdi>
-                    // would) so "10/29/2026, 5:07:00 PM" keeps its order in a right-to-left one.
-                    when: `\u2068${new Date(message.scheduledFor).toLocaleString()}\u2069`,
+                    // In the interface language. A right-to-left one isolates the value (i18n's bidi
+                    // handling), so the date keeps its order inside the sentence.
+                    when: formatDateTime(message.scheduledFor, i18n.language),
                   })}
               </p>
-              <p className="mt-0.5 truncate text-foreground">{message.content}</p>
+              {/* bidi-auto: right to left, the message reads by its own first letter and is cut at its end. */}
+              <p className="bidi-auto mt-0.5 truncate text-foreground">{message.content}</p>
             </div>
             <button
               type="button"

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 
-import { render } from '@testing-library/react';
+import { act, cleanup, render } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
+import { i18n } from '@/modules/i18n';
 import ProjectRunNotifications from '@/modules/project-workspace/ProjectRunNotifications';
 import { WorkspaceChromeProvider } from '@/modules/project-workspace/context/WorkspaceChromeContext';
 import type {
@@ -160,6 +161,33 @@ test('a session is named by its live title, else its tab\'s snapshot, with its p
   assert.deepEqual(resolveSessionLabel('archived'), { title: 'Archived snapshot', projectName: 'Old stuff' });
   // The workspace knows nothing: run-notifications falls back to the server's name.
   assert.equal(resolveSessionLabel('elsewhere'), null);
+});
+
+test('the server\'s placeholder names read in the interface language', async () => {
+  // A language switch saves the choice to the server; it must not reach the network.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    panes.state = {
+      ...panesStateWith(layoutOf(paneOf('pane-left', [tabOf('agy-untitled', { provider: 'agy', title: 'Untitled' })]), null)),
+      projects: [{ ...ALPHA, sessions: [{ id: 'server-untitled', summary: 'Untitled Claude Session' }] }, BETA],
+    };
+    render(tree(false));
+    const { resolveSessionLabel } = props();
+
+    assert.deepEqual(resolveSessionLabel('server-untitled'), { title: '未命名的 Claude 会话', projectName: 'Alpha' });
+    // Not in the loaded pages: its tab's snapshot names it.
+    assert.deepEqual(resolveSessionLabel('agy-untitled'), { title: '未命名会话', projectName: 'Alpha' });
+  } finally {
+    // Unmount first, so restoring the language cannot re-render this test's tree.
+    cleanup();
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    vi.unstubAllGlobals();
+  }
 });
 
 test('on screen: the active tab of each pane on display, in the Chat view', () => {

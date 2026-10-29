@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -13,41 +14,72 @@ type BrowserFullscreenNoticeProps = {
 };
 
 /**
- * Rendered by ProjectWorkspaceShell in desktop immersive mode when the browser refused its full
- * screen or kept it inside the window: says which, with a retry for a refusal and the window's own
- * full-screen shortcut otherwise (retrying cannot leave a fullscreen the document already holds).
- * It sits below the tab bars and under the sidebar drawer with its backdrop, the run banners and
- * dialogs. A status, not a dialog or an escape layer: it never takes focus, Escape or the shortcuts.
+ * Rendered by ProjectWorkspaceShell on desktop when a maximize came without the whole screen: the
+ * browser refused (with a retry), kept the full screen inside the tab or the window is smaller than
+ * the screen (with what to do instead; retrying cannot leave a fullscreen the document already
+ * holds), or no request could be made (an embedding page, a browser without the API). A status, not
+ * a dialog or an escape layer: it never takes focus, Escape or the shortcuts.
+ * Portaled to <body> at z-[39]: above the whole workspace shell (a maximized editor at z-[9999], the
+ * docked editor's CodeMirror panels at 300, the immersive sidebar drawer), under the run banners
+ * (z-40) and every dialog and menu (z-50 and up). The browser fullscreen is the root element's, so
+ * <body> is on screen with it. The keys keep their workspace.* names from when only immersive mode
+ * used the notice.
  */
 function BrowserFullscreenNotice({ issue, onRetry, onDismiss }: BrowserFullscreenNoticeProps) {
   const { t } = useTranslation('common');
-  const message = issue.reason === 'refused'
-    ? t('workspace.fullscreenRefused', {
-      detail: issue.detail,
-      defaultValue: 'The browser refused full screen ({{detail}}); the workspace only fills the window.',
-    })
-    : t('workspace.fullscreenInWindow', {
-      defaultValue: 'The browser kept full screen inside the window: this tab may be shared, cast or recorded by an extension, or an extension may be handling full screen.',
-    });
-  // macOS Chrome keeps its toolbar in a full-screen window unless that View menu item is off.
-  const windowTip = issue.reason === 'inWindow'
-    ? (isApplePlatform()
-      ? t('workspace.fullscreenWindowTipApple', {
-        defaultValue: 'Press ⌃⌘F for a full-screen window; to hide the toolbar, turn off View > Always Show Toolbar in Full Screen (⇧⌘F).',
-      })
-      : t('workspace.fullscreenWindowTip', { defaultValue: 'Press F11 for a full-screen window.' }))
-    : null;
 
-  return (
+  let message: string;
+  let tip: string | null = null;
+  switch (issue.reason) {
+    case 'refused':
+      message = t('workspace.fullscreenRefused', {
+        detail: issue.detail,
+        defaultValue: 'The browser refused full screen ({{detail}}), so this only fills the window.',
+      });
+      break;
+    case 'inWindow':
+      if (issue.kind === 'tab') {
+        message = t('workspace.fullscreenInWindow', {
+          defaultValue: 'The browser kept full screen inside the window: this tab may be shared, cast or recorded by an extension, or an extension may be handling full screen.',
+        });
+        // macOS Chrome keeps its toolbar in a full-screen window unless that View menu item is off.
+        tip = isApplePlatform()
+          ? t('workspace.fullscreenWindowTipApple', {
+            defaultValue: 'Press ⌃⌘F for a full-screen window; to hide the toolbar, turn off View > Always Show Toolbar in Full Screen (⇧⌘F).',
+          })
+          : t('workspace.fullscreenWindowTip', { defaultValue: 'Press F11 for a full-screen window.' });
+      } else {
+        message = t('workspace.fullscreenPartial', {
+          width: issue.window.width,
+          height: issue.window.height,
+          screenWidth: issue.screen.width,
+          screenHeight: issue.screen.height,
+          defaultValue: 'Full screen covers only part of the screen (window {{width}}×{{height}}, screen {{screenWidth}}×{{screenHeight}}): the window may be in Split View or tiled.',
+        });
+        tip = t('workspace.fullscreenPartialTip', {
+          defaultValue: 'Take the window out of Split View or the tile, then choose full screen again.',
+        });
+      }
+      break;
+    case 'unavailable':
+      message = issue.cause === 'iframe'
+        ? t('workspace.fullscreenIframe', {
+          defaultValue: 'This page is embedded in a page that does not allow full screen; open CloudCLI in its own tab for the whole screen.',
+        })
+        : t('workspace.fullscreenNoApi', { defaultValue: 'This browser has no full screen for web pages, so this only fills the window.' });
+      break;
+  }
+
+  return createPortal(
     <div
       role="status"
-      className="fixed left-1/2 z-20 flex w-max max-w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 items-start gap-2 rounded-lg border border-border/60 bg-background/95 py-2 pe-1.5 ps-3 text-sm shadow-lg backdrop-blur-sm"
-      // Just under the immersive tab bar (40px), clear of the safe area.
+      className="fixed left-1/2 z-[39] flex w-max max-w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 items-start gap-2 rounded-lg border border-border/60 bg-background/95 py-2 pe-1.5 ps-3 text-sm shadow-lg backdrop-blur-sm"
+      // Just under the immersive tab bar (40px) or a maximized editor's header, clear of the safe area.
       style={{ top: 'calc(env(safe-area-inset-top, 0px) + 3rem)' }}
     >
       <div className="min-w-0 flex-1 py-1">
         <p className="text-foreground">{message}</p>
-        {windowTip && <p className="mt-0.5 text-muted-foreground">{windowTip}</p>}
+        {tip && <p className="mt-0.5 text-muted-foreground">{tip}</p>}
       </div>
       {issue.reason === 'refused' && (
         <button
@@ -66,7 +98,8 @@ function BrowserFullscreenNotice({ issue, onRetry, onDismiss }: BrowserFullscree
       >
         <X className="h-4 w-4" aria-hidden="true" />
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

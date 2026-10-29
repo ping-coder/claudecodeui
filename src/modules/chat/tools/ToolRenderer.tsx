@@ -1,4 +1,5 @@
 import React, { memo, useMemo, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { DiffLine, Project,ToolStatus } from '@/shared/types';
 import { formatToolDisplayName, getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
@@ -89,11 +90,12 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
   rawToolInput,
   toolStatus: reportedStatus,
 }) => {
+  const { t } = useTranslation();
   const config = getToolConfig(toolName);
   const displayConfig: any = mode === 'input' ? config.input : config.result;
   // Namespaced MCP ids are unreadable as-is; every renderer gets the friendly
   // form while lookups keep using the provider's real tool name.
-  const displayName = formatToolDisplayName(toolName);
+  const displayName = formatToolDisplayName(toolName, t);
 
   const parsedData = useMemo(
     () => parseToolPayload(mode === 'input' ? toolInput : toolResult),
@@ -108,10 +110,10 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
 
   const handleAction = useCallback(() => {
     if (displayConfig?.action === 'open-file' && onFileOpen) {
-      const value = displayConfig.getValue?.(parsedData) || '';
+      const value = displayConfig.getValue?.(parsedData, t) || '';
       onFileOpen(value);
     }
-  }, [displayConfig, parsedData, onFileOpen]);
+  }, [displayConfig, parsedData, onFileOpen, t]);
 
   if (!displayConfig) return null;
 
@@ -157,9 +159,16 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
     );
   }
 
+  // A fixed title or label in the interface language when it has a key, its English otherwise.
+  const resolveTitle = (fallbackKey: string): string => (typeof displayConfig.title === 'function'
+    ? displayConfig.title(parsedData, t)
+    : displayConfig.titleKey
+      ? t(displayConfig.titleKey, { defaultValue: displayConfig.title })
+      : displayConfig.title || t(fallbackKey));
+
   if (displayConfig.type === 'one-line') {
-    const value = displayConfig.getValue?.(parsedData) || '';
-    const secondary = displayConfig.getSecondary?.(parsedData);
+    const value = displayConfig.getValue?.(parsedData, t) || '';
+    const secondary = displayConfig.getSecondary?.(parsedData, t);
 
     return (
       <OneLineDisplay
@@ -167,7 +176,7 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
         toolResult={toolResult}
         toolId={toolId}
         icon={displayConfig.icon}
-        label={displayConfig.label}
+        label={displayConfig.labelKey ? t(displayConfig.labelKey, { defaultValue: displayConfig.label }) : displayConfig.label}
         value={value}
         secondary={secondary}
         action={displayConfig.action}
@@ -182,14 +191,13 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
   }
 
   if (displayConfig.type === 'plan') {
-    const title = typeof displayConfig.title === 'function'
-      ? displayConfig.title(parsedData)
-      : displayConfig.title || 'Plan';
+    const title = resolveTitle('chat:tools.plan');
 
     const contentProps = displayConfig.getContentProps?.(parsedData, {
       selectedProject,
       createDiff,
-      onFileOpen
+      onFileOpen,
+      t,
     }) || {};
 
     const isStreaming = mode === 'input' && !toolResult;
@@ -209,9 +217,7 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
   }
 
   if (displayConfig.type === 'collapsible') {
-    const title = typeof displayConfig.title === 'function'
-      ? displayConfig.title(parsedData)
-      : displayConfig.title || 'Details';
+    const title = resolveTitle('chat:tools.details');
 
     const defaultOpen = displayConfig.defaultOpen !== undefined
       ? displayConfig.defaultOpen
@@ -220,7 +226,8 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
     const contentProps = displayConfig.getContentProps?.(parsedData, {
       selectedProject,
       createDiff,
-      onFileOpen
+      onFileOpen,
+      t,
     }) || {};
 
     let contentComponent: React.ReactNode = null;
@@ -286,7 +293,7 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
         break;
 
       case 'success-message': {
-        const msg = displayConfig.getMessage?.(parsedData) || 'Success';
+        const msg = displayConfig.getMessage?.(parsedData) || t('chat:tools.success');
         contentComponent = (
           <div className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
             <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -11,12 +11,14 @@ import type {
 } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import { api, ApiRequestError, readApiJson } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
+import { stripBidiIsolates } from '@/shared/direction';
 import { readUserPreference } from '@/shared/userSettings';
-import { buildModelRunOptions, describeBackgroundTask, ownBackgroundTasks } from '@/shared/utils';
-import type { AddChatMessageOptions, BackgroundSendChoice, BackgroundSendPrompt, BackgroundTaskSummary, BusySubmitMode, CommandModalPayload, CostCommandData, HelpCommandData, InsertUnavailableReason, MarkSessionBackground, MarkSessionProcessing, ModelCommandData, OwnInsert, OwnInsertOutcome, QueuedDraft, SendRefusedEvent, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import { buildModelRunOptions, describeBackgroundTask, describeScheduledWork, ownBackgroundTasks } from '@/shared/utils';
+import type { AddChatMessageOptions, BackgroundSendChoice, BackgroundSendPrompt, BackgroundTaskSummary, BusySubmitMode, CommandModalPayload, CostCommandData, HelpCommandData, InsertUnavailableReason, MarkSessionBackground, MarkSessionProcessing, ModelCommandData, OwnInsert, OwnInsertOutcome, QueuedDraft, ScheduledWorkSummary, SendRefusedEvent, SessionActivity, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   appendQueuedMessage,
@@ -32,6 +34,7 @@ import { useFileMentions } from '@/modules/chat/hooks/useFileMentions';
 import { useInputHistory } from '@/modules/chat/hooks/useInputHistory';
 import { usePendingInserts } from '@/modules/chat/hooks/usePendingInserts';
 import { useSlashCommands } from '@/modules/chat/hooks/useSlashCommands';
+import { holdsOnlyScheduledWork } from '@/modules/chat/utils/scheduledWork';
 
 type UseChatComposerStateArgs = {
   selectedProject: Project | null;
@@ -108,8 +111,9 @@ type UseChatComposerStateArgs = {
    */
   removeMessage?: (sessionId: string, rowId: string) => void;
   /**
-   * Reports the background tasks a session is left with, which a refused send
-   * puts the session back to after it was marked busy for that send.
+   * Reports the background tasks and scheduled work a session is left with,
+   * which a refused send puts the session back to after it was marked busy
+   * for that send.
    */
   onSessionBackground?: MarkSessionBackground;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
@@ -148,7 +152,9 @@ type SubmitOptions = {
    * can go into the turn (resolveInsertUnavailableReason) and queues it
    * otherwise; `queue` always queues. Once the turn has ended with background
    * work still running, `queue` queues the message until the work finishes
-   * where a send would not ask first. No effect while the session is idle.
+   * where a send would not ask first, unless that work is only scheduled work
+   * (loops, reminders), which leaves nothing to queue behind. No effect while
+   * the session is idle.
    */
   busySubmitMode?: BusySubmitMode;
 };
@@ -289,6 +295,23 @@ const readHandOverPlan = async (sessionId: string, options: QueuedSendOptions): 
 };
 
 /**
+ * The prompt shown before a send would stop a session's background work,
+ * listing the session's own tasks, then its scheduled work. Work that is only
+ * scheduled work (loops, reminders) offers no Queue: a queued message would
+ * wait for it to end, days for a loop.
+ */
+const buildBackgroundSendPrompt = (
+  work: Pick<SessionActivity, 'tasks' | 'scheduled'> | undefined,
+  t: TFunction,
+): BackgroundSendPrompt => {
+  const listed = [
+    ...ownBackgroundTasks(work?.tasks ?? []).map((task) => describeBackgroundTask(task, t)),
+    ...(work?.scheduled ?? []).map((item) => describeScheduledWork(item, t)),
+  ];
+  return holdsOnlyScheduledWork(work) ? { work: listed, queue: false } : { work: listed };
+};
+
+/**
  * A store row id for a row this composer adds and may take out again. Shaped
  * like the ones chat's session state makes: a user echo needs the `local_`
  * prefix for the history refresh to match it with the persisted turn.
@@ -309,6 +332,8 @@ type KeepWorkSend = {
   echoRowId: string;
   /** The session's background tasks when it was sent, which the session goes back to. */
   tasks: BackgroundTaskSummary[];
+  /** The session's scheduled work when it was sent, which the session goes back to. */
+  scheduled: ScheduledWorkSummary[];
 };
 
 /**
@@ -681,13 +706,11 @@ export function useChatComposerState({
     const { content, hasBashCommands } = result;
 
     if (hasBashCommands) {
-      const confirmed = window.confirm(
-        'This command contains bash commands that will be executed. Do you want to proceed?',
-      );
+      const confirmed = window.confirm(t('composer.bashCommandConfirm'));
       if (!confirmed) {
         addMessage({
           type: 'assistant',
-          content: 'Command execution cancelled',
+          content: t('composer.commandCancelled'),
           timestamp: Date.now(),
         });
         return;
@@ -705,7 +728,7 @@ export function useChatComposerState({
         handleSubmitRef.current(createFakeSubmitEvent(), undefined, { skipCommandInterception: true });
       }
     }, 0);
-  }, [addMessage]);
+  }, [addMessage, t]);
 
   const executeCommand = useCallback(
     async (command: SlashCommand, rawInput?: string, options?: { preserveInput?: boolean }) => {
@@ -747,7 +770,7 @@ export function useChatComposerState({
         });
 
         if (!response.ok) {
-          let errorMessage = `Failed to execute command (${response.status})`;
+          let errorMessage = t('composer.commandFailedStatus', { status: response.status });
           try {
             const errorData = await response.json();
             errorMessage = errorData?.message || errorData?.error || errorMessage;
@@ -768,11 +791,11 @@ export function useChatComposerState({
           await handleCustomCommand(result);
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
+        const message = error instanceof Error ? error.message : t('misc.unknownError');
         console.error('Error executing command:', error);
         addMessage({
           type: 'assistant',
-          content: `Error executing command: ${message}`,
+          content: t('composer.commandError', { message }),
           timestamp: Date.now(),
         });
       }
@@ -787,6 +810,7 @@ export function useChatComposerState({
       selectedProject,
       selectedSession?.id,
       addMessage,
+      t,
       tokenBudget,
     ],
   );
@@ -1059,23 +1083,23 @@ export function useChatComposerState({
   // keepBackgroundWork, so the server refuses it rather than stop the work;
   // when it cannot, the user is asked, told what only a new process can
   // apply. Elsewhere, and for an edit, every new turn replaces that process,
-  // so the user is asked. Only while the composer shows the session, though:
-  // once it shows another, the answer is `cancel`, unasked, and the caller
-  // leaves the message in the session's draft.
+  // so the user is asked. The prompt lists the session's tasks and scheduled
+  // work, and offers no Queue for scheduled work alone (see
+  // buildBackgroundSendPrompt). Only while the composer shows the session,
+  // though: once it shows another, the answer is `cancel`, unasked, and the
+  // caller leaves the message in the session's draft.
   const decideSendOverBackgroundWork = useCallback(async (
     sessionId: string,
     options: QueuedSendOptions,
     isEdit: boolean,
   ): Promise<{ choice: BackgroundSendChoice; keepBackgroundWork: boolean }> => {
-    const work = ownBackgroundTasks(processingSessionsRef.current?.get(sessionId)?.tasks ?? [])
-      .map((task) => describeBackgroundTask(task, t));
-    let prompt: BackgroundSendPrompt = { work };
+    let prompt = buildBackgroundSendPrompt(processingSessionsRef.current?.get(sessionId), t);
     if (supportsMidRunInsert && !isEdit) {
       const plan = await readHandOverPlan(sessionId, options);
       if (!plan || !plan.heldWork || plan.canHandOver) {
         return { choice: 'send', keepBackgroundWork: true };
       }
-      prompt = { work, changes: plan.changes };
+      prompt = { ...prompt, changes: plan.changes };
     }
     // The plan, or the upload a submit waits on before it, can come back
     // after the user has opened another session. A prompt there would ask
@@ -1135,7 +1159,7 @@ export function useChatComposerState({
             options: queuedMessage.options,
           };
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+          const message = error instanceof Error ? error.message : t('misc.unknownError');
           console.error('Failed to queue message:', error);
           addMessage({
             type: 'error',
@@ -1143,7 +1167,7 @@ export function useChatComposerState({
             // the user's language; any other failure shows the server's text.
             content: error instanceof ApiRequestError && error.code === 'QUEUED_MESSAGE_NOT_COMBINABLE'
               ? t('input.queue.notCombinable')
-              : `Failed to queue message: ${message}`,
+              : t('composer.queueFailed', { message }),
             timestamp: new Date(),
           });
           const withTypedSince = (typedSince: string) => (
@@ -1249,6 +1273,7 @@ export function useChatComposerState({
         options: turn.options,
         echoRowId,
         tasks: processingSessionsRef.current?.get(turn.sessionId)?.tasks ?? [],
+        scheduled: processingSessionsRef.current?.get(turn.sessionId)?.scheduled ?? [],
       });
     }
     // Mark this request as processing in the per-session activity map (the
@@ -1532,15 +1557,17 @@ export function useChatComposerState({
     }
     keepWorkSends.delete(requestId);
     removeMessage?.(refused.sessionId, refused.echoRowId);
-    onSessionBackground?.(refused.sessionId, refused.tasks);
+    onSessionBackground?.(refused.sessionId, refused.tasks, refused.scheduled);
     putTextBack(refused.sessionId, refused.content, refused.browserFiles);
     if (sessionKeyRef.current !== refused.sessionId) {
       return;
     }
 
     void (async () => {
-      const work = ownBackgroundTasks(refused.tasks).map((task) => describeBackgroundTask(task, t));
-      const choice = await askBeforeSendingOverBackgroundWork({ work, changes: event.changes });
+      const choice = await askBeforeSendingOverBackgroundWork({
+        ...buildBackgroundSendPrompt(refused, t),
+        changes: event.changes,
+      });
       if (choice === 'cancel') {
         return;
       }
@@ -1642,11 +1669,11 @@ export function useChatComposerState({
         try {
           uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+          const message = error instanceof Error ? error.message : t('misc.unknownError');
           console.error('Queued file upload failed:', error);
           addMessage({
             type: 'error',
-            content: `Failed to upload files: ${message}`,
+            content: t('composer.uploadFailed', { message }),
             timestamp: new Date(),
           });
           return;
@@ -1705,11 +1732,11 @@ export function useChatComposerState({
         try {
           uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+          const message = error instanceof Error ? error.message : t('misc.unknownError');
           console.error('File upload failed:', error);
           addMessage({
             type: 'error',
-            content: `Failed to upload files: ${message}`,
+            content: t('composer.uploadFailed', { message }),
             timestamp: new Date(),
           });
           return;
@@ -1746,11 +1773,11 @@ export function useChatComposerState({
             createdSessionName = returnedSessionName;
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+          const message = error instanceof Error ? error.message : t('misc.unknownError');
           console.error('Session creation failed:', error);
           addMessage({
             type: 'error',
-            content: `Failed to start a new session: ${message}`,
+            content: t('composer.sessionStartFailed', { message }),
             timestamp: new Date(),
           });
           return;
@@ -1759,7 +1786,7 @@ export function useChatComposerState({
         if (!targetSessionId) {
           addMessage({
             type: 'error',
-            content: 'Failed to start a new session: no session id returned.',
+            content: t('composer.sessionStartNoId'),
             timestamp: new Date(),
           });
           return;
@@ -1784,13 +1811,17 @@ export function useChatComposerState({
       // work, which the server holds until it finishes, is the safe
       // alternative (see decideSendOverBackgroundWork). Every send of such a
       // provider asks the server to keep the work, even where none shows here
-      // yet: the server refuses it rather than stop work it holds.
+      // yet: the server refuses it rather than stop work it holds. Scheduled
+      // work alone (loops, reminders) leaves nothing to queue behind, as a
+      // loop can go on for days, so the send key with Alt then sends as the
+      // send key does.
       const sendOptions = queuedSubmission?.options ?? buildSendOptions(messageContent);
       const runsBesideWork = supportsMidRunInsert && !editingAnchorId;
       let keepBackgroundWork = runsBesideWork;
-      if (processingSessionsRef.current?.get(targetSessionId)?.background) {
+      const targetActivity = processingSessionsRef.current?.get(targetSessionId);
+      if (targetActivity?.background) {
         let choice: BackgroundSendChoice = 'queue';
-        if (!runsBesideWork || submitOptions?.busySubmitMode !== 'queue') {
+        if (!runsBesideWork || submitOptions?.busySubmitMode !== 'queue' || holdsOnlyScheduledWork(targetActivity)) {
           const decision = await decideSendOverBackgroundWork(targetSessionId, sendOptions, Boolean(editingAnchorId));
           choice = decision.choice;
           keepBackgroundWork = decision.keepBackgroundWork;
@@ -1871,6 +1902,7 @@ export function useChatComposerState({
       slashCommands,
       startTurn,
       supportsMidRunInsert,
+      t,
       takeSubmissionOutOfComposer,
     ],
   );
@@ -2140,7 +2172,7 @@ export function useChatComposerState({
         // Alt with the send key queues a message the turn in flight would
         // otherwise take as an insert, or one a Claude session would run next
         // to its background work until that work finishes; on an idle
-        // session it just sends.
+        // session, or one with only scheduled work, it just sends.
         const submitOptions: SubmitOptions | undefined = event.altKey ? { busySubmitMode: 'queue' } : undefined;
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
           event.preventDefault();
@@ -2231,13 +2263,15 @@ export function useChatComposerState({
         return;
       }
 
+      // The message is interface text for the model: no bidi isolates from a right-to-left language.
+      const message = decision?.message === undefined ? undefined : stripBidiIsolates(decision.message);
       validIds.forEach((requestId) => {
         sendMessage({
           type: 'chat.permission-response',
           requestId,
           allow: Boolean(decision?.allow),
           updatedInput: decision?.updatedInput,
-          message: decision?.message,
+          message,
           rememberEntry: decision?.rememberEntry,
         });
       });

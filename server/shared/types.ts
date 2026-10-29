@@ -262,6 +262,8 @@ export type MessageKind =
  * `send_refused` answers a `chat.send` that asked to keep the session's
  * background work and could not: the gateway started no run, and tells only
  * the asking socket, without `seq` (see `ProviderHandOverPlan`).
+ * `stop_task_status` answers a `chat.stop-task` that names scheduled work
+ * the same way, once for each step of the stop (see `ScheduledWorkSummary`).
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
@@ -269,7 +271,8 @@ export type GatewayEventKind =
   | 'run_ended'
   | 'loading_progress'
   | 'protocol_error'
-  | 'send_refused';
+  | 'send_refused'
+  | 'stop_task_status';
 
 /**
  * Complete set of `kind` values emitted to websocket clients.
@@ -436,6 +439,11 @@ export type NormalizedMessage = {
   commandName?: string;
   commandMessage?: string;
   commandArgs?: string;
+  /**
+   * Set on a slash command Claude Code ran by itself, asking the model nothing
+   * (`/model`, `/cost`): such a row opens no turn. A prompt command (`/review`,
+   * a custom command) carries the command fields without it.
+   */
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
@@ -459,7 +467,23 @@ export type NormalizedMessage = {
   requestId?: string;
   input?: unknown;
   context?: unknown;
+  /**
+   * Why: a `permission_cancelled`'s reason, or, on an `error` with `code`
+   * HAND_OVER_FAILED, the runtime's word for why the held process did not
+   * take the turn (Claude's: `stale-plan`, `lookup`).
+   */
   reason?: string;
+  /**
+   * `error` only, optional: a code clients word in the user's language, with
+   * `content` the English fallback. BACKGROUND_WORK_STOPPED: the runtime
+   * replaced the process it held for the session's background work, which
+   * stops that work, because the turn needed a new one. HAND_OVER_FAILED:
+   * the held process did not take a turn sent on its own settings, and the
+   * turn failed rather than stop the work (see `ProviderHandOverPlanOptions`).
+   */
+  code?: string;
+  /** With `code` BACKGROUND_WORK_STOPPED or HAND_OVER_FAILED: what kept the turn out of the held process. */
+  changes?: HandOverChange[];
   newSessionId?: string;
   status?: string;
   summary?: string;
@@ -584,11 +608,98 @@ export type ProviderProcessState = 'running' | 'exiting';
  * Shell tab reads it before starting a CLI on the session, which would report
  * those tasks as orphans and write to the same transcript. It says nothing
  * about other CloudCLI instances or CLIs started outside this server.
+ *
+ * `scheduled` is the scheduled work those processes hold for the session
+ * (see `ScheduledWorkSummary`). The provider runtime service always sets
+ * it; it is optional for holds built elsewhere, which hold none. A hold is
+ * null only when there is no process state, no task and no scheduled work.
  */
 export type SessionHold = {
   processState: ProviderProcessState | null;
   tasks: BackgroundTaskSummary[];
+  scheduled?: ScheduledWorkSummary[];
 };
+
+/**
+ * One piece of scheduled work a live Claude process holds for a session
+ * (see `IProviderRuntime.listScheduledWork`): a job CronCreate scheduled (a
+ * /loop with an interval, a reminder), or the next wake-up of a self-paced
+ * /loop (ScheduleWakeup). No task event reports either, so they are listed
+ * apart from `BackgroundTaskSummary`. Only work created in the live process
+ * is listed: jobs a new process revives from the transcript are not.
+ *
+ * - `id`: `cron:<jobId>`, or `wakeup:<chainId>` where the chain id is the
+ *   tool_use id of the chain's first ScheduleWakeup; it stays the same while
+ *   the work is held. A job whose id the CLI did not report (an older CLI)
+ *   is `cron:call:<toolUseId>`: shown, but it cannot be stopped.
+ * - `toolUseId`: the CronCreate call; for a wake-up, the chain's latest
+ *   ScheduleWakeup call.
+ * - `prompt`: its first line, a /loop sentinel shown as `/loop` or
+ *   `/loop (loop.md)`, at most 200 characters.
+ * - `startedAt`: when the job was created, or when the wake-up chain started
+ *   (server clock, epoch ms).
+ * - `nextFireAt`: when it fires next, null when that is not known.
+ * - `recurring`: always true for a wake-up.
+ * - `holdUntil`: CloudCLI holds the process for it at most until then:
+ *   CLOUDCLI_CLAUDE_SCHEDULE_HOLD_MAX_MS past `startedAt`. A job whose
+ *   result named no time (an older CLI) is held HOLD_MAX past its creation,
+ *   past anything the CLI says during a turn and, if recurring, past each
+ *   turn of the CLI's own that may have been its fire, within the same
+ *   limit. Work whose `nextFireAt` is later than
+ *   `holdUntil` does not hold the process at all, though it is listed. A
+ *   turn of the CLI's that says nothing at all for HOLD_MAX (a question
+ *   nobody answers) lets the process go sooner, its scheduled work with it.
+ * - `cron`, `cadence`: a job's cron expression and the CLI's
+ *   `humanSchedule`, both in the server's local time.
+ * - `expiresAt`: a recurring job's creation plus seven days; the first fire
+ *   after it is its last.
+ * - `durable`: the job is saved in the project's .claude/scheduled_tasks.json.
+ * - `reason`: the delay reason the model gave for a wake-up.
+ */
+export type ScheduledWorkSummary = {
+  id: string;
+  kind: 'cron' | 'wakeup';
+  toolUseId: string;
+  prompt: string;
+  startedAt: number;
+  nextFireAt: number | null;
+  recurring: boolean;
+  holdUntil: number;
+  cron?: string;
+  cadence?: string;
+  expiresAt?: number;
+  durable?: boolean;
+  reason?: string;
+};
+
+/**
+ * How `IProviderRuntime.stopScheduledWork` reads a stop: `all` targets every
+ * piece of scheduled work of the session that can be stopped, not only the
+ * one named.
+ */
+export type ScheduledWorkStopOptions = {
+  all?: boolean;
+};
+
+/**
+ * What stopping scheduled work takes (see `IProviderRuntime.stopScheduledWork`):
+ *
+ * - `stopped`: done, by letting go of the process (only a wake-up was to be
+ *   stopped, and the process held nothing else). Nothing to send.
+ * - `turn`: the model has to cancel it. The caller runs one turn of the
+ *   session with `content` and run options `options` (merged into the run
+ *   options it builds), handed to the held process when it is still up, so
+ *   other background work keeps running. `targetIds` are the ids the turn
+ *   should remove; still listed after it, they were not cancelled.
+ * - `busy`: the session's process is in a turn it has not handed over; try
+ *   again once it is over.
+ * - `not_found`: no such scheduled work, or it cannot be stopped.
+ */
+export type ScheduledWorkStopResult =
+  | { status: 'stopped' }
+  | { status: 'busy' }
+  | { status: 'not_found' }
+  | { status: 'turn'; content: string; options: AnyRecord; targetIds: string[] };
 
 /**
  * One live Claude process that may still deliver the report of background
@@ -1015,9 +1126,25 @@ export type HandOverSwitch = Extract<HandOverChange, 'model' | 'permissionMode'>
  *   plans with it sends the turn with it too; without it the run judges the
  *   turn as its options say, which the plan would not have predicted. An
  *   `ultracode` the options leave out is the live process's too.
+ * - `acceptProcessSettings`: when the process is held only for scheduled
+ *   work (see `ScheduledWorkSummary`), with no task outstanding, a turn kept
+ *   out only by settings the process cannot switch (`effort`, `ultracode`,
+ *   and tool rules no stricter than the process's) still goes in, and runs
+ *   with the process's own values for them. For the scheduled-messages
+ *   dispatcher, whose messages would otherwise wait as long as a loop runs.
+ *   Tool rules stricter than the process's (fewer tools allowed, or others
+ *   denied), `cwd`, a failed `lookup`, and a model or permission mode the
+ *   process cannot switch still keep the turn out. A run whose options set
+ *   `acceptProcessSettings: true` hands its turn over as such a plan says,
+ *   even if a turn of the CLI's own has started a task since. One the
+ *   process does not take after all fails rather than replace the process,
+ *   which would stop its scheduled work: the run sends an `error` with code
+ *   `HAND_OVER_FAILED` and a `reason`, `stale-plan`, or `lookup` when the
+ *   turn's lookups failed, and rejects with the same `code` and `reason`.
  */
 export type ProviderHandOverPlanOptions = {
   inheritUnset?: boolean;
+  acceptProcessSettings?: boolean;
 };
 
 /**

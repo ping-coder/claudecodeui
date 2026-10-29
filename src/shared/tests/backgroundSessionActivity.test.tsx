@@ -4,7 +4,7 @@ import { act, renderHook } from '@testing-library/react';
 import { test } from 'vitest';
 
 import { useSessionProtection } from '@/shared/hooks/useSessionProtection';
-import type { BackgroundTaskSummary } from '@/shared/types';
+import type { BackgroundTaskSummary, ScheduledWorkSummary } from '@/shared/types';
 
 /**
  * A session whose turn has ended while the agents, workflows or commands it
@@ -159,4 +159,195 @@ test('a poll that changes what it says about a listed task is not dropped as a r
   const listed = result.current.getSessionActivity('session-1')?.tasks?.[0];
   assert.equal(listed?.nested, true);
   assert.equal(listed?.description, 'Audit the whole frontend');
+});
+
+/**
+ * A /loop or a reminder holds the session's process with no task running.
+ * The server reports that scheduled work apart from the tasks, and only it
+ * says when an item is gone; what the client reads from the transcript
+ * changes the tasks alone.
+ */
+
+const scheduled = (overrides: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+  id: 'cron:b2148320',
+  kind: 'cron',
+  toolUseId: 'toolu_cron_1',
+  prompt: 'check CI',
+  startedAt: Date.now() - 90_000,
+  nextFireAt: Date.now() + 120_000,
+  recurring: true,
+  holdUntil: Date.now() + 8 * 86_400_000,
+  cron: '*/5 * * * *',
+  ...overrides,
+});
+
+test('a session with scheduled work alone is background work, timed from its earliest item', () => {
+  const { result } = renderHook(() => useSessionProtection());
+  const loop = scheduled();
+
+  act(() => {
+    result.current.syncProcessingSessions([
+      { sessionId: 'session-1', startedAt: loop.startedAt, canInterrupt: false, background: true, tasks: [], scheduled: [loop] },
+    ]);
+  });
+  const polled = result.current.getSessionActivity('session-1');
+  assert.equal(polled?.background, true);
+  assert.equal(polled?.tasks?.length, 0);
+  assert.equal(polled?.scheduled?.map((item) => item.id).join(','), loop.id);
+  assert.equal(result.current.isSessionProcessing('session-1'), false);
+
+  const earlier = scheduled({ id: 'wakeup:toolu_wake_1', kind: 'wakeup', startedAt: Date.now() - 300_000 });
+  act(() => {
+    result.current.markSessionBackground('session-2', [], [loop, earlier]);
+  });
+  const marked = result.current.getSessionActivity('session-2');
+  assert.equal(marked?.background, true);
+  assert.equal(marked?.startedAt === earlier.startedAt, true);
+});
+
+test('reading the tasks from the transcript again leaves the scheduled work as the server reported it', () => {
+  const { result } = renderHook(() => useSessionProtection());
+  const loop = scheduled();
+  const running = task({ startedAt: Date.now() - 30_000 });
+
+  act(() => {
+    result.current.markSessionBackground('session-1', [running], [loop]);
+  });
+  // A turn's `complete`, a task's notification: the tasks alone.
+  act(() => {
+    result.current.markSessionBackground('session-1', []);
+  });
+  const left = result.current.getSessionActivity('session-1');
+  assert.equal(left?.background, true, 'the loop still holds the process');
+  assert.equal(left?.tasks?.length, 0);
+  assert.equal(left?.scheduled?.map((item) => item.id).join(','), loop.id);
+  assert.equal(left?.startedAt === loop.startedAt, true);
+
+  // Finished background work, as `run_ended` reports it, clears both.
+  act(() => {
+    result.current.markSessionBackground('session-1', [], []);
+  });
+  assert.equal(result.current.getSessionActivity('session-1') === undefined, true);
+});
+
+test('a new turn carries the scheduled work, and its end keeps the session as background work for it', () => {
+  const { result } = renderHook(() => useSessionProtection());
+  const loop = scheduled();
+
+  act(() => {
+    result.current.markSessionBackground('session-1', [], [loop]);
+  });
+  act(() => {
+    result.current.markSessionProcessing('session-1', { statusText: null, canInterrupt: true });
+  });
+  assert.equal(result.current.isSessionProcessing('session-1'), true);
+  assert.equal(result.current.getSessionActivity('session-1')?.scheduled?.length, 1);
+
+  act(() => {
+    result.current.markSessionIdle('session-1', { backgroundWorkGoesOn: true });
+  });
+  const after = result.current.getSessionActivity('session-1');
+  assert.equal(after?.background, true);
+  assert.equal(after?.scheduled?.map((item) => item.id).join(','), loop.id);
+
+  act(() => {
+    result.current.markSessionProcessing('session-2');
+    result.current.markSessionIdle('session-2', { backgroundWorkGoesOn: true });
+  });
+  assert.equal(result.current.getSessionActivity('session-2') === undefined, true, 'nothing to keep: idle');
+});
+
+test('a poll that only moves an item\'s next run is not dropped as a repeat, and one that drops the item clears it', () => {
+  const { result } = renderHook(() => useSessionProtection());
+  const loop = scheduled();
+  const snapshot = (items: ScheduledWorkSummary[]) => [
+    { sessionId: 'session-1', startedAt: loop.startedAt, canInterrupt: false, background: true, tasks: [], scheduled: items },
+  ];
+
+  act(() => {
+    result.current.syncProcessingSessions(snapshot([loop]));
+  });
+  const first = result.current.getSessionActivity('session-1');
+  act(() => {
+    result.current.syncProcessingSessions(snapshot([{ ...loop }]));
+  });
+  assert.equal(result.current.getSessionActivity('session-1') === first, true, 'the same word keeps the entry');
+
+  const nextRun = (loop.nextFireAt ?? 0) + 300_000;
+  act(() => {
+    result.current.syncProcessingSessions(snapshot([{ ...loop, nextFireAt: nextRun }]));
+  });
+  assert.equal(result.current.getSessionActivity('session-1')?.scheduled?.[0]?.nextFireAt === nextRun, true);
+
+  act(() => {
+    result.current.syncProcessingSessions(snapshot([{ ...loop, nextFireAt: nextRun, holdUntil: loop.holdUntil + 1 }]));
+  });
+  assert.equal(result.current.getSessionActivity('session-1')?.scheduled?.[0]?.holdUntil === loop.holdUntil + 1, true);
+
+  act(() => {
+    result.current.syncProcessingSessions([]);
+  });
+  assert.equal(result.current.getSessionActivity('session-1') === undefined, true);
+});
+
+test('a run the poll lists where the map had only background work is a turn CloudCLI can stop, whatever the background entry said', () => {
+  // The turn a stop of a loop starts, a due message, another tab's send: a run
+  // of the chat registry, which the poll lists without canInterrupt.
+  for (const tasks of [[], [task()]]) {
+    const { result } = renderHook(() => useSessionProtection());
+    const loop = scheduled();
+    const runStartedAt = Date.now() - 2_000;
+
+    act(() => {
+      result.current.syncProcessingSessions([
+        { sessionId: 'session-1', startedAt: loop.startedAt, canInterrupt: false, background: true, tasks, scheduled: [loop] },
+      ]);
+    });
+    act(() => {
+      result.current.syncProcessingSessions([
+        { sessionId: 'session-1', startedAt: runStartedAt, tasks: tasks.length ? tasks : undefined, scheduled: [loop] },
+      ]);
+    });
+
+    const activity = result.current.getSessionActivity('session-1');
+    const label = `${tasks.length} task(s)`;
+    assert.equal(result.current.isSessionProcessing('session-1'), true, label);
+    assert.equal(activity?.canInterrupt, true, label);
+    assert.equal(activity?.statusText === null, true, label);
+    assert.equal(activity?.startedAt === runStartedAt, true, label);
+    assert.equal(activity?.scheduled?.map((item) => item.id).join(','), loop.id, label);
+  }
+});
+
+test('a turn the Claude CLI drives, listed where the map had only background work, stays one CloudCLI cannot stop; a followed turn keeps its status', () => {
+  const { result } = renderHook(() => useSessionProtection());
+  const loop = scheduled();
+
+  act(() => {
+    result.current.syncProcessingSessions([
+      { sessionId: 'session-1', startedAt: loop.startedAt, canInterrupt: false, background: true, tasks: [], scheduled: [loop] },
+    ]);
+  });
+  act(() => {
+    result.current.syncProcessingSessions([
+      { sessionId: 'session-1', startedAt: Date.now() - 1_000, canInterrupt: false, statusText: 'Running in the Claude CLI' },
+    ]);
+  });
+  const cliTurn = result.current.getSessionActivity('session-1');
+  assert.equal(result.current.isSessionProcessing('session-1'), true);
+  assert.equal(cliTurn?.canInterrupt, false);
+  assert.equal(cliTurn?.statusText, 'Running in the Claude CLI');
+
+  // A turn this page follows, its status from the stream, listed as a run.
+  act(() => {
+    result.current.markSessionProcessing('session-2', { statusText: 'Reading files', canInterrupt: true });
+  });
+  act(() => {
+    result.current.syncProcessingSessions([
+      { sessionId: 'session-2', startedAt: Date.now() - 1_000 },
+    ]);
+  });
+  const followed = result.current.getSessionActivity('session-2');
+  assert.equal(followed?.statusText, 'Reading files');
+  assert.equal(followed?.canInterrupt, true);
 });

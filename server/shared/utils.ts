@@ -767,11 +767,16 @@ export function splitLegacyUltracodeEffort<
  *   it for models that cannot run ultracode;
  * - `sessionId` is the app session id;
  * - `cwd` is the client's when it named one, else the session's project;
- * - `projectPath` is the session's project, else the client's.
+ * - `projectPath` is the session's project, else the client's;
+ * - a client's `acceptProcessSettings` is dropped: whether a turn runs on
+ *   the held process's own settings is the scheduled-messages dispatcher's
+ *   call (see `ProviderHandOverPlanOptions`), which passes it in
+ *   `extraOptions`.
  *
- * `extraOptions` (how an edited message asks to resume partway) go over the
- * client's. Attachments pass through as sent: the chat gateway re-validates
- * them and sets its own before a run.
+ * `extraOptions` (how an edited message asks to resume partway, the
+ * dispatcher's `acceptProcessSettings`) go over the client's. Attachments
+ * pass through as sent: the chat gateway re-validates them and sets its own
+ * before a run.
  *
  * Used by the chat gateway for every turn it runs, by the provider runtime
  * service to plan whether a `chat.send` would go into the process a runtime
@@ -785,7 +790,7 @@ export function buildTurnRunOptions(input: {
   clientOptions: AnyRecord;
   extraOptions?: AnyRecord;
 }): AnyRecord & { effort: string | undefined; ultracode: boolean | undefined } {
-  const { clientOptions } = input;
+  const { acceptProcessSettings: _fromClient, ...clientOptions } = input.clientOptions;
   const requestedEffort = typeof clientOptions.effort === 'string' ? clientOptions.effort.trim() : '';
   const { effort, ultracode } = splitLegacyUltracodeEffort({
     effort: requestedEffort || undefined,

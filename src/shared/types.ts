@@ -85,7 +85,11 @@ export type ScheduledMessage = {
   /** ISO instant, so the schedule does not move when the user changes time zone. */
   scheduledFor: string;
   status: 'pending' | 'sent' | 'failed' | 'cancelled';
-  /** Why it did not go, when `status` is `failed`. */
+  /**
+   * Why it did not go, when `status` is `failed`: `hand_over_failed:stale-plan` or
+   * `hand_over_failed:lookup` (the held process turned it away), which the composer's list words in
+   * the interface language, or the server's own text for any other reason.
+   */
   failureReason: string | null;
   createdAt: string;
 };
@@ -194,6 +198,55 @@ export type BackgroundTaskSummary = {
   nested?: boolean;
 };
 
+/**
+ * One piece of scheduled work the Claude process CloudCLI holds for a
+ * session keeps: a job CronCreate made (a /loop with an interval, a
+ * reminder) or the next wake-up of a self-paced /loop (ScheduleWakeup). No
+ * task event reports either, so they are listed apart from the background
+ * tasks: by the running-sessions poll (`?scheduled=1`) and the Shell's
+ * `session_busy`. `id` is what `chat.stop-task` addresses: `cron:<jobId>` or
+ * `wakeup:<chainId>`, the same while the process holds the work; a job an
+ * older CLI reported no id for is `cron:call:<toolUseId>`, listed but not
+ * stoppable.
+ */
+export type ScheduledWorkSummary = {
+  id: string;
+  kind: 'cron' | 'wakeup';
+  /** The CronCreate call; for a wake-up, the latest ScheduleWakeup call of its loop. */
+  toolUseId: string;
+  /** The prompt's first line, at most 200 characters; a /loop sentinel reads `/loop` or `/loop (loop.md)`. */
+  prompt: string;
+  /** When the job was made, or the self-paced loop began (server clock, epoch ms). */
+  startedAt: number;
+  /** When it runs next (epoch ms); null when that cannot be told. */
+  nextFireAt: number | null;
+  /** False for a one-shot reminder; a wake-up is always recurring. */
+  recurring: boolean;
+  /** The latest CloudCLI keeps the session's process for it (epoch ms): a run due after this does not happen. */
+  holdUntil: number;
+  /** Cron only: the five-field expression, in the server's local time. */
+  cron?: string;
+  /** Cron only: the CLI's wording of the schedule (`Every 5 minutes`), in the server's local time. */
+  cadence?: string;
+  /** Recurring cron only: when the job expires; its first run after this is its last. */
+  expiresAt?: number;
+  /** Cron only: kept in the project's .claude/scheduled_tasks.json. */
+  durable?: boolean;
+  /** Wake-up only: why the model picked the delay. */
+  reason?: string;
+};
+
+/**
+ * How a `chat.stop-task` for scheduled work stands, as the server's
+ * `stop_task_status` frame (answered to the asking socket alone) says:
+ * `stopped` (the held process was let go, which ended the work), `started`
+ * (a turn that has Claude cancel it began), `finished` (that turn is over;
+ * the frame's `stillHeld` says whether the work is still held), `failed`
+ * (no such turn could run), `busy` (a turn is under way; ask again after it)
+ * or `not_found`. Read by chat's background-tasks strip.
+ */
+export type ScheduledWorkStopStatus = 'stopped' | 'started' | 'finished' | 'failed' | 'busy' | 'not_found';
+
 /** What a busy session is doing, as shown by the activity indicator: producing a response, or only running background tasks. */
 export type SessionActivity = {
   /** Provider-supplied status line; null renders the default activity label. */
@@ -202,17 +255,25 @@ export type SessionActivity = {
   /**
    * When this request was first marked as processing (client clock). Drives
    * the elapsed-time display and the stale `chat_subscribed` idle-ack guard.
-   * For background-only work it is the earliest task's start.
+   * For background-only work it is the earliest start of its tasks and
+   * scheduled work.
    */
   startedAt: number;
   /**
-   * Set when no response is being produced and only background tasks keep
-   * the session busy. The composer stays usable: the CLI accepts a new turn
-   * while they run.
+   * Set when no response is being produced and only background tasks, or
+   * scheduled work, keep the session busy. The composer stays usable: the
+   * CLI accepts a new turn while they run.
    */
   background?: boolean;
   /** The background tasks the session still has running, with or without a response in flight. */
   tasks?: BackgroundTaskSummary[];
+  /**
+   * The scheduled work (loops, reminders) the session's held process keeps,
+   * with or without a response in flight, as the server last reported it:
+   * only the server's word (the running-sessions poll, a stop, finished
+   * background work) takes an item away.
+   */
+  scheduled?: ScheduledWorkSummary[];
 };
 
 /** Every busy session, keyed by session id. Read it to tell whether a session is busy; check `background` to tell how. */
@@ -227,17 +288,22 @@ export type MarkSessionProcessing = (
 /**
  * Marks a session's response as finished; `ifStartedBefore` lets a late acknowledgement clear only a stale run. Leaves
  * background-only work alone, which it says nothing about. `backgroundWorkGoesOn` (the run left background work
- * running) keeps the tasks the entry lists as background work instead; an entry that lists none goes idle.
+ * running) keeps the tasks and scheduled work the entry lists as background work instead; an entry that lists
+ * neither goes idle.
  */
 export type MarkSessionIdle = (
   sessionId?: string | null,
   opts?: { ifStartedBefore?: number; backgroundWorkGoesOn?: boolean },
 ) => void;
 
-/** Records the background tasks a session still has once its turn ended; an empty list marks it idle. */
+/**
+ * Records the background tasks a session still has once its turn ended, and, given `scheduled`, its scheduled work;
+ * left out, the entry keeps the scheduled work it lists, which only the server reports. Neither left marks it idle.
+ */
 export type MarkSessionBackground = (
   sessionId: string,
   tasks: BackgroundTaskSummary[],
+  scheduled?: ScheduledWorkSummary[],
 ) => void;
 
 /** Reads one session's current activity without subscribing to the map, for logic that runs on a websocket frame. */
@@ -257,9 +323,11 @@ export type SessionActivitySnapshot = {
   statusText?: string | null;
   canInterrupt?: boolean;
   startedAt?: number;
-  /** True when the server lists the session for its background tasks alone, with no chat run. */
+  /** True when the server lists the session for its background tasks or scheduled work alone, with no chat run. */
   background?: boolean;
   tasks?: BackgroundTaskSummary[];
+  /** The session's scheduled work, from a server that reports it. */
+  scheduled?: ScheduledWorkSummary[];
 };
 
 /**
@@ -370,7 +438,7 @@ export type ActivityDetailsTask = BackgroundTaskSummary & { elapsedMs: number };
  * Everything the activity tab's details panel lists for the viewed session,
  * read by chat's `deriveActivityDetails` from the transcript rows and the
  * activity entry the tab's own readout counts from. Never invented: a run
- * with no workflow, checklist or background task lists none.
+ * with no workflow, checklist, background task or scheduled work lists none.
  */
 export type ActivityDetails = {
   run: {
@@ -378,7 +446,7 @@ export type ActivityDetails = {
     statusText: string | null;
     /** How long the activity has lasted at the panel's clock. */
     elapsedMs: number;
-    /** The turn is over and only background tasks keep the session busy. */
+    /** The turn is over and only background tasks, or scheduled work, keep the session busy. */
     isBackground: boolean;
     /**
      * The turn runs in a Claude CLI process CloudCLI does not drive (a Shell
@@ -400,6 +468,10 @@ export type ActivityDetails = {
    * its row says is over, which no lagging task list can show as running.
    */
   tasks: ActivityDetailsTask[];
+  /** The session's scheduled work (loops, reminders), in the order the server lists it: by when each began. */
+  scheduled: ScheduledWorkSummary[];
+  /** The panel's clock (epoch ms) the details were read at, which the scheduled work's next runs are told against. */
+  nowMs: number;
 };
 
 // ---------------------------
@@ -552,6 +624,7 @@ export type ChatMessage = {
   commandName?: string;
   commandMessage?: string;
   commandArgs?: string;
+  /** A slash command Claude Code ran by itself, asking the model nothing (/model, /cost): it opens no turn (isTurnOpener). */
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
@@ -589,6 +662,8 @@ export type ChatMessage = {
   errorCode?: string;
   /** With `errorCode` BACKGROUND_WORK_STOPPED: the store row's `changes`. */
   errorChanges?: string[];
+  /** With `errorCode` HAND_OVER_FAILED: the store row's `reason`. */
+  errorReason?: string;
   [key: string]: unknown;
 };
 
@@ -728,6 +803,11 @@ export type NormalizedMessage = {
   commandName?: string;
   commandMessage?: string;
   commandArgs?: string;
+  /**
+   * Set on a slash command Claude Code ran by itself, asking the model nothing
+   * (`/model`, `/cost`): such a row opens no turn. A prompt command (`/review`,
+   * a custom command) carries the command fields without it.
+   */
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
@@ -805,10 +885,11 @@ export type NormalizedMessage = {
   inserted?: boolean;
   /**
    * `error` only, optional: a code for an error the transcript words itself,
-   * in the user's language, with `content` the English fallback. Today only
+   * in the user's language, with `content` the English fallback. Today
    * BACKGROUND_WORK_STOPPED: the Claude runtime replaced the process it held
    * for the session's background work, stopping that work, because the turn
-   * needed a new process (see `changes`).
+   * needed a new process (see `changes`); and HAND_OVER_FAILED: a turn meant
+   * for that process did not go into it, so it was not sent (see `reason`).
    */
   code?: string;
   /**
@@ -817,6 +898,8 @@ export type NormalizedMessage = {
    * the turn could not be handed to the held process at all.
    */
   changes?: string[];
+  /** With `code` HAND_OVER_FAILED: `stale-plan` or `lookup`; any other value reads as the general case. */
+  reason?: string;
 };
 
 /** What a background task has spent so far — tokens, tool calls and wall time — as the CLI reports it while the task runs and when it ends. */
@@ -1016,17 +1099,20 @@ export type BackgroundSendChoice = 'send' | 'queue' | 'cancel';
 
 /**
  * An open background-work send prompt, listing the session's own background
- * tasks as display strings. `changes` is set when the provider runs a new
- * turn in the process the work runs in but cannot run this one there (the
- * server's hand-over plan, or its `send_refused`): the server's labels for
- * what only a new process can apply (`model`, `effort`, `ultracode`,
- * `permissionMode`, `tools`, `cwd`, or `lookup` when it could not prepare the
- * turn for that process), possibly none. Absent when every new turn replaces
- * that process (another provider, or an edit).
+ * tasks, then its scheduled work, as display strings. `changes` is set when
+ * the provider runs a new turn in the process the work runs in but cannot run
+ * this one there (the server's hand-over plan, or its `send_refused`): the
+ * server's labels for what only a new process can apply (`model`, `effort`,
+ * `ultracode`, `permissionMode`, `tools`, `cwd`, or `lookup` when it could
+ * not prepare the turn for that process), possibly none. Absent when every
+ * new turn replaces that process (another provider, or an edit). `queue` is
+ * false when the work is only scheduled work (loops, reminders): a queued
+ * message would wait for it to end, days for a loop, so none is offered.
  */
 export type BackgroundSendPrompt = {
   work: string[];
   changes?: string[];
+  queue?: false;
 };
 
 /**
@@ -1709,9 +1795,9 @@ export type ProjectWorkspaceShellProps = RealtimeProps & {
 };
 
 /**
- * Chromium's Keyboard Lock API, which TypeScript's DOM types do not include. Read by
- * project-workspace's useImmersiveMode (locks Escape in full screen) and chat's ChatInterface
- * (tells whether Escape is locked before stopping a turn on it).
+ * Chromium's Keyboard Lock API, which TypeScript's DOM types do not include. Read by the shared
+ * browserFullscreen controller (locks Escape while a granted full screen lasts) and chat's
+ * ChatInterface (tells whether Escape is locked before stopping a turn on it).
  */
 export type KeyboardLockNavigator = Navigator & {
   keyboard?: {
@@ -1721,14 +1807,77 @@ export type KeyboardLockNavigator = Navigator & {
 };
 
 /**
- * Why workspace full screen came without the whole screen: 'refused' when the browser rejected the
- * request (detail: its error message), 'inWindow' when it granted the request but kept the full
- * screen inside the window (this tab being captured, an extension standing in for the API). Set by
- * project-workspace's useImmersiveMode, shown by its BrowserFullscreenNotice.
+ * Which maximize control asked for the browser fullscreen: workspace immersive mode, the code editor
+ * (text, media and binary views), the PRD editor or Browser Use's preview. Passed by each holder to
+ * useBrowserFullscreen; used only for the diagnostics report the shared controller sends and to tell
+ * a view maximized over the page (any source but 'workspace', which owns a short Escape) from
+ * immersive mode. It has nothing to do with the notice, which every holder shares.
+ */
+export type BrowserFullscreenSource = 'workspace' | 'codeEditor' | 'prdEditor' | 'browserUse';
+
+/** A width and height in the units the browser reports them in (CSS pixels at 100% zoom). */
+export type BrowserFullscreenSize = { width: number; height: number };
+
+/**
+ * Why a maximize came without the whole screen, for the notice that says so:
+ * 'refused' when the browser rejected the request (detail: its error message);
+ * 'inWindow' when it granted the request but the page does not fill the screen: kind 'tab' when the
+ * window never went fullscreen (this tab captured, an extension standing in for the API), 'partial'
+ * when the window is fullscreen but smaller than the screen (macOS Split View, a tile);
+ * 'unavailable' when the request could not be made: an embedding page that does not allow it, or a
+ * browser without the API (the desktop app is reported, not explained).
+ * Set by the shared browserFullscreen controller, shown by project-workspace's BrowserFullscreenNotice.
  */
 export type BrowserFullscreenIssue =
   | { reason: 'refused'; detail: string }
-  | { reason: 'inWindow' };
+  | { reason: 'inWindow'; kind: 'tab' }
+  | { reason: 'inWindow'; kind: 'partial'; window: BrowserFullscreenSize; screen: BrowserFullscreenSize }
+  | { reason: 'unavailable'; cause: 'iframe' | 'noApi' };
+
+/**
+ * The display-mode media feature as the diagnostics report names it; 'unknown' when no listed mode
+ * matches (or matchMedia is missing).
+ */
+export type BrowserDisplayModeName = 'browser' | 'minimal-ui' | 'standalone' | 'fullscreen' | 'window-controls-overlay' | 'picture-in-picture' | 'unknown';
+
+/**
+ * One line of fullscreen diagnostics: what came of one request and the window around it, sent by the
+ * shared browserFullscreen controller through api.system.reportClientDiagnostics and logged by the
+ * server's system module as a single `[client-diag] fullscreen` line. No page address, path, file or
+ * user name goes in it.
+ */
+export type BrowserFullscreenReport = {
+  event: 'fullscreen';
+  source: BrowserFullscreenSource;
+  outcome: 'whole' | 'inWindow' | 'refused' | 'unavailable' | 'prefixed' | 'interrupted';
+  kind?: 'tab' | 'partial';
+  cause?: 'desktopApp' | 'iframe' | 'noApi';
+  /** The browser's refusal message, at most 120 characters. */
+  detail?: string;
+  /** From the request to the outcome. */
+  elapsedMs: number;
+  /** Before the request: tells a window already fullscreen, or a PWA window, from a normal one. */
+  displayModeBefore: BrowserDisplayModeName;
+  displayModeAfter: BrowserDisplayModeName;
+  /** A PWA window of its own. */
+  standalone: boolean;
+  inIframe: boolean;
+  /** A secure context, which Keyboard Lock needs. */
+  secure: boolean;
+  /** document.hasFocus() at the request. */
+  focused: boolean;
+  /** Whether the request ran in a user gesture; null where the browser cannot tell. */
+  userActivation: boolean | null;
+  keyboardLock: 'requested' | 'locked' | 'failed' | 'unsupported' | 'insecure' | 'notRequested';
+  outer: [number, number];
+  inner: [number, number];
+  screen: [number, number];
+  avail: [number, number];
+  position: [number, number];
+  dpr: number;
+  /** userAgentData.platform, else navigator.platform; at most 40 characters. */
+  platform: string;
+};
 
 /** One side of the split workspace; 'right' exists only while the workspace is split. */
 export type WorkspacePaneSide = 'left' | 'right';
@@ -2173,14 +2322,17 @@ export type MobileTerminalSelectionManager = {
  * turn (`turn`), a Claude process shutting down (`exiting`), background tasks
  * (`background`), a process held open for work no task stands for, such as a
  * Monitor (`held`), or only a queued chat message (`queued`). `tasks` lists
- * the outstanding background tasks, nested ones included; `hasQueuedMessage`
- * rules out taking the session over; `changed` says a takeover was refused,
- * nothing stopped, because more had started than the notice showed. Held by
- * the shell module's connection hook and shown by its busy notice.
+ * the outstanding background tasks, nested ones included; `scheduled` the
+ * scheduled work (loops, reminders) the held process keeps, present only when
+ * the frame lists some; `hasQueuedMessage` rules out taking the session over;
+ * `changed` says a takeover was refused, nothing stopped, because more had
+ * started than the notice showed. Held by the shell module's connection hook
+ * and shown by its busy notice.
  */
 export type ShellSessionBusy = {
   reason: 'turn' | 'exiting' | 'background' | 'held' | 'queued';
   tasks: BackgroundTaskSummary[];
+  scheduled?: ScheduledWorkSummary[];
   hasQueuedMessage: boolean;
   changed: boolean;
 };
@@ -2188,13 +2340,17 @@ export type ShellSessionBusy = {
 /**
  * What the Shell's last `session_busy` frame showed, sent back as the init's
  * `takeOver` so the server stops only that: the chat turn then under way (its
- * start time, null for none) and the id of every task in the frame, nested and
- * unlisted ones included. Built by the shell module's connection hook, typed
- * on its outgoing init in the module's socket utilities.
+ * start time, null for none), the id of every task in the frame, nested and
+ * unlisted ones included, and, when the frame listed scheduled work (a server
+ * that reports it always lists it, possibly none), the id of every piece of
+ * it, which the server then counts when it checks whether more has started.
+ * Built by the shell module's connection hook, typed on its outgoing init in
+ * the module's socket utilities.
  */
 export type ShellTakeOverSnapshot = {
   turnStartedAt: number | null;
   taskIds: string[];
+  scheduledIds?: string[];
 };
 
 // ---------------------------

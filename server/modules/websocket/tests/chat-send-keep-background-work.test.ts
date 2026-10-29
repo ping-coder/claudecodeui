@@ -54,6 +54,9 @@ function createGateway(plan: (options: AnyRecord) => Promise<ProviderHandOverPla
     abort: async () => false,
     stopBackgroundTask: async () => false,
     hasBackgroundWork: () => true,
+    hasScheduledWork: () => false,
+    listScheduledWork: () => [],
+    stopScheduledWork: async () => ({ status: 'not_found' }),
     resolveToolApproval: () => {},
     getPendingApprovalsForSession: () => [],
     insert: async () => ({ accepted: false, reason: 'NO_ACTIVE_RUN' }),
@@ -208,5 +211,40 @@ test('the refusal hands back the send\'s clientRequestId, and leaves out one tha
       refusals.map((frame) => ('clientRequestId' in frame ? frame.clientRequestId : 'none')),
       ['send_mf3k2_a1b2c3', 'send_mf3k2_d4e5f6', 'none', 'none', 'none', 'none'],
     );
+  });
+});
+
+// `acceptProcessSettings` lets a turn into a process held only for scheduled
+// work on that process's own effort, ultracode and tool rules. Only the
+// scheduled-messages dispatcher decides that, once its plan says so; a
+// client that sends it has it dropped (see buildTurnRunOptions).
+
+test('a send that carries acceptProcessSettings runs without it', async () => {
+  const { runtime, runs } = createGateway(async () => ({ heldWork: true, canHandOver: false, changes: ['effort'], switches: [] }));
+  await withChat(runtime, async ({ socket }) => {
+    send(socket, { effort: 'max', acceptProcessSettings: true });
+    await settle();
+
+    assert.equal(runs.length, 1);
+    assert.equal('acceptProcessSettings' in (runs[0]?.options ?? {}), false);
+    assert.equal(runs[0]?.options.effort, 'max', 'at the effort the user picked');
+  });
+});
+
+test('a send that asks to keep the background work is planned without acceptProcessSettings, and refused when only that would let its turn in', async () => {
+  // Lets the turn in on the process's own effort only when asked to.
+  const { runtime, plans, runs } = createGateway(async (options) => (
+    options.acceptProcessSettings === true
+      ? { heldWork: true, canHandOver: true, changes: [], switches: [] }
+      : { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] }
+  ));
+  await withChat(runtime, async ({ socket }) => {
+    send(socket, { effort: 'max', keepBackgroundWork: true, acceptProcessSettings: true });
+    await settle();
+
+    assert.equal(plans.length, 1);
+    assert.equal('acceptProcessSettings' in (plans[0] ?? {}), false);
+    assert.equal(runs.length, 0);
+    assert.equal(JSON.stringify(socket.frames.map((frame) => [frame.kind, frame.changes])), JSON.stringify([['send_refused', ['effort']]]));
   });
 });

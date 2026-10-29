@@ -133,7 +133,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
         {status && status !== 'running' && <ToolStatusBadge status={status} className="flex-shrink-0" />}
         {!open && hasOutput && !isRunning && (
           <span className="bidi-auto flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/70 transition-opacity group-hover/cmd:opacity-0">
-            {outputLineCount} {outputLineCount === 1 ? 'line' : 'lines'}
+            {t('chat:tools.outputLines', { count: outputLineCount })}
           </span>
         )}
 
@@ -150,7 +150,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
 
       {description && !open && (
         <div className="truncate px-2.5 pb-1.5 ps-[2.4rem] text-[11px] italic text-muted-foreground/70">
-          {description}
+          <span dir="auto">{description}</span>
         </div>
       )}
 
@@ -158,7 +158,7 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
       {open && hasOutput && (
         <div className="settings-content-enter border-t border-border/50 bg-background/50">
           {description && (
-            <div className="px-3 pt-2 text-[11px] italic text-muted-foreground/70">{description}</div>
+            <div className="px-3 pt-2 text-[11px] italic text-muted-foreground/70"><span dir="auto">{description}</span></div>
           )}
           <pre
             className={cn(

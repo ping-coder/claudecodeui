@@ -8,7 +8,7 @@ import { WebSocket, type RawData } from 'ws';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import type { ProviderRuntimeGateway } from '@/modules/websocket/services/chat-websocket.service.js';
 import { resolveAgyCliPath } from '@/shared/agy-cli-path.js';
-import type { BackgroundTaskSummary, ProviderProcessState, SessionHold } from '@/shared/types.js';
+import type { BackgroundTaskSummary, ProviderProcessState, ScheduledWorkSummary, SessionHold } from '@/shared/types.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -155,28 +155,33 @@ type ShellWebSocketDependencies = {
 /**
  * Why CloudCLI itself still holds a session, and what it runs there: sent as
  * `session_busy` instead of starting a CLI on it. `tasks` are the background
- * tasks still outstanding; `turnStartedAt` is when the chat turn under way
- * started (its run's `startedAt`, null when none is), which tells that turn
- * from a later one; `hasQueuedMessage` rules out a takeover, as the
- * dispatcher would send the message, in a new process, as soon as the
- * session is free.
+ * tasks still outstanding; `scheduled` the scheduled work its process holds
+ * (a /loop's next wake-up, a CronCreate job), always sent, empty for none;
+ * `turnStartedAt` is when the chat turn under way started (its run's
+ * `startedAt`, null when none is), which tells that turn from a later one;
+ * `hasQueuedMessage` rules out a takeover, as the dispatcher would send the
+ * message, in a new process, as soon as the session is free.
  */
 type ShellSessionBusy = {
   reason: 'turn' | 'exiting' | 'background' | 'held' | 'queued';
   tasks: BackgroundTaskSummary[];
+  scheduled: ScheduledWorkSummary[];
   turnStartedAt: number | null;
   hasQueuedMessage: boolean;
 };
 
 /**
  * What the busy notice the user acted on showed, sent back with a takeover:
- * the chat turn then under way (`turnStartedAt`, null for none) and the id of
- * every task its frame carried, nested and unlisted ones included. A takeover
- * stops nothing beyond it (see hasChangedSinceSnapshot).
+ * the chat turn then under way (`turnStartedAt`, null for none), the id of
+ * every task its frame carried, nested and unlisted ones included, and the id
+ * of every piece of scheduled work it carried (`scheduledIds`), null from a
+ * client that sends none, which never shows scheduled work. A takeover stops
+ * nothing beyond it (see hasChangedSinceSnapshot).
  */
 type ShellTakeOverSnapshot = {
   turnStartedAt: number | null;
   taskIds: string[];
+  scheduledIds: string[] | null;
 };
 
 /**
@@ -199,8 +204,9 @@ function listSessionIds(appSessionId: string, providerSessionId: string | null):
  * The first reason that applies wins: a chat turn under way, for any
  * provider (`turn`); a Claude process on its way out (`exiting`); one held
  * open for background tasks (`background`) or for work no task stands for,
- * such as a Monitor or a scheduled wake-up (`held`); or only a queued chat
- * message (`queued`). Null when nothing holds it.
+ * such as a Monitor or scheduled work (`held`); or only a queued chat
+ * message (`queued`). Null when nothing holds it. The scheduled work a
+ * process holds is listed whatever the reason.
  */
 function readSessionBusy(
   appSessionId: string,
@@ -209,12 +215,14 @@ function readSessionBusy(
 ): ShellSessionBusy | null {
   let processState: ProviderProcessState | null = null;
   const tasks: BackgroundTaskSummary[] = [];
+  const scheduled: ScheduledWorkSummary[] = [];
   for (const sessionId of listSessionIds(appSessionId, providerSessionId)) {
     const hold = dependencies.runtime?.describeSessionHold(sessionId) ?? null;
     if (hold?.processState === 'running' || (hold?.processState === 'exiting' && processState === null)) {
       processState = hold.processState;
     }
     tasks.push(...(hold?.tasks ?? []));
+    scheduled.push(...(hold?.scheduled ?? []));
   }
   const hasQueuedMessage = dependencies.hasQueuedMessage?.(appSessionId) ?? false;
   const run = chatRunRegistry.getRun(appSessionId);
@@ -232,7 +240,7 @@ function readSessionBusy(
   } else if (hasQueuedMessage) {
     reason = 'queued';
   }
-  return reason ? { reason, tasks, turnStartedAt, hasQueuedMessage } : null;
+  return reason ? { reason, tasks, scheduled, turnStartedAt, hasQueuedMessage } : null;
 }
 
 /**
@@ -245,40 +253,53 @@ function readSessionBusy(
  * can still take over a process held with no turn and no tasks, but gets
  * `session_busy` with `changed` for a turn or tasks, which it cannot show it
  * saw, until the page is reloaded.
+ *
+ * `scheduledIds` is left out by clients from before scheduled work was
+ * shown, which read as null: their takeover stops the scheduled work as it
+ * always did.
  */
 function readTakeOverSnapshot(value: unknown): ShellTakeOverSnapshot | null {
   if (value === true) {
-    return { turnStartedAt: null, taskIds: [] };
+    return { turnStartedAt: null, taskIds: [], scheduledIds: null };
   }
   if (!value || typeof value !== 'object') {
     return null;
   }
   const snapshot = value as Record<string, unknown>;
+  const readIds = (ids: unknown) => (Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []);
   return {
     turnStartedAt:
       typeof snapshot.turnStartedAt === 'number' && Number.isFinite(snapshot.turnStartedAt)
         ? snapshot.turnStartedAt
         : null,
-    taskIds: Array.isArray(snapshot.taskIds)
-      ? snapshot.taskIds.filter((taskId): taskId is string => typeof taskId === 'string')
-      : [],
+    taskIds: readIds(snapshot.taskIds),
+    scheduledIds: snapshot.scheduledIds === undefined ? null : readIds(snapshot.scheduledIds),
   };
 }
 
 /**
  * Whether CloudCLI has started something on the session since the notice a
  * takeover comes from: a chat turn other than the one it showed (a session's
- * next run starts after the last one ended, so with a later `startedAt`), or
- * a task it did not carry. Its turn or tasks having ended since is no change,
- * there is only less to stop; nor is the process going from held to exiting
- * or back, as a process carries no identity here.
+ * next run starts after the last one ended, so with a later `startedAt`), a
+ * task it did not carry, or, when the notice sent its scheduled work back,
+ * scheduled work it did not carry (a self-paced /loop keeps its id from one
+ * wake-up to the next). Its turn, tasks or scheduled work having ended since
+ * is no change, there is only less to stop; nor is the process going from
+ * held to exiting or back, as a process carries no identity here.
  */
 function hasChangedSinceSnapshot(busy: ShellSessionBusy, snapshot: ShellTakeOverSnapshot): boolean {
   if (busy.turnStartedAt !== null && busy.turnStartedAt !== snapshot.turnStartedAt) {
     return true;
   }
   const shownTaskIds = new Set(snapshot.taskIds);
-  return busy.tasks.some((task) => !shownTaskIds.has(task.taskId));
+  if (busy.tasks.some((task) => !shownTaskIds.has(task.taskId))) {
+    return true;
+  }
+  if (snapshot.scheduledIds === null) {
+    return false;
+  }
+  const shownScheduledIds = new Set(snapshot.scheduledIds);
+  return busy.scheduled.some((item) => !shownScheduledIds.has(item.id));
 }
 
 /**

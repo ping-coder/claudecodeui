@@ -150,7 +150,7 @@ function ProjectMainRegion({
   const tabDisplayKey = [...layout.left.tabs, ...(layout.right?.tabs ?? [])]
     .map((tab) => [
       tab.key,
-      resolvePaneTabTitle(tab, tab.sessionId ? liveTitles.get(tab.sessionId) : null, untitledLabels),
+      resolvePaneTabTitle(tab, tab.sessionId ? liveTitles.get(tab.sessionId) : null, untitledLabels, t),
       projectNames.get(tab.projectId) ?? '',
       getActivity(tab.sessionId) ?? '',
     ].join(WORKSPACE_KEY_FIELD_SEPARATOR))

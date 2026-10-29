@@ -196,7 +196,7 @@ test('describeSessionHold merges every runtime: a running process wins over an e
     createProvider('cursor', createRuntime()),
   ]);
 
-  assert.deepEqual(service.describeSessionHold('session-1'), { processState: 'running', tasks: [task('a')] });
+  assert.deepEqual(service.describeSessionHold('session-1'), { processState: 'running', tasks: [task('a')], scheduled: [] });
   assert.equal(service.describeSessionHold('session-3'), null);
 });
 
@@ -209,8 +209,77 @@ test('describeSessionHold reports a process on its way out, or tasks alone', () 
     })),
   ]);
 
-  assert.deepEqual(service.describeSessionHold('exiting-session'), { processState: 'exiting', tasks: [] });
-  assert.deepEqual(service.describeSessionHold('tasks-session'), { processState: null, tasks: [task] });
+  assert.deepEqual(service.describeSessionHold('exiting-session'), { processState: 'exiting', tasks: [], scheduled: [] });
+  assert.deepEqual(service.describeSessionHold('tasks-session'), { processState: null, tasks: [task], scheduled: [] });
+});
+
+/** A piece of scheduled work as a runtime lists it. */
+const scheduledWork = (id: string, startedAt: number) => ({
+  id, kind: 'cron' as const, toolUseId: `toolu_${id}`, prompt: id, startedAt, nextFireAt: null, recurring: true, holdUntil: startedAt + 1000,
+});
+
+test('scheduled work is read from every runtime, oldest first, apart from background work', () => {
+  const service = createService([
+    createProvider('claude', createRuntime({
+      listBackgroundWork: () => [],
+      listScheduledWork: () => [
+        { sessionId: 'session-1', scheduled: [scheduledWork('cron:b', 20)] },
+        { sessionId: 'session-2', scheduled: [scheduledWork('cron:other', 1)] },
+      ],
+    })),
+    createProvider('codex', createRuntime({
+      listScheduledWork: () => [{ sessionId: 'session-1', scheduled: [scheduledWork('wakeup:a', 10)] }],
+    })),
+    createProvider('cursor', createRuntime()),
+  ]);
+
+  assert.deepEqual(service.listScheduledWork('session-1').map((item) => item.id), ['wakeup:a', 'cron:b']);
+  assert.equal(service.hasScheduledWork('session-1'), true);
+  assert.equal(service.hasScheduledWork('session-3'), false);
+  assert.deepEqual(service.listScheduledWork('session-3'), []);
+  assert.equal(service.hasBackgroundWork('session-1'), false, 'scheduled work is no task');
+  // The Shell reads it with the hold: scheduled work alone holds the session.
+  assert.deepEqual(service.describeSessionHold('session-2'), { processState: null, tasks: [], scheduled: [scheduledWork('cron:other', 1)] });
+});
+
+test('only scheduled work that keeps its process counts as held: work due past its hold limit is listed all the same', () => {
+  const pastLimit = { ...scheduledWork('cron:far', 5), nextFireAt: 5000, holdUntil: 4000 };
+  const atLimit = { ...scheduledWork('cron:near', 6), nextFireAt: 4000, holdUntil: 4000 };
+  const service = createService([
+    createProvider('claude', createRuntime({
+      listScheduledWork: () => [
+        { sessionId: 'far-only', scheduled: [pastLimit] },
+        { sessionId: 'far-and-near', scheduled: [pastLimit, atLimit] },
+        { sessionId: 'unknown-time', scheduled: [scheduledWork('cron:call:toolu_old', 7)] },
+      ],
+    })),
+  ]);
+
+  assert.equal(service.hasScheduledWork('far-only'), false, 'its next fire is past its hold limit');
+  assert.deepEqual(service.listScheduledWork('far-only').map((item) => item.id), ['cron:far']);
+  assert.deepEqual(service.describeSessionHold('far-only')?.scheduled?.map((item) => item.id), ['cron:far']);
+  assert.equal(service.hasScheduledWork('far-and-near'), true, 'due right at its hold limit');
+  assert.equal(service.hasScheduledWork('unknown-time'), true, 'no known next fire');
+});
+
+test('a stop of scheduled work goes to the session\'s runtime as asked, and a runtime that holds none answers not_found', async () => {
+  const calls: unknown[] = [];
+  const service = createService([
+    createProvider('claude', createRuntime({
+      async stopScheduledWork(sessionId, id, options) {
+        calls.push([sessionId, id, options]);
+        return { status: 'turn', content: 'Cancel', options: { inheritUnset: true }, targetIds: [id] };
+      },
+    })),
+    createProvider('cursor', createRuntime()),
+  ]);
+
+  assert.deepEqual(
+    await service.stopScheduledWork('claude', 'session-1', 'cron:b2148320', { all: true }),
+    { status: 'turn', content: 'Cancel', options: { inheritUnset: true }, targetIds: ['cron:b2148320'] },
+  );
+  assert.deepEqual(calls, [['session-1', 'cron:b2148320', { all: true }]]);
+  assert.deepEqual(await service.stopScheduledWork('cursor', 'session-1', 'cron:b2148320'), { status: 'not_found' });
 });
 
 test('releaseSession asks every runtime that can let go of a session, once each, and waits for them', async () => {

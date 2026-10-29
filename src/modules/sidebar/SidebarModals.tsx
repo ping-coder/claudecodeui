@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
+import { Trans } from 'react-i18next';
 
 import { Button } from '@/shared/ui';
 import { Settings } from '@/modules/settings';
 import { VersionUpgradeModal } from '@/modules/version-upgrade';
 import type { InstallMode, PendingSidebarDeletion, Project, ReleaseInfo, SettingsProject } from '@/shared/types';
-import { normalizeProjectForSettings } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { formatSessionTitle, normalizeProjectForSettings } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { splitTranslationAtValue } from '@/modules/sidebar/utils/translationSlots';
 import { ProjectCreationWizard } from '@/modules/project-creation-wizard';
 
 type SidebarModalsProps = {
@@ -32,6 +34,21 @@ type SidebarModalsProps = {
   installMode: InstallMode;
   t: TFunction;
 };
+
+/**
+ * "What would you like to do with <name>?", the name in bold. The translation places the name and
+ * carries the question mark; the name is rendered here (splitTranslationAtValue), as it is user text.
+ */
+function DeleteQuestion({ name, t }: { name: string; t: TFunction }) {
+  const [before, after] = splitTranslationAtValue(t, 'deleteConfirmation.confirmDeleteNamed', 'name');
+  return (
+    <>
+      {before}
+      <span className="font-medium text-foreground">{name}</span>
+      {after}
+    </>
+  );
+}
 
 type TypedSettingsProps = {
   isOpen: boolean;
@@ -133,11 +150,10 @@ export default function SidebarModals({
                       {t('deleteConfirmation.deleteProject')}
                     </h3>
                     <p className="mb-1 text-sm text-muted-foreground">
-                      {t('deleteConfirmation.confirmDelete')}{' '}
-                      <span className="font-medium text-foreground">
-                        {pendingDeletion.project.displayName || pendingDeletion.project.projectId}
-                      </span>
-                      ?
+                      <DeleteQuestion
+                        name={pendingDeletion.project.displayName || pendingDeletion.project.projectId}
+                        t={t}
+                      />
                     </p>
                     {pendingDeletion.sessionCount > 0 && (
                       <p className="mt-2 text-sm text-muted-foreground">
@@ -187,11 +203,8 @@ export default function SidebarModals({
                       {t('deleteConfirmation.deleteSession')}
                     </h3>
                     <p className="mb-1 text-sm text-muted-foreground">
-                      {t('deleteConfirmation.confirmDelete')}{' '}
-                      <span className="font-medium text-foreground">
-                        {pendingDeletion.sessionTitle || t('sessions.unnamed')}
-                      </span>
-                      ?
+                      {/* The archive hands over the title as stored; the rows already formatted theirs. */}
+                      <DeleteQuestion name={formatSessionTitle(pendingDeletion.sessionTitle, t) || t('sessions.unnamed')} t={t} />
                     </p>
                     <p className="mt-3 text-xs text-muted-foreground">
                       {pendingDeletion.isArchived
@@ -243,11 +256,13 @@ export default function SidebarModals({
                       {t('deleteConfirmation.deleteSessions', { count: pendingDeletion.sessionIds.length })}
                     </h3>
                     <p className="mb-1 text-sm text-muted-foreground">
-                      {t('deleteConfirmation.confirmDeleteSessions')}{' '}
-                      <span className="font-medium text-foreground">
-                        {t('deleteConfirmation.selectedSessions', { count: pendingDeletion.sessionIds.length })}
-                      </span>
-                      ?
+                      <Trans
+                        t={t}
+                        i18nKey="deleteConfirmation.confirmDeleteSelected"
+                        count={pendingDeletion.sessionIds.length}
+                        values={{ count: pendingDeletion.sessionIds.length }}
+                        components={{ strong: <span className="font-medium text-foreground" /> }}
+                      />
                     </p>
                     <p className="mt-3 text-xs text-muted-foreground">
                       {t('deleteConfirmation.archiveSessionsNotice', { count: pendingDeletion.sessionIds.length })}

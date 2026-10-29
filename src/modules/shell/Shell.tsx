@@ -33,6 +33,12 @@ type CliPromptOption = { number: string; label: string };
 type ShellProps = {
   selectedProject?: Project | null;
   selectedSession?: ProjectSession | null;
+  /**
+   * How the header and the resume prompt name `selectedSession`: project-workspace passes its title
+   * through sidebar's formatSessionTitle, so the server's placeholder names read in the interface
+   * language. Without it, getSessionTitle's.
+   */
+  sessionTitle?: string | null;
   initialCommand?: string | null;
   isPlainShell?: boolean;
   onProcessComplete?: ((exitCode: number) => void) | null;
@@ -82,6 +88,7 @@ const readShellModel = (stored: string | null): string | null => {
 export default function Shell({
   selectedProject = null,
   selectedSession = null,
+  sessionTitle = null,
   initialCommand = null,
   isPlainShell = false,
   onProcessComplete = null,
@@ -311,8 +318,8 @@ export default function Shell({
 
   // Null (not a label) when nothing is selected, which is what the header renders against.
   const sessionDisplayName = useMemo(
-    () => (selectedSession ? getSessionTitle(selectedSession) : null),
-    [selectedSession],
+    () => (selectedSession ? sessionTitle || getSessionTitle(selectedSession, t) : null),
+    [selectedSession, sessionTitle, t],
   );
   const sessionDisplayNameShort = useMemo(
     () => (sessionDisplayName ? sessionDisplayName.slice(0, 30) : null),

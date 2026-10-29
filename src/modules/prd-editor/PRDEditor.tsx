@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
 import type { Project,PrdEditorFile } from '@/shared/types';
+import { useBrowserFullscreen } from '@/shared/hooks/useBrowserFullscreen';
 import { usePrdDocument } from '@/modules/prd-editor/hooks/usePrdDocument';
 import { usePrdKeyboardShortcuts } from '@/modules/prd-editor/hooks/usePrdKeyboardShortcuts';
 import { usePrdRegistry } from '@/modules/prd-editor/hooks/usePrdRegistry';
@@ -32,6 +33,16 @@ export default function PRDEditor({
 }: PRDEditorProps) {
   const [showOverwriteConfirm, setShowOverwriteConfirm] = useState<boolean>(false);
   const [overwriteFileName, setOverwriteFileName] = useState<string>('');
+  // The editor's dialog, loading or loaded: a modal layer over the page, so the code editor docked
+  // behind it and the chat leave Escape to it.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Full screen: the editor fills the viewport and, where the browser allows it, the screen. Held
+  // here, beside the shortcuts, so Escape leaves it before it closes the editor.
+  const {
+    isMaximized: isFullscreen,
+    toggle: toggleFullscreen,
+    exit: exitFullscreen,
+  } = useBrowserFullscreen({ source: 'prdEditor' });
 
   const { content, setContent, fileName, setFileName, loading, loadError } = usePrdDocument({
     file,
@@ -102,16 +113,19 @@ export default function PRDEditor({
     onSave: () => {
       void handleSave();
     },
-    onClose,
+    // In full screen Escape first leaves it, as the browser's own Escape would; the next one closes.
+    onClose: isFullscreen ? exitFullscreen : onClose,
+    dialogRef,
   });
 
   if (loading) {
-    return <PrdEditorLoadingState />;
+    return <PrdEditorLoadingState dialogRef={dialogRef} />;
   }
 
   return (
     <>
       <PrdEditorWorkspace
+        dialogRef={dialogRef}
         content={content}
         onContentChange={setContent}
         fileName={fileName}
@@ -124,6 +138,8 @@ export default function PRDEditor({
         }}
         onDownload={handleDownload}
         onClose={onClose}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={toggleFullscreen}
         loadError={loadError}
       />
 

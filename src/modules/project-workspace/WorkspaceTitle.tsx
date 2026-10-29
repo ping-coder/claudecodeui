@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { LLMProviderLogo } from '@/shared/ui';
 import type { AppTab, Project, ProjectSession } from '@/shared/types';
 import { usePlugins } from '@/modules/plugins';
+import { formatSessionTitle } from '@/modules/sidebar';
 import { getSessionTitle } from '@/shared/utils';
 import { useSessionTitleRename } from '@/modules/project-workspace/hooks/useSessionTitleRename';
 
@@ -62,7 +63,10 @@ export default function WorkspaceTitle({
 
   const showSessionIcon = activeTab === 'chat' && Boolean(selectedSession);
   const showChatNewSession = activeTab === 'chat' && !selectedSession;
-  const sessionTitle = selectedSession ? getSessionTitle(selectedSession) : '';
+  // A rename starts from the title as stored (one without, from its placeholder in the interface
+  // language); the header shows the server's placeholder names ("Untitled Claude Session") in it too.
+  const sessionTitle = selectedSession ? getSessionTitle(selectedSession, t) : '';
+  const sessionLabel = formatSessionTitle(sessionTitle, t);
 
   const {
     isEditing: isRenaming,
@@ -110,11 +114,11 @@ export default function WorkspaceTitle({
               />
             ) : (
               <h2
-                title={t('mainContent.renameSessionHint', { title: sessionTitle })}
+                title={t('mainContent.renameSessionHint', { title: sessionLabel })}
                 onDoubleClick={startRenaming}
                 className="bidi-auto cursor-text truncate text-sm font-semibold leading-tight text-foreground"
               >
-                {sessionTitle}
+                {sessionLabel}
               </h2>
             )}
             <div className="truncate text-[11px] leading-tight text-muted-foreground">{selectedProject.displayName}</div>

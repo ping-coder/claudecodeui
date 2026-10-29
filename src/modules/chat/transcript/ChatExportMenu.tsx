@@ -45,7 +45,7 @@ export default function ChatExportMenu({
   createDiff,
   onLoadFullTranscript,
 }: ChatExportMenuProps) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   // Building a large transcript takes long enough to notice, and the download
   // only appears at the end — without this the button looks unresponsive.
   const [busyFormat, setBusyFormat] = useState<TranscriptExportFormat | null>(null);
@@ -64,6 +64,8 @@ export default function ChatExportMenu({
         provider,
         selectedProject,
         createDiff,
+        t,
+        language: i18n.language,
       });
     } catch (error) {
       console.error('Failed to export conversation:', error);

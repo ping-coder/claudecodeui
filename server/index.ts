@@ -15,7 +15,7 @@ import {
     initializeSessionsWatcher,
     providerRuntimeService,
 } from '@/modules/providers/index.js';
-import { chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
+import { chatRunRegistry, createWebSocketServer, holdsWorkPastTurn } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -99,8 +99,9 @@ const agentRoutes = createAgentModule({
 
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.
 // A completed run stays subscribable while its session's background work
-// (agents, workflows, backgrounded commands) is still reporting through it.
-chatRunRegistry.setRetentionGuard((sessionId) => providerRuntimeService.hasBackgroundWork(sessionId));
+// (agents, workflows, backgrounded commands) or scheduled work (a /loop's
+// wake-up, a cron job) is still reporting through it.
+chatRunRegistry.setRetentionGuard((sessionId) => holdsWorkPastTurn(providerRuntimeService, sessionId));
 // Run-end notifications collapse repeats of one run, not the session's next run: the registry names the run.
 setNotificationRunLookup((sessionId) => chatRunRegistry.getRun(sessionId));
 

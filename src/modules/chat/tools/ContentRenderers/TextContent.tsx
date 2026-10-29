@@ -42,9 +42,10 @@ export const TextContent: React.FC<TextContentProps> = ({
     );
   }
 
-  // Plain text
+  // Plain text: a tool's output (a search, a fetched page, an MCP tool's answer), laid out by its own
+  // first letter, as the assistant's reply is.
   return (
-    <div className={`mt-1 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 ${className}`}>
+    <div dir="auto" className={`mt-1 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 ${className}`}>
       {content}
     </div>
   );

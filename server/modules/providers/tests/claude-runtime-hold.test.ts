@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +21,7 @@ import {
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
+import { nextScheduledFire } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import {
   abortClaudeSDKSession,
   claudeRuntime,
@@ -292,9 +294,11 @@ const completes = (sent: NormalizedMessage[]) => sent.filter((message) => messag
 const listedTasks = () => listClaudeSDKBackgroundWork().map((entry) => [entry.sessionId, entry.tasks.map((task) => task.taskId)]);
 
 const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
 // The runtime's defaults; the tests run without the env overrides.
 const HOLD_IDLE_MS = 30 * MINUTE;
 const HOLD_MAX_MS = 12 * 60 * MINUTE;
+const SCHEDULE_HOLD_MAX_MS = 8 * 24 * HOUR;
 
 // Waits that keep working while `setTimeout` is mocked: the tests below mock
 // only `setTimeout`, so these lean on `setImmediate`.
@@ -1906,7 +1910,7 @@ test('through the runtime service, a held session reads running with its workflo
     script.emit(taskNotification('wf1', 'toolu_wf', 'completed'));
     script.emit(followUpResult());
     await waitUntil(() => script.released());
-    assert.deepEqual(service.describeSessionHold(sessionId), { processState: 'exiting', tasks: [] });
+    assert.deepEqual(service.describeSessionHold(sessionId), { processState: 'exiting', tasks: [], scheduled: [] });
 
     script.end();
     await run;
@@ -1934,13 +1938,505 @@ test('through the runtime service, letting go of a held session stops it like a 
     const release = service.releaseSession(sessionId);
     await flush();
     assert.deepEqual(script.calls, ['interrupt', 'stop:wf1', 'release']);
-    assert.deepEqual(service.describeSessionHold(sessionId), { processState: 'exiting', tasks: [] });
+    assert.deepEqual(service.describeSessionHold(sessionId), { processState: 'exiting', tasks: [], scheduled: [] });
     assert.equal(await settledNow(release), 'pending', 'the process has not exited yet');
 
     script.end();
     await run;
     await release;
     assert.equal(service.describeSessionHold(sessionId), null);
+  } finally {
+    script.end();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+// Scheduled work (CronCreate jobs, ScheduleWakeup wake-ups) is held as long
+// as it can still fire, up to its hold limit, whatever HOLD_IDLE and
+// HOLD_MAX say; work that never fires is dropped.
+
+/** A CronCreate and its result as CLI 2.1.312 writes them. */
+function cronCreated(script: Scripted, jobId: string, { cron, nextFireAt, recurring = true }: { cron: string; nextFireAt: number; recurring?: boolean }): void {
+  const id = `toolu_cron_${jobId}`;
+  script.emit(toolUse(id, 'CronCreate', { cron, prompt: 'check the deploy', recurring }));
+  script.emit(ack(id, `Scheduled ${recurring ? 'recurring job' : 'one-shot task'} ${jobId}. Session-only (not written to disk, dies when Claude exits).`, {
+    id: jobId, humanSchedule: 'Every day at 12:00 AM', recurring, durable: false, nextFireAt,
+  }));
+}
+
+/** CLI 2.1.312 fires a cron job and runs its turn, whose result names no prompt. */
+function cronFired(script: Scripted): void {
+  script.emit({ type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: randomUUID(), state: 'started', wakeup_source: 'schedule_wakeup' });
+  script.emit(init());
+  script.emit(assistantText('The deploy is healthy.'));
+  script.emit(result());
+}
+
+test('a /loop 1d job due 20 hours on keeps its process past HOLD_MAX until it fires, and nothing is reported finished', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    script.emit(init());
+    cronCreated(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR });
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(HOLD_MAX_MS + MINUTE);
+    await flush();
+    assert.equal(script.released(), false, 'HOLD_MAX finds no task to stop, and the job still holds the process');
+    t.mock.timers.tick(20 * HOUR - HOLD_MAX_MS - MINUTE);
+    cronFired(script);
+    await flush();
+    assert.equal(script.released(), false, 'it fires again tomorrow');
+    assert.deepEqual(script.calls, []);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+test('HOLD_MAX stops the tasks of a process that also holds a loop, and the loop keeps the process held', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    launchWorkflow(script);
+    cronCreated(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR });
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(HOLD_MAX_MS);
+    await flush();
+    assert.deepEqual(script.calls, ['stop:wf1'], 'the workflow is stopped, and stdin stays open');
+    script.emit(taskNotification('wf1', 'toolu_wf', 'stopped'));
+    await flush();
+    assert.equal(script.released(), false, 'the loop still holds the process');
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+test('a job whose next fire cannot be worked out keeps its process up to its hold limit, then lets it go without a word', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const created = Date.now();
+    script.emit(init());
+    // A time the CLI's defaults do not give: its scheduler runs with other settings.
+    cronCreated(script, 'b2148320', { cron: '*/5 * * * *', nextFireAt: created + 2 * MINUTE });
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(2 * MINUTE);
+    cronFired(script);
+    await flush();
+    t.mock.timers.tick(SCHEDULE_HOLD_MAX_MS - 2 * MINUTE - 1);
+    await flush();
+    assert.equal(script.released(), false, 'its next fire is unknown, so it is never missed');
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(script.released(), true);
+    assert.deepEqual(script.calls, ['release']);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+/** A recurring CronCreate and its result as CLI 2.1.165 (the SDK's own) writes them: no `nextFireAt`. */
+function cronCreatedWithoutTime(script: Scripted, jobId: string): void {
+  const id = `toolu_cron_${jobId}`;
+  script.emit(toolUse(id, 'CronCreate', { cron: '0 */5 * * *', prompt: 'check the deploy', recurring: true }));
+  script.emit(ack(id, `Scheduled recurring job ${jobId} (Every 5 hours). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.`, {
+    id: jobId, humanSchedule: 'Every 5 hours', recurring: true, durable: false,
+  }));
+}
+
+/** Such a CLI fires a job: a turn of its own, named (`schedule_wakeup`) or not. */
+function cronFiredWithoutTime(script: Scripted, named: boolean): void {
+  if (named) {
+    script.emit({ type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: randomUUID(), state: 'started', wakeup_source: 'schedule_wakeup' });
+  }
+  script.emit(init());
+  script.emit(assistantText('The deploy is healthy.'));
+  script.emit(result());
+}
+
+for (const named of [false, true]) {
+  test(`a recurring job whose result named no time is held as long as it fires (${named ? 'named' : 'unnamed'} fires), and let go HOLD_MAX after its last fire`, async (t) => {
+    await withRun(async ({ script, finishedReports }) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+      script.emit(init());
+      cronCreatedWithoutTime(script, '1a2b3c4d');
+      script.emit(result());
+      await flush();
+      // Three fires five hours apart: the last one 15 hours after the job was set up.
+      for (let fire = 1; fire <= 3; fire += 1) {
+        t.mock.timers.tick(5 * HOUR);
+        await flush();
+        assert.equal(script.released(), false, `before fire ${fire}`);
+        cronFiredWithoutTime(script, named);
+        await flush();
+      }
+      t.mock.timers.tick(HOLD_MAX_MS - 1);
+      await flush();
+      assert.equal(script.released(), false, 'held HOLD_MAX past its last fire');
+      t.mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(script.calls, ['release']);
+      assert.equal(finishedReports(), 0);
+    });
+  });
+}
+
+test('a recurring job whose result named no time and that keeps firing is let go once the schedule limit has passed since it was set up', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const created = Date.now();
+    script.emit(init());
+    cronCreatedWithoutTime(script, '1a2b3c4d');
+    script.emit(result());
+    await flush();
+    // Every five hours up to the 38th fire, 190 hours on; the limit is 192 hours.
+    for (let fire = 1; fire <= 38; fire += 1) {
+      t.mock.timers.tick(5 * HOUR);
+      await flush();
+      assert.equal(script.released(), false, `before fire ${fire}`);
+      cronFiredWithoutTime(script, false);
+      await flush();
+    }
+    t.mock.timers.tick(created + SCHEDULE_HOLD_MAX_MS - Date.now() - 1);
+    await flush();
+    assert.equal(script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.deepEqual(script.calls, ['release']);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+// A job whose result named no time is held HOLD_MAX past its creation and its
+// fires; the CLI fires nothing while it runs a turn, so a turn that keeps
+// talking holds it too, however long it runs.
+
+/** Thirteen hours of a turn that says something every ten minutes, on the main thread or in an agent. */
+async function talkForThirteenHours(t: import('node:test').TestContext, script: Scripted, parentToolUseId: string | null = null): Promise<void> {
+  for (let minutes = 10; minutes <= 13 * 60; minutes += 10) {
+    t.mock.timers.tick(10 * MINUTE);
+    script.emit(assistantText(`Still checking (${minutes} min)`, parentToolUseId));
+    await flush();
+  }
+}
+
+/** The process is let go HOLD_MAX after the turn that just ended, and not before. */
+async function assertLetGoHoldMaxLater(t: import('node:test').TestContext, script: Scripted): Promise<void> {
+  t.mock.timers.tick(HOLD_MAX_MS - 1);
+  await flush();
+  assert.equal(script.released(), false, 'held HOLD_MAX past the turn');
+  t.mock.timers.tick(1);
+  await flush();
+  assert.deepEqual(script.calls, ['release']);
+}
+
+for (const named of [false, true]) {
+  test(`a fire of a recurring job whose result named no time whose turn talks for thirteen hours is not cut off (${named ? 'named' : 'unnamed'} fire), and the job is held HOLD_MAX past it`, async (t) => {
+    await withRun(async ({ script, finishedReports }) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+      script.emit(init());
+      cronCreatedWithoutTime(script, '1a2b3c4d');
+      script.emit(result());
+      await flush();
+      t.mock.timers.tick(HOUR);
+      if (named) {
+        script.emit(cronFire());
+      }
+      script.emit(init());
+      await flush();
+      await talkForThirteenHours(t, script);
+      assert.equal(script.released(), false, 'past HOLD_MAX from the job\'s creation and from the fire, still talking');
+      script.emit(result());
+      await flush();
+      await assertLetGoHoldMaxLater(t, script);
+      assert.equal(finishedReports(), 0);
+    });
+  });
+}
+
+test('a fire of a job whose result named no time whose agent talks for thirteen hours is not cut off either', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    script.emit(init());
+    cronCreatedWithoutTime(script, '1a2b3c4d');
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(HOUR);
+    script.emit(init());
+    script.emit(toolUse('toolu_agent', 'Agent', { prompt: 'Find out why the deploy is slow', subagent_type: 'general-purpose' }));
+    await flush();
+    await talkForThirteenHours(t, script, 'toolu_agent');
+    assert.equal(script.released(), false);
+    script.emit(ack('toolu_agent', 'The cache was cold.', { status: 'completed' }));
+    script.emit(result());
+    await flush();
+    await assertLetGoHoldMaxLater(t, script);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+test('the turn that set up a job whose result named no time talking for thirteen hours leaves the job held HOLD_MAX past it', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    script.emit(init());
+    cronCreatedWithoutTime(script, '1a2b3c4d');
+    await flush();
+    await talkForThirteenHours(t, script);
+    script.emit(result());
+    await flush();
+    await assertLetGoHoldMaxLater(t, script);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+test('a job that never fires is dropped five minutes past its time, and its process let go without a word', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const nextFireAt = nextScheduledFire({ cron: '0 * * * *', recurring: true, id: '00000000', createdAt: Date.now() }) as number;
+    script.emit(init());
+    cronCreated(script, '00000000', { cron: '0 * * * *', nextFireAt });
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(nextFireAt + 5 * MINUTE - Date.now() - 1);
+    await flush();
+    assert.equal(script.released(), false);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(script.released(), true);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+// A turn the CLI runs on its own while the process is held can wait forever:
+// AskUserQuestion and ExitPlanMode wait for an answer with no timeout, and
+// nobody may be there to give one. Scheduled work fires only once the turn is
+// over, so HOLD_MAX gives up on a turn that has said nothing for that long.
+
+const ASK = { questions: [{ question: 'CI failed. Re-run it?', header: 'CI', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] }] };
+const cronFire = () => ({ type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: randomUUID(), state: 'started', wakeup_source: 'schedule_wakeup' });
+
+/** Sets up `kind` of scheduled work, ends the turn, and returns when it fires and what its fire looks like. */
+function setUpScheduledWork(script: Scripted, kind: 'loop' | 'reminder' | 'wakeup'): { fireAt: number; fire: Record<string, unknown> } {
+  script.emit(init());
+  if (kind === 'wakeup') {
+    const scheduledFor = Math.ceil((Date.now() + 10 * MINUTE) / MINUTE) * MINUTE;
+    script.emit(toolUse('toolu_wakeup', 'ScheduleWakeup', { delaySeconds: 600, prompt: '/loop check CI', reason: 'polling' }));
+    script.emit(ack('toolu_wakeup', 'Next wakeup scheduled (in 600s).', { scheduledFor, clampedDelaySeconds: 600, wasClamped: false }));
+    script.emit(result());
+    return { fireAt: scheduledFor, fire: { ...cronFire(), wakeup_source: 'loop_wakeup', scheduled_for: scheduledFor } };
+  }
+  const due = new Date(Date.now() + 2 * HOUR);
+  const cron = kind === 'loop' ? '*/5 * * * *' : `${due.getMinutes()} ${due.getHours()} ${due.getDate()} ${due.getMonth() + 1} *`;
+  const recurring = kind === 'loop';
+  const nextFireAt = nextScheduledFire({ cron, recurring, id: 'b2148320', createdAt: Date.now() }) as number;
+  cronCreated(script, 'b2148320', { cron, nextFireAt, recurring });
+  script.emit(result());
+  return { fireAt: nextFireAt, fire: cronFire() };
+}
+
+for (const kind of ['loop', 'reminder', 'wakeup'] as const) {
+  test(`a ${kind}'s fire whose turn asks something and then says nothing for HOLD_MAX lets the process go, without a word`, async (t) => {
+    await withRun(async ({ script, finishedReports }) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+      const { fireAt, fire } = setUpScheduledWork(script, kind);
+      await flush();
+      t.mock.timers.tick(fireAt - Date.now() + 500);
+      script.emit(fire);
+      script.emit(init());
+      if (kind === 'loop') {
+        script.emit(toolUse('toolu_bg', 'Bash', { command: 'npm run build', run_in_background: true }));
+        script.emit(taskStarted('bg1', 'toolu_bg', 'local_bash'));
+        script.emit(ack('toolu_bg', 'Command running in background with ID: bg1', { backgroundTaskId: 'bg1' }));
+      }
+      script.emit(toolUse('toolu_ask', 'AskUserQuestion', ASK));
+      await flush();
+      t.mock.timers.tick(HOLD_MAX_MS - MINUTE);
+      await flush();
+      assert.equal(script.released(), false, 'not silent for HOLD_MAX yet');
+      t.mock.timers.tick(MINUTE);
+      await flush();
+      assert.deepEqual(script.calls, kind === 'loop' ? ['stop:bg1', 'release'] : ['release'], 'what is outstanding is stopped while stdin is open, then the CLI is let go');
+      assert.equal(finishedReports(), 0);
+    });
+  });
+}
+
+test('a /loop 1d job whose fire comes after HOLD_MAX has passed is let go HOLD_MAX after its turn falls silent', async (t) => {
+  await withRun(async ({ script }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    script.emit(init());
+    cronCreated(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR });
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(HOLD_MAX_MS + MINUTE);
+    await flush();
+    assert.equal(script.released(), false, 'HOLD_MAX found the job still to fire');
+    t.mock.timers.tick(20 * HOUR - HOLD_MAX_MS - MINUTE);
+    script.emit(cronFire());
+    script.emit(init());
+    script.emit(assistantText('CI failed again.'));
+    script.emit(toolUse('toolu_ask', 'AskUserQuestion', ASK));
+    await flush();
+    t.mock.timers.tick(HOLD_MAX_MS - MINUTE);
+    await flush();
+    assert.equal(script.released(), false);
+    t.mock.timers.tick(MINUTE);
+    await flush();
+    assert.equal(script.released(), true);
+  });
+});
+
+test('a fire\'s turn whose agent talks for two hours and then goes silent is let go HOLD_MAX after the agent last spoke', async (t) => {
+  await withRun(async ({ script }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const { fireAt, fire } = setUpScheduledWork(script, 'loop');
+    await flush();
+    t.mock.timers.tick(fireAt - Date.now() + 500);
+    script.emit(fire);
+    script.emit(init());
+    script.emit(toolUse('toolu_agent', 'Agent', { prompt: 'Find out why CI fails', subagent_type: 'general-purpose' }));
+    await flush();
+    for (let minutes = 10; minutes <= 120; minutes += 10) {
+      t.mock.timers.tick(10 * MINUTE);
+      script.emit(assistantText(`Still digging (${minutes} min)`, 'toolu_agent'));
+      await flush();
+    }
+    // Ten minutes at a time: a mocked tick runs every timer it passes at
+    // the time it ends, which would put the hold's later looks off schedule.
+    for (let step = 0; step < HOLD_MAX_MS / (10 * MINUTE) - 1; step += 1) {
+      t.mock.timers.tick(10 * MINUTE);
+      await flush();
+    }
+    assert.equal(script.released(), false, 'the agent spoke less than HOLD_MAX ago');
+    t.mock.timers.tick(10 * MINUTE);
+    await flush();
+    assert.equal(script.released(), true, 'not left to the next HOLD_MAX of the main thread');
+  });
+});
+
+test('a fire\'s turn whose agent keeps talking for fourteen hours is not let go, and the loop goes on after it', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const { fireAt, fire } = setUpScheduledWork(script, 'loop');
+    await flush();
+    t.mock.timers.tick(fireAt - Date.now() + 500);
+    script.emit(fire);
+    script.emit(init());
+    script.emit(toolUse('toolu_agent', 'Agent', { prompt: 'Bisect the failure', subagent_type: 'general-purpose' }));
+    await flush();
+    for (let minutes = 10; minutes <= 14 * 60; minutes += 10) {
+      t.mock.timers.tick(10 * MINUTE);
+      script.emit(assistantText(`Bisecting (${minutes} min)`, 'toolu_agent'));
+      await flush();
+    }
+    assert.equal(script.released(), false, 'a turn whose agent keeps talking is busy, not stuck');
+    script.emit(ack('toolu_agent', 'The failure came in with the last merge.', { status: 'completed' }));
+    script.emit(result());
+    await flush();
+    // The job was due long ago: the CLI fires it on its next tick.
+    t.mock.timers.tick(1000);
+    await runLoopFires(t, script, 1);
+    assert.equal(loopNextFireAt() > Date.now(), true, 'its next fire is still to come');
+    assert.equal(script.released(), false);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+test('a question answered eleven hours on ends the fire\'s turn, and the loop goes on past HOLD_MAX from the question', async (t) => {
+  await withRun(async ({ script, finishedReports }) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    const { fireAt, fire } = setUpScheduledWork(script, 'loop');
+    await flush();
+    t.mock.timers.tick(fireAt - Date.now() + 500);
+    script.emit(fire);
+    script.emit(init());
+    script.emit(toolUse('toolu_ask', 'AskUserQuestion', ASK));
+    await flush();
+    const askedAt = Date.now();
+    t.mock.timers.tick(11 * HOUR);
+    script.emit(ack('toolu_ask', 'User answered: Yes', {}));
+    script.emit(assistantText('Re-ran CI.'));
+    script.emit(result());
+    await flush();
+    t.mock.timers.tick(1000);
+    // The overdue fire, then one every five minutes for a little over an hour.
+    await runLoopFires(t, script, 15);
+    assert.equal(Date.now() - askedAt > HOLD_MAX_MS, true);
+    assert.equal(script.released(), false, 'the turn ended: the loop holds the process as before');
+    assert.equal(loopNextFireAt() > Date.now(), true);
+    assert.equal(finishedReports(), 0);
+  });
+});
+
+/** When the loop of withRun's session fires next. */
+function loopNextFireAt(): number {
+  return claudeRuntime.listScheduledWork().find((entry) => entry.sessionId === SESSION_ID)?.scheduled[0]?.nextFireAt ?? Number.NaN;
+}
+
+/** The CLI fires the loop `count` times, each at its time (at once when that has passed), each a turn of its own. */
+async function runLoopFires(t: import('node:test').TestContext, script: Scripted, count: number): Promise<void> {
+  for (let fire = 0; fire < count; fire += 1) {
+    t.mock.timers.tick(Math.max(0, loopNextFireAt() - Date.now()) + 500);
+    script.emit(cronFire());
+    script.emit(init());
+    script.emit(assistantText('CI is green.'));
+    script.emit(result());
+    await flush();
+  }
+}
+
+test('through the runtime service, a session held only for a loop has scheduled work but no background work, and its hold lists the loop', async () => {
+  const sessionId = 'app-hold-service-loop';
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const { createQuery, script } = createScriptedQuery();
+  const { writer } = createWriter();
+  const service = createProviderRuntimeService({ listProviders: () => [{ id: 'claude', runtime: claudeRuntime }] as never });
+
+  try {
+    const run = queryClaudeSDK('loop it', { sessionId, cwd }, writer as never, { ...createContext(), createQuery });
+    await waitUntil(() => script.created());
+    script.emit(init());
+    cronCreated(script, 'b2148320', { cron: '0 0 * * *', nextFireAt: Date.now() + 20 * HOUR });
+    script.emit(result());
+    await waitUntil(() => service.hasScheduledWork(sessionId));
+
+    assert.equal(service.hasBackgroundWork(sessionId), false, 'a loop is no task');
+    assert.deepEqual(service.listScheduledWork(sessionId).map((item) => item.id), ['cron:b2148320']);
+    const held = service.describeSessionHold(sessionId);
+    assert.deepEqual([held?.processState, held?.tasks.length, held?.scheduled?.map((item) => item.id)], ['running', 0, ['cron:b2148320']]);
+
+    script.end();
+    await run;
+    assert.equal(service.hasScheduledWork(sessionId), false);
+    assert.equal(service.describeSessionHold(sessionId), null);
+  } finally {
+    script.end();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('through the runtime service, a turn whose only scheduled work is due past its hold limit completes with none held, and lets its process go', async () => {
+  const sessionId = 'app-hold-service-far';
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const { createQuery, script } = createScriptedQuery();
+  const { writer } = createWriter();
+  const service = createProviderRuntimeService({ listProviders: () => [{ id: 'claude', runtime: claudeRuntime }] as never });
+  // What the chat run registry reads for the turn's run_ended as it completes.
+  let atComplete: unknown = null;
+  const send = writer.send;
+  writer.send = (message) => {
+    if (message.kind === 'complete') {
+      atComplete = [service.hasScheduledWork(sessionId), service.listScheduledWork(sessionId).map((item) => item.id)];
+    }
+    send(message);
+  };
+
+  try {
+    const run = queryClaudeSDK('remind me on the first of the month', { sessionId, cwd }, writer as never, { ...createContext(), createQuery });
+    await waitUntil(() => script.created());
+    script.emit(init());
+    cronCreated(script, 'c0ffee00', { cron: '0 9 1 * *', nextFireAt: Date.now() + 20 * 24 * HOUR });
+    script.emit(result());
+    await waitUntil(() => script.released());
+    assert.deepEqual(atComplete, [false, ['cron:c0ffee00']], 'listed, but holding nothing');
+    script.end();
+    await run;
   } finally {
     script.end();
     await rm(cwd, { recursive: true, force: true });

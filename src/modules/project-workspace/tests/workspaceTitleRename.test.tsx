@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import type * as ReactI18next from 'react-i18next';
 import { beforeEach, test, vi } from 'vitest';
 
 import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
@@ -14,7 +15,9 @@ import type { Project, ProjectSession } from '@/shared/types';
  * input is an Escape layer: Escape cancels the edit without stopping the run.
  */
 
-vi.mock('react-i18next', () => ({
+// The rest of react-i18next stays real: the title imports the sidebar's entry, whose modules set up i18n.
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...(await importOriginal<typeof ReactI18next>()),
   useTranslation: () => ({
     t: (key: string, options?: { title?: string }) => (
       key === 'mainContent.renameSessionHint' && options?.title

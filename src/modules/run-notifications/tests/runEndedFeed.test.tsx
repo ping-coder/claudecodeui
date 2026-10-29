@@ -4,7 +4,7 @@ import { act, render } from '@testing-library/react';
 import { useLayoutEffect } from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import { useRunEndedFeed } from '@/modules/run-notifications/hooks/useRunEndedFeed';
 import {
   SessionProtectionProvider,
@@ -278,6 +278,33 @@ test('finished background work clears the session\'s background entry, but not a
   assert.equal(activity.map.has('session-b'), true);
 });
 
+test('finished background work clears the scheduled work the entry lists too: the loops ended with it', async () => {
+  await renderFeed();
+  const loop = {
+    id: 'cron:b2148320',
+    kind: 'cron' as const,
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: 1,
+    nextFireAt: 300_001,
+    recurring: true,
+    holdUntil: 691_200_001,
+  };
+  act(() => {
+    activity.actions?.markSessionBackground('session-a', [], [loop]);
+    activity.actions?.markSessionBackground('session-b', [
+      { taskId: 'w1', toolUseId: 'toolu_1', taskType: 'local_workflow', description: 'Audit', startedAt: 1 },
+    ], [loop]);
+  });
+  assert.equal(activity.map.get('session-a')?.background, true);
+
+  dispatch(runEnd({ sessionId: 'session-a', outcome: 'backgroundDone' }));
+  dispatch(runEnd({ sessionId: 'session-b', outcome: 'backgroundDone' }));
+
+  assert.equal(activity.map.has('session-a'), false);
+  assert.equal(activity.map.has('session-b'), false);
+});
+
 test('ends listed on mount raise nothing; ones missed during a drop come as catch-up alerts after the reconnect', async () => {
   page.runEndsReplies.push([runEnd()]);
   await renderFeed();
@@ -342,4 +369,26 @@ test('names fall back from the workspace label to the server\'s session name to 
     { title: 'Server name C', projectName: null },
     { title: 'Untitled session', projectName: null },
   ]);
+});
+
+test('a session the workspace does not know reads by the server\'s placeholder name in the interface language', async () => {
+  await renderFeed();
+  await act(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+  try {
+    dispatch(runEnd({ sessionId: 'session-a', outcome: 'failed', sessionName: 'Untitled Claude Session' }));
+    dispatch(runEnd({ sessionId: 'session-b', sessionName: 'Untitled Session' }));
+    dispatch(runEnd({ sessionId: 'session-c', sessionName: 'New Session' }));
+    dispatch(runEnd({ sessionId: 'session-e', sessionName: 'Fix login bug' }));
+    assert.deepEqual(alerts.map(({ title }) => title), ['未命名的 Claude 会话', '未命名会话', '新会话', 'Fix login bug']);
+  } finally {
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+  }
+
+  // English reads as the server wrote it.
+  dispatch(runEnd({ sessionId: 'session-d', sessionName: 'Untitled Claude Session' }));
+  assert.equal(alerts.at(-1)?.title, 'Untitled Claude Session');
 });

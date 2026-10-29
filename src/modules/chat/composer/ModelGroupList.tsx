@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 
 import type { LLMProvider, ProviderModelOption } from "@/shared/types";
 import { Badge, CommandGroup, CommandItem, LLMProviderLogo } from "@/shared/ui";
+import { describeModelDescription, describeModelOption } from "@/modules/chat/utils/catalogLabels";
 
 /**
  * One branch of the model picker.
@@ -49,6 +51,7 @@ export default function ModelGroupList({
   onSelect,
   loadingLabel,
 }: ModelGroupListProps) {
+  const { t } = useTranslation("chat");
   const [collapsedKeys, setCollapsedKeys] = useState<string[]>(readCollapsed);
   const collapsed = useMemo(() => new Set(collapsedKeys), [collapsedKeys]);
 
@@ -119,25 +122,28 @@ export default function ModelGroupList({
                 onSelect={() => toggle(group.key)}
                 className="ms-4 border-s border-border/40 ps-4 text-[11px] text-muted-foreground"
               >
-                {group.models.length} hidden — click to show
+                {t("providerSelection.hiddenModels", { count: group.models.length })}
               </CommandItem>
             ) : null}
 
             {!isCollapsed && group.models.map((model) => {
               const isSelected = provider === group.provider && currentModel === model.value;
+              const label = describeModelOption(model, t);
+              const description = describeModelDescription(model, t);
 
               return (
                 <CommandItem
                   key={`${group.key}-${model.value}`}
-                  value={`${group.name} ${model.label} ${model.description || ""}`}
+                  // The shown name and description, and the catalog's own, so a search finds the model by any of them.
+                  value={`${group.name} ${label === model.label ? label : `${label} ${model.label}`} ${description === model.description ? description || "" : `${description} ${model.description}`}`}
                   onSelect={() => onSelect(group.provider, model.value)}
                   className="ms-4 border-s border-border/40 ps-4"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate">{model.label}</span>
+                      <span className="truncate">{label}</span>
                       {model.isCustom && (
-                        <Badge className="h-4 shrink-0 rounded-full px-1.5 text-[8px]">Custom</Badge>
+                        <Badge className="h-4 shrink-0 rounded-full px-1.5 text-[8px]">{t("modelLibrary.customBadge")}</Badge>
                       )}
                     </div>
                     {model.label !== model.value && (

@@ -14,6 +14,7 @@ import type {
   ActivityDetailsWorkflow,
   BackgroundTaskSummary,
   ChatMessage,
+  ScheduledWorkSummary,
   SessionActivity,
   WorkflowAgentProgress,
 } from '@/shared/types';
@@ -599,6 +600,8 @@ describe('a workflow\'s run time in the panel', () => {
     hiddenWorkflowCount: 0,
     checklist: null,
     tasks: [],
+    scheduled: [],
+    nowMs: NOW,
   });
 
   const workflowSection = () => screen.getByText('frontend-architecture-audit').closest('section')!;
@@ -622,6 +625,61 @@ describe('a workflow\'s run time in the panel', () => {
     render(<ActivityDetailsPanel id="details" details={listing({ status: 'running', elapsedMs: 95_600 })} />);
 
     expect(workflowSection().textContent).toContain('2/2 agents· 100%· 1m 35s');
+  });
+});
+
+describe('the scheduled work in the panel', () => {
+  const loop: ScheduledWorkSummary = {
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: LAUNCH,
+    nextFireAt: NOW + 5 * 60_000,
+    recurring: true,
+    holdUntil: NOW + 8 * 86_400_000,
+    cron: '*/5 * * * *',
+  };
+  const reminder: ScheduledWorkSummary = { ...loop, id: 'cron:7b7cd8fc', prompt: 'stretch', recurring: false, cron: '30 10 26 10 *', nextFireAt: NOW - 1_000 };
+  const clock = (time: number) => new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit' }).format(new Date(time));
+
+  it('lists each loop and reminder with how often and when it runs next, and no time spent', () => {
+    render(
+      <ActivityDetailsPanel
+        id="details"
+        details={{
+          run: { statusText: null, elapsedMs: 360_000, isBackground: true, isCliDriven: false },
+          workflows: [],
+          hiddenWorkflowCount: 0,
+          checklist: null,
+          tasks: [],
+          scheduled: [loop, reminder],
+          nowMs: NOW,
+        }}
+      />,
+    );
+
+    const section = screen.getByText('Loops and reminders').closest('section');
+    expect(section?.querySelectorAll('li').length).toBe(2);
+    expect([...(section?.querySelectorAll('li') ?? [])].map((item) => item.textContent)).toEqual([
+      `Loop check CIEvery 5 minutes · Next: ${clock(NOW + 5 * 60_000)}`,
+      'Reminder stretchDue now',
+    ]);
+    expect(screen.queryAllByText(/^No detailed progress yet/).length).toBe(0);
+  });
+
+  it('is not empty for a session that only holds a loop', () => {
+    render(
+      <IndicatorHarness
+        messages={[userTurn]}
+        activity={{ statusText: null, canInterrupt: false, startedAt: LAUNCH, background: true, tasks: [], scheduled: [loop] }}
+      />,
+    );
+    const opened = openPanel();
+
+    expect(within(opened).queryAllByText('Loops and reminders').length).toBe(1);
+    expect(within(opened).queryAllByText('Loop check CI').length).toBe(1);
+    expect(within(opened).queryAllByText(/^No detailed progress yet/).length).toBe(0);
   });
 });
 

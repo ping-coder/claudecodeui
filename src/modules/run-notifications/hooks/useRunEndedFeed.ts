@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { readSeenRunAlertKeys } from '@/modules/run-notifications/utils/runAlertCoordination';
+import { formatSessionTitle } from '@/modules/sidebar';
 import { api } from '@/shared/api';
 import { useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
@@ -23,7 +24,7 @@ type RunEnd = {
   outcome: 'done' | 'failed' | 'aborted' | 'backgroundDone';
   /** 'done' or 'aborted': the turn ended with background work still running (an aborted one was stopped alone). */
   backgroundWork: boolean;
-  /** The session's custom name on the server, for a session this tab has not loaded. */
+  /** The session's custom name on the server, for a session this tab has not loaded; its placeholder names ("Untitled Claude Session") are shown through formatSessionTitle. */
   sessionName: string | null;
 };
 
@@ -143,14 +144,16 @@ export function useRunEndedFeed({ resolveSessionLabel, onAlert }: UseRunEndedFee
     };
 
     const toAlert = (end: RunEnd, alertKey: string, outcome: RunAlertOutcome, isCatchUp: boolean): RunAlert => {
-      const label = latestRef.current.resolveSessionLabel(end.sessionId);
+      const { resolveSessionLabel: resolveLabel, t: translate } = latestRef.current;
+      const label = resolveLabel(end.sessionId);
       return {
         key: alertKey,
         sessionId: end.sessionId,
         outcome,
+        // The server's name for a session the workspace does not know reads as the sidebar would show it.
         title: label?.title
-          || end.sessionName
-          || latestRef.current.t('runNotifications.untitledSession', { defaultValue: 'Untitled session' }),
+          || (end.sessionName ? formatSessionTitle(end.sessionName, translate) : '')
+          || translate('runNotifications.untitledSession', { defaultValue: 'Untitled session' }),
         projectName: label?.projectName ?? null,
         provider: end.provider,
         receivedAt: Date.now(),
@@ -159,16 +162,17 @@ export function useRunEndedFeed({ resolveSessionLabel, onAlert }: UseRunEndedFee
     };
 
     // A finished turn has no response in flight (a background-only entry is left alone); finished background
-    // work clears the session's purple entry, but never a new turn the session has started since. A turn that
-    // left background work running, finished or stopped alone, keeps the tasks its entry lists as background
-    // work until the running-sessions poll. markSessionIdle decides that against the map as it is, not as last
-    // rendered: in a tab that follows the run, the chat has just settled the entry from the run's `complete`.
+    // work clears the session's purple entry, its scheduled work included (the loops ended with it), but never a
+    // new turn the session has started since. A turn that left background work running, finished or stopped
+    // alone, keeps the tasks and scheduled work its entry lists as background work until the running-sessions
+    // poll. markSessionIdle decides that against the map as it is, not as last rendered: in a tab that follows
+    // the run, the chat has just settled the entry from the run's `complete`.
     const syncActivity = (end: RunEnd) => {
       const { markSessionIdle: markIdle, markSessionBackground: markBackground, getSessionActivity: readActivity } = latestRef.current;
       if (end.outcome !== 'backgroundDone') {
         markIdle(end.sessionId, { backgroundWorkGoesOn: end.backgroundWork });
       } else if (readActivity(end.sessionId)?.background) {
-        markBackground(end.sessionId, []);
+        markBackground(end.sessionId, [], []);
       }
     };
 

@@ -6,6 +6,7 @@ import test, { mock } from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import { holdsWorkPastTurn } from '@/modules/websocket/services/chat-websocket.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 
 /**
@@ -277,6 +278,77 @@ test('a refreshed tab stops receiving once its old socket is closed', async () =
   });
 });
 
+test('the run that takes over a held process gets every open socket that watched it, once each, and hears them from its first frame', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-audience', 'claude', '/workspace/demo');
+    const start = (connection: FakeConnection | null) => chatRunRegistry.startRun({
+      appSessionId: 'app-audience',
+      provider: 'claude',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    const sender = new FakeConnection();
+    const otherTab = new FakeConnection();
+    const closedTab = new FakeConnection();
+
+    // The turn that set up a /loop, from the sender's tab; two more tabs
+    // subscribed while its process was held for the loop.
+    const loopRun = start(sender);
+    assert.ok(loopRun);
+    assert.equal(chatRunRegistry.attachConnection('app-audience', otherTab), true);
+    assert.equal(chatRunRegistry.attachConnection('app-audience', closedTab), true);
+    loopRun.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    closedTab.readyState = 3;
+    const heardBefore = (connection: FakeConnection) => connection.frames.length;
+    const marks = new Map([sender, otherTab, closedTab].map((connection) => [connection, heardBefore(connection)]));
+    const heardSince = (connection: FakeConnection) => connection.frames
+      .slice(marks.get(connection))
+      .map((frame) => `${String(frame.kind)}#${String(frame.seq)}`);
+
+    // A detached turn (a stop's cancelling turn, a due message) goes into that
+    // process; the sender's tab had subscribed to it as well.
+    const handedRun = start(null);
+    assert.ok(handedRun);
+    assert.equal(chatRunRegistry.attachConnection('app-audience', sender), true);
+    loopRun.writer.reportProcessHandedOver();
+    handedRun.writer.send({ kind: 'text', provider: 'claude', sessionId: 'native', content: 'Cancelled job aaaaaaaa.' });
+    handedRun.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    // The other loop's next firing asks for a tool, through the process's writer.
+    handedRun.writer.send({ kind: 'permission_request', provider: 'claude', sessionId: 'native', requestId: 'req-1', toolName: 'Bash' });
+
+    const expected = ['text#1', 'complete#2', 'permission_request#3'];
+    assert.deepEqual(heardSince(sender), expected, 'once, though it watches both runs');
+    assert.deepEqual(heardSince(otherTab), expected);
+    assert.deepEqual(heardSince(closedTab), []);
+  });
+});
+
+test('a run that takes over no process hears none of the previous run\'s sockets, and a hand-over with no other run in the slot moves nothing', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-no-audience', 'claude', '/workspace/demo');
+    const start = (connection: FakeConnection | null) => chatRunRegistry.startRun({
+      appSessionId: 'app-no-audience',
+      provider: 'claude',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    const sender = new FakeConnection();
+    const loopRun = start(sender);
+    assert.ok(loopRun);
+    loopRun.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+    loopRun.writer.reportProcessHandedOver();
+
+    // The next turn starts a process of its own: its run is nobody's to watch yet.
+    const ownRun = start(null);
+    assert.ok(ownRun);
+    ownRun.writer.send({ kind: 'text', provider: 'claude', sessionId: 'native', content: 'a new process' });
+
+    assert.deepEqual(sender.frames.map((frame) => String(frame.kind)), ['complete']);
+  });
+});
+
 test('startRun rejects a second concurrent run for the same session', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-6', 'opencode', '/workspace/demo');
@@ -532,6 +604,66 @@ test('an aborted complete tells the run\'s listeners the session\'s background w
       chatRunRegistry.setRetentionGuard(() => false);
     }
   });
+});
+
+test('with the composition root\'s guard, scheduled work alone keeps a completed run registered, and the turn\'s end says work goes on', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    await withIsolatedDatabase(async () => {
+      // A /loop holds each session's process: no task is outstanding.
+      let loopsHeld = true;
+      const runtime = {
+        hasBackgroundWork: () => false,
+        hasScheduledWork: (sessionId: string) => loopsHeld && sessionId.startsWith('app-loop-'),
+      };
+      chatRunRegistry.setRetentionGuard((sessionId) => holdsWorkPastTurn(runtime, sessionId));
+      try {
+        const tab = connectTab();
+        const completeOf = (sessionId: string, complete: Record<string, unknown>) => {
+          sessionsDb.createAppSession(sessionId, 'claude', '/workspace/demo');
+          const listener = new FakeConnection();
+          const run = chatRunRegistry.startRun({
+            appSessionId: sessionId,
+            provider: 'claude',
+            providerSessionId: null,
+            connection: listener,
+            userId: null,
+          });
+          assert.ok(run);
+          run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', ...complete });
+          return listener.frames.find((frame) => frame.kind === 'complete');
+        };
+
+        // The turn that set the loop up, and a turn handed to its process and stopped alone.
+        completeOf('app-loop-set-up', { exitCode: 0, success: true });
+        const stopped = completeOf('app-loop-stopped', { exitCode: 0, success: false, aborted: true });
+        completeOf('app-plain', { exitCode: 0, success: true });
+        await flushMicrotasks();
+
+        assert.deepEqual(
+          runEndedFrames(tab).map((frame) => [frame.sessionId, frame.outcome, frame.backgroundWork]),
+          [
+            ['app-loop-set-up', 'done', true],
+            ['app-loop-stopped', 'aborted', true],
+            ['app-plain', 'done', false],
+          ],
+        );
+        assert.equal(stopped?.backgroundWork, true);
+
+        mock.timers.tick(5 * 60 * 1000);
+        assert.ok(chatRunRegistry.getRun('app-loop-set-up'), 'the run outlives the retention window while the loop is held');
+        assert.equal(chatRunRegistry.getRun('app-plain'), undefined);
+
+        loopsHeld = false;
+        mock.timers.tick(5 * 60 * 1000);
+        assert.equal(chatRunRegistry.getRun('app-loop-set-up'), undefined, 'once the loop has stopped the run is evicted');
+      } finally {
+        chatRunRegistry.setRetentionGuard(() => false);
+      }
+    });
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test('the background work a completed run left behind ends as backgroundDone of that run', async () => {

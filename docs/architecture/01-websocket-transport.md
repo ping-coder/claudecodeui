@@ -185,13 +185,14 @@ throws is answered with `INTERNAL_ERROR`.**
 | `chat.send` | `sessionId`, `content`, `options` | Resolves the session row, registers the run, dispatches to the provider runtime (`:146-158`). On a session whose previous turn left background work running, the new turn's CLI process supersedes the one that work runs under, so the work is stopped or finishes unheard; the composer asks the user before sending such a turn |
 | `chat.edit-send` | as above plus `anchorId` | Announces `history_truncated`, rewinds or resumes the provider transcript at the anchor, then dispatches (`:314-408`) |
 | `chat.abort` | `sessionId` | Aborts the runtime and emits the terminal `complete` on its behalf (`:415-438`) |
-| `chat.stop-task` | `sessionId`, `taskId` | Stops one background task (agent, workflow or backgrounded command) through the provider runtime; the runtime reports the stop on the session's stream |
-| `chat.subscribe` | `sessions: [{ sessionId, lastSeq }]` | Acks with `chat_subscribed`, attaches this socket to a running run — or to a completed one whose session still has background work — and replays what was missed for running runs (`:448-504`) |
+| `chat.stop-task` | `sessionId`, `taskId`, `allScheduled?`, `clientRequestId?` | Stops one background task (agent, workflow or backgrounded command) through the provider runtime; the runtime reports the stop on the session's stream. A `cron:` or `wakeup:` taskId names a /loop's scheduled work instead (`allScheduled` stops all of the session's): the runtime lets go of its process or a detached turn has the model cancel it, with the asking socket attached, and each step comes back to the asking socket as `stop_task_status`, carrying the stop's `clientRequestId` |
+| `chat.subscribe` | `sessions: [{ sessionId, lastSeq }]` | Acks with `chat_subscribed`, attaches this socket to a running run — or to a completed one whose session still has background or scheduled work — and replays what was missed for running runs (`:448-504`) |
 | `chat.permission-response` | `requestId`, `allow`, `updatedInput?`, `message?`, `rememberEntry?` | Resolves one pending tool approval (`:511-522`) |
 
-All six are built in exactly three client files: the composer builds sends, aborts and
+All six are built in exactly five client files: the composer builds sends, aborts and
 permission answers (`useChatComposerState.ts:825-837`, `:1121-1124`, `:1149-1156`),
-`chat.stop-task` is built by the background-tasks strip's ✕ (`BackgroundTasksStrip.tsx`), and
+`chat.stop-task` is built by the background-tasks strip's ✕ (`BackgroundTasksStrip.tsx`, and
+`ScheduledWorkChips.tsx` for scheduled work, which reads its `stop_task_status` answers), and
 `chat.subscribe` is built in `useChatSessionState.ts:668-674` and
 `ChatInterface.tsx:267-273`.
 
@@ -415,6 +416,11 @@ A run started with `connection: null` — a scheduled message firing with no bro
 (`chat-run-registry.service.ts:171-177`, `runDetachedChatTurn` at
 `chat-websocket.service.ts:550-581`) — still records everything into the buffer, so whoever
 subscribes later replays it from `seq` 1.
+
+When such a turn goes into the process an earlier run left held for background work, the
+runtime writes through the new run's writer from then on, the work's later events included.
+The earlier run's `onProcessHandedOver` hands its open sockets to the new writer
+(`adoptAudienceOf`), so the tabs that watched the process keep hearing it.
 
 ## Drop, reconnect, replay
 

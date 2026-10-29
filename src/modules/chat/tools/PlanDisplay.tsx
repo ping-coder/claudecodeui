@@ -76,7 +76,7 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
           </div>
           <CollapsibleTrigger className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
             <ChevronsUpDown className="h-4 w-4" />
-            <span className="sr-only">Toggle plan</span>
+            <span className="sr-only">{t('chat:plan.toggle')}</span>
           </CollapsibleTrigger>
         </CardHeader>
 
@@ -90,7 +90,7 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
               />
             ) : isStreaming ? (
               <div className="py-2">
-                <Shimmer>Generating plan...</Shimmer>
+                <Shimmer>{t('chat:plan.generating')}</Shimmer>
               </div>
             ) : null}
 
@@ -105,7 +105,7 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  raw params
+                  {t('chat:tools.rawParams')}
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                   <pre className="mt-1 overflow-hidden whitespace-pre-wrap break-words rounded border border-border/40 bg-muted p-2 font-mono text-[11px] text-muted-foreground">
@@ -126,13 +126,11 @@ export const PlanDisplay: React.FC<PlanDisplayProps> = ({
               onClick={handleRevise}
               className="text-muted-foreground"
             >
-              Revise
+              {t('chat:plan.revise')}
             </Button>
+            {/* No shortcut hint: no key builds the plan (Ctrl/Cmd+Enter in the composer sends a message). */}
             <Button size="sm" onClick={handleBuild}>
-              Build{' '}
-              <kbd className="ms-1 rounded bg-primary-foreground/20 px-1 py-0.5 font-mono text-[10px]">
-                ⌘↩
-              </kbd>
+              {t('chat:plan.build')}
             </Button>
           </CardFooter>
         )}

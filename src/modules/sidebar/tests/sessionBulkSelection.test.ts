@@ -292,7 +292,7 @@ test('a page emptied by deleting every loaded row keeps Load more', () => {
     false,
     'the server still has sessions, so the list must not say there are none',
   );
-  const loadMore = buttonWithText(emptied.container, 'Load more sessions');
+  const loadMore = buttonWithText(emptied.container, 'sessions.showMore');
   assert.ok(loadMore, 'the rest of the sessions stay reachable without a refresh');
   fireEvent.click(loadMore);
   assert.deepEqual(onLoadMoreSessions.mock.calls, [['project-1']]);
@@ -300,7 +300,7 @@ test('a page emptied by deleting every loaded row keeps Load more', () => {
 
   const reallyEmpty = renderSessions({ sessions: [], hasMoreSessions: false });
   assert.equal(reallyEmpty.container.textContent?.includes('sessions.noSessions'), true);
-  assert.equal(buttonWithText(reallyEmpty.container, 'Load more sessions') === null, true);
+  assert.equal(buttonWithText(reallyEmpty.container, 'sessions.showMore') === null, true);
 });
 
 test('the compact layout selects with the same rules and hides its options button', () => {

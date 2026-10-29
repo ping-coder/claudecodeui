@@ -23,6 +23,9 @@ import type {
   ProviderRuntimeContext,
   ProviderRuntimePermissionGateway,
   ProviderRuntimeWriter,
+  ScheduledWorkStopOptions,
+  ScheduledWorkStopResult,
+  ScheduledWorkSummary,
   UpsertProviderMcpServerInput,
   WorkflowAgentActivity,
 } from '@/shared/types.js';
@@ -42,8 +45,11 @@ export interface IProviderRuntime {
    * its process open past a turn for background work may run the session's
    * next turn in that process instead of a new one, keeping the work going
    * (Claude); that call resolves once its own turn is over. Options that set
-   * `inheritUnset: true` hand the turn over the way `planHandOver` plans it
-   * with that option (see `ProviderHandOverPlanOptions`). Options that set
+   * `inheritUnset: true` or `acceptProcessSettings: true` hand the turn over
+   * the way `planHandOver` plans it with that option (see
+   * `ProviderHandOverPlanOptions`); a turn with `acceptProcessSettings: true`
+   * that the held process does not take fails (HAND_OVER_FAILED) rather
+   * than replace that process. Options that set
    * `restoreSwitchesAfterTurn: true` keep the model and permission mode such a
    * turn switches the process to (see `HandOverSwitch`) for that turn alone:
    * the process is switched back once the turn is over, completed or
@@ -84,6 +90,29 @@ export interface IProviderRuntime {
    * settled, or the id was never one of its own.
    */
   stopBackgroundTask?(sessionId: string, taskId: string): Promise<boolean>;
+  /**
+   * Sessions whose live process holds scheduled work (see
+   * `ScheduledWorkSummary`), each session's oldest first. Listed apart from
+   * `listBackgroundWork`, which this leaves as it is: a session with only
+   * scheduled work has no task. Only a process that owns its session and has
+   * not let go of its input reports any. Only a runtime that keeps its
+   * process past a turn for such work implements it (Claude).
+   */
+  listScheduledWork?(): Array<{ sessionId: string; scheduled: ScheduledWorkSummary[] }>;
+  /**
+   * Works out how to stop one piece of the session's scheduled work, or all
+   * of it (`options.all`), and lets go of the process when that alone stops
+   * it (see `ScheduledWorkStopResult`). A wake-up's id stops it only while
+   * its process is up; a job's id (`cron:` and the CLI's eight-digit hex id)
+   * also asks for a turn when no process holds the session, as the CLI
+   * revives the job from the transcript when the session next runs. An id of
+   * any other shape is `not_found`.
+   */
+  stopScheduledWork?(
+    sessionId: string,
+    id: string,
+    options?: ScheduledWorkStopOptions,
+  ): Promise<ScheduledWorkStopResult>;
   /**
    * Writes a user message into the session's running turn without stopping
    * it: the model reads it once its current tool batch ends, or as the next
@@ -142,9 +171,12 @@ export interface IProviderRuntime {
    * `options` are the run options `run` would get for the turn;
    * `planOptions.inheritUnset` counts the settings they leave out as the live
    * process's own (see `ProviderHandOverPlanOptions`), as does
-   * `inheritUnset: true` in `options`. Only a runtime that runs a new turn in
-   * a held process implements it (Claude); the gateway answers for the
-   * others that nothing is held.
+   * `inheritUnset: true` in `options`; `acceptProcessSettings`, in either,
+   * lets a process held only for scheduled work take a turn whose effort or
+   * ultracode differ, or whose tool rules differ without being stricter
+   * than the process's. Only a runtime that runs a new turn in a held
+   * process implements it (Claude); the gateway answers for the others that
+   * nothing is held.
    */
   planHandOver?(
     sessionId: string,

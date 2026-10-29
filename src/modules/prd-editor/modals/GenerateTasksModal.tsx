@@ -1,4 +1,8 @@
+import { useId } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Sparkles, X } from 'lucide-react';
+
+import { usePrdDialogEscape } from '@/modules/prd-editor/hooks/usePrdDialogEscape';
 
 const PRD_DOCS_URL =
   'https://github.com/eyaltoledano/claude-task-master/blob/main/docs/examples.md';
@@ -15,24 +19,34 @@ export default function GenerateTasksModal({
   fileName,
   onClose,
 }: GenerateTasksModalProps) {
+  const { t } = useTranslation('tasks');
+  const titleId = useId();
+  usePrdDialogEscape(isOpen, onClose);
+
   if (!isOpen) {
     return null;
   }
 
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-full max-w-md rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800"
+      >
         <div className="flex items-center justify-between border-b border-gray-200 p-6 dark:border-gray-700">
           <div className="flex items-center gap-3">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100 dark:bg-purple-900/50">
               <Sparkles className="h-4 w-4 text-purple-600 dark:text-purple-400" />
             </div>
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-              Generate Tasks from PRD
+            <h3 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-white">
+              {t('prdEditor.generateTasksModal.title', 'Generate Tasks from PRD')}
             </h3>
           </div>
           <button
             onClick={onClose}
+            aria-label={t('prdEditor.close', 'Close')}
             className="rounded-md p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
           >
             <X className="h-5 w-5" />
@@ -42,16 +56,24 @@ export default function GenerateTasksModal({
         <div className="space-y-4 p-6">
           <div className="rounded-lg border border-purple-200 bg-purple-50 p-4 dark:border-purple-800 dark:bg-purple-900/20">
             <h4 className="mb-2 font-semibold text-purple-900 dark:text-purple-100">
-              Ask Claude Code directly
+              {t('prdEditor.generateTasksModal.askTitle', 'Ask Claude Code directly')}
             </h4>
             <p className="mb-3 text-sm text-purple-800 dark:text-purple-200">
-              Save this PRD, then ask Claude Code in chat to parse the file and create your initial tasks.
+              {t(
+                'prdEditor.generateTasksModal.askDescription',
+                'Save this PRD, then ask Claude Code in chat to parse the file and create your initial tasks.',
+              )}
             </p>
 
             <div className="rounded border border-purple-200 bg-white p-3 dark:border-purple-700 dark:bg-gray-800">
-              <p className="mb-1 text-xs font-medium text-gray-600 dark:text-gray-400">Example prompt</p>
+              <p className="mb-1 text-xs font-medium text-gray-600 dark:text-gray-400">
+                {t('prdEditor.generateTasksModal.examplePrompt', 'Example prompt')}
+              </p>
               <p className="font-mono text-xs text-gray-900 dark:text-white">
-                I have a PRD at .taskmaster/docs/{fileName}. Parse it and create the initial tasks.
+                {t('prdEditor.generateTasksModal.prompt', {
+                  defaultValue: 'I have a PRD at .taskmaster/docs/{{fileName}}. Parse it and create the initial tasks.',
+                  fileName,
+                })}
               </p>
             </div>
           </div>
@@ -63,7 +85,7 @@ export default function GenerateTasksModal({
               rel="noopener noreferrer"
               className="inline-block text-sm font-medium text-purple-600 underline hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-300"
             >
-              View TaskMaster documentation
+              {t('prdEditor.generateTasksModal.docs', 'View TaskMaster documentation')}
             </a>
           </div>
 
@@ -71,7 +93,7 @@ export default function GenerateTasksModal({
             onClick={onClose}
             className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
           >
-            Got it
+            {t('prdEditor.generateTasksModal.gotIt', 'Got it')}
           </button>
         </div>
       </div>

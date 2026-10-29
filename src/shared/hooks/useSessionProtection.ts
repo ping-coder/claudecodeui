@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 
-import type { BackgroundTaskSummary, GetSessionActivity, IsSessionProcessing, MarkSessionBackground, MarkSessionIdle, MarkSessionProcessing, SessionActivity, SessionActivityMap, SessionActivitySnapshot, SyncProcessingSessions } from '@/shared/types';
+import type { BackgroundTaskSummary, GetSessionActivity, IsSessionProcessing, MarkSessionBackground, MarkSessionIdle, MarkSessionProcessing, ScheduledWorkSummary, SessionActivity, SessionActivityMap, SessionActivitySnapshot, SyncProcessingSessions } from '@/shared/types';
 
 
 
@@ -18,20 +18,42 @@ const backgroundTasksKey = (tasks: readonly BackgroundTaskSummary[] | undefined)
     .map((task) => [task.taskId, task.toolUseId, task.taskType, task.description, task.workflowName ?? '', task.startedAt, task.nested ? 1 : 0].join('\u0001'))
     .join('\u0000');
 
+/**
+ * The scheduled work as an identity, by what changes while an item is held:
+ * its next run (every run moves it, a self-paced loop's renewal too, along
+ * with its latest call and reason) and how long it is held. A poll that
+ * says only that is not dropped as a repeat.
+ */
+const scheduledWorkKey = (scheduled: readonly ScheduledWorkSummary[] | undefined): string =>
+  (scheduled ?? [])
+    .map((item) => [item.id, item.toolUseId, item.nextFireAt ?? '', item.holdUntil, item.reason ?? ''].join('\u0001'))
+    .join('\u0000');
+
 const sessionActivitiesMatch = (left: SessionActivity, right: SessionActivity): boolean =>
   left.statusText === right.statusText
   && left.canInterrupt === right.canInterrupt
   && left.startedAt === right.startedAt
   && Boolean(left.background) === Boolean(right.background)
-  && backgroundTasksKey(left.tasks) === backgroundTasksKey(right.tasks);
+  && backgroundTasksKey(left.tasks) === backgroundTasksKey(right.tasks)
+  && scheduledWorkKey(left.scheduled) === scheduledWorkKey(right.scheduled);
 
-/** A session's entry while the tasks it launched still run after its turn: busy, but no response. */
-const backgroundActivity = (tasks: BackgroundTaskSummary[]): SessionActivity => ({
+/** An entry's `scheduled`, written only when there is some, so an entry without any carries no key for it. */
+const withScheduled = (scheduled: ScheduledWorkSummary[] | undefined): Pick<SessionActivity, 'scheduled'> => (
+  scheduled?.length ? { scheduled } : {}
+);
+
+/**
+ * A session's entry while the tasks it launched, or the scheduled work its
+ * held process keeps, go on after its turn: busy, but no response. Timed from
+ * the earliest of them. Never called with neither.
+ */
+const backgroundActivity = (tasks: BackgroundTaskSummary[], scheduled: ScheduledWorkSummary[] = []): SessionActivity => ({
   statusText: null,
   canInterrupt: false,
-  startedAt: Math.min(...tasks.map((task) => task.startedAt)),
+  startedAt: Math.min(...tasks.map((task) => task.startedAt), ...scheduled.map((item) => item.startedAt)),
   background: true,
   tasks,
+  ...withScheduled(scheduled),
 });
 
 const sessionActivityMapsMatch = (
@@ -62,8 +84,12 @@ const sessionActivityMapsMatch = (
  *
  * An entry is either a response in flight or, flagged `background`, a
  * session whose turn has ended while the tasks it launched — agents,
- * workflows, backgrounded commands — are still running. Only the former
- * counts as processing: the composer stays usable during the latter.
+ * workflows, backgrounded commands — are still running, or while its held
+ * process keeps scheduled work (a /loop, a reminder). Only the former counts
+ * as processing: the composer stays usable during the latter. Scheduled work
+ * is the server's word alone: the running-sessions poll sets and clears it,
+ * and so does finished background work (`run_ended`); what the client reads
+ * from the transcript changes only the tasks.
  */
 export function useSessionProtection() {
   const [processingSessions, setProcessingSessions] = useState<Map<string, SessionActivity>>(
@@ -88,9 +114,10 @@ export function useSessionProtection() {
           activity?.statusText !== undefined ? activity.statusText : continuing?.statusText ?? null,
         canInterrupt: activity?.canInterrupt ?? continuing?.canInterrupt ?? true,
         startedAt: continuing?.startedAt ?? Date.now(),
-        // The tasks keep running under the new turn; they are reported again
-        // when it ends.
+        // The tasks keep running under the new turn, and the scheduled work
+        // stays held; they are reported again when it ends.
         ...(existing?.tasks ? { tasks: existing.tasks } : {}),
+        ...withScheduled(existing?.scheduled),
       };
 
       if (
@@ -129,12 +156,13 @@ export function useSessionProtection() {
       }
 
       const updated = new Map(prev);
-      // A run that left background work running keeps the tasks its entry
-      // lists as that work, for a tab that did not follow the run; one that
-      // did has settled the entry from the transcript by now, as background
-      // work or idle, which the check above leaves alone.
-      if (opts?.backgroundWorkGoesOn && existing.tasks?.length) {
-        updated.set(sessionId, backgroundActivity(existing.tasks));
+      // A run that left background work running keeps the tasks and the
+      // scheduled work its entry lists as that work, for a tab that did not
+      // follow the run; one that did has settled the entry from the
+      // transcript by now, as background work or idle, which the check above
+      // leaves alone.
+      if (opts?.backgroundWorkGoesOn && (existing.tasks?.length || existing.scheduled?.length)) {
+        updated.set(sessionId, backgroundActivity(existing.tasks ?? [], existing.scheduled));
       } else {
         updated.delete(sessionId);
       }
@@ -142,10 +170,12 @@ export function useSessionProtection() {
     });
   }, []);
 
-  const markSessionBackground = useCallback<MarkSessionBackground>((sessionId, tasks) => {
+  const markSessionBackground = useCallback<MarkSessionBackground>((sessionId, tasks, scheduled) => {
     setProcessingSessions((prev) => {
       const existing = prev.get(sessionId);
-      if (tasks.length === 0) {
+      // Left out, the scheduled work stays as the server last reported it.
+      const nextScheduled = scheduled ?? existing?.scheduled ?? [];
+      if (tasks.length === 0 && nextScheduled.length === 0) {
         if (!existing) {
           return prev;
         }
@@ -154,7 +184,7 @@ export function useSessionProtection() {
         return updated;
       }
 
-      const next = backgroundActivity(tasks);
+      const next = backgroundActivity(tasks, nextScheduled);
       if (existing && sessionActivitiesMatch(existing, next)) {
         return prev;
       }
@@ -199,13 +229,18 @@ export function useSessionProtection() {
           continue;
         }
 
+        // A run listed where the map had only background work is a new turn,
+        // as markSessionProcessing has it: the background entry's
+        // canInterrupt: false must not make it look driven outside CloudCLI.
+        const base = !snapshot.background && existing?.background ? undefined : existing;
         updated.set(sessionId, {
           statusText:
-            snapshot.statusText !== undefined ? snapshot.statusText : existing?.statusText ?? null,
-          canInterrupt: snapshot.canInterrupt ?? existing?.canInterrupt ?? true,
-          startedAt: snapshotStartedAt ?? existing?.startedAt ?? now,
+            snapshot.statusText !== undefined ? snapshot.statusText : base?.statusText ?? null,
+          canInterrupt: snapshot.canInterrupt ?? base?.canInterrupt ?? true,
+          startedAt: snapshotStartedAt ?? base?.startedAt ?? now,
           ...(snapshot.background ? { background: true } : {}),
           ...(snapshot.tasks ? { tasks: snapshot.tasks } : {}),
+          ...withScheduled(snapshot.scheduled),
         });
       }
 

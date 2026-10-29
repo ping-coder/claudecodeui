@@ -146,6 +146,7 @@
   "deleteConfirmation": {
     "deleteProject": "프로젝트 제거",
     "deleteSession": "세션 삭제",
+    "confirmDeleteNamed": "이 프로젝트를 어떻게 하시겠습니까: {{name}}?",
     "confirmDelete": "이 프로젝트를 어떻게 하시겠습니까:",
     "sessionCount_one": "이 프로젝트에는 {{count}}개의 대화가 있습니다.",
     "sessionCount_other": "이 프로젝트에는 {{count}}개의 대화가 있습니다.",
@@ -161,6 +162,8 @@
     "confirmDeleteSessions": "다음 세션을 어떻게 하시겠습니까:",
     "deleteSessions_one": "세션 {{count}}개 삭제",
     "deleteSessions_other": "세션 {{count}}개 삭제",
+    "confirmDeleteSelected_one": "다음 세션을 어떻게 하시겠습니까: <strong>선택한 세션 {{count}}개</strong>?",
+    "confirmDeleteSelected_other": "다음 세션을 어떻게 하시겠습니까: <strong>선택한 세션 {{count}}개</strong>?",
     "selectedSessions_one": "선택한 세션 {{count}}개",
     "selectedSessions_other": "선택한 세션 {{count}}개",
     "archiveSessions_one": "세션 {{count}}개 보관",

@@ -122,6 +122,58 @@
   "prd": {
     "modified": "Modified: {{date}}"
   },
+  "prdEditor": {
+    "fullscreen": "Fullscreen",
+    "exitFullscreen": "Exit fullscreen",
+    "fileNamePlaceholder": "Enter PRD filename",
+    "focusFileName": "Focus filename input",
+    "newBadge": "New",
+    "documentType": "Product Requirements Document",
+    "editMode": "Switch to edit mode",
+    "previewMarkdown": "Preview markdown",
+    "disableWordWrap": "Disable word wrap",
+    "enableWordWrap": "Enable word wrap",
+    "toggleTheme": "Toggle theme",
+    "download": "Download PRD",
+    "generateTasks": "Generate Tasks",
+    "generateTasksHint": "Generate tasks from PRD content",
+    "save": "Save PRD",
+    "saving": "Saving...",
+    "saved": "Saved!",
+    "close": "Close",
+    "loading": "Loading PRD...",
+    "footer": {
+      "lines": "Lines: {{lines}}",
+      "characters": "Characters: {{characters}}",
+      "words": "Words: {{words}}",
+      "format": "Format: Markdown",
+      "shortcuts": "Press Ctrl+S to save and Esc to close"
+    },
+    "errors": {
+      "generateNeedsContent": "Please add content to the PRD before generating tasks.",
+      "emptyContent": "Please add content before saving.",
+      "emptyFileName": "Please provide a filename for the PRD.",
+      "noProject": "No project selected. Please reopen the editor.",
+      "saveStatus": "Save failed: {{status}}",
+      "save": "Error saving PRD: {{message}}",
+      "load": "Unable to load file content: {{message}}"
+    },
+    "generateTasksModal": {
+      "title": "Generate Tasks from PRD",
+      "askTitle": "Ask Claude Code directly",
+      "askDescription": "Save this PRD, then ask Claude Code in chat to parse the file and create your initial tasks.",
+      "examplePrompt": "Example prompt",
+      "prompt": "I have a PRD at .taskmaster/docs/{{fileName}}. Parse it and create the initial tasks.",
+      "docs": "View TaskMaster documentation",
+      "gotIt": "Got it"
+    },
+    "overwriteModal": {
+      "title": "File Already Exists",
+      "message": "A PRD named \"{{fileName}}\" already exists. Do you want to overwrite it?",
+      "cancel": "Cancel",
+      "overwrite": "Overwrite"
+    }
+  },
   "statuses": {
     "pending": "Pending",
     "in-progress": "In Progress",

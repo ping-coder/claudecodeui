@@ -26,6 +26,12 @@ import {
   normalizeImageDescriptors
 } from '@/shared/image-attachments.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
+import {
+  buildScheduledStopMessage,
+  createScheduledWork,
+  isStoppableScheduledWorkId,
+  resolveScheduleHoldMax
+} from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
@@ -136,21 +142,37 @@ function resolveHoldDurations(env) {
 // HOLD_IDLE_MS: released after this much silence on the stream, unless the
 // session's own tasks (not nested ones) are still outstanding: a backgrounded
 // command emits nothing until it ends, so silence proves nothing about it.
-// Nor does it about a recurring CronCreate job between its fires, or a
-// ScheduleWakeup (/loop) wake-up or a one-shot CronCreate job before it is
-// due: a hold for a wake-up lasts until its time plus WAKEUP_GRACE_MS, and so
-// does one for a one-shot job due before HOLD_MAX would run out (one due
-// later would not fire in this process anyway). A hold kept only for nested
-// tasks, or for a Monitor the CLI reported no task for, ends here.
+// Nor does it about scheduled work (a CronCreate job, a ScheduleWakeup
+// wake-up; see createScheduledWork) that still holds the process: the hold
+// looks again at the earlier of HOLD_IDLE_MS and the next time scheduled
+// work could be missed or reach its hold limit, and drops what has. A hold
+// kept only for nested tasks, or for a Monitor the CLI reported no task for,
+// ends after HOLD_IDLE_MS of silence.
 //
 // HOLD_MAX_MS: the backstop for tasks that never report. Pushed back by every
 // `result` and every main-thread assistant message during the hold; when it
-// runs out the outstanding tasks are stopped and stdin is closed.
+// runs out the outstanding tasks are stopped, and stdin is closed unless
+// scheduled work still holds the process. A turn the CLI runs while the
+// process is held that says nothing at all for HOLD_MAX_MS, nested messages
+// included, never ends on its own (a question nobody answers): stdin is
+// closed then, whatever holds the process.
 const { idleMs: HOLD_IDLE_MS, maxMs: HOLD_MAX_MS } = resolveHoldDurations(process.env);
-// How long past its time a held process still waits for a ScheduleWakeup
-// wake-up, or a one-shot CronCreate job, to fire. The CLI sends nothing for a
-// fire that never starts, and the fire itself can come a little early or late.
+// SCHEDULE_HOLD_MAX_MS (CLOUDCLI_CLAUDE_SCHEDULE_HOLD_MAX_MS, eight days by
+// default): the longest a process is held for one piece of scheduled work,
+// counted from its creation (a wake-up chain's start). A job whose result
+// named no time (an older CLI) is held for HOLD_MAX_MS from its creation and
+// from anything the CLI says during a turn, and a recurring one HOLD_MAX_MS
+// from each turn of the CLI's own that may have been its fire, within that
+// limit (see createScheduledWork).
+const SCHEDULE_HOLD_MAX_MS = resolveScheduleHoldMax(process.env);
+// How long past its time a held process still waits for scheduled work to
+// fire, counted from the end of the CLI's last turn when that is later: the
+// CLI fires nothing while it runs a turn. It sends nothing for a fire that
+// never starts, and the fire itself can come a little early or late.
 const WAKEUP_GRACE_MS = 5 * 60 * 1000;
+// How long the hold waits before it looks at its scheduled work again when
+// that look is already due, so such a look does not spin the timer.
+const MIN_SCHEDULE_CHECK_MS = 60 * 1000;
 // A process still up this long after its input was released, whatever the
 // reason, is closed: the CLI's own ceiling plus a minute. The CLI does not
 // always keep to that ceiling: a backgrounded shell's own timeout can push it
@@ -1049,11 +1071,12 @@ const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 
 
 // The deferred-work tools whose work no task event ever reports: the wake-up
 // a ScheduleWakeup (/loop) sets, and a CronCreate job. The run follows that
-// work by the calls and what their results say (see `heldWakeup` and
-// `heldCronJobs` in queryClaudeSDK), and holds its process for it whatever
-// the tracker says. A Monitor is not one of them: Claude Code (2.1.165 and
-// later) reports it as a task, which the tracker follows; one it reports no
-// task for is held until the CLI runs a turn for it (`untrackedMonitorHeld`).
+// work by the calls and what their results say (see `scheduled` in
+// queryClaudeSDK, and createScheduledWork), and holds its process for it
+// whatever the tracker says. A Monitor is not one of them: Claude Code
+// (2.1.165 and later) reports it as a task, which the tracker follows; one it
+// reports no task for is held until the CLI runs a turn for it
+// (`untrackedMonitorHeld`).
 const SCHEDULING_TOOLS = new Set(['ScheduleWakeup', 'CronCreate']);
 
 /**
@@ -1122,33 +1145,6 @@ function startsBackgroundTasks(sdkMessage) {
   const content = sdkMessage?.message?.content;
   return Array.isArray(content)
     && content.some((block) => launchesBackgroundWork(block) && !SCHEDULING_TOOLS.has(block.name));
-}
-
-// The shortest and the longest wait a ScheduleWakeup sets: the CLI clamps
-// `delaySeconds` to them.
-const WAKEUP_MIN_DELAY_S = 60;
-const WAKEUP_MAX_DELAY_S = 3600;
-
-/**
- * When the wake-up a ScheduleWakeup call set fires, in epoch ms: the
- * `scheduledFor` its result carries (`tool_use_result`), else worked out from
- * its `delaySeconds` as the CLI does (clamped, then rounded up to the
- * minute). `exact` when the result said: the fire names the time it was set
- * for (`scheduled_for`), which then has to match it.
- * @param {Object|null} output - The call's `tool_use_result`
- * @param {Object} input - The call's input
- * @param {number} calledAt - When the call came, in epoch ms
- * @returns {{ at: number, exact: boolean }}
- */
-function readWakeupTime(output, input, calledAt) {
-  if (Number.isFinite(output?.scheduledFor) && output.scheduledFor > 0) {
-    return { at: output.scheduledFor, exact: true };
-  }
-  const requested = Math.round(Number(input?.delaySeconds));
-  const delaySeconds = Number.isNaN(requested)
-    ? WAKEUP_MIN_DELAY_S
-    : Math.min(WAKEUP_MAX_DELAY_S, Math.max(WAKEUP_MIN_DELAY_S, requested));
-  return { at: Math.ceil((calledAt + delaySeconds * 1000) / 60000) * 60000, exact: false };
 }
 
 /**
@@ -2155,6 +2151,29 @@ const HAND_OVER_CHANGE_LABELS = {
   permissionMode: 'the permission mode',
 };
 
+// The changes (planTurnHandOver) a turn that accepts the live process's own
+// settings (`acceptProcessSettings`) lets go of: what the CLI takes only at
+// launch, but its working directory, and tool rules stricter than the
+// process's (see processKeptSettings). Such a turn goes into a process held
+// only for scheduled work despite them, and runs with the process's values
+// (see blockingChanges in queryClaudeSDK).
+const PROCESS_SETTINGS = new Set(['effort', 'ultracode', 'tools']);
+
+/**
+ * The changes of a turn's plan (planTurnHandOver) the process keeps its own
+ * values for when the turn accepts them (`acceptProcessSettings`): its effort
+ * and ultracode, and its tool rules unless the turn's are stricter (allow
+ * fewer tools, or deny others), which only a new process can apply. Rules
+ * that are not stricter differ only in what the process denies besides the
+ * turn's denials: the turn runs with its own allowed tools, every one the
+ * process allows among them, and the deny rules the CLI took at launch.
+ * @param {{ changes: Array<string>, toolsStricter: boolean }} plan
+ * @returns {Array<string>}
+ */
+function processKeptSettings(plan) {
+  return plan.changes.filter((change) => PROCESS_SETTINGS.has(change) && !(change === 'tools' && plan.toolsStricter));
+}
+
 /**
  * Whether two lists hold the same entries, in any order.
  * @param {Array<string>} first
@@ -2236,10 +2255,12 @@ function createSwitchTracker(initial) {
  * @param {Object|null} instance - The live SDK query
  * @param {boolean} nextUltracode - The ultracode setting a new process would
  *   run the turn with (resolveEffectiveUltracode of `next`)
- * @returns {{ changes: Array<Exclude<import('@/shared/types.js').HandOverChange, 'lookup'>>, switches: Array<import('@/shared/types.js').HandOverSwitch>, model: string|null, permissionMode: string|null }}
+ * @returns {{ changes: Array<Exclude<import('@/shared/types.js').HandOverChange, 'lookup'>>, switches: Array<import('@/shared/types.js').HandOverSwitch>, model: string|null, permissionMode: string|null, toolsStricter: boolean }}
  *   `changes` is empty when the turn can go in; `model` and `permissionMode`
  *   are the switches to make before its prompt, if any, and `switches` names
- *   the ones the process can make, whatever else `changes` holds
+ *   the ones the process can make, whatever else `changes` holds.
+ *   `toolsStricter` when the turn's tool rules allow fewer tools than the
+ *   process's, or deny others (see processKeptSettings)
  */
 function planTurnHandOver(launched, next, instance, nextUltracode) {
   const changes = [];
@@ -2254,10 +2275,10 @@ function planTurnHandOver(launched, next, instance, nextUltracode) {
     changes.push('ultracode');
   }
   const nextAllowedTools = new Set(next.allowedTools ?? []);
-  if (
-    launched.allowedTools.some((entry) => !nextAllowedTools.has(entry))
-    || !haveSameEntries(next.disallowedTools ?? [], launched.disallowedTools)
-  ) {
+  const launchedDisallowedTools = new Set(launched.disallowedTools);
+  const allowsFewer = launched.allowedTools.some((entry) => !nextAllowedTools.has(entry));
+  const deniesOthers = (next.disallowedTools ?? []).some((entry) => !launchedDisallowedTools.has(entry));
+  if (allowsFewer || !haveSameEntries(next.disallowedTools ?? [], launched.disallowedTools)) {
     changes.push('tools');
   }
   const model = next.model !== launched.model ? next.model : null;
@@ -2271,7 +2292,7 @@ function planTurnHandOver(launched, next, instance, nextUltracode) {
       && (permissionMode !== 'bypassPermissions' || launched.canBypass);
     (canSwitch ? switches : changes).push('permissionMode');
   }
-  return { changes, switches, model, permissionMode };
+  return { changes, switches, model, permissionMode, toolsStricter: allowsFewer || deniesOthers };
 }
 
 /**
@@ -2340,6 +2361,57 @@ async function loadEffortModels(context) {
 }
 
 /**
+ * Why a turn did not go into the process its session holds, in English: what
+ * only a new process can apply (planTurnHandOver), or that its lookups failed
+ * (`lookup`).
+ * @param {Array<import('@/shared/types.js').HandOverChange>} changes
+ * @returns {string}
+ */
+function describeWhyNotHandedOver(changes) {
+  if (changes.includes('lookup')) {
+    return 'the message could not be handed to the process the work ran in';
+  }
+  const labels = changes.map((change) => HAND_OVER_CHANGE_LABELS[change]);
+  const named = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}` : labels.join('');
+  return `this message changes ${named}, which only a new Claude process can apply`;
+}
+
+/**
+ * Fails a turn sent with `acceptProcessSettings: true` that the process its
+ * session holds did not take after all (see handTurnToHeldProcess): a new
+ * process would stop the scheduled work the scheduled-messages dispatcher
+ * sent the turn into that process to keep. The turn's run hears why, as an
+ * `error` the client translates by its `code`, HAND_OVER_FAILED, and its
+ * `reason`: `lookup` when the turn's lookups failed, `stale-plan` when the
+ * process no longer takes what the plan let in (`changes` names what keeps
+ * it out); `content` says the same in English for a client that cannot. Its
+ * `onSwitchesRestored` hears that nothing was switched
+ * (reportNothingSwitched). The throw, which carries the same `code` and
+ * `reason`, fails the run, and the dispatcher acts on it.
+ * @param {Object} options - The turn's run options
+ * @param {Object} writer - The writer of the turn's run
+ * @param {string} key - Session key, for the log
+ * @param {string} sessionId - The session id the message carries
+ * @param {Array<import('@/shared/types.js').HandOverChange>} changes - What kept it out
+ */
+function failAcceptingTurn(options, writer, key, sessionId, changes) {
+  const reason = changes.includes('lookup') ? 'lookup' : 'stale-plan';
+  const content = `Not sent: ${describeWhyNotHandedOver(changes)}, and a new process would stop the session's scheduled work.`;
+  console.warn(`[Claude SDK] Session ${key}: ${content}`);
+  writer.send(createNormalizedMessage({
+    kind: 'error',
+    code: 'HAND_OVER_FAILED',
+    reason,
+    changes: [...changes],
+    content,
+    sessionId,
+    provider: 'claude',
+  }));
+  reportNothingSwitched(options, key);
+  throw Object.assign(new Error(content), { code: 'HAND_OVER_FAILED', reason });
+}
+
+/**
  * Tells a turn's run that the process its session held for background work
  * is being replaced by one of the turn's own, which stops that work, and why:
  * what only a new process can apply (planTurnHandOver), or `lookup` alone when
@@ -2352,11 +2424,7 @@ async function loadEffortModels(context) {
  * @param {Array<import('@/shared/types.js').HandOverChange>} changes
  */
 function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
-  const labels = changes.filter((change) => change !== 'lookup').map((change) => HAND_OVER_CHANGE_LABELS[change]);
-  const named = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}` : labels.join('');
-  const why = changes.includes('lookup')
-    ? 'the message could not be handed to the process the work ran in'
-    : `this message changes ${named}, which only a new Claude process can apply`;
+  const why = describeWhyNotHandedOver(changes);
   console.log(`[Claude SDK] Session ${key}: ${why}; replacing the process held for background work`);
   writer.send(createNormalizedMessage({
     kind: 'error',
@@ -2390,6 +2458,18 @@ function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
  * session last recorded is the composer's latest pick, not what the process
  * runs. Only for the hand-over: a turn that starts a process of its own runs
  * with its options as they are.
+ *
+ * Options that set `acceptProcessSettings: true` (a message the
+ * scheduled-messages dispatcher sends once a plan with it said the process,
+ * held only for scheduled work, takes the turn) go in even when their
+ * effort, ultracode or tool rules differ from the process's, and run with
+ * the process's (see processKeptSettings): such a message would otherwise
+ * wait as long as the loop runs. The plan stands at the hand-over, even if
+ * the CLI's own turn has started a task since. Tool rules stricter than the
+ * process's still keep the turn out, and such a turn never replaces the
+ * process: one the process does not take, or whose lookups fail, fails
+ * instead (failAcceptingTurn), and the process and its work go on. Only for
+ * the hand-over, like `inheritUnset`.
  *
  * Options that set `restoreSwitchesAfterTurn: true` (a message the
  * scheduled-messages dispatcher sends) keep the model and permission mode the
@@ -2490,6 +2570,7 @@ async function handTurnToHeldProcess(command, options, writer, context) {
       sdkOptions,
       ultracode,
       skipPermissions: Boolean(turnOptions.toolsSettings?.skipPermissions),
+      acceptProcessSettings: options.acceptProcessSettings === true,
       restoreSwitches: options.restoreSwitchesAfterTurn === true,
       onSwitchesRestored: options.restoreSwitchesAfterTurn === true ? options.onSwitchesRestored : null,
       promptMessage,
@@ -2503,6 +2584,9 @@ async function handTurnToHeldProcess(command, options, writer, context) {
     // the held process first, unless that has let go meanwhile.
     console.warn(`[Claude SDK] Session ${key}: could not hand the new turn to the process held for background work:`, error?.message || error);
     if (getSession(key)?.takesHandedOverTurn?.()) {
+      if (options.acceptProcessSettings === true) {
+        failAcceptingTurn(options, writer, key, providerSessionId || key, ['lookup']);
+      }
       reportBackgroundWorkStopped(writer, key, providerSessionId || key, ['lookup']);
     }
     return null;
@@ -2515,6 +2599,9 @@ async function handTurnToHeldProcess(command, options, writer, context) {
     return { settled: outcome.settled };
   }
   if (outcome.changes.length > 0) {
+    if (options.acceptProcessSettings === true) {
+      failAcceptingTurn(options, writer, key, providerSessionId || key, outcome.changes);
+    }
     reportBackgroundWorkStopped(writer, key, providerSessionId || key, outcome.changes);
   }
   return null;
@@ -2529,12 +2616,16 @@ async function handTurnToHeldProcess(command, options, writer, context) {
  * `canHandOver` when the turn would go into it (handTurnToHeldProcess);
  * `changes` for what keeps it out otherwise (planTurnHandOver), or `lookup`
  * when the lookups a run makes first failed; `switches` for the model and
- * permission mode it would switch there. An edited message never goes in,
- * and names no change. A session with no such process, or whose process is
- * starting or has let go, has nothing held. One whose process is in a turn
- * takes no other: `heldWork` then says whether that process has work of the
- * session's own (holdsOwnWorkInTurn), which stopping a first turn would stop
- * with it.
+ * permission mode it would switch there. With `acceptProcessSettings`,
+ * asked or set in the options, a process held only for scheduled work does
+ * not count the effort, ultracode or tool rules among the changes, unless
+ * the turn's tool rules are stricter than the process's (see
+ * processKeptSettings, and blockingChanges in queryClaudeSDK). An edited
+ * message never goes in, and names no change. A session with no such
+ * process, or whose process is starting or has let go, has nothing held.
+ * One whose process is in a turn takes no other: `heldWork` then says
+ * whether that process has work of the session's own (holdsOwnWorkInTurn),
+ * which stopping a first turn would stop with it.
  *
  * The lookups are the held run's, with its provider-scoped context, except
  * that a model the turn names comes first: the chat gateway records it for
@@ -2674,12 +2765,17 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // The uuid the run's prompt goes out with: the CLI records the prompt's row
   // under it and echoes the prompt back with it (see createInsertController).
   const firstPromptUuid = crypto.randomUUID();
-  // The post-turn hold's silence countdown (HOLD_IDLE_MS) and its backstop
-  // (HOLD_MAX_MS), with when the backstop runs out. Both run only while the
-  // process is held for background work.
+  // The post-turn hold's silence countdown (HOLD_IDLE_MS), which also looks
+  // at the scheduled work, and its backstop (HOLD_MAX_MS). Both run only
+  // while the process is held for background work. `holdActivityAt` is when
+  // the CLI last said anything during the hold: silence counts from it.
+  // `holdTimerEndsSilence` is set while the countdown's timer is armed for
+  // the end of the silence rather than for an earlier look at the scheduled
+  // work.
   let holdIdleTimer = null;
   let holdMaxTimer = null;
-  let holdMaxAt = null;
+  let holdActivityAt = 0;
+  let holdTimerEndsSilence = false;
   // Closes the process if it is still up ABANDONED_PROCESS_CLOSE_MS after its
   // input was released.
   let abandonedCloseTimer = null;
@@ -2703,21 +2799,26 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   let sawTaskEventThisTurn = false;
   // Work no task event reports, which the process is held for whatever the
   // tracker says (untrackedWorkHeld), as the calls and their results tell:
-  // - `heldWakeup`: the wake-up a ScheduleWakeup (/loop) set, as
-  //   readWakeupTime has it, until it fires and its turn ends, a later call
-  //   sets another, or one with `stop: true` cancels it.
-  // - `heldCronJobs`: the jobs CronCreate scheduled in this process, by id,
-  //   with `recurring` and `nextFireAt` (null when its result did not say):
-  //   a recurring one until a CronDelete cancels it, a one-shot one until it
-  //   has fired. They die with the process, as the CLI keeps them in memory.
+  // - `scheduled`: the scheduled work of this process (createScheduledWork),
+  //   the jobs CronCreate scheduled and the wake-up ScheduleWakeup (/loop)
+  //   set. A job lasts until a CronDelete cancels it, it has fired for the
+  //   last time, or the hold gives up on it; the wake-up until it fires and
+  //   its turn sets no other, `stop: true` cancels it, or the hold gives up on
+  //   it. Only work that still holds the process counts here: one whose next
+  //   fire is past its hold limit is listed, and dies with the process.
   // - `untrackedMonitorHeld`: a Monitor the CLI reported no task for, until
   //   the CLI runs a turn for it.
-  let heldWakeup = null;
-  const heldCronJobs = new Map();
+  const scheduled = createScheduledWork({
+    holdMaxMs: HOLD_MAX_MS,
+    scheduleHoldMaxMs: SCHEDULE_HOLD_MAX_MS,
+    graceMs: WAKEUP_GRACE_MS,
+    log: (line) => console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: ${line}`),
+  });
   let untrackedMonitorHeld = false;
-  const untrackedWorkHeld = () => heldWakeup !== null || heldCronJobs.size > 0 || untrackedMonitorHeld;
+  const untrackedWorkHeld = () => scheduled.holdsProcess() || untrackedMonitorHeld;
   // The turn's main-thread ScheduleWakeup, CronCreate and CronDelete calls,
-  // by tool_use id, until their results say what they did.
+  // and a nested agent's that end scheduled work (noteUntrackedWorkCalls), by
+  // tool_use id, until their results say what they did.
   const schedulingCalls = new Map();
   // The turn's Monitor calls the CLI has reported no task for yet.
   const monitorCallsAwaitingTask = new Set();
@@ -2728,8 +2829,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // `started`): `source` is the scheduler fire's `wakeup_source`
   // (`loop_wakeup` for a ScheduleWakeup's, `schedule_wakeup` for a cron
   // job's), null for any other command or from a CLI that does not say,
-  // `scheduledFor` the time a wake-up was set for, and `startedAt` when the
-  // run heard it start.
+  // `scheduledFor` the time a wake-up was set for, `startedAt` when the
+  // run heard it start, and `turnEndedBefore` when the CLI's turn before it
+  // ended (`lastTurnEndedAt` then).
   let turnCommands = [];
   // Tasks of the session's own that finished (not stopped), until the CLI
   // feeds their notification into a turn: their relay. A `result` of a turn
@@ -2740,8 +2842,13 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   let ownTaskRelayedThisTurn = false;
   let taskNotificationEchoedThisTurn = false;
   // Whether the CLI is in a turn, as far as the stream tells: from the first
-  // sign of one until its `result`.
+  // sign of one until its `result`, and when its last turn ended. Scheduled
+  // work counts as missed only from the end of that turn on: the CLI fires
+  // nothing while it runs one. `cliHeardAt` is when the CLI last said
+  // anything at all, nested messages included (see turnSilentPastHoldMax).
   let cliTurnActive = true;
+  let lastTurnEndedAt = null;
+  let cliHeardAt = Date.now();
   // True while the process is being held open for background work, so a later
   // `result` can be recognised as that work reporting back.
   let heldForBackgroundWork = false;
@@ -2808,6 +2915,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     inheritUnsetSettings: (turnOptions) => (launched ? inheritUnsetSettings(turnOptions, liveSettings()) : turnOptions),
     // What a later send's turn would make of this process (planClaudeSDKHandOver).
     planHandOver: (turnOptions, planOptions) => planHandOver(turnOptions, planOptions),
+    // The scheduled work this process holds (listClaudeSDKScheduledWork), and
+    // how to stop some of it (stopClaudeSDKScheduledWork).
+    listScheduledWork: () => scheduled.list(),
+    stopScheduledWork: (id, stopOptions) => stopScheduledWork(id, stopOptions),
     // Releases the caller of a handed-over turn the run will not finish.
     settleTurn: () => settleTurn(),
     // Whether an abort stops only the turn under way, and stops it so
@@ -2873,7 +2984,6 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       clearTimeout(holdMaxTimer);
       holdMaxTimer = null;
     }
-    holdMaxAt = null;
   };
 
   // Closes the held prompt stream so the CLI can wind down, once, and logs why.
@@ -2881,8 +2991,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // exit on its own; one still up ABANDONED_PROCESS_CLOSE_MS later is closed.
   const releaseInput = (reason) => {
     clearHoldTimers();
-    heldWakeup = null;
-    heldCronJobs.clear();
+    scheduled.clear();
     untrackedMonitorHeld = false;
     finishedOwnTaskIds.clear();
     // No prompt, switch or restore reaches the CLI from here on, and a turn
@@ -2916,66 +3025,126 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }
   };
 
-  // HOLD_IDLE_MS of silence. Like every timer here, the hold timers are
+  // Drops the scheduled work the hold gives up on (see createScheduledWork):
+  // work past its hold limit, and, while the CLI is not in a turn, work that
+  // missed its fire. Each one is logged; none is reported finished.
+  const cleanUpScheduledWork = () => {
+    scheduled.cleanUp(Date.now(), { inTurn: cliTurnActive, lastTurnEndedAt });
+  };
+
+  // Whether the CLI has been in a turn, and said nothing at all, for
+  // HOLD_MAX_MS while the process is held: a turn that never ends, such as
+  // one waiting for the answer to a question nobody gives (AskUserQuestion and
+  // ExitPlanMode wait with no timeout). Scheduled work fires only once it is
+  // over, and only its `result` would arm the hold's timers again. A turn the
+  // CLI is busy with says something, if only in a nested agent's transcript.
+  const turnSilentPastHoldMax = () => cliTurnActive && Date.now() - cliHeardAt >= HOLD_MAX_MS;
+  // Gives up on such a turn as HOLD_MAX gives up on tasks that never report:
+  // the outstanding tasks are stopped while stdin is still open, then the
+  // process is let go, with whatever it was held for. A question the turn
+  // waited on is cancelled once the process is closed. Letting go this way is
+  // not the work finishing, so nothing is reported finished.
+  const letGoOfSilentTurn = () => {
+    const outstanding = backgroundWork.outstanding(sessionKey());
+    console.warn(`[Claude SDK] Session ${sessionKey() || 'NEW'}: the CLI's turn has said nothing for ${HOLD_MAX_MS} ms; stopping ${outstanding.length} outstanding task(s) and letting go`);
+    for (const task of outstanding) {
+      sendStopTask(runEntry.instance, task.taskId);
+    }
+    heldForBackgroundWork = false;
+    releaseInput('hold-max');
+  };
+
+  // HOLD_IDLE_MS of silence, or the time the scheduled work is next looked
+  // at, whichever comes first (scheduleHoldCheck); a turn of the CLI's that
+  // has said nothing for HOLD_MAX_MS is given up on here at the latest
+  // HOLD_IDLE_MS after that. Like every timer here, the hold timers are
   // unref'd: they never keep the server alive on their own.
   const onHoldIdle = () => {
     holdIdleTimer = null;
-    // Silence says nothing about the session's own tasks: a backgrounded
-    // command emits nothing until it ends. Nor about a recurring cron job
-    // between its fires, or a one-shot one whose result named no time.
-    // HOLD_MAX bounds those.
-    if (
-      backgroundWork.hasOwnOutstanding(sessionKey())
-      || [...heldCronJobs.values()].some((job) => job.recurring || job.nextFireAt === null)
-    ) {
-      armHoldIdleTimer();
+    if (turnSilentPastHoldMax()) {
+      letGoOfSilentTurn();
       return;
     }
-    // Nor about a wake-up or a one-shot cron job still to come: the hold
-    // waits for the last of them, with WAKEUP_GRACE_MS to spare, as a fire
-    // that never starts sends nothing. A one-shot job due after HOLD_MAX runs
-    // out is not waited for: it would not fire in this process anyway.
-    const holdEndsAt = holdMaxAt ?? Date.now() + HOLD_MAX_MS;
-    let dueAt = heldWakeup ? heldWakeup.at : -Infinity;
-    for (const job of heldCronJobs.values()) {
-      if (job.nextFireAt <= holdEndsAt) {
-        dueAt = Math.max(dueAt, job.nextFireAt);
-      }
-    }
-    const wait = dueAt + WAKEUP_GRACE_MS - Date.now();
-    if (wait > 0) {
-      armHoldIdleTimer(wait);
+    cleanUpScheduledWork();
+    // Silence says nothing about the session's own tasks: a backgrounded
+    // command emits nothing until it ends. HOLD_MAX bounds those. Nor about
+    // scheduled work still to come, until it misses its fire or reaches its
+    // hold limit. A hold for anything else (nested tasks, a Monitor the CLI
+    // reported no task for, a relay still to come) lasts HOLD_IDLE_MS of
+    // silence, also when the timer came early for the scheduled work; with
+    // nothing at all left, it ends now.
+    const silenceOver = holdTimerEndsSilence || Date.now() - holdActivityAt >= HOLD_IDLE_MS;
+    const waitsOutSilence = !silenceOver
+      && (backgroundWork.hasOutstanding(sessionKey()) || untrackedMonitorHeld || finishedOwnTaskIds.size > 0);
+    if (backgroundWork.hasOwnOutstanding(sessionKey()) || scheduled.holdsProcess() || waitsOutSilence) {
+      scheduleHoldCheck();
       return;
     }
     heldForBackgroundWork = false;
     releaseInput('idle');
   };
-  const armHoldIdleTimer = (delay = HOLD_IDLE_MS) => {
+  // Arms the hold's timer for the end of the silence counted from
+  // `holdActivityAt` (a fresh HOLD_IDLE_MS once that has run out), or for the
+  // time the scheduled work is next looked at when that is earlier
+  // (scheduled.nextCheckAt); a look already due waits MIN_SCHEDULE_CHECK_MS.
+  const scheduleHoldCheck = () => {
     if (holdIdleTimer) {
       clearTimeout(holdIdleTimer);
     }
-    holdIdleTimer = setTimeout(onHoldIdle, Math.min(delay, MAX_TIMER_DELAY_MS));
+    const now = Date.now();
+    let silenceEnds = holdActivityAt + HOLD_IDLE_MS;
+    if (silenceEnds <= now) {
+      silenceEnds = now + HOLD_IDLE_MS;
+    }
+    let due = silenceEnds;
+    const check = scheduled.nextCheckAt({ inTurn: cliTurnActive, lastTurnEndedAt });
+    if (check !== null) {
+      due = Math.min(due, check > now ? check : now + MIN_SCHEDULE_CHECK_MS);
+    }
+    holdTimerEndsSilence = due === silenceEnds;
+    holdIdleTimer = setTimeout(onHoldIdle, due - now);
     holdIdleTimer.unref?.();
   };
+  // The CLI said something during the hold, or a turn left the process held:
+  // the silence counts from now.
+  const armHoldIdleTimer = () => {
+    holdActivityAt = Date.now();
+    scheduleHoldCheck();
+  };
 
-  // No follow-up turn for HOLD_MAX_MS: give up on the work. stdin is still
-  // open, so the stops reach the CLI; the release comes after them. Letting go
-  // this way is not the work finishing, so nothing is reported finished.
+  // No follow-up turn for HOLD_MAX_MS: give up on the tasks. stdin is still
+  // open, so the stops reach the CLI; the release comes after them, unless
+  // scheduled work still holds the process once the hold has dropped what it
+  // gives up on (cleanUpScheduledWork): the hold then goes on, the silence
+  // countdown with it, and so does this backstop, which a turn handed to the
+  // process leaves the only timer running. A turn of the CLI's that has said
+  // nothing for that long is given up on with the process
+  // (letGoOfSilentTurn). Letting go this way is not the work finishing, so
+  // nothing is reported finished.
   const onHoldMax = () => {
     holdMaxTimer = null;
-    heldForBackgroundWork = false;
+    if (turnSilentPastHoldMax()) {
+      letGoOfSilentTurn();
+      return;
+    }
     const outstanding = backgroundWork.outstanding(sessionKey());
     console.warn(`[Claude SDK] Session ${sessionKey() || 'NEW'}: no follow-up turn for ${HOLD_MAX_MS} ms; stopping ${outstanding.length} outstanding task(s)`);
     for (const task of outstanding) {
       sendStopTask(runEntry.instance, task.taskId);
     }
+    cleanUpScheduledWork();
+    if (scheduled.holdsProcess()) {
+      console.log(`[Claude SDK] Session ${sessionKey() || 'NEW'}: still held for its scheduled work`);
+      armHoldMaxTimer();
+      return;
+    }
+    heldForBackgroundWork = false;
     releaseInput('hold-max');
   };
   const armHoldMaxTimer = () => {
     if (holdMaxTimer) {
       clearTimeout(holdMaxTimer);
     }
-    holdMaxAt = Date.now() + HOLD_MAX_MS;
     holdMaxTimer = setTimeout(onHoldMax, HOLD_MAX_MS);
     holdMaxTimer.unref?.();
   };
@@ -3037,16 +3206,27 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     monitorCallsAwaitingTask.clear();
   };
 
-  // Notes the main-thread calls that leave work no task event reports. A
-  // Monitor waits for its task (monitorCallsAwaitingTask); a ScheduleWakeup,
-  // CronCreate or CronDelete for its result (noteSchedulingResults).
-  const noteUntrackedWorkCalls = (message) => {
+  // Notes the calls that leave work no task event reports, or end it. A
+  // main-thread Monitor waits for its task (monitorCallsAwaitingTask); a
+  // main-thread ScheduleWakeup, CronCreate or CronDelete for its result
+  // (noteSchedulingResults). Of a nested agent's calls (`nested`), only those
+  // that end scheduled work count, CronDelete and a ScheduleWakeup with
+  // `stop: true`: they end it in the session's CLI wherever they come from,
+  // and a model told to cancel a loop may hand them to an agent. Work a
+  // nested agent starts is not followed, like a job the CLI revives on resume.
+  const noteUntrackedWorkCalls = (message, { nested = false } = {}) => {
     const content = message.message?.content;
     if (!Array.isArray(content)) {
       return;
     }
     for (const block of content) {
       if (block?.type !== 'tool_use' || typeof block.id !== 'string') {
+        continue;
+      }
+      if (nested) {
+        if (block.name === 'CronDelete' || (block.name === 'ScheduleWakeup' && block.input?.stop === true)) {
+          schedulingCalls.set(block.id, { name: block.name, input: block.input ?? {}, calledAt: Date.now() });
+        }
         continue;
       }
       if (block.name === 'Monitor') {
@@ -3062,7 +3242,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // one result (`tool_use_result`), else the result's text and the call's
   // input. A call that failed did nothing. A wake-up set replaces the one
   // pending, as the CLI cancels that; `stop: true` cancels every pending
-  // wake-up, but no cron job.
+  // wake-up, but no cron job (see createScheduledWork).
   const noteSchedulingResults = (message) => {
     const content = message.message?.content;
     if (!Array.isArray(content)) {
@@ -3083,17 +3263,17 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         : null;
       if (call.name === 'ScheduleWakeup') {
         wakeupCallThisTurn = true;
-        heldWakeup = call.input.stop === true || output?.stopped === true
-          ? null
-          : readWakeupTime(output, call.input, call.calledAt);
+        scheduled.noteWakeupCall({ toolUseId: block.tool_use_id, input: call.input, output, calledAt: call.calledAt });
       } else if (call.name === 'CronCreate') {
-        heldCronJobs.set(readCronJobId(output, readToolResultText(block.content)) ?? `call:${block.tool_use_id}`, {
-          // A job is recurring unless the call says otherwise.
-          recurring: typeof output?.recurring === 'boolean' ? output.recurring : call.input.recurring !== false,
-          nextFireAt: Number.isFinite(output?.nextFireAt) ? output.nextFireAt : null,
+        scheduled.noteCronCreated({
+          toolUseId: block.tool_use_id,
+          jobId: readCronJobId(output, readToolResultText(block.content)),
+          input: call.input,
+          output,
+          calledAt: call.calledAt,
         });
       } else {
-        heldCronJobs.delete(typeof output?.id === 'string' ? output.id : call.input.id);
+        scheduled.noteCronDeleted(typeof output?.id === 'string' ? output.id : call.input.id);
       }
     }
   };
@@ -3107,36 +3287,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         : null,
       scheduledFor: Number.isFinite(message.scheduled_for) ? message.scheduled_for : null,
       startedAt: Date.now(),
+      turnEndedBefore: lastTurnEndedAt,
     });
-  };
-
-  // A cron job fired, starting at `firedAt`. The fire names no job (CLI
-  // 2.1.312), but the CLI fires a one-shot job only once the time its
-  // CronCreate result named has come, and the fire is seen after that: the
-  // one-shot job due first by then is the one, and is gone, else the first
-  // one whose result named no time. A fire with no one-shot job due, a
-  // recurring job's or that of a job the run did not see created (one an
-  // earlier process saved, the CLI's notice of missed jobs), takes none.
-  const dropFiredOneShotJob = (firedAt) => {
-    let fired = null;
-    let untimed = null;
-    for (const [jobId, job] of heldCronJobs) {
-      if (job.recurring) {
-        continue;
-      }
-      if (job.nextFireAt === null) {
-        untimed = untimed ?? jobId;
-      } else if (
-        job.nextFireAt <= firedAt
-        && (fired === null || job.nextFireAt < heldCronJobs.get(fired).nextFireAt)
-      ) {
-        fired = jobId;
-      }
-    }
-    const jobId = fired ?? untimed;
-    if (jobId !== null) {
-      heldCronJobs.delete(jobId);
-    }
   };
 
   // What a turn's `result` tells of the work no task reports, its calls read
@@ -3145,41 +3297,36 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   //   (`loop_wakeup`) takes the held wake-up with it, unless the turn made a
   //   ScheduleWakeup call of its own, or the held one was set while the fire
   //   waited: the CLI names the time a fire was set for, and the held one
-  //   then has another. A cron job's (`schedule_wakeup`) takes the one-shot
-  //   job it fired for, if any (dropFiredOneShotJob); a recurring one stays.
+  //   then has another. A cron job's (`schedule_wakeup`) names no job (CLI
+  //   2.1.312): the scheduled work puts it down to the job it was by the
+  //   jobs' times (see createScheduledWork), which then counts its next fire
+  //   from it, or is gone if it was a one-shot job or a recurring one's last;
+  //   one no job with a known time takes keeps a recurring job whose result
+  //   named no time held past it.
   // - A turn the CLI ran on its own (`cliOwnTurn`: reportsUntrackedWork) to
   //   relay a task notification is a Monitor's the CLI reported no task for.
   //   One for no fire the CLI named, from a CLI that does not name them, is
   //   taken for any work that ends by reporting back: the wake-up, every
-  //   one-shot job due by then, as dropFiredOneShotJob reads a job's time,
-  //   and the Monitor.
+  //   one-shot job due by then or with no time, and the Monitor; and it
+  //   keeps a recurring job whose result named no time held past it.
   // - A Monitor called during the turn that the CLI reported no task for is
   //   held from now on.
   const noteTurnUntrackedWork = (result, cliOwnTurn) => {
     const fires = turnCommands.filter((command) => command.source !== null);
     for (const fire of fires) {
       if (fire.source === 'schedule_wakeup') {
-        dropFiredOneShotJob(fire.startedAt);
-      } else if (
-        heldWakeup
-        && !wakeupCallThisTurn
-        && (!heldWakeup.exact || fire.scheduledFor === null || fire.scheduledFor === heldWakeup.at)
-      ) {
-        heldWakeup = null;
+        scheduled.noteCronFire(fire.startedAt, fire.turnEndedBefore);
+      } else if (!wakeupCallThisTurn) {
+        scheduled.noteWakeupFire(fire.scheduledFor);
       }
     }
     if (cliOwnTurn && result.origin?.kind === 'task-notification') {
       untrackedMonitorHeld = false;
     } else if (cliOwnTurn && fires.length === 0) {
       if (!wakeupCallThisTurn) {
-        heldWakeup = null;
+        scheduled.endWakeupChain();
       }
-      const dueBy = Date.now();
-      for (const [jobId, job] of heldCronJobs) {
-        if (!job.recurring && (job.nextFireAt === null || job.nextFireAt <= dueBy)) {
-          heldCronJobs.delete(jobId);
-        }
-      }
+      scheduled.noteUnnamedFire(Date.now());
       untrackedMonitorHeld = false;
     }
     if (monitorCallsAwaitingTask.size > 0) {
@@ -3391,6 +3538,28 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     skipPermissions: launched.skipPermissions,
   });
 
+  // Whether the process is held only for scheduled work: work of it holds
+  // the process (untrackedWorkHeld), and there is no task outstanding, nested
+  // ones included, no finished task still to be relayed, and no Monitor the
+  // CLI reported no task for.
+  const heldOnlyForScheduledWork = () => scheduled.holdsProcess()
+    && !backgroundWork.hasOutstanding(sessionKey())
+    && finishedOwnTaskIds.size === 0
+    && !untrackedMonitorHeld;
+
+  // What keeps a turn out of this process, of the changes planTurnHandOver
+  // found (`plan`): all of them, unless the turn accepts the process's own
+  // settings (`acceptProcessSettings`) and the process is held only for
+  // scheduled work. Such a turn runs with the process's effort, ultracode and
+  // tool rules (processKeptSettings) rather than wait as long as the loop
+  // runs, or stop it; a working directory, tool rules stricter than the
+  // process's, or a model or permission mode the process cannot switch to,
+  // still keep it out. The plan stands at the hand-over (handOverTurn).
+  const blockingChanges = (plan, acceptProcessSettings) => {
+    const kept = acceptProcessSettings && heldOnlyForScheduledWork() ? processKeptSettings(plan) : [];
+    return plan.changes.filter((change) => !kept.includes(change));
+  };
+
   // What handOverTurn would make of a later send's turn with these options,
   // worked out without writing or switching anything (planClaudeSDKHandOver).
   // The lookups are the ones handTurnToHeldProcess makes, with this run's
@@ -3398,7 +3567,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // records it for the session before the turn's run looks the model up.
   // With `inheritUnset`, asked or set in the options, a setting the options
   // leave out is this process's own (inheritUnsetSettings), the model
-  // included, so there is no model to look up.
+  // included, so there is no model to look up. With `acceptProcessSettings`,
+  // asked or set in the options, the changes are the blocking ones only
+  // (blockingChanges).
   const planHandOver = async (turnOptions, planOptions = {}) => {
     // A turn under way takes no other; whether its process has work of the
     // session's own is all there is to say.
@@ -3435,8 +3606,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     if (!next) {
       return { heldWork: holdsOwnWork(), canHandOver: false, changes: ['lookup'], switches: [] };
     }
-    const { changes, switches } = planTurnHandOver(launched, next, runEntry.instance, nextUltracode);
-    return { heldWork: holdsOwnWork(), canHandOver: changes.length === 0, changes, switches };
+    const plan = planTurnHandOver(launched, next, runEntry.instance, nextUltracode);
+    const changes = blockingChanges(
+      plan,
+      planOptions.acceptProcessSettings === true || turnOptions.acceptProcessSettings === true,
+    );
+    return { heldWork: holdsOwnWork(), canHandOver: changes.length === 0, changes, switches: plan.switches };
   };
 
   // Sends one switch of the model or the permission mode (`setting`) to the
@@ -3480,7 +3655,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // of its prompt, which the CLI reads after them, and sets the turn's own
   // tool rules; the remembered ones of earlier turns go. `skipPermissions` is
   // that of the tool settings the turn came with, which a later turn that
-  // brings none inherits.
+  // brings none inherits. The deny rules stay the ones the CLI took at
+  // launch: a turn that goes in denies nothing they do not.
   const applyTurnSettings = ({ plan, allowedTools, skipPermissions }) => {
     if (plan.model) {
       switchProcess('model', plan.model, `the model to ${plan.model}`);
@@ -3590,13 +3766,29 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // (writeDeferredHandOver), so the CLI's turn, a /loop wake-up say, runs
   // with the process's own settings; stopped before then, it switches
   // nothing, and `onSwitchesRestored` still hears what the process runs with.
-  const handOverTurn = ({ writer: turnWriter, sessionName, sdkOptions: next, ultracode, skipPermissions, restoreSwitches, onSwitchesRestored, promptMessage }) => {
+  //
+  // `acceptProcessSettings` lets in a turn that changes only settings the
+  // process keeps (processKeptSettings), which then runs with the process's.
+  // Only the scheduled-messages dispatcher sends it, once a plan with it said
+  // the process, held only for scheduled work, takes the turn
+  // (blockingChanges): that plan stands, even if the CLI's own turn has
+  // started a task since. Turning the turn away now would replace the
+  // process, and stop the very work the plan kept.
+  const handOverTurn = ({ writer: turnWriter, sessionName, sdkOptions: next, ultracode, skipPermissions, acceptProcessSettings, restoreSwitches, onSwitchesRestored, promptMessage }) => {
     if (!takesHandedOverTurn()) {
       return { taken: false, changes: [] };
     }
     const plan = planTurnHandOver(launched, next, runEntry.instance, ultracode);
-    if (plan.changes.length > 0) {
-      return { taken: false, changes: plan.changes };
+    // What the turn asked for that the process keeps its own of.
+    const keptSettings = acceptProcessSettings === true ? processKeptSettings(plan) : [];
+    const changes = plan.changes.filter((change) => !keptSettings.includes(change));
+    if (changes.length > 0) {
+      return { taken: false, changes };
+    }
+    if (keptSettings.length > 0) {
+      const labels = keptSettings.map((change) => HAND_OVER_CHANGE_LABELS[change]);
+      const named = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}` : labels[0];
+      console.log(`[Claude SDK] Session ${sessionKey()}: the new turn runs with the process's settings for ${named}, as planned for a process held only for scheduled work`);
     }
 
     const turn = {
@@ -3729,6 +3921,55 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       stoppingHandedOverTurn = false;
       settleStoppedTurn = null;
     }
+  };
+
+  // How to stop scheduled work of this process (stopClaudeSDKScheduledWork):
+  // the piece `id` names, or with `all` every piece that can be stopped
+  // (scheduled.stopTargets). A process in a turn it has not handed over is
+  // busy. Stopping only the wake-up of a process that holds nothing else (no
+  // task outstanding or still to be relayed, no cron job, no Monitor the CLI
+  // reported no task for) lets go of the process: the dynamic loop ends with
+  // it, at no cost, and no later process revives it. Anything else takes a
+  // turn in which the model cancels it (buildScheduledStopMessage), handed to
+  // this process (`inheritUnset`) so its other work keeps running. A process
+  // in plan mode runs that turn in the default mode, with permissions not
+  // skipped (which would ask for bypassPermissions), and is switched back
+  // after it (`restoreSwitchesAfterTurn`). Auto mode is left as it is.
+  const stopScheduledWork = (id, { all = false } = {}) => {
+    if (!takesHandedOverTurn()) {
+      return { status: 'busy' };
+    }
+    const targets = scheduled.stopTargets(id, { all });
+    if (!targets) {
+      return { status: 'not_found' };
+    }
+    const jobIds = targets.filter((target) => target.kind === 'cron').map((target) => target.jobId);
+    if (
+      jobIds.length === 0
+      && !scheduled.hasCronJobs()
+      && !backgroundWork.hasOutstanding(sessionKey())
+      && finishedOwnTaskIds.size === 0
+      && !untrackedMonitorHeld
+    ) {
+      console.log(`[Claude SDK] Session ${sessionKey()}: its dynamic /loop is stopped`);
+      heldForBackgroundWork = false;
+      releaseInput('scheduled-stopped');
+      return { status: 'stopped' };
+    }
+    const options = { inheritUnset: true };
+    if (launched.permissionMode === 'plan') {
+      Object.assign(options, {
+        permissionMode: 'default',
+        restoreSwitchesAfterTurn: true,
+        toolsSettings: { skipPermissions: false },
+      });
+    }
+    return {
+      status: 'turn',
+      content: buildScheduledStopMessage({ jobIds, wakeup: targets.some((target) => target.kind === 'wakeup') }),
+      options,
+      targetIds: targets.map((target) => target.id),
+    };
   };
 
   // Hoisted above the try so the catch's cleanup can tell whether this run
@@ -4018,14 +4259,22 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
       // The CLI runs one turn at a time, from its first sign (its init, a
       // command it starts, a main-thread message) to its `result`.
+      cliHeardAt = Date.now();
       if (message.type === 'result') {
         cliTurnActive = false;
+        lastTurnEndedAt = Date.now();
       } else if (
         (message.type === 'system' && message.subtype === 'init')
         || (message.type === 'command_lifecycle' && message.state === 'started')
         || ((message.type === 'assistant' || message.type === 'user') && !message.parent_tool_use_id)
       ) {
         cliTurnActive = true;
+      }
+      // Anything a turn says, its start included, holds a job whose result
+      // named no time a while longer: the turn may be its fire (see
+      // createScheduledWork).
+      if (cliTurnActive) {
+        scheduled.noteTurnActivity(cliHeardAt);
       }
       if (message.type === 'command_lifecycle' && message.state === 'started') {
         noteCommandStarted(message);
@@ -4130,9 +4379,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       if (startsBackgroundTasks(message)) {
         backgroundWorkPending = true;
       }
-      if (message.type === 'assistant' && !message.parent_tool_use_id) {
-        noteUntrackedWorkCalls(message);
-      } else if (message.type === 'user' && !message.parent_tool_use_id) {
+      if (message.type === 'assistant') {
+        noteUntrackedWorkCalls(message, { nested: Boolean(message.parent_tool_use_id) });
+      } else if (message.type === 'user') {
         noteSchedulingResults(message);
       }
       // Only tasks the tracker follows count. A housekeeping task the CLI
@@ -4535,6 +4784,63 @@ async function stopClaudeSDKTask(sessionId, taskId) {
 }
 
 /**
+ * Sessions whose live process holds scheduled work (see
+ * `IProviderRuntime.listScheduledWork` and createScheduledWork), each
+ * session's oldest first. Only a run that owns its session key and has not
+ * let go of its input reports any: the work dies with the process.
+ * @returns {Array<{ sessionId: string, scheduled: Array<import('@/shared/types.js').ScheduledWorkSummary> }>}
+ */
+function listClaudeSDKScheduledWork() {
+  const sessions = [];
+  for (const [sessionId, entry] of activeSessions) {
+    if (entry.inputReleased) {
+      continue;
+    }
+    const scheduled = entry.listScheduledWork();
+    if (scheduled.length > 0) {
+      sessions.push({ sessionId, scheduled });
+    }
+  }
+  return sessions;
+}
+
+/**
+ * Works out how to stop scheduled work of a session (see
+ * `IProviderRuntime.stopScheduledWork` and `ScheduledWorkStopResult`). An id
+ * that is not `cron:` and an eight-digit hex job id, or `wakeup:` and a
+ * tool_use id, is `not_found`. A live process (its run owns the key and
+ * holds its input) answers for itself: `busy` in a turn it has not handed
+ * over, `not_found` for work it does not hold, else `stopped` once it has
+ * let go to end a dynamic loop, or the turn that has the model cancel the
+ * work (see `stopScheduledWork` in queryClaudeSDK). With no live process, a
+ * job still takes a turn, in a new process: the CLI revives the job from the
+ * transcript and would run it again whenever a process holds the session.
+ * A wake-up has ended with its process.
+ * @param {string} sessionKey - Session key (the app session id for a chat run)
+ * @param {string} id - The work's id (`ScheduledWorkSummary.id`)
+ * @param {import('@/shared/types.js').ScheduledWorkStopOptions} [options]
+ * @returns {Promise<import('@/shared/types.js').ScheduledWorkStopResult>}
+ */
+async function stopClaudeSDKScheduledWork(sessionKey, id, options = {}) {
+  if (!isStoppableScheduledWorkId(id)) {
+    return { status: 'not_found' };
+  }
+  const entry = typeof sessionKey === 'string' ? getSession(sessionKey) : undefined;
+  if (entry && !entry.inputReleased) {
+    return entry.stopScheduledWork(id, { all: options?.all === true });
+  }
+  if (id.startsWith('cron:')) {
+    return {
+      status: 'turn',
+      content: buildScheduledStopMessage({ jobIds: [id.slice('cron:'.length)], wakeup: false }),
+      options: {},
+      targetIds: [id],
+    };
+  }
+  return { status: 'not_found' };
+}
+
+/**
  * Checks if an SDK session is currently active
  * @param {string} sessionId - Session identifier
  * @returns {boolean} True if session is active
@@ -4693,6 +4999,8 @@ export const claudeRuntime = {
   },
   listBackgroundWork: listClaudeSDKBackgroundWork,
   stopBackgroundTask: stopClaudeSDKTask,
+  listScheduledWork: listClaudeSDKScheduledWork,
+  stopScheduledWork: stopClaudeSDKScheduledWork,
   insert: insertIntoClaudeSDKSession,
   cancelInsert: cancelClaudeSDKInsert,
   processState: getClaudeSDKProcessState,
@@ -4706,6 +5014,8 @@ export {
   abortClaudeSDKSession,
   listClaudeSDKBackgroundWork,
   stopClaudeSDKTask,
+  listClaudeSDKScheduledWork,
+  stopClaudeSDKScheduledWork,
   isClaudeSDKSessionActive,
   getClaudeSDKSessionStartTime,
   getActiveClaudeSDKSessions,

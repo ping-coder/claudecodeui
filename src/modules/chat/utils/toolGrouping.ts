@@ -1,3 +1,5 @@
+import type { TFunction } from 'i18next';
+
 import type { ChatMessage, ToolGroupItem } from '@/shared/types';
 import { getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
 
@@ -17,6 +19,8 @@ type CachedToolGroup = {
   run: GroupableToolRun;
   /** Hidden reasoning both joins runs and changes what the preview names, so it is part of the key. */
   showThinking: boolean;
+  /** The preview's words are in the language of this `t`, which a change of language replaces. */
+  t: TFunction;
   group: ToolGroupItem;
 };
 
@@ -34,10 +38,10 @@ function isSameRun(cachedRun: GroupableToolRun, run: GroupableToolRun): boolean 
 }
 
 /** The group object for a run, reused unchanged while the run's rows are unchanged. */
-function getToolGroup(run: GroupableToolRun, showThinking: boolean): ToolGroupItem {
+function getToolGroup(run: GroupableToolRun, showThinking: boolean, t: TFunction): ToolGroupItem {
   const first = run[0];
   const cached = toolGroupCache.get(first);
-  if (cached && cached.showThinking === showThinking && isSameRun(cached.run, run)) {
+  if (cached && cached.showThinking === showThinking && cached.t === t && isSameRun(cached.run, run)) {
     return cached.group;
   }
 
@@ -46,9 +50,9 @@ function getToolGroup(run: GroupableToolRun, showThinking: boolean): ToolGroupIt
     toolName: first.toolName,
     messages: run,
     timestamp: first.timestamp,
-    preview: buildGroupPreview(run),
+    preview: buildGroupPreview(run, t),
   };
-  toolGroupCache.set(first, { run, showThinking, group });
+  toolGroupCache.set(first, { run, showThinking, t, group });
   return group;
 }
 
@@ -81,11 +85,13 @@ function parseToolInput(toolInput: unknown): unknown {
   }
 }
 
-function getToolInputPreview(message: ChatMessage): string {
+function getToolInputPreview(message: ChatMessage, t: TFunction): string {
   const config = getToolConfig(message.toolName || 'UnknownTool').input;
   const parsedInput = parseToolInput(message.toolInput);
-  const title = typeof config.title === 'function' ? config.title(parsedInput) : config.title;
-  const value = config.getValue?.(parsedInput);
+  const title = typeof config.title === 'function'
+    ? config.title(parsedInput, t)
+    : config.titleKey ? t(config.titleKey, { defaultValue: config.title }) : config.title;
+  const value = config.getValue?.(parsedInput, t);
 
   return String(value || title || message.displayText || message.content || '').trim();
 }
@@ -98,10 +104,10 @@ function getToolInputPreview(message: ChatMessage): string {
  * group cache above can reuse — a run's preview depends on the whole run, which
  * is exactly what that cache compares.
  */
-function buildGroupPreview(messages: ChatMessage[]): string {
+function buildGroupPreview(messages: ChatMessage[], t: TFunction): string {
   const named = messages
     .slice(0, PREVIEWED_TOOL_COUNT)
-    .map(getToolInputPreview)
+    .map((message) => getToolInputPreview(message, t))
     .filter(Boolean);
 
   const previewText = named.join(', ');
@@ -113,15 +119,21 @@ function buildGroupPreview(messages: ChatMessage[]): string {
   // whose first preview is empty render "/b.ts, +1 more" beside an x3 badge.
   const extraCount = messages.length - named.length;
 
+  const more = t('chat:tools.moreInGroup', { count: extraCount });
   if (!previewText) {
-    return extraCount > 0 ? `+${extraCount} more` : '';
+    return extraCount > 0 ? more : '';
   }
 
-  return extraCount > 0 ? `${previewText}, +${extraCount} more` : previewText;
+  return extraCount > 0 ? `${previewText}, ${more}` : previewText;
 }
 
+/**
+ * Folds runs of consecutive calls to the same tool into groups, each with its
+ * summary line in the language of `t` (any namespace: the keys carry theirs).
+ */
 export function groupConsecutiveTools(
   messages: ChatMessage[],
+  t: TFunction,
   showThinking: boolean = true,
 ): MessageListItem[] {
   const items: MessageListItem[] = [];
@@ -158,7 +170,7 @@ export function groupConsecutiveTools(
     }
 
     if (run.length >= TOOL_GROUP_THRESHOLD) {
-      items.push(getToolGroup(run, showThinking));
+      items.push(getToolGroup(run, showThinking, t));
     } else {
       items.push(...run);
     }

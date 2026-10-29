@@ -9,7 +9,8 @@ import type { BackgroundTaskSummary,
   LLMProvider,
   ProviderModelActions,
   ProviderModelsDefinition,
-  RevealMessageOptions } from '@/shared/types';
+  RevealMessageOptions,
+  ScheduledWorkSummary } from '@/shared/types';
 import { TURN_OPENER_ROW_CLASS } from '@/shared/constants';
 import { isTurnOpener } from '@/shared/utils';
 import { getIntrinsicMessageKey } from '@/modules/chat/utils/messageKeys';
@@ -64,6 +65,8 @@ type ChatMessagesPaneProps = {
   revealMessage: (message: ChatMessage, options?: RevealMessageOptions) => void;
   /** The session's running background tasks from the activity map, for the strip to list ones whose rows are not loaded. */
   backgroundTasks?: BackgroundTaskSummary[];
+  /** The scheduled work (loops, reminders) the session's held process keeps, from the activity map, for the strip to list. */
+  backgroundScheduled?: ScheduledWorkSummary[];
   /**
    * Whether CloudCLI's own runtime drives the viewed session's run, so the
    * background-tasks strip can offer to stop the tasks the transcript's rows
@@ -140,6 +143,7 @@ function ChatMessagesPane({
   loadEarlierMessages,
   revealMessage,
   backgroundTasks,
+  backgroundScheduled,
   canStopBackgroundTasks,
   sendMessage,
   loadAllMessages,
@@ -162,8 +166,8 @@ function ChatMessagesPane({
   const { t } = useTranslation('chat');
   const lazyRows = useLazyRowObserver(scrollContainerRef);
   const groupedVisibleMessages = useMemo(
-    () => groupConsecutiveTools(visibleMessages, Boolean(showThinking)),
-    [visibleMessages, showThinking],
+    () => groupConsecutiveTools(visibleMessages, t, Boolean(showThinking)),
+    [visibleMessages, showThinking, t],
   );
 
   // Stable, deterministic keys for the messages rendered this pass.
@@ -216,8 +220,10 @@ function ChatMessagesPane({
             <BackgroundTasksStrip
               messages={chatMessages}
               tasks={backgroundTasks}
+              scheduled={backgroundScheduled}
               sessionId={selectedSession?.id || currentSessionId}
               canStopTasks={canStopBackgroundTasks}
+              isTurnRunning={isProcessing}
               sendMessage={sendMessage}
               onReveal={revealMessage}
               onLoadAll={loadAllMessages}

@@ -238,6 +238,27 @@ test('the system notification goes through getRegistration, never serviceWorker.
   assert.equal(await showRunAlertSystemNotification(notification), false);
 });
 
+test('a system notification from a right-to-left interface goes out without bidi isolates', async () => {
+  const posted: Array<{ title: string; body: unknown }> = [];
+  defineNavigatorProperty('serviceWorker', {
+    getRegistration: async () => ({
+      showNotification: async (title: string, options: { body?: unknown }) => {
+        posted.push({ title, body: options.body });
+      },
+    }),
+  });
+
+  // What the Hebrew interface hands over: a fallback label in LRI…PDI, values in FSI…PDI.
+  await showRunAlertSystemNotification({
+    title: '\u2066Stage\u2069 · Fix login bug',
+    body: '\u2068הושלם\u2069 · \u2068demo-app\u2069',
+    tag: 'claude:session-a:run.stopped',
+    data: { sessionId: 'session-a', provider: 'claude', code: 'run.stopped' },
+    silent: true,
+  });
+  assert.deepEqual(posted, [{ title: 'Stage · Fix login bug', body: 'הושלם · demo-app' }]);
+});
+
 test('push counts as subscribed only when the registration holds a subscription', async () => {
   let subscription: unknown = { endpoint: 'https://push.example/abc' };
   defineNavigatorProperty('serviceWorker', {

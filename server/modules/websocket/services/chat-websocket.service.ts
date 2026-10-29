@@ -27,6 +27,9 @@ import type {
   ProviderInsertInput,
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
+  ScheduledWorkStopOptions,
+  ScheduledWorkStopResult,
+  ScheduledWorkSummary,
 } from '@/shared/types.js';
 import { buildTurnRunOptions, generateMessageId, parseIncomingJsonObject } from '@/shared/utils.js';
 
@@ -89,6 +92,28 @@ export type ProviderRuntimeGateway = {
   stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
   /** Whether a provider runtime still holds background work for the session after its turn ended. */
   hasBackgroundWork(sessionId: string): boolean;
+  /**
+   * Whether a provider runtime holds scheduled work for the session in the
+   * process it keeps for it: a /loop's next wake-up, a CronCreate job (see
+   * `ScheduledWorkSummary`). Apart from `hasBackgroundWork`, which answers
+   * for tasks alone.
+   */
+  hasScheduledWork(sessionId: string): boolean;
+  /** The session's scheduled work, as the provider runtimes list it. */
+  listScheduledWork(sessionId: string): ScheduledWorkSummary[];
+  /**
+   * Stops one item of the session's scheduled work, named by its id, or all
+   * of it with `all` (see `ScheduledWorkStopResult`): the provider runtime
+   * lets go of its process when that alone ends the work, and otherwise
+   * answers with the turn that has the model cancel it. The chat gateway's
+   * `chat.stop-task` asks for it, and runs that turn.
+   */
+  stopScheduledWork(
+    provider: LLMProvider,
+    sessionId: string,
+    id: string,
+    options: ScheduledWorkStopOptions,
+  ): Promise<ScheduledWorkStopResult>;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
   /**
@@ -118,6 +143,23 @@ export type ProviderRuntimeGateway = {
     planOptions?: ProviderHandOverPlanOptions,
   ): Promise<ProviderHandOverPlan>;
 };
+
+/**
+ * Whether a provider runtime still holds work of the session after its turn:
+ * background tasks (`hasBackgroundWork`), or scheduled work
+ * (`hasScheduledWork`: a /loop's next wake-up, a CronCreate job). Either way
+ * the run that left the work keeps sending live events through its writer
+ * (task progress, the turn a task's report or a firing pushes), so
+ * `chat.subscribe` attaches a tab to it, and the composition root keeps the
+ * run registered for as long (`chatRunRegistry.setRetentionGuard`), which
+ * also has the turn's `run_ended` say that work goes on.
+ */
+export function holdsWorkPastTurn(
+  runtime: Pick<ProviderRuntimeGateway, 'hasBackgroundWork' | 'hasScheduledWork'>,
+  sessionId: string,
+): boolean {
+  return runtime.hasBackgroundWork(sessionId) || runtime.hasScheduledWork(sessionId);
+}
 
 type ChatWebSocketDependencies = {
   /** Central dispatcher for every provider SDK/CLI runtime. */
@@ -242,12 +284,13 @@ type SendRefusedFrame = {
 };
 
 /**
- * How a client names one of its sends (`clientRequestId`), for the gateway to
- * hand back on its refusal: letters, digits, `_` and `-`, 128 at most.
+ * How a client names one of its requests (`clientRequestId`), for the gateway
+ * to hand back on its answer: a send's refusal, a stop's `stop_task_status`.
+ * Letters, digits, `_` and `-`, 128 at most.
  */
 const CLIENT_REQUEST_ID_PATTERN = /^[\w-]{1,128}$/;
 
-/** The send's `clientRequestId` as the client sent it, or null when it sent none, or one out of pattern. */
+/** The request's `clientRequestId` as the client sent it, or null when it sent none, or one out of pattern. */
 function readClientRequestId(data: AnyRecord): string | null {
   return typeof data.clientRequestId === 'string' && CLIENT_REQUEST_ID_PATTERN.test(data.clientRequestId)
     ? data.clientRequestId
@@ -361,85 +404,122 @@ function resolveSendTarget(
 type SwitchesRestored = { model?: unknown; permissionMode?: unknown };
 
 /**
- * One turn that recorded its model on the session for itself alone (see
- * `recordModelForTurnAlone`).
+ * One turn that recorded one of its settings (its model, reasoning effort or
+ * ultracode) on the session for itself alone (see `recordForTurnAlone`).
  */
-type TurnModelRecord = {
-  /** The model the session had recorded when the turn wrote its own; null when none was. */
-  previousModel: string | null;
-  /** The model the turn recorded. */
-  turnModel: string;
+type TurnSettingRecord<T> = {
+  /** What the session had recorded when the turn wrote its own; null when nothing was. */
+  previous: T | null;
+  /** What the turn recorded. */
+  value: T;
   /** Set once the turn's switch-back has come. */
   restored: boolean;
   /**
    * The session's next such turn, when it was dispatched while this turn's
-   * switch-back was still to come, so that it found this turn's model
+   * switch-back was still to come, so that it found this turn's value
    * recorded. Once the switch-back comes, it takes over this turn's previous
-   * model as its own.
+   * value as its own.
    */
-  next: TurnModelRecord | null;
+  next: TurnSettingRecord<T> | null;
+};
+
+/** One setting of the session's row a turn can record for itself alone (see `recordForTurnAlone`). */
+type TurnSetting<T> = {
+  /**
+   * Per session, the latest turn that recorded the setting for itself alone,
+   * until its switch-back comes: the only one whose switch-back puts a value
+   * back. One whose switch-back never comes (its process let go after the
+   * turn) stays until the session's next such turn takes its place: that turn
+   * links to it only if it still finds its value recorded, and a switch-back
+   * that never comes hands nothing on.
+   */
+  records: Map<string, TurnSettingRecord<T>>;
+  /** What the session's row records; null when nothing is, or the session has gone. */
+  read: (sessionId: string) => T | null;
+  write: (provider: LLMProvider, sessionId: string, value: T) => void;
+  /** What the switch-back says the process runs with, standing in when nothing was recorded before the turn. */
+  switchedBackTo?: (restored: SwitchesRestored) => T | null;
+};
+
+const TURN_MODEL: TurnSetting<string> = {
+  records: new Map(),
+  read: (sessionId) => sessionsDb.getSessionById(sessionId)?.model?.trim() || null,
+  write: (provider, sessionId, model) => {
+    providerModelsService.setSessionModel(provider, sessionId, model);
+  },
+  switchedBackTo: (restored) => (
+    typeof restored?.model === 'string' && restored.model.trim() ? restored.model.trim() : null
+  ),
+};
+
+const TURN_EFFORT: TurnSetting<string> = {
+  records: new Map(),
+  read: (sessionId) => sessionsDb.getSessionById(sessionId)?.effort?.trim() || null,
+  write: (provider, sessionId, effort) => {
+    providerModelsService.setSessionEffort(provider, sessionId, effort);
+  },
+};
+
+const TURN_ULTRACODE: TurnSetting<boolean> = {
+  records: new Map(),
+  read: (sessionId) => {
+    const ultracode = sessionsDb.getSessionById(sessionId)?.ultracode;
+    return typeof ultracode === 'number' ? ultracode !== 0 : null;
+  },
+  write: (provider, sessionId, ultracode) => {
+    providerModelsService.setSessionUltracode(provider, sessionId, ultracode);
+  },
 };
 
 /**
- * Per session, the latest turn that recorded its model for itself alone,
- * until its switch-back comes: the only one whose switch-back puts a model
- * back. One whose switch-back never comes (its process let go after the
- * turn) stays until the session's next such turn takes its place: that turn
- * links to it only if it still finds its model recorded, and a switch-back
- * that never comes hands nothing on.
- */
-const turnModelRecords = new Map<string, TurnModelRecord>();
-
-/** The model recorded on the session's row, trimmed; null when none is, or the session has gone. */
-function readRecordedModel(sessionId: string): string | null {
-  return sessionsDb.getSessionById(sessionId)?.model?.trim() || null;
-}
-
-/**
- * Records the model of a turn whose switches last for the turn alone
+ * Records one setting of a turn whose switches last for the turn alone
  * (`restoreSwitchesAfterTurn`, as the scheduled-messages dispatcher sends a
- * queued or due message), and returns the turn's `onSwitchesRestored` run
- * option, which puts the session's own model back once the turn's
- * switch-back comes (see `SwitchesRestored`).
+ * queued or due message): its model, reasoning effort or ultracode. Returns
+ * what puts the session's own value back once the turn's switch-back comes
+ * (see `SwitchesRestored`), for the turn's `onSwitchesRestored` run option.
  *
- * The model is recorded before the run as for every turn: the runtime reads
+ * The value is recorded before the run as for every turn: the runtime reads
  * a resumed turn's model off the record, and the message must run on its
  * own. But the record is also what a composer shows when the session is
- * opened again, and what the user's next send goes with: left on the
+ * opened again, and what the user's next send goes with. Left on the
  * message's model, it would switch a /loop the message left as it was for
- * good. So once the switch-back comes, the model recorded before the turn
- * goes back, unless the record no longer holds the turn's model (the user
- * picked another meanwhile); read and written with nothing awaited in
- * between. The previous model goes back whatever the runtime switched back,
- * as the turn's record replaced the user's pick even where the model was
- * not switched, or nothing was: the turn named the process's own model and
- * permission mode, or it was stopped while it waited for a turn the CLI ran
- * on its own. The model the runtime names stands in only when nothing was
- * recorded before.
+ * good. Left on an effort or ultracode the held process cannot switch to (a
+ * message that went in on the process's own, `acceptProcessSettings`), it
+ * would make the user's next send ask for a new process, which stops the
+ * loop, though nobody changed a setting. So once the switch-back comes, the
+ * value recorded before the turn goes back, unless the record no longer
+ * holds the turn's (the user picked another meanwhile); read and written
+ * with nothing awaited in between. The previous value goes back whatever the
+ * runtime switched back, as the turn's record replaced the user's pick even
+ * where nothing was switched: the turn named the process's own settings, or
+ * it was stopped while it waited for a turn the CLI ran on its own. The
+ * model the runtime names stands in only when nothing was recorded before.
  * A turn that started a process of its own, or whose process lets go after
- * it, gets no switch-back: it leaves the record on the turn's model, as
+ * it, gets no switch-back: it leaves the record on the turn's values, as
  * every turn's did before.
  *
  * Two such turns of a session can follow each other faster than the first
  * one's switch-back (due messages of one session in one pass). The record is
- * then the second one's, and only the second one's switch-back puts a model
- * back: the one the second found recorded, or, when that was the first one's
- * model, the one recorded before the first, which the first one's
- * switch-back hands on.
+ * then the second one's, and only the second one's switch-back puts a value
+ * back: the one the second found recorded, or, when that was the first one's,
+ * the one recorded before the first, which the first one's switch-back hands
+ * on. Each setting goes its own way: when the second turn records no effort,
+ * the first one's switch-back puts the effort back.
  */
-function recordModelForTurnAlone(
+function recordForTurnAlone<T>(
+  setting: TurnSetting<T>,
   provider: LLMProvider,
   sessionId: string,
-  model: string,
+  value: T,
 ): (restored: SwitchesRestored) => void {
-  const recorded = readRecordedModel(sessionId);
-  const turn: TurnModelRecord = { previousModel: recorded, turnModel: model, restored: false, next: null };
-  const latest = turnModelRecords.get(sessionId);
-  if (latest && !latest.restored && latest.turnModel === recorded) {
+  const recorded = setting.read(sessionId);
+  const turn: TurnSettingRecord<T> = { previous: recorded, value, restored: false, next: null };
+  const latest = setting.records.get(sessionId);
+  if (latest && !latest.restored && latest.value === recorded) {
     latest.next = turn;
   }
-  turnModelRecords.set(sessionId, turn);
-  providerModelsService.setSessionModel(provider, sessionId, model);
+  setting.records.set(sessionId, turn);
+  setting.write(provider, sessionId, value);
 
   return (restored) => {
     if (turn.restored) {
@@ -447,26 +527,56 @@ function recordModelForTurnAlone(
     }
     turn.restored = true;
     if (turn.next) {
-      turn.next.previousModel = turn.previousModel;
+      turn.next.previous = turn.previous;
     }
-    if (turnModelRecords.get(sessionId) !== turn) {
-      // A later such turn recorded its model: the record is that turn's.
+    if (setting.records.get(sessionId) !== turn) {
+      // A later such turn recorded its value: the record is that turn's.
       return;
     }
-    turnModelRecords.delete(sessionId);
-    const switchedBackTo = typeof restored?.model === 'string' && restored.model.trim() ? restored.model.trim() : null;
-    const previousModel = turn.previousModel ?? switchedBackTo;
-    if (previousModel && readRecordedModel(sessionId) === turn.turnModel) {
-      providerModelsService.setSessionModel(provider, sessionId, previousModel);
+    setting.records.delete(sessionId);
+    const previous = turn.previous ?? setting.switchedBackTo?.(restored) ?? null;
+    if (previous !== null && setting.read(sessionId) === turn.value) {
+      setting.write(provider, sessionId, previous);
     }
   };
 }
 
 /**
- * Registers the run and hands the turn to the provider runtime.
+ * Why a provider runtime turned a turn away at the hand-over, as its run's
+ * `error` with code HAND_OVER_FAILED says: a turn the scheduled-messages
+ * dispatcher sent on the held process's own settings
+ * (`acceptProcessSettings`), which that process did not take after all. The
+ * runtime fails such a turn rather than start a process of its own, which
+ * would stop the session's scheduled work. `reason` is the runtime's word
+ * for it (Claude's: `stale-plan`, `lookup`), `content` its English text;
+ * null when the error left either out.
+ */
+export type HandOverFailure = { reason: string | null; content: string | null };
+
+type ChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
+
+/** The `HandOverFailure` a run's events report, or null when its runtime reported none. */
+function readHandOverFailure(run: ChatRun): HandOverFailure | null {
+  const error = run.events.find((event) => event.kind === 'error' && event.code === 'HAND_OVER_FAILED');
+  if (!error) {
+    return null;
+  }
+  return {
+    reason: typeof error.reason === 'string' ? error.reason : null,
+    content: typeof error.content === 'string' ? error.content : null,
+  };
+}
+
+/**
+ * Registers the run and hands the turn to the provider runtime. Resolves once
+ * the runtime's run settles, with whether the run started, how it failed,
+ * and the `HandOverFailure` its events report.
  *
- * `extraRuntimeOptions` is how an edited message asks the provider to resume
- * partway instead of continuing from the tip; a normal send passes nothing.
+ * `extraRuntimeOptions` go over the client's options (see
+ * `buildTurnRunOptions`): how an edited message asks the provider to resume
+ * partway instead of continuing from the tip, or the
+ * `acceptProcessSettings` of a turn `runDetachedChatTurn` runs; a normal
+ * send passes nothing.
  */
 async function dispatchRun(
   ws: WebSocket | null,
@@ -476,8 +586,8 @@ async function dispatchRun(
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies,
   extraRuntimeOptions: AnyRecord = {},
-  beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
-): Promise<{ started: boolean; error: string | null }> {
+  beforeRun?: (run: ChatRun) => void | Promise<void>,
+): Promise<{ started: boolean; error: string | null; handOverFailure: HandOverFailure | null }> {
   const provider = session.provider as LLMProvider;
 
   const run = chatRunRegistry.startRun({
@@ -497,7 +607,7 @@ async function dispatchRun(
         sessionId
       );
     }
-    return { started: false, error: 'A run is already in progress for this session.' };
+    return { started: false, error: 'A run is already in progress for this session.', handOverFailure: null };
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -518,20 +628,34 @@ async function dispatchRun(
   // Record what this turn runs with so reopening the session later restores the
   // same model, reasoning effort and ultracode switch, and so the resume path
   // has a session-scoped model answer to use. A turn whose switches last for
-  // it alone puts the session's own model back afterwards.
+  // it alone puts the session's own settings back afterwards
+  // (recordForTurnAlone).
   const turnModel = typeof clientOptions.model === 'string' ? clientOptions.model.trim() : '';
-  let onSwitchesRestored: ((restored: SwitchesRestored) => void) | null = null;
-  if (turnModel && clientOptions.restoreSwitchesAfterTurn === true) {
-    onSwitchesRestored = recordModelForTurnAlone(provider, sessionId, turnModel);
-  } else if (turnModel) {
-    providerModelsService.setSessionModel(provider, sessionId, turnModel);
+  const forTurnAlone = clientOptions.restoreSwitchesAfterTurn === true;
+  const putBack: Array<(restored: SwitchesRestored) => void> = [];
+  const record = <T>(setting: TurnSetting<T>, value: T) => {
+    if (forTurnAlone) {
+      putBack.push(recordForTurnAlone(setting, provider, sessionId, value));
+    } else {
+      setting.write(provider, sessionId, value);
+    }
+  };
+  if (turnModel) {
+    record(TURN_MODEL, turnModel);
   }
   if (effort) {
-    providerModelsService.setSessionEffort(provider, sessionId, effort);
+    record(TURN_EFFORT, effort);
   }
   if (typeof ultracode === 'boolean') {
-    providerModelsService.setSessionUltracode(provider, sessionId, ultracode);
+    record(TURN_ULTRACODE, ultracode);
   }
+  const onSwitchesRestored = putBack.length > 0
+    ? (restored: SwitchesRestored) => {
+      for (const put of putBack) {
+        put(restored);
+      }
+    }
+    : null;
 
   const attachmentCandidates = [
     ...normalizeAttachmentDescriptors(clientOptions.images),
@@ -557,8 +681,8 @@ async function dispatchRun(
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
   };
-  // The gateway's own callback (see recordModelForTurnAlone), never a value
-  // the client sent under its name.
+  // The gateway's own callback (see recordForTurnAlone), never a value the
+  // client sent under its name.
   delete runtimeOptions.onSwitchesRestored;
   if (onSwitchesRestored) {
     runtimeOptions.onSwitchesRestored = onSwitchesRestored;
@@ -584,7 +708,7 @@ async function dispatchRun(
     chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
   }
 
-  return { started: true, error: failure };
+  return { started: true, error: failure, handOverFailure: readHandOverFailure(run) };
 }
 
 /**
@@ -718,15 +842,185 @@ async function handleChatAbort(
 }
 
 /**
+ * The gateway's answers to a `chat.stop-task` that names scheduled work (see
+ * `stopScheduledWork`), sent to the asking socket alone, without `seq`, and
+ * never as a `protocol_error`, which the client takes as the session's run
+ * failing. `taskId` is the id the stop named, and `clientRequestId` the
+ * stop's own (see `readClientRequestId`), left out when it had none: every
+ * pane on a page shares the socket, and two of them can stop the same item.
+ *
+ * - `stopped`: the provider runtime let go of its held process, which ended
+ *   the work;
+ * - `started`: the turn that has the model cancel the work has started;
+ *   `finished` follows once it is over, with `stillHeld` saying whether any
+ *   of the work it was to end is still held;
+ * - `failed`: that turn was not started, as it would have replaced the held
+ *   process and stopped the session's other background work, or the runtime
+ *   failed to answer;
+ * - `busy`: a turn is under way in the session, or the cancelling turn could
+ *   not start: the stop can be asked again once it is over;
+ * - `not_found`: the session holds no such work.
+ */
+type StopTaskStatusFrame = {
+  kind: Extract<GatewayEventKind, 'stop_task_status'>;
+  sessionId: string;
+  taskId: string;
+  status: 'stopped' | 'started' | 'finished' | 'failed' | 'busy' | 'not_found';
+  stillHeld?: boolean;
+  clientRequestId?: string;
+  timestamp: string;
+};
+
+/**
+ * Whether a `chat.stop-task` names scheduled work (`cron:` or `wakeup:`, see
+ * `ScheduledWorkSummary.id`) rather than a background task. The provider
+ * runtime checks the rest of the id.
+ */
+function namesScheduledWork(taskId: string): boolean {
+  return taskId.startsWith('cron:') || taskId.startsWith('wakeup:');
+}
+
+/**
+ * Stops scheduled work of a session for `chat.stop-task`: the item `taskId`
+ * names, or all of it with `all`. Each step is answered with
+ * `stop_task_status` (see `StopTaskStatusFrame`).
+ *
+ * Nothing is stopped while a turn is under way in the session. The provider
+ * runtime stops what letting go of its held process stops; for the rest it
+ * answers with a turn that has the model cancel the work (see
+ * `ScheduledWorkStopResult`). That turn runs as the scheduled-messages
+ * dispatcher runs a message, with no client attached: planned first, with
+ * what its options leave out taken as the held process's own, and not
+ * started when it would need a process of its own while that process is held
+ * for background work, which the new process would stop. A session whose
+ * process has gone starts one, which resumes the conversation, so the model
+ * can cancel a CronCreate job the CLI brings back from the transcript. Once
+ * the turn is over, the session's scheduled work tells whether the model did.
+ */
+async function stopScheduledWork(
+  ws: WebSocket,
+  userId: string | number | null,
+  target: {
+    sessionId: string;
+    taskId: string;
+    all: boolean;
+    clientRequestId: string | null;
+    session: ReturnType<typeof sessionsDb.getSessionById> | null;
+  },
+  dependencies: ChatWebSocketDependencies,
+): Promise<void> {
+  const { sessionId, taskId, all, clientRequestId, session } = target;
+  const reply = (status: StopTaskStatusFrame['status'], stillHeld?: boolean) => {
+    const frame: StopTaskStatusFrame = {
+      kind: 'stop_task_status',
+      sessionId,
+      taskId,
+      status,
+      ...(stillHeld === undefined ? {} : { stillHeld }),
+      ...(clientRequestId ? { clientRequestId } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    sendJson(ws, frame);
+  };
+
+  const provider = session?.provider as LLMProvider | undefined;
+  if (!session || !provider || !dependencies.runtime.hasRuntime(provider)) {
+    reply('not_found');
+    return;
+  }
+  if (chatRunRegistry.isProcessing(sessionId)) {
+    reply('busy');
+    return;
+  }
+
+  let stop: ScheduledWorkStopResult;
+  try {
+    stop = await dependencies.runtime.stopScheduledWork(provider, sessionId, taskId, { all });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" failed to stop scheduled work`, { sessionId, taskId, error: message });
+    reply('failed');
+    return;
+  }
+  if (stop.status !== 'turn') {
+    reply(stop.status);
+    return;
+  }
+
+  let plan: ProviderHandOverPlan;
+  try {
+    plan = await dependencies.runtime.planHandOver(
+      provider,
+      sessionId,
+      // The options the turn's run gets (see dispatchRun), so the plan judges
+      // the very turn that would run.
+      buildTurnRunOptions({ sessionId, projectPath: session.project_path, clientOptions: stop.options }),
+      { inheritUnset: true },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" could not plan the turn that cancels scheduled work`, {
+      sessionId,
+      error: message,
+    });
+    plan = { heldWork: true, canHandOver: false, changes: ['lookup'], switches: [] };
+  }
+  if (plan.heldWork && !plan.canHandOver) {
+    console.log(`[Chat] Session ${sessionId}: not cancelling scheduled work, the turn would replace the process held for background work (${plan.changes.join(', ')})`);
+    reply('failed');
+    return;
+  }
+
+  const { targetIds } = stop;
+  const result = await runDetachedChatTurn(
+    {
+      sessionId,
+      userId,
+      content: stop.content,
+      options: stop.options,
+      onStarted: () => {
+        // The asking socket follows the turn from its first frame. A turn
+        // handed to the held process brings along whoever watched it (see
+        // chatRunRegistry), but one that starts a process of its own, for a
+        // session whose process has gone, has nobody watching.
+        chatRunRegistry.attachConnection(sessionId, ws);
+        reply('started');
+      },
+      onTurnEnded: () => {
+        let stillHeld = true;
+        try {
+          const held = new Set(dependencies.runtime.listScheduledWork(sessionId).map((item) => item.id));
+          stillHeld = targetIds.some((id) => held.has(id));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error('[Chat] Could not list scheduled work after the turn that cancels it', { sessionId, error: message });
+        }
+        reply('finished', stillHeld);
+      },
+    },
+    dependencies,
+  );
+  if (!result.started) {
+    reply('busy');
+  }
+}
+
+/**
  * Handles `chat.stop-task`: stops one background task of a session — an
  * agent, a workflow or a backgrounded command that is still going after its
  * turn ended. Unlike `chat.abort` there is no run to consult: the task lives
  * in the provider's held process, which is the only thing that can stop it.
  * The provider then reports the task as stopped on the session's stream, so
  * nothing is echoed back here on success.
+ *
+ * An id that names scheduled work (`cron:`, `wakeup:`) is stopped by
+ * `stopScheduledWork` instead, and `allScheduled: true` stops all of the
+ * session's: those are answered with `stop_task_status` frames, which carry
+ * the stop's `clientRequestId` back.
  */
 async function handleChatStopTask(
   ws: WebSocket,
+  userId: string | number | null,
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies
 ): Promise<void> {
@@ -743,6 +1037,15 @@ async function handleChatStopTask(
   }
 
   const session = sessionsDb.getSessionById(sessionId);
+  if (namesScheduledWork(taskId)) {
+    await stopScheduledWork(
+      ws,
+      userId,
+      { sessionId, taskId, all: data.allScheduled === true, clientRequestId: readClientRequestId(data), session },
+      dependencies,
+    );
+    return;
+  }
   if (!session) {
     sendProtocolError(ws, 'SESSION_NOT_FOUND', `Session "${sessionId}" was not found.`, sessionId);
     return;
@@ -1023,11 +1326,12 @@ function handleChatSubscribe(
 
     // Future live events for this run should land on the socket that asked —
     // this is what makes mid-stream page refreshes work for all providers.
-    // A session whose turn ended but whose background work is still going
-    // keeps producing events through the same writer (task progress, the
-    // turn the CLI pushes when a task reports), so a tab opened during that
-    // work attaches too; the registry keeps the run while the work lasts.
-    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId)) {
+    // A session whose turn ended but whose background or scheduled work is
+    // still going keeps producing events through the same writer (task
+    // progress, the turn the CLI pushes when a task reports or a /loop's
+    // wake-up or cron job fires), so a tab opened during that work attaches
+    // too; the registry keeps the run while the work lasts.
+    if (isProcessing || holdsWorkPastTurn(dependencies.runtime, sessionId)) {
       chatRunRegistry.attachConnection(sessionId, ws);
     }
 
@@ -1078,10 +1382,12 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * Runs a turn for a session with no client attached.
  *
  * Used by scheduled messages, which fire from a timer: there is no socket to
- * report errors to and no audience to stream to. The run is registered exactly
- * like an interactive one, so anyone who opens the session while it is going
- * subscribes and replays it from the start, and the session shows as busy
- * everywhere in the meantime.
+ * report errors to and no audience to stream to. The chat gateway's stop of
+ * scheduled work runs its cancelling turn this way too (`stopScheduledWork`),
+ * telling the asking socket how it goes through `onStarted` and
+ * `onTurnEnded`. The run is registered exactly like an interactive one, so
+ * anyone who opens the session while it is going subscribes and replays it
+ * from the start, and the session shows as busy everywhere in the meantime.
  *
  * Resolves when the provider run settles, which for a turn that leaves
  * background work going is when its process exits, or as soon as the turn is
@@ -1092,6 +1398,11 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * included. `onTurnEnded` tells the caller earlier, as the turn ends. Returns
  * false when the session has gone away or is busy without
  * `interruptActiveRun`, which the caller reports on the schedule.
+ *
+ * `options` are the server's own, never a client's: an
+ * `acceptProcessSettings: true` among them reaches the run, which
+ * `buildTurnRunOptions` drops from a `chat.send`. Only the scheduled-messages
+ * dispatcher sets it, once its plan said the held process takes the turn.
  */
 export async function runDetachedChatTurn(
   input: {
@@ -1116,6 +1427,21 @@ export async function runDetachedChatTurn(
      * may go into that process meanwhile.
      */
     onTurnEnded?: () => void;
+    /**
+     * Called once the turn's run has started: the session is reserved for
+     * it, and the provider runtime is about to get the turn. Never called
+     * for a run that did not start. The chat gateway's stop of scheduled
+     * work tells the asking socket then.
+     */
+    onStarted?: () => void;
+    /**
+     * Called before the result settles when the provider runtime turned the
+     * turn away at the hand-over (see `HandOverFailure`), which only a turn
+     * whose options set `acceptProcessSettings: true` can be. The
+     * scheduled-messages dispatcher puts a queued message back in the queue
+     * then, and records why a due one failed.
+     */
+    onHandOverFailed?: (failure: HandOverFailure) => void;
   },
   dependencies: ChatWebSocketDependencies,
 ): Promise<{ started: boolean; error: string | null }> {
@@ -1151,7 +1477,7 @@ export async function runDetachedChatTurn(
   const handedOver = new Promise<{ started: boolean; error: string | null }>((resolve) => {
     settleOnHandOver = resolve;
   });
-  const { onTurnEnded } = input;
+  const { onTurnEnded, onStarted, onHandOverFailed } = input;
   const dispatched = dispatchRun(
     null,
     input.userId,
@@ -1159,14 +1485,20 @@ export async function runDetachedChatTurn(
     session,
     { sessionId: input.sessionId, content: input.content, options: input.options ?? {} },
     dependencies,
-    {},
+    input.options?.acceptProcessSettings === true ? { acceptProcessSettings: true } : {},
     (run) => {
       void chatRunRegistry.whenHandedOver(run).then(() => settleOnHandOver({ started: true, error: null }));
       if (onTurnEnded) {
         void chatRunRegistry.whenCompleted(run).then(() => onTurnEnded());
       }
+      onStarted?.();
     },
-  );
+  ).then(({ handOverFailure, ...result }) => {
+    if (handOverFailure) {
+      onHandOverFailed?.(handOverFailure);
+    }
+    return result;
+  });
   return Promise.race([dispatched, handedOver]);
 }
 
@@ -1182,18 +1514,22 @@ export async function runDetachedChatTurn(
  * - `chat.insert`              { sessionId, insertId, content }
  * - `chat.insert-cancel`       { sessionId, insertId }
  * - `chat.abort`               { sessionId }
- * - `chat.stop-task`           { sessionId, taskId }
+ * - `chat.stop-task`           { sessionId, taskId, allScheduled?, clientRequestId? } (a `cron:` or `wakeup:`
+ *                              taskId names scheduled work; `allScheduled` stops all of the session's; its
+ *                              `stop_task_status` answers carry the stop's `clientRequestId`)
  * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
  * a provider `NormalizedMessage` (with `seq`) or a gateway event
  * (`chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
- * `protocol_error`, `send_refused`). `insert_status` comes both ways: a
- * runtime's go out through the run's writer with `seq`, while the gateway
- * answers a refused insert or a failed cancel to the asking socket alone,
- * without one. `send_refused` goes the same way, for a `chat.send` with
- * `keepBackgroundWork` that would have stopped the session's background work.
+ * `protocol_error`, `send_refused`, `stop_task_status`). `insert_status`
+ * comes both ways: a runtime's go out through the run's writer with `seq`,
+ * while the gateway answers a refused insert or a failed cancel to the
+ * asking socket alone, without one. `send_refused` goes the same way, for a
+ * `chat.send` with `keepBackgroundWork` that would have stopped the session's
+ * background work, and so does `stop_task_status`, for a `chat.stop-task`
+ * that names scheduled work.
  */
 export function handleChatConnection(
   ws: WebSocket,
@@ -1232,7 +1568,7 @@ export function handleChatConnection(
           await handleChatAbort(ws, data, dependencies);
           return;
         case 'chat.stop-task':
-          await handleChatStopTask(ws, data, dependencies);
+          await handleChatStopTask(ws, userId, data, dependencies);
           return;
         case 'chat.subscribe':
           handleChatSubscribe(ws, data, dependencies);

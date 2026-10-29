@@ -7,6 +7,7 @@ import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import type { ChatMessage, RevealMessageOptions } from '@/shared/types';
 import { convertMarkdownToPlainText } from '@/shared/utils';
 import { usePinnedQuestion } from '@/modules/chat/hooks/usePinnedQuestion';
+import { formatTimeOfDay } from '@/modules/chat/utils/chatFormatting';
 import { getIntrinsicMessageKey } from '@/modules/chat/utils/messageKeys';
 import { Markdown } from '@/modules/chat/transcript/Markdown';
 import MessageCopyControl from '@/modules/chat/transcript/MessageCopyControl';
@@ -50,7 +51,7 @@ const selectBarWidthTier = (width: number): BarWidthTier => {
 };
 
 const isSlashCommand = (message: ChatMessage): boolean => (
-  Boolean(message.isLocalCommand || message.commandName)
+  Boolean(message.commandName)
   || SLASH_COMMAND_PATTERN.test(String(message.content ?? '').trimStart())
 );
 
@@ -61,8 +62,9 @@ const listAttachmentNames = (message: ChatMessage): string[] => (
     .filter(Boolean)
 );
 
-const formatClock = (timestamp: ChatMessage['timestamp']): string => (
-  new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+/** An insert's time to the minute, in the interface language. */
+const formatClock = (timestamp: ChatMessage['timestamp'], language: string): string => (
+  formatTimeOfDay(timestamp, language, { hour: '2-digit', minute: '2-digit' })
 );
 
 /** The panel open under the bar: for which question (its intrinsic key) and how tall it may get. */
@@ -108,7 +110,7 @@ function PinnedQuestionBar({
   findLoadedQuestion,
   exportMenu,
 }: PinnedQuestionBarProps) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const { question, isLoaded, inserts, status, preview } = usePinnedQuestion({
     scrollContainerRef,
     chatMessages,
@@ -441,8 +443,8 @@ function PinnedQuestionBar({
                           <span className="rounded-full border border-primary/20 bg-primary/5 px-1.5 text-[10px] font-medium leading-4 text-primary/80">
                             {t('message.inserted', { defaultValue: 'Inserted' })}
                           </span>
-                          {/* In the browser's locale: a <bdi> keeps "5:02 PM" in order in a right-to-left row. */}
-                          <bdi>{formatClock(insert.timestamp)}</bdi>
+                          {/* A <bdi> keeps the time in its own order in a right-to-left row. */}
+                          <bdi>{formatClock(insert.timestamp, i18n.language)}</bdi>
                         </span>
                         <span dir="auto" className="bidi-auto line-clamp-2 min-w-0 flex-1 break-words font-serif text-sm text-foreground">
                           {convertMarkdownToPlainText(String(insert.content ?? '').slice(0, INSERT_PREVIEW_CHARS))}
@@ -454,7 +456,7 @@ function PinnedQuestionBar({
               </div>
               <div className="flex flex-shrink-0 items-center justify-end gap-1 border-t border-border/60 px-2 py-1 text-xs text-muted-foreground">
                 {content.trim() && <MessageCopyControl content={content} messageType="user" />}
-                <bdi>{new Date(question.timestamp).toLocaleTimeString()}</bdi>
+                <bdi>{formatTimeOfDay(question.timestamp, i18n.language)}</bdi>
               </div>
             </div>
           </div>

@@ -91,7 +91,7 @@ const cancelRename = vi.fn();
 // A sidebar with a search box first and Settings last, around the real session row (its click,
 // double-click, rename and side-button rules are what the drawer has to work with), which opens
 // through the sidebar's open callback the way the sidebar's controller does. The row is loaded by
-// path: the sidebar's barrel only exposes Sidebar.
+// path: the sidebar's barrel does not expose it.
 vi.mock('@/modules/sidebar', async () => {
   const { default: SidebarSessionItem } = await vi.importActual<{ default: ComponentType<Record<string, unknown>> }>(
     '@/modules/sidebar/SidebarSessionItem',

@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectSession,
   QuickSettingsTab,
+  ScheduledWorkSummary,
   SessionDragPayload,
   SlashCommand,
   UntitledPaneTabLabels,
@@ -294,17 +295,20 @@ const DEFAULT_PAGE_TITLE = 'CloudCLI UI';
 /**
  * Resolves the human-readable label for a session: the persisted `summary` (the custom
  * name the sessions API returns for every provider, Cursor included), else the `name` a
- * Cursor session object may carry locally, else the provider's placeholder. Reads the
- * same fields in the same order as the sidebar row, so the header, document title and
- * sidebar never disagree about a session's name.
+ * Cursor session object may carry locally, else the provider's placeholder in the interface
+ * language (sidebar's "Untitled Session" for Cursor, "New Session" for the others; the keys
+ * name their namespace, so any `t` will do). Reads the same fields in the same order as the
+ * sidebar row, so the header, document title and sidebar never disagree about a session's name.
  */
-export const getSessionTitle = (session: ProjectSession): string => {
+export const getSessionTitle = (session: ProjectSession, t: TFunction): string => {
   const title = (session.summary as string) || (session.name as string);
-  if (session.__provider === 'cursor') {
-    return title || 'Untitled Session';
+  if (title) {
+    return title;
   }
 
-  return title || 'New Session';
+  return session.__provider === 'cursor'
+    ? t('sidebar:projects.untitledSession')
+    : t('sidebar:projects.newSession');
 };
 
 /**
@@ -314,9 +318,10 @@ export const getSessionTitle = (session: ProjectSession): string => {
 export const getPageTitle = (
   selectedProject: Project | null,
   selectedSession: ProjectSession | null,
+  t: TFunction,
 ): string => {
   if (selectedSession) {
-    return getSessionTitle(selectedSession);
+    return getSessionTitle(selectedSession, t);
   }
 
   const displayName = selectedProject?.displayName?.trim();
@@ -355,7 +360,8 @@ export const findLiveSessionTitle = (sessionId: string, projects: readonly Proje
  * its text and only gains the marker: its live title (`findLiveSessionTitle`), else `tabTitle`,
  * the snapshot of a pane tab holding it, trimmed, else the localized "Untitled session" (common's
  * runNotifications.untitledSession, whatever namespace `t` defaults to). Never `getSessionTitle`'s
- * English-only "New Session". Used by project-workspace's ProjectEffects and useRunningSessionTitle.
+ * provider placeholders ("New Session"). Used by project-workspace's ProjectEffects and useRunningSessionTitle,
+ * which pass it through sidebar's formatSessionTitle for the server's placeholder names.
  */
 export const resolveDocumentSessionTitle = (
   sessionId: string,
@@ -580,6 +586,78 @@ export function describeBackgroundTask(task: BackgroundTaskSummary, t: TFunction
   }
 }
 
+/**
+ * One piece of scheduled work by kind and prompt: "Loop check CI", "Reminder
+ * stretch" (a one-shot job). Takes a `t` bound to the chat namespace, which
+ * holds the labels; used by the chat module (the activity tab, its details
+ * panel, the background-send prompt) and the shell module's busy notice.
+ */
+export function describeScheduledWork(item: ScheduledWorkSummary, t: TFunction): string {
+  const label = item.recurring
+    ? t('scheduledWork.loop', { prompt: item.prompt, defaultValue: 'Loop {{prompt}}' })
+    : t('scheduledWork.reminder', { prompt: item.prompt, defaultValue: 'Reminder {{prompt}}' });
+  return label.trim();
+}
+
+/**
+ * How much scheduled work there is: "3 loops", or "3 scheduled items" once a
+ * one-shot reminder is among it. Takes a `t` bound to the chat namespace;
+ * used by the chat module's activity tab.
+ */
+export function countScheduledWork(items: ScheduledWorkSummary[], t: TFunction): string {
+  return items.every((item) => item.recurring)
+    ? t('scheduledWork.count.loops', { count: items.length, defaultValue_one: '{{count}} loop', defaultValue_other: '{{count}} loops' })
+    : t('scheduledWork.count.items', { count: items.length, defaultValue_one: '{{count}} scheduled item', defaultValue_other: '{{count}} scheduled items' });
+}
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+
+/**
+ * The scheduled work a server reply or frame lists (see ScheduledWorkSummary),
+ * item by item: one in a shape this client does not read hides only itself.
+ * Undefined when the value is no list, as from a server that does not report
+ * scheduled work. Read by the activity map's running-sessions poll and the
+ * shell module's `session_busy` reader.
+ */
+export function parseScheduledWork(value: unknown): ScheduledWorkSummary[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items: ScheduledWorkSummary[] = [];
+  for (const entry of value) {
+    const item = entry as Partial<Record<keyof ScheduledWorkSummary, unknown>> | null;
+    if (
+      !item
+      || typeof item.id !== 'string'
+      || (item.kind !== 'cron' && item.kind !== 'wakeup')
+      || typeof item.toolUseId !== 'string'
+      || typeof item.prompt !== 'string'
+      || !isFiniteNumber(item.startedAt)
+      || !(item.nextFireAt === null || isFiniteNumber(item.nextFireAt))
+      || typeof item.recurring !== 'boolean'
+      || !isFiniteNumber(item.holdUntil)
+    ) {
+      continue;
+    }
+    items.push({
+      id: item.id,
+      kind: item.kind,
+      toolUseId: item.toolUseId,
+      prompt: item.prompt,
+      startedAt: item.startedAt,
+      nextFireAt: item.nextFireAt,
+      recurring: item.recurring,
+      holdUntil: item.holdUntil,
+      ...(typeof item.cron === 'string' ? { cron: item.cron } : {}),
+      ...(typeof item.cadence === 'string' ? { cadence: item.cadence } : {}),
+      ...(isFiniteNumber(item.expiresAt) ? { expiresAt: item.expiresAt } : {}),
+      ...(item.durable === true ? { durable: true } : {}),
+      ...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+    });
+  }
+  return items;
+}
+
 /** The English label of each setting a Claude hand-over can name (see describeHandOverChanges). */
 const HAND_OVER_SETTING_LABELS = {
   model: 'the model',
@@ -794,15 +872,18 @@ export const getPaneScopedDomId = (side: WorkspacePaneSide | null, id: string): 
   (side ? `pane-${side}-${id}` : id);
 
 /**
- * A pane tab's label: labels.newChat for a draft; otherwise liveTitle (the session's title in the
+ * A pane tab's title: labels.newChat for a draft; otherwise liveTitle (the session's title in the
  * projects list, where renames and generated summaries land), then the tab's own snapshot, then
- * labels.missing for a missing session or the generic session title. Each caller looks the live title
- * up its own way: project-workspace's ProjectMainRegion (tab bar) and ProjectCommandPalette (Open tabs).
+ * labels.missing for a missing session or the generic session title (getSessionTitle's, worded by
+ * `t`). Each caller looks the live title up its own way: project-workspace's ProjectMainRegion (tab
+ * bar) and ProjectCommandPalette (Open tabs). A rename starts from it; on screen it goes through
+ * sidebar's formatSessionTitle, which shows the server's placeholder names in the interface language.
  */
 export const resolvePaneTabTitle = (
   tab: WorkspaceSessionTab,
   liveTitle: string | null | undefined,
   labels: UntitledPaneTabLabels,
+  t: TFunction,
 ): string => {
   if (!tab.sessionId) {
     return labels.newChat;
@@ -813,7 +894,7 @@ export const resolvePaneTabTitle = (
   }
   return tab.isMissing
     ? labels.missing
-    : getSessionTitle(tab.session ?? { id: tab.sessionId, __provider: tab.provider });
+    : getSessionTitle(tab.session ?? { id: tab.sessionId, __provider: tab.provider }, t);
 };
 
 /** The tabindex loans focusWithLentTabIndex has outstanding, by element, so a second call shares the first one. */
@@ -890,10 +971,84 @@ export const focusWorkspacePaneElement = (
 
 //----------------- CHAT MESSAGE TEXT ------------
 
+/** Unicode punctuation and symbols, which CommonMark's flanking rules treat alike. */
+const MARKDOWN_PUNCTUATION = /[\p{P}\p{S}]/u;
+
+type EmphasisRun = { mark: string; from: number; to: number; length: number; canOpen: boolean; canClose: boolean };
+
 /**
- * Turns markdown into readable plain text: fenced code keeps its code, while inline code marks, images,
- * links, quotes, headings, list markers, emphasis and HTML tags are dropped. Used by chat's
- * MessageCopyControl ("Copy as text") and usePinnedQuestion (the one-line preview of a turn's question).
+ * One line without its `*` and `_` emphasis marks, read as CommonMark reads them, roughly: a run of
+ * marks opens when left-flanking (no whitespace after it, and punctuation after it only if whitespace
+ * or punctuation is before it) and closes when right-flanking (the mirror image); an underscore does
+ * neither inside a word. A closer pairs with the nearest opener of its mark, two marks at a time while
+ * both have two, under the rule of 3. So `run_in_background`, `*\/3 * * * *` and `src/**\/*.ts` keep
+ * every mark, a star pair inside a word is emphasis, and an underscore pair is not.
+ */
+const dropEmphasisMarks = (line: string): string => {
+  const isSpace = (ch: string) => ch === '' || /\s/u.test(ch);
+  const isPunctuation = (ch: string) => MARKDOWN_PUNCTUATION.test(ch);
+  // Whole characters, so an emoji next to a mark counts as the symbol it is.
+  const charBefore = (index: number) => (/[\uDC00-\uDFFF]/.test(line[index - 1] ?? '') ? line.slice(Math.max(0, index - 2), index) : line[index - 1] ?? '');
+  const charAfter = (index: number) => (index < line.length ? String.fromCodePoint(line.codePointAt(index) ?? 0) : '');
+  const runs: EmphasisRun[] = [];
+  for (const match of line.matchAll(/\*+|_+/g)) {
+    const start = match.index ?? 0;
+    // A backslash escapes the mark it stands before.
+    const from = start + (line[start - 1] === '\\' ? 1 : 0);
+    const to = start + match[0].length;
+    if (from === to) continue;
+    const before = charBefore(from);
+    const after = charAfter(to);
+    const leftFlanking = !isSpace(after) && (!isPunctuation(after) || isSpace(before) || isPunctuation(before));
+    const rightFlanking = !isSpace(before) && (!isPunctuation(before) || isSpace(after) || isPunctuation(after));
+    const mark = match[0][0];
+    runs.push({
+      mark,
+      from,
+      to,
+      length: to - from,
+      canOpen: leftFlanking && (mark === '*' || !rightFlanking || isPunctuation(before)),
+      canClose: rightFlanking && (mark === '*' || !leftFlanking || isPunctuation(after)),
+    });
+  }
+  const dropped = new Set<number>();
+  const openers: EmphasisRun[] = [];
+  for (const closer of runs) {
+    while (closer.canClose && closer.to > closer.from) {
+      let index = openers.length - 1;
+      while (index >= 0) {
+        const opener = openers[index];
+        const breaksRuleOf3 = (opener.canClose || closer.canOpen) && (opener.length + closer.length) % 3 === 0
+          && (opener.length % 3 !== 0 || closer.length % 3 !== 0);
+        if (opener.mark === closer.mark && !breaksRuleOf3) break;
+        index -= 1;
+      }
+      if (index < 0) break;
+      const opener = openers[index];
+      const used = opener.to - opener.from >= 2 && closer.to - closer.from >= 2 ? 2 : 1;
+      for (let offset = 0; offset < used; offset += 1) {
+        dropped.add(opener.to - 1 - offset);
+        dropped.add(closer.from + offset);
+      }
+      opener.to -= used;
+      closer.from += used;
+      // The openers after this one are left unpaired, and this one goes once it has no marks left.
+      openers.length = opener.to > opener.from ? index + 1 : index;
+    }
+    if (closer.canOpen && closer.to > closer.from) openers.push(closer);
+  }
+  let kept = '';
+  for (let index = 0; index < line.length; index += 1) {
+    if (!dropped.has(index)) kept += line[index];
+  }
+  return kept;
+};
+
+/**
+ * Turns markdown into readable plain text: fenced and inline code keep their code, while code marks,
+ * images, links, quotes, headings, list markers, emphasis and HTML tags are dropped. Used by chat's
+ * MessageCopyControl ("Copy as text"), usePinnedQuestion (the one-line preview of a turn's question)
+ * and PinnedQuestionBar (its inserts).
  */
 export const convertMarkdownToPlainText = (markdown: string): string => {
   let plainText = markdown.replace(/\r\n/g, '\n');
@@ -903,28 +1058,36 @@ export const convertMarkdownToPlainText = (markdown: string): string => {
     codeBlocks.push(code.replace(/\n$/, ''));
     return placeholder;
   });
-  plainText = plainText.replace(/`([^`]+)`/g, '$1');
+  const inlineCode: string[] = [];
+  plainText = plainText.replace(/`([^`]+)`/g, (_match, code: string) => {
+    inlineCode.push(code);
+    return `@@INLINECODE${inlineCode.length - 1}@@`;
+  });
   plainText = plainText.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1');
   plainText = plainText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
   plainText = plainText.replace(/^>\s?/gm, '');
   plainText = plainText.replace(/^#{1,6}\s+/gm, '');
   plainText = plainText.replace(/^[-*+]\s+/gm, '');
   plainText = plainText.replace(/^\d+\.\s+/gm, '');
-  plainText = plainText.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  plainText = plainText.replace(/(\*|_)(.*?)\1/g, '$2');
+  plainText = plainText.split('\n').map(dropEmphasisMarks).join('\n');
   plainText = plainText.replace(/~~(.*?)~~/g, '$1');
   plainText = plainText.replace(/<\/?[^>]+(>|$)/g, '');
   plainText = plainText.replace(/\n{3,}/g, '\n\n');
+  plainText = plainText.replace(/@@INLINECODE(\d+)@@/g, (_match, index: string) => inlineCode[Number(index)] ?? '');
   plainText = plainText.replace(/@@CODEBLOCK(\d+)@@/g, (_match, index: string) => codeBlocks[Number(index)] ?? '');
   return plainText.trim();
 };
 
 /**
- * Whether a transcript row opens a turn: a user message that was not inserted into a running turn. The
- * user-role entries the transcript draws as the assistant's (a background task's report, a compaction
- * summary, a local command's output) are assistant rows by the time normalizedToChatMessages hands them
- * over. The server's isTurnQuestion (server/modules/providers/services/sessions.service.ts) applies the
- * same rule to stored rows; change the two together. Read by chat's usePinnedQuestion and ChatMessagesPane
- * (which question a turn is pinned under) and runProgress (where the turn in flight starts).
+ * Whether a transcript row opens a turn: a user message that was neither inserted into a running turn
+ * nor a local command (isLocalCommand: /model, /cost, which Claude Code runs without asking the model).
+ * A slash command that hands the model a turn, such as /review or a custom command, opens one like any
+ * message. The user-role entries the transcript draws as the assistant's (a background task's report, a
+ * compaction summary, a local command's output) are assistant rows by the time normalizedToChatMessages
+ * hands them over. The server's isTurnQuestion (server/modules/providers/services/sessions.service.ts)
+ * applies the same rule to stored rows; change the two together. Read by chat's usePinnedQuestion and
+ * ChatMessagesPane (which question a turn is pinned under) and runProgress (where the turn in flight starts).
  */
-export const isTurnOpener = (message: ChatMessage): boolean => message.type === 'user' && !message.inserted;
+export const isTurnOpener = (message: ChatMessage): boolean => (
+  message.type === 'user' && !message.inserted && !message.isLocalCommand
+);

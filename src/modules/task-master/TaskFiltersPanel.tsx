@@ -48,7 +48,7 @@ export default function TaskFiltersPanel({
           <select
             value={statusFilter}
             onChange={(event) => onStatusFilterChange(event.target.value)}
-            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-800"
+            className="w-full rounded-md border border-gray-300 bg-white py-2 pe-10 ps-3 dark:border-gray-600 dark:bg-gray-800"
           >
             <option value="all">{t('filters.allStatuses')}</option>
             {statuses.map((status) => (
@@ -64,7 +64,7 @@ export default function TaskFiltersPanel({
           <select
             value={priorityFilter}
             onChange={(event) => onPriorityFilterChange(event.target.value)}
-            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-800"
+            className="w-full rounded-md border border-gray-300 bg-white py-2 pe-10 ps-3 dark:border-gray-600 dark:bg-gray-800"
           >
             <option value="all">{t('filters.allPriorities')}</option>
             {priorities.map((priority) => (
@@ -83,7 +83,7 @@ export default function TaskFiltersPanel({
               const [field, order] = event.target.value.split('-') as [TaskBoardSortField, TaskBoardSortOrder];
               onSortConfigChange(field, order);
             }}
-            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-800"
+            className="w-full rounded-md border border-gray-300 bg-white py-2 pe-10 ps-3 dark:border-gray-600 dark:bg-gray-800"
           >
             <option value="id-asc">{t('sort.idAsc')}</option>
             <option value="id-desc">{t('sort.idDesc')}</option>

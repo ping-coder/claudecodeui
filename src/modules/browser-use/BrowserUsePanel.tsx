@@ -15,6 +15,8 @@ import {
   X,
 } from 'lucide-react';
 
+import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
+import { useBrowserFullscreen } from '@/shared/hooks/useBrowserFullscreen';
 import { cn } from '@/shared/utils';
 import { Badge, Button } from '@/shared/ui';
 import { api, readApiJson, ApiRequestError } from '@/shared/api';
@@ -149,13 +151,45 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [isInstalling, setIsInstalling] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // The full-screen preview: an overlay over the viewport and, where the browser allows it, the screen.
+  const {
+    isMaximized: isFullscreen,
+    enter: enterFullscreen,
+    exit: exitFullscreen,
+  } = useBrowserFullscreen({ source: 'browserUse' });
   const [error, setError] = useState<string | null>(null);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) || sessions[0] || null,
     [selectedSessionId, sessions],
   );
+
+  // The overlay shows the selected session; with none left (deleted elsewhere, the server restarted)
+  // the full screen ends too instead of holding the page over an empty workspace.
+  useEffect(() => {
+    if (isFullscreen && !selectedSession) {
+      exitFullscreen();
+    }
+  }, [exitFullscreen, isFullscreen, selectedSession]);
+
+  // A short Escape leaves the full-screen preview once nothing above it (a menu, a dialog) took it;
+  // holding it is the browser's own way out.
+  useEffect(() => {
+    if (!isFullscreen) {
+      return undefined;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR)) {
+        return;
+      }
+      event.preventDefault();
+      exitFullscreen();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [exitFullscreen, isFullscreen]);
 
   const activeSessions = sessions.filter((session) => session.status === 'ready');
   const needsBrowserBinaries = Boolean(status?.enabled && (!status.playwrightInstalled || !status.chromiumInstalled));
@@ -227,7 +261,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
     if (!selectedSession) return;
     const response = await api.browserUse.deleteSession(selectedSession.id);
     await readApiJson(response);
-    setIsFullscreen(false);
+    exitFullscreen();
   });
 
   const installBrowserBinaries = () => runAction(async () => {
@@ -463,7 +497,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
                   <div className="hidden text-xs text-muted-foreground md:block">
                     {formatAction(selectedSession?.lastAction || null, t)}
                   </div>
-                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setIsFullscreen(true)} disabled={!selectedSession?.screenshotDataUrl} title={t('browserUse.fullScreen')} aria-label={t('browserUse.fullScreen')}>
+                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={enterFullscreen} disabled={!selectedSession?.screenshotDataUrl} title={t('browserUse.fullScreen')} aria-label={t('browserUse.fullScreen')}>
                     <Expand className="h-4 w-4" />
                   </Button>
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0 lg:hidden" onClick={stopSession} disabled={isBusy || !selectedSession || selectedSession.status !== 'ready'} title={t('browserUse.stopSession')} aria-label={t('browserUse.stopSession')}>
@@ -536,11 +570,12 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
       </div>
 
       {isFullscreen && selectedSession && (
-        <div className="fixed inset-0 z-50 bg-black/90 p-6">
-          <div className="flex h-full flex-col rounded-md border border-white/10 bg-black">
+        // Edge to edge, like the other maximized views, whether or not the browser granted its full screen.
+        <div className="fixed inset-0 z-50 bg-black/90 p-0">
+          <div className="flex h-full flex-col bg-black">
             <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 text-sm text-white/80">
               <div className="min-w-0 truncate">{selectedSession.title || selectedSession.url || t('browserUse.sessionFallback')}</div>
-              <Button variant="outline" size="sm" onClick={() => setIsFullscreen(false)}>
+              <Button variant="outline" size="sm" onClick={exitFullscreen}>
                 <X className="h-4 w-4" />
                 {t('browserUse.close')}
               </Button>

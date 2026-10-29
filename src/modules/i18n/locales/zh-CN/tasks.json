@@ -18,13 +18,13 @@
     "steps": {
       "createPRD": {
         "title": "创建产品需求文档（PRD）",
-        "description": "讨论您的项目构想并创建描述您想构建什么的 PRD。",
+        "description": "讨论项目构想，写一份 PRD，说明要构建什么。",
         "addButton": "添加 PRD",
         "existingPRDs": "现有的 PRD："
       },
       "generateTasks": {
         "title": "从 PRD 生成任务",
-        "description": "一旦您有了 PRD，请 AI 助手解析它，TaskMaster 将自动将其分解为可管理的任务，包含实现细节。"
+        "description": "有了 PRD 之后，让 AI 助手解析它，TaskMaster 会自动把它拆成可执行的任务，并附上实现细节。"
       },
       "analyzeTasks": {
         "title": "分析并展开任务",
@@ -41,13 +41,13 @@
     "title": "TaskMaster 设置",
     "subtitle": "{{projectName}} 的交互式 CLI",
     "willStart": "TaskMaster 初始化将自动开始",
-    "completed": "TaskMaster 设置完成！您现在可以关闭此窗口。",
+    "completed": "TaskMaster 设置完成！现在可以关闭这个窗口了。",
     "closeButton": "关闭",
     "closeContinueButton": "关闭并继续"
   },
   "helpGuide": {
     "title": "开始使用 TaskMaster",
-    "subtitle": "您的高效任务管理指南",
+    "subtitle": "高效任务管理指南",
     "examples": {
       "parsePRD": "💬 示例：\n「我刚用 Claude Task Master 初始化了一个新项目。我有一个 PRD 在 .taskmaster/docs/prd.txt。你能帮我解析它并设置初始任务吗？」",
       "expandTask": "💬 示例：\n「任务 5 看起来很复杂。你能把它分解成子任务吗？」",
@@ -68,7 +68,7 @@
     }
   },
   "search": {
-    "placeholder": "搜索任务..."
+    "placeholder": "搜索任务…"
   },
   "filters": {
     "button": "筛选",
@@ -122,6 +122,58 @@
   "prd": {
     "modified": "修改时间：{{date}}"
   },
+  "prdEditor": {
+    "fullscreen": "全屏",
+    "exitFullscreen": "退出全屏",
+    "fileNamePlaceholder": "输入 PRD 文件名",
+    "focusFileName": "编辑文件名",
+    "newBadge": "新建",
+    "documentType": "产品需求文档",
+    "editMode": "切换到编辑模式",
+    "previewMarkdown": "预览 Markdown",
+    "disableWordWrap": "关闭自动换行",
+    "enableWordWrap": "开启自动换行",
+    "toggleTheme": "切换主题",
+    "download": "下载 PRD",
+    "generateTasks": "生成任务",
+    "generateTasksHint": "根据 PRD 内容生成任务",
+    "save": "保存 PRD",
+    "saving": "正在保存…",
+    "saved": "已保存！",
+    "close": "关闭",
+    "loading": "正在加载 PRD…",
+    "footer": {
+      "lines": "行数：{{lines}}",
+      "characters": "字符数：{{characters}}",
+      "words": "词数：{{words}}",
+      "format": "格式：Markdown",
+      "shortcuts": "按 Ctrl+S 保存，按 Esc 关闭"
+    },
+    "errors": {
+      "generateNeedsContent": "先给 PRD 写点内容，再生成任务。",
+      "emptyContent": "先写点内容再保存。",
+      "emptyFileName": "先填写 PRD 的文件名。",
+      "noProject": "没有选中项目，重新打开编辑器再试。",
+      "saveStatus": "保存失败：{{status}}",
+      "save": "保存 PRD 出错：{{message}}",
+      "load": "无法加载文件内容：{{message}}"
+    },
+    "generateTasksModal": {
+      "title": "从 PRD 生成任务",
+      "askTitle": "直接问 Claude Code",
+      "askDescription": "先保存这份 PRD，再在聊天里让 Claude Code 解析这个文件，创建初始任务。",
+      "examplePrompt": "提示词示例",
+      "prompt": "我的 PRD 在 .taskmaster/docs/{{fileName}}，解析它并创建初始任务。",
+      "docs": "查看 TaskMaster 文档",
+      "gotIt": "知道了"
+    },
+    "overwriteModal": {
+      "title": "文件已存在",
+      "message": "已有名为「{{fileName}}」的 PRD，要覆盖吗？",
+      "cancel": "取消",
+      "overwrite": "覆盖"
+    }
+  },
   "statuses": {
     "pending": "待处理",
     "in-progress": "进行中",
@@ -133,10 +185,26 @@
   "priorities": {
     "high": "高",
     "medium": "中",
-    "low": "低"
+    "low": "低",
+    "highTitle": "高优先级",
+    "mediumTitle": "中优先级",
+    "lowTitle": "低优先级"
   },
   "noMatchingTasks": {
     "title": "没有符合筛选条件的任务",
-    "description": "尝试调整您的搜索或筛选条件。"
+    "description": "试试调整搜索或筛选条件。"
+  },
+  "banner": {
+    "initialize": "初始化",
+    "hideDetails": "收起详情",
+    "whatIsTaskmaster": "什么是 TaskMaster？",
+    "detailAiPowered": "- AI 驱动的任务管理，支持依赖关系和子任务。",
+    "detailPrdDriven": "- 从 PRD 生成任务，项目起步更快。",
+    "detailKanbanList": "- 看板和列表视图，方便日常推进。",
+    "startTask": "开始任务",
+    "viewTaskDetails": "查看任务详情",
+    "viewAllTasks": "查看全部任务",
+    "allComplete": "任务已全部完成",
+    "noPending": "没有待处理的任务"
   }
 }

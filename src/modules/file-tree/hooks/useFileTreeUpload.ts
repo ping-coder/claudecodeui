@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import { IS_PLATFORM } from '@/shared/utils';
 import type { FileTreeUploadProgressState, Project } from '@/shared/types';
@@ -27,8 +29,6 @@ const MAX_FILE_UPLOAD_COUNT = 20;
 const COMPLETE_PROGRESS_CLEAR_DELAY_MS = 1400;
 const ERROR_PROGRESS_CLEAR_DELAY_MS = 3200;
 
-const pluralizeFiles = (count: number) => (count === 1 ? 'file' : 'files');
-
 const getRelativePath = (file: File) => {
   const fileWithRelativePath = file as File & { webkitRelativePath?: string };
   return fileWithRelativePath.webkitRelativePath || file.name;
@@ -39,17 +39,60 @@ const getFileDisplayName = (file: File) => {
   return relativePath.split(/[\\/]/).pop() || file.name;
 };
 
-const validateFilesForUpload = (files: File[]): string | null => {
+const validateFilesForUpload = (t: TFunction, files: File[]): string | null => {
   if (files.length > MAX_FILE_UPLOAD_COUNT) {
-    return `You can upload up to ${MAX_FILE_UPLOAD_COUNT} files at once.`;
+    return t('fileTree.uploadError.tooMany', { max: MAX_FILE_UPLOAD_COUNT });
   }
 
   const oversizedFile = files.find((file) => file.size > MAX_FILE_UPLOAD_SIZE_BYTES);
   if (oversizedFile) {
-    return `${getFileDisplayName(oversizedFile)} is larger than ${MAX_FILE_UPLOAD_SIZE_LABEL}.`;
+    return t('fileTree.uploadError.tooLarge', {
+      fileName: getFileDisplayName(oversizedFile),
+      size: MAX_FILE_UPLOAD_SIZE_LABEL,
+    });
   }
 
   return null;
+};
+
+/** Why an upload request failed. The hook words it in the UI language (describeUploadError). */
+type UploadFailure =
+  | { reason: 'network' }
+  | { reason: 'canceled' }
+  // `serverMessage` is the server's own error text, which is English.
+  | { reason: 'server'; status: number; serverMessage: string | null };
+
+class UploadRequestError extends Error {
+  readonly failure: UploadFailure;
+
+  constructor(failure: UploadFailure) {
+    super(failure.reason === 'server' ? failure.serverMessage ?? `HTTP ${failure.status}` : `Upload ${failure.reason}`);
+    this.name = 'UploadRequestError';
+    this.failure = failure;
+  }
+}
+
+/**
+ * The toast and progress-line text for a failed upload. What the server says keeps its own words
+ * after a prefix in the UI language; any other error is worded the same way.
+ */
+const describeUploadError = (t: TFunction, error: unknown): string => {
+  if (error instanceof UploadRequestError) {
+    const { failure } = error;
+    if (failure.reason === 'network') {
+      return t('fileTree.uploadError.network');
+    }
+    if (failure.reason === 'canceled') {
+      return t('fileTree.uploadError.canceled');
+    }
+    return failure.serverMessage
+      ? t('fileTree.uploadError.server', { error: failure.serverMessage })
+      : t('fileTree.uploadError.status', { status: failure.status });
+  }
+
+  return error instanceof Error && error.message
+    ? t('fileTree.uploadError.server', { error: error.message })
+    : t('fileTree.uploadFailed');
 };
 
 const parseUploadResponse = (xhr: XMLHttpRequest): UploadResponse => {
@@ -64,12 +107,22 @@ const parseUploadResponse = (xhr: XMLHttpRequest): UploadResponse => {
   }
 };
 
-const formatUploadSuccessMessage = (uploadedCount: number, requestedFileCount: number) => {
+const formatUploadSuccessMessage = (t: TFunction, uploadedCount: number, requestedFileCount: number) => {
   if (uploadedCount !== requestedFileCount) {
-    return `Uploaded ${uploadedCount} of ${requestedFileCount} ${pluralizeFiles(requestedFileCount)}`;
+    return t('fileTree.uploadedCount', {
+      uploaded: uploadedCount,
+      total: requestedFileCount,
+      count: requestedFileCount,
+      defaultValue_one: 'Uploaded {{uploaded}} of {{total}} file',
+      defaultValue_other: 'Uploaded {{uploaded}} of {{total}} files',
+    });
   }
 
-  return `Uploaded ${uploadedCount} ${pluralizeFiles(uploadedCount)} successfully`;
+  return t('fileTree.uploadedAll', {
+    count: uploadedCount,
+    defaultValue_one: 'Uploaded {{count}} file successfully',
+    defaultValue_other: 'Uploaded {{count}} files successfully',
+  });
 };
 
 const buildUploadFormData = (files: File[], targetPath: string) => {
@@ -135,11 +188,15 @@ const uploadFormDataWithProgress = (
         return;
       }
 
-      reject(new Error(payload.error || payload.message || `Upload failed with status ${xhr.status}`));
+      reject(new UploadRequestError({
+        reason: 'server',
+        status: xhr.status,
+        serverMessage: payload.error || payload.message || null,
+      }));
     };
 
-    xhr.onerror = () => reject(new Error('Upload failed. Check your connection and try again.'));
-    xhr.onabort = () => reject(new Error('Upload canceled.'));
+    xhr.onerror = () => reject(new UploadRequestError({ reason: 'network' }));
+    xhr.onabort = () => reject(new UploadRequestError({ reason: 'canceled' }));
 
     xhr.send(formData);
   });
@@ -240,6 +297,7 @@ export const useFileTreeUpload = ({
   onRefresh,
   showToast,
 }: UseFileTreeUploadOptions) => {
+  const { t } = useTranslation();
   const [isDragOver, setIsDragOver] = useState(false);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [operationLoading, setOperationLoading] = useState(false);
@@ -292,13 +350,13 @@ export const useFileTreeUpload = ({
       const fileName = files.length === 1 ? getFileDisplayName(files[0]) : undefined;
 
       if (!selectedProject) {
-        const message = 'Select a project before uploading files.';
+        const message = t('fileTree.uploadError.noProject');
         showToast(message, 'error');
         setUploadError(message, files.length, targetPath, fileName);
         return;
       }
 
-      const validationError = validateFilesForUpload(files);
+      const validationError = validateFilesForUpload(t, files);
       if (validationError) {
         showToast(validationError, 'error');
         setUploadError(validationError, files.length, targetPath, fileName);
@@ -345,11 +403,11 @@ export const useFileTreeUpload = ({
           targetPath,
         });
 
-        showToast(formatUploadSuccessMessage(uploadedCount, requestedFileCount), 'success');
+        showToast(formatUploadSuccessMessage(t, uploadedCount, requestedFileCount), 'success');
         scheduleProgressClear(COMPLETE_PROGRESS_CLEAR_DELAY_MS);
         onRefresh();
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Upload failed';
+        const message = describeUploadError(t, err);
         console.error('Upload error:', err);
         showToast(message, 'error');
         setUploadError(message, files.length, targetPath, fileName, latestProgress);
@@ -365,6 +423,7 @@ export const useFileTreeUpload = ({
       selectedProject,
       setUploadError,
       showToast,
+      t,
     ],
   );
 
@@ -411,14 +470,15 @@ export const useFileTreeUpload = ({
         const files = await collectDroppedFiles(e.dataTransfer);
         await uploadFiles(files, targetPath);
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Could not read dropped files';
+        // The browser's reason, if any, goes to the console only: it is not in the UI language.
+        const message = t('fileTree.uploadError.readDropped');
         console.error('Upload error:', err);
         showToast(message, 'error');
         setUploadError(message, 0, targetPath);
         setDropTarget(null);
       }
     },
-    [dropTarget, setUploadError, showToast, uploadFiles],
+    [dropTarget, setUploadError, showToast, t, uploadFiles],
   );
 
   const handleItemDragOver = useCallback((e: DragEvent, itemPath: string) => {

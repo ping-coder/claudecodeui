@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import '@/modules/i18n';
 import { SubagentPanel } from '@/modules/chat/tools/SubagentPanel';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
 import type { LiveTaskStatus, SubagentInfo, ToolResult } from '@/shared/types';

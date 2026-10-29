@@ -7,7 +7,8 @@
     "showDiff": "הצגת הדגשת ה-diff",
     "settings": "הגדרות העורך",
     "collapse": "כיווץ העורך",
-    "expand": "הרחבת העורך לרוחב מלא"
+    "expand": "הרחבת העורך לרוחב מלא",
+    "popOut": "פתיחה בחלון צף"
   },
   "loading": "טוען את {{fileName}}…",
   "header": {
@@ -25,7 +26,9 @@
     "close": "סגירה",
     "previewMarkdown": "תצוגה מקדימה של Markdown",
     "editMarkdown": "עריכת Markdown",
-    "previewHtml": "פתיחת תצוגה מקדימה של HTML בלשונית חדשה"
+    "previewHtml": "פתיחת תצוגה מקדימה של HTML בלשונית חדשה",
+    "wrapTextFiles": "גלישת שורות (קובצי Markdown וטקסט)",
+    "wrapCodeFiles": "גלישת שורות (קובצי קוד)"
   },
   "footer": {
     "lines": "שורות:",
@@ -41,8 +44,14 @@
     "error": "לא ניתן להציג את הקובץ הזה.",
     "openInNewTab": "פתיחה בלשונית חדשה"
   },
+  "markdownPreview": {
+    "copy": "העתקה",
+    "copied": "הועתק"
+  },
   "unsavedChanges": {
     "confirmClose": "יש שינויים שלא נשמרו. לסגור את הקובץ ולבטל אותם?",
     "indicator": "שינויים שלא נשמרו"
-  }
+  },
+  "resizeFileTree": "שינוי גודל עץ הקבצים",
+  "resizeEditor": "גרירה לשינוי הגודל"
 }

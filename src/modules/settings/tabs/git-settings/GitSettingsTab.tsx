@@ -37,7 +37,7 @@ export default function GitSettingsTab() {
                 type="text"
                 value={gitName}
                 onChange={(event) => setGitName(event.target.value)}
-                placeholder="John Doe"
+                placeholder={t('auth:onboarding.gitNamePlaceholder')}
                 disabled={isLoading}
                 className="w-full"
               />
@@ -53,7 +53,7 @@ export default function GitSettingsTab() {
                 type="email"
                 value={gitEmail}
                 onChange={(event) => setGitEmail(event.target.value)}
-                placeholder="john@example.com"
+                placeholder={t('auth:onboarding.gitEmailPlaceholder')}
                 disabled={isLoading}
                 className="w-full"
               />

@@ -174,6 +174,37 @@ describe('the send button beside background work', () => {
     assert.equal(moreWaysToSend().length, 0);
   });
 
+  it('reads as idle while only scheduled work holds the session: nothing to queue behind', () => {
+    // A loop can run for days, so "queue until the work finishes" offers nothing.
+    const onlyLoop: SessionActivity = {
+      statusText: null,
+      canInterrupt: false,
+      startedAt: 1,
+      background: true,
+      tasks: [],
+      scheduled: [{
+        id: 'cron:b2148320',
+        kind: 'cron',
+        toolUseId: 'toolu_cron_1',
+        prompt: 'check CI',
+        startedAt: 1,
+        nextFireAt: 300_001,
+        recurring: true,
+        holdUntil: 691_200_001,
+        cron: '*/5 * * * *',
+      }],
+    };
+    renderComposer({ activity: onlyLoop });
+
+    assert.equal(moreWaysToSend().length, 0, 'the send button does not split');
+    assert.equal(screen.queryAllByText(/to queue until background work finishes/).length, 0);
+    assert.equal(screen.queryAllByText('Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands').length, 1, 'the idle hint');
+
+    // With a task running beside the loop, the task is still something to queue behind.
+    renderComposer({ activity: { ...onlyLoop, tasks: backgroundOnly.tasks } });
+    assert.equal(moreWaysToSend().length, 1);
+  });
+
   it('has its strings in English and Simplified Chinese', () => {
     const keys = [
       'input.hintText.sendBesideBackgroundWork',

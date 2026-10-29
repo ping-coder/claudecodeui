@@ -156,16 +156,6 @@
     "scroll": "Scroll",
     "wrap": "Wrap"
   },
-  "selection": {
-    "selectedOfFiles": "{{selected}} of {{total}} files selected",
-    "selectedOf": "{{selected}} of {{total}} selected",
-    "all": "All",
-    "selectAll": "Select All",
-    "none": "None",
-    "deselectAll": "Deselect All",
-    "selectedOfFiles_one": "{{selected}} of {{count}} file selected",
-    "selectedOfFiles_other": "{{selected}} of {{count}} files selected"
-  },
   "legend": {
     "title": "File Status Guide"
   },

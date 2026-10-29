@@ -1,0 +1,7 @@
+{
+  "zh-CN": {
+    "git:merge.defaultSquash": "The default merge commit message stays in English: MergeWorktreeModal asks for it with lng: 'en'.",
+    "git:merge.defaultMerge": "The default merge commit message stays in English: MergeWorktreeModal asks for it with lng: 'en'."
+  },
+  "he": {}
+}

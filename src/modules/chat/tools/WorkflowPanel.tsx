@@ -262,7 +262,10 @@ const WorkflowAgentRowView = memo(({ agent, timelineAddress, onFileOpen, createD
       )}
 
       {agent.status === 'completed' && agent.resultPreview && (
-        <div className="line-clamp-2 whitespace-pre-wrap break-words ps-[30px] text-[11px] text-muted-foreground/70">{agent.resultPreview}</div>
+        <div className="line-clamp-2 whitespace-pre-wrap break-words ps-[30px] text-[11px] text-muted-foreground/70">
+          {/* The direction goes on the text, not the row: the row's indent stays on the interface's start side. */}
+          <span dir="auto">{agent.resultPreview}</span>
+        </div>
       )}
 
       {isOpen && timelineAddress && agent.agentId && (

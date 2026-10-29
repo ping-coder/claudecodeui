@@ -123,6 +123,13 @@ type UseChatRealtimeHandlersArgs = {
   /** Reports the tasks a session still runs once its turn ends, so it reads as background work rather than idle. */
   onSessionBackground?: MarkSessionBackground;
   getSessionActivity?: GetSessionActivity;
+  /**
+   * Reads the running sessions at once, for the scheduled work a turn left (a
+   * /loop it set up), which no frame reports: called at the turn's
+   * `complete`, after its remaining tasks are reported, by the chat that
+   * reports the session's background work.
+   */
+  refreshRunningSessions?: () => Promise<void>;
   onWebSocketReconnect?: () => void;
   /**
    * Hands over a mid-run insert's status, once per insert and status, from
@@ -195,6 +202,7 @@ export function useChatRealtimeHandlers({
   onSessionIdle,
   onSessionBackground,
   getSessionActivity,
+  refreshRunningSessions,
   onWebSocketReconnect,
   onInsertStatus,
   onInsertRunEnded,
@@ -427,9 +435,10 @@ export function useChatRealtimeHandlers({
         return;
       }
 
-      // A gateway frame for run-notifications, which announces the run's end;
-      // it is no transcript row, so no chat stores it.
-      if (msg.kind === 'run_ended') {
+      // A gateway frame for run-notifications, which announces the run's end,
+      // or for the background-tasks strip, which follows the stop of scheduled
+      // work it asked for; neither is a transcript row, so no chat stores it.
+      if (msg.kind === 'run_ended' || msg.kind === 'stop_task_status') {
         return;
       }
 
@@ -708,6 +717,11 @@ export function useChatRealtimeHandlers({
           const workGoesOn = msg.aborted === true && msg.backgroundWork === true;
           if (sid && (!msg.aborted || workGoesOn)) {
             reportRemainingBackgroundWork(sid, { workGoesOn });
+            // What scheduled work the session is left with (a /loop the turn
+            // set up, a loop's next run) only the server can say.
+            if (isBackgroundReporter(sid)) {
+              void refreshRunningSessions?.();
+            }
           } else {
             onSessionIdle?.(sid);
           }
@@ -871,6 +885,7 @@ export function useChatRealtimeHandlers({
     onSessionIdle,
     onSessionBackground,
     getSessionActivity,
+    refreshRunningSessions,
     onWebSocketReconnect,
     onInsertStatus,
     onInsertRunEnded,

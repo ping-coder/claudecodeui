@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { X } from 'lucide-react';
 
-import type { BackgroundTaskSummary, ChatMessage } from '@/shared/types';
+import type { BackgroundTaskSummary, ChatMessage, ScheduledWorkSummary } from '@/shared/types';
 import { ownBackgroundTasks } from '@/shared/utils';
 import {
   describeWorkflowAgent,
@@ -14,6 +14,7 @@ import {
 } from '@/modules/chat/utils/backgroundTasks';
 import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
 import { parseWorkflowMeta } from '@/modules/chat/utils/workflowScriptMeta';
+import { ScheduledWorkChips } from '@/modules/chat/transcript/ScheduledWorkChips';
 
 type BackgroundTasksStripProps = {
   /** Every loaded row of the session, not the visible window: a task launched pages ago is still running. */
@@ -25,6 +26,11 @@ type BackgroundTasksStripProps = {
    * row to draw from and is listed from here, so it can still be stopped.
    */
   tasks?: BackgroundTaskSummary[];
+  /**
+   * The scheduled work (loops, reminders) the session's held process keeps,
+   * as the activity map has it from the server; listed after the tasks.
+   */
+  scheduled?: ScheduledWorkSummary[];
   /** The session the tasks belong to, which `chat.stop-task` names; null before one exists. */
   sessionId: string | null;
   /**
@@ -38,6 +44,8 @@ type BackgroundTasksStripProps = {
    * where nothing here runs.
    */
   canStopTasks: boolean;
+  /** A turn runs in the session, which holds back a stop of its scheduled work until it is over. */
+  isTurnRunning?: boolean;
   /** The chat websocket's send, for stopping a task. */
   sendMessage: (message: unknown) => void;
   /**
@@ -98,7 +106,7 @@ function describeTask(message: ChatMessage, t: TFunction) {
   const summary = live?.summary && live.summary !== description && live.summary !== name ? live.summary : '';
   const progress = agentsProgress
     || summary
-    || (live?.usage ? `${live.usage.toolUses} ${live.usage.toolUses === 1 ? 'tool' : 'tools'}` : '')
+    || (live?.usage ? t('chat:claudeStatus.backgroundTask.toolUses', { count: live.usage.toolUses }) : '')
     || (message.workflow && message.workflow.agentCounts.total > 0
       ? `${message.workflow.agentCounts.completed + message.workflow.agentCounts.failed}/${message.workflow.agentCounts.total}`
       : '');
@@ -111,10 +119,11 @@ function describeTask(message: ChatMessage, t: TFunction) {
  * background task — workflow, agent or command — that is still running, each
  * scrolling to its card when clicked. A task CloudCLI's runtime tracks is
  * stoppable from its ✕; one a Claude CLI outside CloudCLI runs is listed
- * without one, as only that CLI can stop it. Renders nothing while nothing
- * runs, which is most of the time.
+ * without one, as only that CLI can stop it. The session's scheduled work
+ * follows the tasks (see ScheduledWorkChips). Renders nothing while nothing
+ * runs or waits, which is most of the time.
  */
-export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopTasks, sendMessage, onReveal, onLoadAll }: BackgroundTasksStripProps) => {
+export const BackgroundTasksStrip = memo(({ messages, tasks, scheduled, sessionId, canStopTasks, isTurnRunning = false, sendMessage, onReveal, onLoadAll }: BackgroundTasksStripProps) => {
   const { t } = useTranslation();
   const running = listRunningBackgroundLaunches(messages);
   // A loaded row that has a word on its task — settled or not — is the word;
@@ -126,7 +135,9 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopT
   );
   const fromMap = ownBackgroundTasks(tasks ?? []).filter((task) => !settledToolIds.has(task.toolUseId));
 
-  if (running.length === 0 && fromMap.length === 0) {
+  const scheduledWork = scheduled ?? [];
+
+  if (running.length === 0 && fromMap.length === 0 && scheduledWork.length === 0) {
     return null;
   }
 
@@ -150,7 +161,8 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopT
             >
               <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
               <span className="flex-shrink-0 font-medium text-foreground">{kind}</span>
-              {name && <span className="min-w-0 truncate">{name}</span>}
+              {/* bidi-auto: right to left, a task's name keeps its own order and is cut at its end. */}
+              {name && <span className="bidi-auto min-w-0 truncate">{name}</span>}
               {progress && <span className="min-w-0 truncate text-muted-foreground/70">· {progress}</span>}
             </button>
             {canStopTasks && sessionId && taskId && (
@@ -178,7 +190,7 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopT
           <>
             <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
             <span className="flex-shrink-0 font-medium text-foreground">{kind}</span>
-            {name && <span className="min-w-0 truncate">{name}</span>}
+            {name && <span className="bidi-auto min-w-0 truncate">{name}</span>}
           </>
         );
         return (
@@ -218,6 +230,21 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, sessionId, canStopT
           </span>
         );
       })}
+      {scheduledWork.length > 0 && (
+        <ScheduledWorkChips
+          // A session's own: a stop asked for in one is not heard of in another.
+          key={sessionId ?? ''}
+          items={scheduledWork}
+          hasTasks={running.length > 0 || Boolean(tasks?.length)}
+          messages={messages}
+          sessionId={sessionId}
+          canStop={canStopTasks}
+          isTurnRunning={isTurnRunning}
+          sendMessage={sendMessage}
+          onReveal={onReveal}
+          onLoadAll={onLoadAll}
+        />
+      )}
     </div>
   );
 });

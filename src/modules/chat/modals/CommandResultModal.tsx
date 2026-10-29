@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import {
   Activity,
   BadgeCheck,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 
 import { Badge, Button, Dialog, DialogContent, DialogTitle, Input } from '@/shared/ui';
+import { IsolateFreeCode } from '@/shared/ui/IsolateFreeCode';
 import type {
   LLMProvider,
   ProviderModelActions,
@@ -26,6 +28,7 @@ import type {
   ProviderModelsDefinition,CommandModalPayload,CostCommandData,HelpCommandData,ModelCommandData,StatusCommandData
 } from '@/shared/types';
 import ModelLibraryPanel from '@/modules/chat/modals/ModelLibraryPanel';
+import { describeCommandType, describeModelDescription, describeModelOption, describeSlashCommand } from '@/modules/chat/utils/catalogLabels';
 
 type CommandResultModalProps = {
   payload: CommandModalPayload | null;
@@ -69,12 +72,24 @@ const FALLBACK_COMMANDS: CommandEntry[] = [
   { name: '/help', descriptionKey: 'chat:misc.fallbackCommands.help' },
 ];
 
-const getProviderLabel = (provider: string | undefined, fallback = 'Unknown') => {
+/** A provider by its product name; `unknown` when the server names none. */
+const getProviderLabel = (provider: string | undefined, unknown: string) => {
   if (!provider) {
-    return fallback;
+    return unknown;
   }
 
   return PROVIDER_LABELS[provider] || provider;
+};
+
+/** The server's uptime ("2h 5m", "5m") in the interface language; any other shape as the server words it. */
+const formatUptime = (uptime: string, t: TFunction): string => {
+  const match = /^(?:(\d+)h )?(\d+)m$/.exec(uptime);
+  if (!match) {
+    return uptime;
+  }
+  return match[1] === undefined
+    ? t('chat:commandResult.status.uptimeMinutes', { minutes: Number(match[2]) })
+    : t('chat:commandResult.status.uptimeHours', { hours: Number(match[1]), minutes: Number(match[2]) });
 };
 
 const formatNumber = (value: number) => {
@@ -155,7 +170,7 @@ function HelpContent({ data }: { data: HelpCommandData }) {
     }
 
     return commands.filter((command) => {
-      const haystack = `${command.name} ${command.description || ''} ${
+      const haystack = `${command.name} ${describeSlashCommand(command, t) || ''} ${command.description || ''} ${
         command.descriptionKey ? t(command.descriptionKey) : ''
       } ${command.namespace || ''}`.toLowerCase();
       return haystack.includes(normalized);
@@ -180,11 +195,11 @@ function HelpContent({ data }: { data: HelpCommandData }) {
                     {command.name}
                   </code>
                   <Badge variant="secondary" className="shrink-0 text-[10px] capitalize">
-                    {command.namespace || 'builtin'}
+                    {describeCommandType(command.namespace || 'builtin', t)}
                   </Badge>
                 </div>
                 <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                  {command.description
+                  {describeSlashCommand(command, t)
                     || (command.descriptionKey ? t(command.descriptionKey) : t('chat:misc.noDescription'))}
                 </p>
               </div>
@@ -193,7 +208,7 @@ function HelpContent({ data }: { data: HelpCommandData }) {
 
           {filteredCommands.length === 0 && (
             <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
-              No commands match that filter.
+              {t('chat:commandResult.help.noMatch')}
             </div>
           )}
         </div>
@@ -203,23 +218,44 @@ function HelpContent({ data }: { data: HelpCommandData }) {
         <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
             <TerminalSquare className="h-4 w-4 text-primary" />
-            Syntax
+            {t('chat:commandResult.help.syntax')}
           </div>
           <div className="space-y-2 text-sm text-muted-foreground">
             <p><code className="text-foreground">/command arg1 arg2</code></p>
-            <p><code className="text-foreground">$ARGUMENTS</code> passes all args.</p>
-            <p><code className="text-foreground">$1</code>, <code className="text-foreground">$2</code> pass positional args.</p>
-            <p><code className="text-foreground">@file</code> includes file contents.</p>
+            <p>
+              <Trans
+                i18nKey="chat:commandResult.help.allArgs"
+                values={{ token: '$ARGUMENTS' }}
+                components={{ code: <IsolateFreeCode className="text-foreground" /> }}
+              />
+            </p>
+            <p>
+              <Trans
+                i18nKey="chat:commandResult.help.positionalArgs"
+                values={{ first: '$1', second: '$2' }}
+                components={{ code: <IsolateFreeCode className="text-foreground" /> }}
+              />
+            </p>
+            <p>
+              <Trans
+                i18nKey="chat:commandResult.help.fileContents"
+                values={{ token: '@file' }}
+                components={{ code: <IsolateFreeCode className="text-foreground" /> }}
+              />
+            </p>
           </div>
         </div>
 
         <div className="rounded-2xl border border-primary/25 bg-primary/10 p-4">
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
             <Sparkles className="h-4 w-4 text-primary" />
-            Quick tip
+            {t('chat:commandResult.help.quickTip')}
           </div>
           <p className="text-sm leading-5 text-muted-foreground">
-            Type <code className="text-foreground">/</code> in the composer to open the command palette, then use arrows and Enter to run a command.
+            <Trans
+              i18nKey="chat:commandResult.help.quickTipText"
+              components={{ code: <IsolateFreeCode className="text-foreground" /> }}
+            />
           </p>
         </div>
       </aside>
@@ -253,8 +289,8 @@ function ModelsContent({
   const currentProvider = (data?.current?.provider || 'claude') as LLMProvider;
   const currentModel = activeProvider === currentProvider
     ? activeProviderModel
-    : pendingSessionModel ?? data?.current?.model ?? 'Unknown';
-  const providerLabel = data?.current?.providerLabel || getProviderLabel(currentProvider);
+    : pendingSessionModel ?? data?.current?.model ?? t('chat:commandResult.unknown');
+  const providerLabel = data?.current?.providerLabel || getProviderLabel(currentProvider, t('chat:commandResult.unknown'));
   const liveDefinition = providerModelCatalog[currentProvider];
   const availableOptions = useMemo<ProviderModelOption[]>(() => {
     if (liveDefinition?.OPTIONS && liveDefinition.OPTIONS.length > 0) {
@@ -275,10 +311,10 @@ function ModelsContent({
     }
 
     return availableOptions.filter((option) => {
-      const haystack = `${option.value} ${option.label || ''} ${option.description || ''}`.toLowerCase();
+      const haystack = `${option.value} ${describeModelOption(option, t)} ${option.label || ''} ${describeModelDescription(option, t) || ''} ${option.description || ''}`.toLowerCase();
       return haystack.includes(normalized);
     });
-  }, [availableOptions, query]);
+  }, [availableOptions, query, t]);
 
   const hasConcreteSessionId = typeof currentSessionId === 'string' && currentSessionId.trim().length > 0;
   const showSearch = availableOptions.length > 6;
@@ -289,12 +325,12 @@ function ModelsContent({
       const result = await onSelectProviderModel(currentProvider, model, currentSessionId);
       if (result.scope === 'session') {
         setPendingSessionModel(result.model);
-        setSelectionNotice(`This session now uses ${result.model}.`);
+        setSelectionNotice(t('chat:commandResult.models.sessionUses', { model: result.model }));
         return;
       }
 
       setPendingSessionModel(null);
-      setSelectionNotice(`Default ${providerLabel} model set to ${result.model}.`);
+      setSelectionNotice(t('chat:commandResult.models.defaultSet', { provider: providerLabel, model: result.model }));
     } catch (error) {
       const message = error instanceof Error ? error.message : t('chat:misc.modelChangeFailed');
       setSelectionNotice(message);
@@ -319,13 +355,13 @@ function ModelsContent({
       <div className="flex items-center justify-between gap-3 rounded-2xl border border-border/70 bg-muted/20 px-3.5 py-2.5">
         <div className="min-w-0">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Active model · {providerLabel}
+            {t('chat:commandResult.models.active', { provider: providerLabel })}
           </p>
           <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <span className="break-all font-mono text-sm font-semibold text-foreground">{currentModel}</span>
             {pendingSessionModel && pendingSessionModel !== currentModel && (
               <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-500 dark:text-emerald-400">
-                → {pendingSessionModel} next
+                {t('chat:commandResult.models.next', { model: pendingSessionModel })}
               </span>
             )}
           </p>
@@ -338,12 +374,12 @@ function ModelsContent({
           className="h-9 shrink-0 rounded-xl bg-background px-3 text-xs"
         >
           <Plus className="h-3.5 w-3.5" />
-          Manage models
+          {t('chat:providerSelection.manageModels')}
         </Button>
       </div>
 
       {showSearch && (
-        <SearchField value={query} onChange={setQuery} placeholder={`Search ${providerLabel} models...`} />
+        <SearchField value={query} onChange={setQuery} placeholder={t('chat:commandResult.models.search', { provider: providerLabel })} />
       )}
 
       {filteredOptions.length > 0 ? (
@@ -359,7 +395,7 @@ function ModelsContent({
                   type="button"
                   onClick={() => handleSelectModel(option.value)}
                   disabled={Boolean(changingModel)}
-                  aria-label={`Select model ${option.value}`}
+                  aria-label={t('chat:commandResult.models.select', { model: option.value })}
                   className={`settings-content-enter group flex min-h-16 flex-col rounded-2xl border p-3 text-start shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60 ${
                     isCurrent
                       ? 'border-primary/45 bg-primary/10'
@@ -370,9 +406,9 @@ function ModelsContent({
                   style={{ animationDelay: `${Math.min(index * 14, 180)}ms` }}
                 >
                   <span className="flex items-center justify-between gap-2">
-                    <span className="break-words text-sm font-semibold text-foreground">{option.label || option.value}</span>
+                    <span className="break-words text-sm font-semibold text-foreground">{describeModelOption(option, t)}</span>
                     <span className="flex shrink-0 items-center gap-2">
-                      {option.isCustom && <Badge className="rounded-full px-2 py-0 text-[9px]">Custom</Badge>}
+                      {option.isCustom && <Badge className="rounded-full px-2 py-0 text-[9px]">{t('chat:modelLibrary.customBadge')}</Badge>}
                       {isCurrent ? (
                         <BadgeCheck className="h-4 w-4 shrink-0 text-primary" />
                       ) : isChanging ? (
@@ -384,14 +420,16 @@ function ModelsContent({
                     <span className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{option.value}</span>
                   )}
                   {option.description && (
-                    <span className="mt-1 text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    <span className="mt-1 text-xs leading-5 text-muted-foreground">{describeModelDescription(option, t)}</span>
                   )}
                   {isCurrent && (
-                    <span className="mt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">Current selection</span>
+                    <span className="mt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">
+                      {t('chat:commandResult.models.currentSelection')}
+                    </span>
                   )}
                   {isPendingSelection && !isCurrent && (
                     <span className="mt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-500 dark:text-emerald-400">
-                      Session model
+                      {t('chat:commandResult.models.sessionModel')}
                     </span>
                   )}
                 </button>
@@ -401,7 +439,7 @@ function ModelsContent({
         </div>
       ) : (
         <div className="rounded-2xl border border-dashed border-border bg-background/60 px-4 py-10 text-center text-sm text-muted-foreground">
-          No models match that search.
+          {t('chat:commandResult.models.noMatch')}
         </div>
       )}
 
@@ -420,32 +458,37 @@ function ModelsContent({
 }
 
 function CostContent({ data }: { data: CostCommandData }) {
+  const { t } = useTranslation();
+  const unknown = t('chat:commandResult.unknown');
   const used = Number(data.tokenUsage?.used ?? 0);
   const total = Number(data.tokenUsage?.total ?? 0);
-  const model = data.model || 'Unknown';
-  const provider = getProviderLabel(data.provider, data.provider || 'Unknown');
+  const model = data.model || unknown;
+  const provider = getProviderLabel(data.provider, unknown);
   const hasBreakdown =
     typeof data.tokenBreakdown?.input === 'number' ||
     typeof data.tokenBreakdown?.output === 'number';
   const usageRows = [
-    { label: 'Total tokens used', value: formatNumber(used), icon: Activity },
+    { id: 'total', label: t('chat:commandResult.cost.totalTokens'), value: formatNumber(used), icon: Activity },
     ...(hasBreakdown
       ? [
           {
-            label: 'Input tokens',
+            id: 'input',
+            label: t('chat:commandResult.cost.inputTokens'),
             value: formatNumber(Number(data.tokenBreakdown?.input ?? 0)),
             icon: TerminalSquare,
           },
           {
-            label: 'Output tokens',
+            id: 'output',
+            label: t('chat:commandResult.cost.outputTokens'),
             value: formatNumber(Number(data.tokenBreakdown?.output ?? 0)),
             icon: Coins,
           },
         ]
       : [
           {
-            label: 'Breakdown',
-            value: 'Unavailable',
+            id: 'breakdown',
+            label: t('chat:commandResult.cost.breakdown'),
+            value: t('chat:commandResult.cost.unavailable'),
             icon: TerminalSquare,
           },
         ]),
@@ -455,7 +498,7 @@ function CostContent({ data }: { data: CostCommandData }) {
     // know whether a session runs a 200K or a 1M variant of the same model —
     // and a row reading "used 404,009 / window 160,000" is worse than no row.
     ...(total > used
-      ? [{ label: 'Context window', value: formatNumber(total), icon: Gauge }]
+      ? [{ id: 'contextWindow', label: t('chat:commandResult.cost.contextWindow'), value: formatNumber(total), icon: Gauge }]
       : []),
   ];
 
@@ -467,7 +510,7 @@ function CostContent({ data }: { data: CostCommandData }) {
 
           return (
             <div
-              key={row.label}
+              key={row.id}
               className="flex items-center justify-between gap-4 border-b border-border/60 px-4 py-3 last:border-b-0"
             >
               <div className="flex min-w-0 items-center gap-3">
@@ -485,11 +528,15 @@ function CostContent({ data }: { data: CostCommandData }) {
       <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Provider</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+              {t('chat:commandResult.provider')}
+            </p>
             <p className="mt-1 text-sm font-semibold text-foreground">{provider}</p>
           </div>
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Model</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+              {t('chat:commandResult.model')}
+            </p>
             <p className="mt-1 break-all font-mono text-sm text-foreground">{model}</p>
           </div>
         </div>
@@ -499,16 +546,23 @@ function CostContent({ data }: { data: CostCommandData }) {
 }
 
 function StatusContent({ data }: { data: StatusCommandData }) {
+  const { t } = useTranslation();
+  const unknown = t('chat:commandResult.unknown');
   const memoryRssMb = data.memoryUsage?.rssMb;
   const rows = [
-    { label: 'Package', value: data.packageName || 'claude-code-ui', icon: Package },
-    { label: 'Version', value: data.version || 'Unknown', icon: BadgeCheck, tone: 'success' as const },
-    { label: 'Uptime', value: data.uptime || 'Unknown', icon: Timer },
-    { label: 'Provider', value: getProviderLabel(data.provider, data.provider || 'Unknown'), icon: Server, tone: 'primary' as const },
-    { label: 'Model', value: data.model || 'Unknown', icon: Cpu },
-    { label: 'Node.js', value: data.nodeVersion || 'Unknown', icon: TerminalSquare },
-    { label: 'Platform', value: data.platform || 'Unknown', icon: Activity },
-    { label: 'Memory', value: typeof memoryRssMb === 'number' ? `${memoryRssMb} MB RSS` : 'Unknown', icon: Gauge },
+    { id: 'package', label: t('chat:commandResult.status.package'), value: data.packageName || 'claude-code-ui', icon: Package },
+    { id: 'version', label: t('chat:commandResult.status.version'), value: data.version || unknown, icon: BadgeCheck, tone: 'success' as const },
+    { id: 'uptime', label: t('chat:commandResult.status.uptime'), value: data.uptime ? formatUptime(data.uptime, t) : unknown, icon: Timer },
+    { id: 'provider', label: t('chat:commandResult.provider'), value: getProviderLabel(data.provider, unknown), icon: Server, tone: 'primary' as const },
+    { id: 'model', label: t('chat:commandResult.model'), value: data.model || unknown, icon: Cpu },
+    { id: 'node', label: 'Node.js', value: data.nodeVersion || unknown, icon: TerminalSquare },
+    { id: 'platform', label: t('chat:commandResult.status.platform'), value: data.platform || unknown, icon: Activity },
+    {
+      id: 'memory',
+      label: t('chat:commandResult.status.memory'),
+      value: typeof memoryRssMb === 'number' ? t('chat:commandResult.status.memoryRss', { mb: memoryRssMb }) : unknown,
+      icon: Gauge,
+    },
   ];
 
   return (
@@ -520,16 +574,20 @@ function StatusContent({ data }: { data: StatusCommandData }) {
             <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
           </span>
           <div>
-            <p className="text-sm font-semibold text-foreground">Runtime online</p>
-            <p className="text-xs text-muted-foreground">Process {data.pid ? `#${data.pid}` : 'status'} is responding.</p>
+            <p className="text-sm font-semibold text-foreground">{t('chat:commandResult.status.online')}</p>
+            <p className="text-xs text-muted-foreground">
+              {data.pid
+                ? t('chat:commandResult.status.responding', { pid: data.pid })
+                : t('chat:commandResult.status.respondingNoPid')}
+            </p>
           </div>
         </div>
-        <Badge className="rounded-full bg-emerald-500 text-white hover:bg-emerald-500">Healthy</Badge>
+        <Badge className="rounded-full bg-emerald-500 text-white hover:bg-emerald-500">{t('chat:commandResult.status.healthy')}</Badge>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {rows.map((row) => (
-          <MetricCard key={row.label} label={row.label} value={String(row.value)} icon={row.icon} tone={row.tone} />
+          <MetricCard key={row.id} label={row.label} value={String(row.value)} icon={row.icon} tone={row.tone} />
         ))}
       </div>
     </div>

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ClipboardAddon, type IClipboardProvider } from '@xterm/addon-clipboard';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -185,11 +186,19 @@ export function useShellTerminal({
   closeSocket,
 }: UseShellTerminalOptions): UseShellTerminalResult {
   const { isDarkMode } = useTheme();
+  const { t } = useTranslation('chat');
   const [isInitialized, setIsInitialized] = useState(false);
   // Read through a ref when the terminal is created: with the theme in that
   // effect's dependencies, a toggle would dispose the terminal and close the
   // socket instead of repainting the session that is running.
   const isDarkModeRef = useRef(isDarkMode);
+  // The touch-selection menu's labels, read through a ref for the same reason;
+  // the menu reads them each time it opens, so a language switch reaches it.
+  const selectionMenuLabels = useMemo(
+    () => ({ copy: t('shell.selectionMenu.copy'), selectAll: t('shell.selectionMenu.selectAll') }),
+    [t],
+  );
+  const selectionMenuLabelsRef = useRef(selectionMenuLabels);
   const resizeTimeoutRef = useRef<number | null>(null);
   const mobileSelectionRef = useRef<MobileTerminalSelectionManager | null>(null);
   const selectedProjectKey = selectedProject?.fullPath || selectedProject?.path || '';
@@ -257,6 +266,7 @@ export function useShellTerminal({
       nextTerminal,
       terminalContainer,
       {
+        getLabels: () => selectionMenuLabelsRef.current,
         onFontSizeChange: (fontSize) => {
           nextTerminal.options.fontSize = fontSize;
 
@@ -429,6 +439,10 @@ export function useShellTerminal({
     currentTerminal.options.theme = colors.theme;
     currentTerminal.options.minimumContrastRatio = colors.minimumContrastRatio;
   }, [isDarkMode, terminalRef]);
+
+  useEffect(() => {
+    selectionMenuLabelsRef.current = selectionMenuLabels;
+  }, [selectionMenuLabels]);
 
   return {
     isInitialized,

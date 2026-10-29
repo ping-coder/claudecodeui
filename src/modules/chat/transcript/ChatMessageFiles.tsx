@@ -1,5 +1,6 @@
 import { DownloadIcon, FileArchiveIcon, FileCodeIcon, FileIcon, FileTextIcon } from 'lucide-react';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import type { ChatAttachment } from '@/shared/types';
@@ -25,8 +26,9 @@ const getFileIcon = (file: ChatAttachment) => {
 };
 
 function ChatMessageFile({ file }: { file: ChatAttachment }) {
+  const { t } = useTranslation('chat');
   const [isDownloading, setIsDownloading] = useState(false);
-  const name = file.name || file.path?.split(/[\\/]/).pop() || 'Attached file';
+  const name = file.name || file.path?.split(/[\\/]/).pop() || t('misc.attachedFile');
   const FileTypeIcon = getFileIcon(file);
   const size = formatFileSize(file.size);
 
@@ -58,14 +60,14 @@ function ChatMessageFile({ file }: { file: ChatAttachment }) {
       onClick={() => void download()}
       disabled={!file.path || isDownloading}
       className="group/file flex w-64 max-w-full items-center gap-3 rounded-xl border border-border/50 bg-card px-3 py-2.5 text-start shadow-sm transition-colors hover:bg-accent/60 disabled:cursor-default disabled:hover:bg-card"
-      aria-label={`Download ${name}`}
+      aria-label={t('misc.downloadFile', { name })}
     >
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <FileTypeIcon className="h-5 w-5" aria-hidden />
       </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground" title={name}>{name}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">{size || 'File attachment'}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">{size || t('misc.fileAttachment')}</p>
       </div>
       <DownloadIcon
         className={`h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover/file:text-foreground ${

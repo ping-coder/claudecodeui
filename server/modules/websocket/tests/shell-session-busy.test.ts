@@ -10,7 +10,7 @@ import { WebSocket } from 'ws';
 import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { handleShellConnection } from '@/modules/websocket/services/shell-websocket.service.js';
-import type { BackgroundTaskSummary, LLMProvider, SessionHold } from '@/shared/types.js';
+import type { BackgroundTaskSummary, LLMProvider, ScheduledWorkSummary, SessionHold } from '@/shared/types.js';
 
 /**
  * The Shell tab must not start a CLI on a session CloudCLI itself still runs:
@@ -174,6 +174,25 @@ const busyFramesOf = (socket: FakeSocket) => framesOf(socket).filter((frame) => 
 const snapshotOf = (frame: Record<string, unknown> | undefined) => ({
   turnStartedAt: frame?.turnStartedAt ?? null,
   taskIds: ((frame?.tasks ?? []) as BackgroundTaskSummary[]).map((summary) => summary.taskId),
+});
+
+/** What a client that shows scheduled work sends back: `snapshotOf`, and every scheduled work id of the frame. */
+const scheduledSnapshotOf = (frame: Record<string, unknown> | undefined) => ({
+  ...snapshotOf(frame),
+  scheduledIds: ((frame?.scheduled ?? []) as ScheduledWorkSummary[]).map((item) => item.id),
+});
+
+/** One piece of scheduled work a held process lists for the session. */
+const scheduledItem = (id: string, extra: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+  id,
+  kind: id.startsWith('cron:') ? 'cron' : 'wakeup',
+  toolUseId: `toolu_${id.replace(/\W/g, '')}`,
+  prompt: 'check the deploy',
+  startedAt: 1,
+  nextFireAt: 60_001,
+  recurring: true,
+  holdUntil: 691_200_001,
+  ...extra,
 });
 
 /**
@@ -630,4 +649,78 @@ test('a session still held after the takeover is reported busy again, in answer 
   assert.equal(answer?.reason, 'held');
   assert.equal(answer?.changed, false, 'the takeover did stop what it could');
   assert.equal(answer?.initId, 5);
+});
+
+test('the busy notice lists the scheduled work the held process keeps for the session, and always carries the list', () => {
+  const harness = createHarness();
+  const loopId = nextSessionId('scheduled-held');
+  const loops = [scheduledItem('wakeup:toolu_01Chain'), scheduledItem('cron:7b7cd8fc', { cron: '*/5 * * * *' })];
+  harness.holds.set(loopId, { processState: 'running', tasks: [], scheduled: loops });
+  const loopNotice = connect(harness.dependencies);
+  loopNotice.init({ sessionId: loopId });
+
+  const [frame] = busyFramesOf(loopNotice.socket);
+  assert.equal(frame?.reason, 'held', 'the reason is what it was');
+  assert.deepEqual(frame?.scheduled, loops);
+  assert.deepEqual(harness.spawned, []);
+
+  const plainId = nextSessionId('scheduled-none');
+  harness.holds.set(plainId, { processState: 'running', tasks: [task('wf1')] });
+  const plainNotice = connect(harness.dependencies);
+  plainNotice.init({ sessionId: plainId });
+  const [plain] = busyFramesOf(plainNotice.socket);
+  assert.equal(plain?.reason, 'background');
+  assert.deepEqual(plain?.scheduled, []);
+});
+
+test('a takeover that sends scheduled work back is held back by scheduled work its notice did not carry, not by a self-paced /loop\'s next wake-up', async () => {
+  const harness = createHarness();
+  const sessionId = nextSessionId('takeover-scheduled');
+  harness.holds.set(sessionId, { processState: 'running', tasks: [], scheduled: [scheduledItem('wakeup:toolu_01Chain')] });
+  const { socket, init, notice } = openNotice(harness.dependencies, sessionId);
+
+  // With the notice up, the model sets a reminder in the held process.
+  harness.holds.set(sessionId, {
+    processState: 'running',
+    tasks: [],
+    scheduled: [scheduledItem('wakeup:toolu_01Chain'), scheduledItem('cron:b2148320', { recurring: false })],
+  });
+  init({ sessionId, takeOver: scheduledSnapshotOf(notice), initId: 2 });
+  await flush();
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.spawned, []);
+  const refusal = busyFramesOf(socket).at(-1);
+  assert.equal(refusal?.changed, true);
+  assert.deepEqual(scheduledSnapshotOf(refusal).scheduledIds, ['wakeup:toolu_01Chain', 'cron:b2148320']);
+
+  // The loop wakes up and arms its next wake-up, which keeps the chain's id;
+  // the reminder fired and is gone. Nothing was started since this notice.
+  harness.holds.set(sessionId, {
+    processState: 'running',
+    tasks: [],
+    scheduled: [scheduledItem('wakeup:toolu_01Chain', { toolUseId: 'toolu_02Next', nextFireAt: 120_001 })],
+  });
+  init({ sessionId, takeOver: scheduledSnapshotOf(refusal) });
+  await waitUntil(() => harness.spawned.length > 0);
+  assert.deepEqual(harness.calls, [`release:${sessionId}`, 'release:native-1']);
+});
+
+test('a takeover from a client that sends no scheduled work back stops scheduled work as it always did', async () => {
+  const harness = createHarness();
+  const sessionId = nextSessionId('takeover-scheduled-legacy');
+  harness.holds.set(sessionId, { processState: 'running', tasks: [] });
+  const { socket, takeOver } = openNotice(harness.dependencies, sessionId);
+
+  harness.holds.set(sessionId, { processState: 'running', tasks: [], scheduled: [scheduledItem('cron:b2148320')] });
+  takeOver();
+  await waitUntil(() => harness.spawned.length > 0);
+  assert.deepEqual(harness.calls, [`release:${sessionId}`, 'release:native-1']);
+  assert.equal(busyFramesOf(socket).length, 1, 'only the notice the takeover came from');
+
+  // A bare `takeOver: true`, from a page loaded before the snapshot, too.
+  const bareId = nextSessionId('takeover-scheduled-bare');
+  harness.holds.set(bareId, { processState: 'running', tasks: [], scheduled: [scheduledItem('wakeup:toolu_01Chain')] });
+  connect(harness.dependencies).init({ sessionId: bareId, takeOver: true });
+  await waitUntil(() => harness.spawned.length > 1);
+  assert.deepEqual(harness.calls.slice(2), [`release:${bareId}`, 'release:native-1']);
 });

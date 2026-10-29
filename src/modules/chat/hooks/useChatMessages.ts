@@ -4,7 +4,6 @@
  */
 
 import type { ChatMessage, LiveTaskStatus, NormalizedMessage, SubagentActivity } from '@/shared/types';
-import { formatUsageLimitText } from '@/modules/chat/utils/chatFormatting';
 
 function formatToolResultContent(content: unknown): string {
   const text = typeof content === 'string' ? content : JSON.stringify(content);
@@ -14,6 +13,7 @@ function formatToolResultContent(content: unknown): string {
 
 type ParsedTaskNotification = {
   status: string;
+  /** Empty when the block has none: MessageComponent words the row in the interface language. */
   summary: string;
   result: string;
 };
@@ -67,7 +67,7 @@ function parseTaskNotification(content: string): ParsedTaskNotification | null {
 
   return {
     status: statusMatch?.[1]?.trim() || 'completed',
-    summary: summaryMatch?.[1]?.trim() || 'Background task finished',
+    summary: summaryMatch?.[1]?.trim() || '',
     result,
   };
 }
@@ -422,7 +422,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             if (taskNotif.result) {
               converted.push({
                 type: 'assistant',
-                content: formatUsageLimitText(taskNotif.result),
+                content: taskNotif.result,
                 timestamp: msg.timestamp,
                 ...sharedMetadata,
               });
@@ -438,10 +438,11 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             });
           }
         } else {
-          const text = formatUsageLimitText(content);
+          // A usage-limit marker stays as the CLI wrote it: the row words it
+          // where it is drawn (formatUsageLimitText), in the language then shown.
           converted.push({
             type: 'assistant',
-            content: text,
+            content,
             timestamp: msg.timestamp,
             memoryCitations: msg.memoryCitations,
             ...sharedMetadata,
@@ -514,12 +515,16 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       case 'error':
         converted.push({
           type: 'error',
-          content: msg.content || 'Unknown error',
+          // Empty when the server sent no words: the row says "Unknown error" in
+          // the interface language where it is drawn (MessageComponent).
+          content: msg.content || '',
           timestamp: msg.timestamp,
           // A code the transcript words itself, in the user's language (see
-          // MessageComponent), with `content` the fallback.
+          // MessageComponent), with `content` the fallback; HAND_OVER_FAILED
+          // carries a `reason` the store row keeps as the server sent it.
           ...(typeof msg.code === 'string' ? { errorCode: msg.code } : {}),
           ...(Array.isArray(msg.changes) ? { errorChanges: msg.changes } : {}),
+          ...(typeof msg.reason === 'string' ? { errorReason: msg.reason } : {}),
           ...sharedMetadata,
         });
         break;
@@ -527,7 +532,8 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       case 'task_notification':
         converted.push({
           type: 'assistant',
-          content: msg.summary || 'Background task update',
+          // Empty without a summary: worded where it is drawn, as for the XML form above.
+          content: msg.summary || '',
           timestamp: msg.timestamp,
           isTaskNotification: true,
           taskNotificationStatus: msg.status || 'completed',

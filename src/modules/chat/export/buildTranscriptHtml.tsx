@@ -1,7 +1,10 @@
 import { createElement } from 'react';
+import type { TFunction } from 'i18next';
 
+import { i18n } from '@/modules/i18n';
 import type { ChatMessage, DiffLine, LLMProvider, Project } from '@/shared/types';
 import { TranscriptExportDocument } from '@/modules/chat/export/TranscriptExportDocument';
+import { formatDateTime } from '@/modules/chat/utils/chatFormatting';
 
 type BuildTranscriptHtmlInput = {
   messages: ChatMessage[];
@@ -10,6 +13,8 @@ type BuildTranscriptHtmlInput = {
   selectedProject?: Project | null;
   sessionTitle: string;
   exportedAt: Date;
+  t: TFunction;
+  language: string;
 };
 
 /**
@@ -75,11 +80,17 @@ export async function buildTranscriptHtml(input: BuildTranscriptHtmlInput): Prom
   const styles = dropUnresolvableUrls(collectDocumentStyles());
   const title = escapeHtml(input.sessionTitle);
   const isDark = document.documentElement.classList.contains('dark');
-  const exportedAt = escapeHtml(input.exportedAt.toLocaleString());
-  const messageCount = input.messages.length;
+  // The page's own words, and its language and direction, are the interface's; so is the transcript's.
+  const meta = escapeHtml(input.t('chat:export.meta', {
+    count: input.messages.length,
+    time: formatDateTime(input.exportedAt, input.language),
+  }));
+  const toggleTheme = escapeHtml(input.t('chat:export.toggleTheme'));
+  const lang = escapeHtml(input.language || 'en');
+  const dir = i18n.dir(input.language) === 'rtl' ? ' dir="rtl"' : '';
 
   return `<!DOCTYPE html>
-<html lang="en" class="${isDark ? 'dark' : ''}">
+<html lang="${lang}"${dir} class="${isDark ? 'dark' : ''}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -116,9 +127,9 @@ ${styles}
   <header class="chat-export-header">
     <div>
       <h1 class="chat-export-title">${title}</h1>
-      <p class="chat-export-meta">${messageCount} messages · exported ${exportedAt}</p>
+      <p class="chat-export-meta">${meta}</p>
     </div>
-    <button type="button" class="chat-export-theme-toggle" onclick="document.documentElement.classList.toggle('dark')">Toggle theme</button>
+    <button type="button" class="chat-export-theme-toggle" onclick="document.documentElement.classList.toggle('dark')">${toggleTheme}</button>
   </header>
   ${body}
 </div>

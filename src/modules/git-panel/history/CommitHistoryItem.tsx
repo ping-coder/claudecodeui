@@ -92,11 +92,15 @@ export default function CommitHistoryItem({
                   ))}
                 </span>
               )}
-              <p className="truncate text-sm font-medium text-foreground">{commit.message}</p>
+              <p className="bidi-auto truncate text-sm font-medium text-foreground">{commit.message}</p>
+              {/*
+                Each part isolated: right to left, the day that starts a Hebrew date would join the
+                Latin name before it ("Dana Levi • 29" then the month).
+              */}
               <p className="mt-1 text-sm text-muted-foreground">
-                {commit.author}
+                <bdi>{commit.author}</bdi>
                 {' \u2022 '}
-                {formatDate(commit.date, i18n.language)}
+                <bdi>{formatDate(commit.date, i18n.language)}</bdi>
               </p>
             </div>
             <span className="flex-shrink-0 font-mono text-sm text-muted-foreground/60">

@@ -24,6 +24,7 @@ import {
 } from "@/shared/ui";
 import ModelGroupList, { type ModelGroup } from "@/modules/chat/composer/ModelGroupList";
 import ModelLibraryPanel from "@/modules/chat/modals/ModelLibraryPanel";
+import { describeModelOption } from "@/modules/chat/utils/catalogLabels";
 import { writeSelectedProvider } from '@/shared/selectedProvider';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { formatShortcut } from '@/shared/utils';
@@ -160,11 +161,27 @@ export default function ProviderSelectionEmptyState({
 
   const currentModelLabel = useMemo(() => {
     const config = getModelConfig(provider, providerModelCatalog);
-    const found = config.OPTIONS.find(
-      (o: { value: string; label: string }) => o.value === currentModel,
-    );
-    return found?.label || currentModel;
-  }, [provider, currentModel, providerModelCatalog]);
+    const found = config.OPTIONS.find((option) => option.value === currentModel);
+    return found ? describeModelOption(found, t) : currentModel;
+  }, [provider, currentModel, providerModelCatalog, t]);
+
+  // Names the model as the card above does, by its catalog name in the interface language;
+  // one the catalog does not list (not loaded yet, or set elsewhere) by its id.
+  const readyPrompt = (() => {
+    const values = { model: currentModelLabel };
+    switch (provider) {
+      case "cursor":
+        return t("providerSelection.readyPrompt.cursor", values);
+      case "codex":
+        return t("providerSelection.readyPrompt.codex", values);
+      case "opencode":
+        return t("providerSelection.readyPrompt.opencode", values);
+      case "agy":
+        return t("providerSelection.readyPrompt.agy", values);
+      default:
+        return t("providerSelection.readyPrompt.claude", values);
+    }
+  })();
 
   const handleModelSelect = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
@@ -234,7 +251,7 @@ export default function ProviderSelectionEmptyState({
             </DialogTrigger>
 
             <DialogContent className="max-w-md overflow-hidden p-0">
-              <DialogTitle>Model Selector</DialogTitle>
+              <DialogTitle>{t("providerSelection.modelSelector")}</DialogTitle>
               <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/20 px-4 py-3">
                 <div>
                   <p className="text-sm font-semibold text-foreground">
@@ -271,7 +288,7 @@ export default function ProviderSelectionEmptyState({
                     defaultValue: "Search models...",
                   })}
                 />
-                <CommandList className="max-h-[350px]">
+                <CommandList className="max-h-[350px]" label={t("providerSelection.modelSelector")}>
                   <CommandEmpty>
                     {t("providerSelection.noModelsFound", {
                       defaultValue: "No models found.",
@@ -319,27 +336,7 @@ export default function ProviderSelectionEmptyState({
           </Dialog>
 
           <p className="mt-4 text-center text-sm text-muted-foreground/70">
-            {
-              {
-                claude: t("providerSelection.readyPrompt.claude", {
-                  model: providerModels.claude,
-                }),
-                cursor: t("providerSelection.readyPrompt.cursor", {
-                  model: providerModels.cursor,
-                }),
-                codex: t("providerSelection.readyPrompt.codex", {
-                  model: providerModels.codex,
-                }),
-                opencode: t("providerSelection.readyPrompt.opencode", {
-                  model: providerModels.opencode,
-                  defaultValue: "Ready with OpenCode {{model}}",
-                }),
-                agy: t("providerSelection.readyPrompt.agy", {
-                  model: providerModels.agy,
-                  defaultValue: "Ready to use Antigravity with {{model}}. Start typing your message below.",
-                }),
-              }[provider]
-            }
+            {readyPrompt}
           </p>
 
           <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground/60">

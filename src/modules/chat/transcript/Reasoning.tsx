@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useTranslation } from 'react-i18next';
 import { BrainIcon, ChevronDownIcon } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
@@ -132,15 +133,21 @@ export type ReasoningTriggerProps = {
   getThinkingMessage?: (isStreaming: boolean, duration?: number) => React.ReactNode;
 } & React.ButtonHTMLAttributes<HTMLButtonElement>;
 
-const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number): React.ReactNode => {
+/** The trigger's words: thinking while it streams, then how long it took, in the interface language. */
+function ThinkingMessage({ isStreaming, duration }: { isStreaming: boolean; duration?: number }) {
+  const { t } = useTranslation('chat');
   if (isStreaming || duration === 0) {
-    return <Shimmer>Thinking...</Shimmer>;
+    return <Shimmer>{t('thinking.title')}</Shimmer>;
   }
   if (duration === undefined) {
-    return <p>Thought for a few seconds</p>;
+    return <p>{t('thinking.thoughtBriefly')}</p>;
   }
-  return <p>Thought for {duration} seconds</p>;
-};
+  return <p>{t('thinking.thoughtFor', { count: duration })}</p>;
+}
+
+const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number): React.ReactNode => (
+  <ThinkingMessage isStreaming={isStreaming} duration={duration} />
+);
 
 /** Toggle of Reasoning, used by MessageComponent. */
 export const ReasoningTrigger = React.memo<ReasoningTriggerProps>(

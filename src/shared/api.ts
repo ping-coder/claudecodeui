@@ -4,6 +4,7 @@ import {
   storeAuthToken,
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
+import type { BrowserFullscreenReport } from '@/shared/types';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
@@ -276,7 +277,10 @@ export const api = {
   // owning project — used when a /session/<id> URL isn't in loaded payloads.
   sessionDetails: (sessionId: string) =>
     get(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
-  runningSessions: () => get('/api/providers/sessions/running'),
+  // `scheduled=1` also lists the sessions held only for scheduled work (a
+  // /loop, a reminder) and each session's `scheduled`; a server without it
+  // ignores the parameter.
+  runningSessions: () => get('/api/providers/sessions/running?scheduled=1'),
   // Runs that ended in the last 10 minutes (at most 200, oldest first), as the
   // `run_ended` frames the server broadcast: { data: { ends } }. run-notifications
   // reads it on mount as a baseline and after a reconnect to catch up on missed ends.
@@ -675,6 +679,8 @@ export const api = {
     // read it too: running version, install mode and deployment environment.
     health: () => fetch('/health'),
     update: () => post('/api/system/update'),
+    // One line of browser diagnostics for the server log (the fullscreen outcome); best effort.
+    reportClientDiagnostics: (report: BrowserFullscreenReport) => post('/api/system/client-diagnostics', report),
   },
 };
 

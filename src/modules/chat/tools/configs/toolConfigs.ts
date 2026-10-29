@@ -1,6 +1,15 @@
+import type { TFunction } from 'i18next';
+
 /**
  * Centralized tool configuration registry
- * Defines display behavior for all tool types 
+ * Defines display behavior for all tool types
+ *
+ * Words shown to the reader are in the interface language: a fixed label or
+ * title has a key (`labelKey`, `titleKey`) beside its English fallback, and a
+ * function that words a title, a value or a secondary line takes the `t` of
+ * whoever draws it (ToolRenderer, ToolGroupContainer, the tool grouping's
+ * preview); getContentProps gets it as `helpers.t`. The keys carry their
+ * namespace, so any `t` will do.
  */
 
 export type ToolDisplayConfig = {
@@ -9,8 +18,10 @@ export type ToolDisplayConfig = {
     // One-line config
     icon?: string;
     label?: string;
-    getValue?: (input: any) => string;
-    getSecondary?: (input: any) => string | undefined;
+    /** Translation key of `label`, which stays as its English fallback. */
+    labelKey?: string;
+    getValue?: (input: any, t: TFunction) => string;
+    getSecondary?: (input: any, t: TFunction) => string | undefined;
     action?: 'copy' | 'open-file' | 'jump-to-results' | 'none';
     style?: string;
     wrapText?: boolean;
@@ -22,7 +33,9 @@ export type ToolDisplayConfig = {
       icon?: string;
     };
     // Collapsible config
-    title?: string | ((input: any) => string);
+    title?: string | ((input: any, t: TFunction) => string);
+    /** Translation key of a fixed `title`, which stays as its English fallback. */
+    titleKey?: string;
     defaultOpen?: boolean;
     contentType?: 'diff' | 'markdown' | 'file-list' | 'todo-list' | 'text' | 'task' | 'question-answer';
     getContentProps?: (input: any, helpers?: any) => any;
@@ -32,12 +45,14 @@ export type ToolDisplayConfig = {
     hidden?: boolean;
     hideOnSuccess?: boolean;
     type?: 'one-line' | 'collapsible' | 'plan' | 'special';
-    title?: string | ((result: any) => string);
+    title?: string | ((result: any, t: TFunction) => string);
+    /** Translation key of a fixed `title`, which stays as its English fallback. */
+    titleKey?: string;
     defaultOpen?: boolean;
     // Special result handlers
     contentType?: 'markdown' | 'file-list' | 'todo-list' | 'text' | 'success-message' | 'task' | 'question-answer';
     getMessage?: (result: any) => string;
-    getContentProps?: (result: any) => any;
+    getContentProps?: (result: any, helpers?: any) => any;
   };
 };
 
@@ -51,12 +66,12 @@ const DESCRIPTIVE_INPUT_KEYS = [
 ] as const;
 
 /** Builds a one-line summary of an unmapped tool's input. */
-function summarizeToolInput(input: unknown): string {
+function summarizeToolInput(input: unknown, t: TFunction): string {
   if (typeof input === 'string') {
-    return input.length > 80 ? `${input.slice(0, 80)}…` : input || 'Parameters';
+    return input.length > 80 ? `${input.slice(0, 80)}…` : input || t('chat:tools.values.parameters');
   }
   if (!input || typeof input !== 'object') {
-    return 'Parameters';
+    return t('chat:tools.values.parameters');
   }
 
   const record = input as Record<string, unknown>;
@@ -69,7 +84,7 @@ function summarizeToolInput(input: unknown): string {
   }
 
   const keys = Object.keys(record);
-  return keys.length > 0 ? keys.slice(0, 3).join(', ') : 'Parameters';
+  return keys.length > 0 ? keys.slice(0, 3).join(', ') : t('chat:tools.values.parameters');
 }
 
 /**
@@ -85,18 +100,19 @@ function summarizeToolInput(input: unknown): string {
  *
  * The canonical tool names are Claude's, so a Codex plan update would otherwise
  * announce itself as `TodoWrite`. Naming the surface instead of the tool keeps
- * the two providers reading as one product.
+ * the two providers reading as one product. Each is the key of its name in
+ * the interface language.
  */
 const UNIFIED_TOOL_LABELS: Record<string, string> = {
-  TodoWrite: 'Checklist',
-  TodoRead: 'Checklist',
-  AskUserQuestion: 'Question',
+  TodoWrite: 'chat:tools.names.checklist',
+  TodoRead: 'chat:tools.names.checklist',
+  AskUserQuestion: 'chat:tools.names.question',
 };
 
-export function formatToolDisplayName(toolName: string): string {
-  const unifiedLabel = UNIFIED_TOOL_LABELS[toolName];
-  if (unifiedLabel) {
-    return unifiedLabel;
+export function formatToolDisplayName(toolName: string, t: TFunction): string {
+  const unifiedLabelKey = UNIFIED_TOOL_LABELS[toolName];
+  if (unifiedLabelKey) {
+    return t(unifiedLabelKey);
   }
 
   const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(toolName);
@@ -168,6 +184,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Search',
+      labelKey: 'chat:tools.labels.search',
       getValue: (input) => input.query || '',
       action: 'none',
       colorScheme: {
@@ -179,6 +196,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       title: 'Search results',
+      titleKey: 'chat:tools.titles.searchResults',
       defaultOpen: false,
       contentType: 'text',
       getContentProps: (result) => ({ content: String(result?.content || ''), format: 'plain' })
@@ -189,6 +207,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Fetch',
+      labelKey: 'chat:tools.labels.fetch',
       getValue: (input) => input.url || '',
       action: 'none',
       colorScheme: {
@@ -200,6 +219,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       title: 'Fetched page',
+      titleKey: 'chat:tools.titles.fetchedPage',
       defaultOpen: false,
       contentType: 'text',
       getContentProps: (result) => ({ content: String(result?.content || ''), format: 'plain' })
@@ -214,6 +234,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Read',
+      labelKey: 'chat:tools.read',
       getValue: (input) => input.file_path || '',
       action: 'open-file',
       colorScheme: {
@@ -231,18 +252,18 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   Edit: {
     input: {
       type: 'collapsible',
-      title: (input) => {
-        const filename = input.file_path?.split('/').pop() || input.file_path || 'file';
+      title: (input, t) => {
+        const filename = input.file_path?.split('/').pop() || input.file_path || t('chat:tools.values.file');
         return `${filename}`;
       },
       defaultOpen: false,
       contentType: 'diff',
       actionButton: 'none',
-      getContentProps: (input) => ({
+      getContentProps: (input, helpers) => ({
         oldContent: input.old_string,
         newContent: input.new_string,
         filePath: input.file_path,
-        badge: 'Edit',
+        badge: helpers?.t ? (helpers.t as TFunction)('chat:tools.badges.edit') : 'Edit',
         badgeColor: 'gray'
       })
     },
@@ -254,18 +275,18 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   Write: {
     input: {
       type: 'collapsible',
-      title: (input) => {
-        const filename = input.file_path?.split('/').pop() || input.file_path || 'file';
+      title: (input, t) => {
+        const filename = input.file_path?.split('/').pop() || input.file_path || t('chat:tools.values.file');
         return `${filename}`;
       },
       defaultOpen: false,
       contentType: 'diff',
       actionButton: 'none',
-      getContentProps: (input) => ({
+      getContentProps: (input, helpers) => ({
         oldContent: '',
         newContent: input.content,
         filePath: input.file_path,
-        badge: 'New',
+        badge: helpers?.t ? (helpers.t as TFunction)('chat:tools.badges.new') : 'New',
         badgeColor: 'green'
       })
     },
@@ -277,18 +298,18 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   ApplyPatch: {
     input: {
       type: 'collapsible',
-      title: (input) => {
-        const filename = input.file_path?.split('/').pop() || input.file_path || 'file';
+      title: (input, t) => {
+        const filename = input.file_path?.split('/').pop() || input.file_path || t('chat:tools.values.file');
         return `${filename}`;
       },
       defaultOpen: false,
       contentType: 'diff',
       actionButton: 'none',
-      getContentProps: (input) => ({
+      getContentProps: (input, helpers) => ({
         oldContent: input.old_string,
         newContent: input.new_string,
         filePath: input.file_path,
-        badge: 'Patch',
+        badge: helpers?.t ? (helpers.t as TFunction)('chat:tools.badges.patch') : 'Patch',
         badgeColor: 'gray'
       })
     },
@@ -306,7 +327,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'one-line',
       label: 'Grep',
       getValue: (input) => input.pattern,
-      getSecondary: (input) => input.path ? `in ${input.path}` : undefined,
+      getSecondary: (input, t) => input.path ? t('chat:tools.values.inPath', { path: input.path }) : undefined,
       action: 'jump-to-results',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -319,10 +340,10 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       defaultOpen: false,
-      title: (result) => {
+      title: (result, t) => {
         const toolData = result.toolUseResult || {};
         const count = toolData.numFiles || toolData.filenames?.length || 0;
-        return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
+        return t('chat:tools.titles.foundFiles', { count });
       },
       contentType: 'file-list',
       getContentProps: (result) => {
@@ -339,7 +360,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'one-line',
       label: 'Glob',
       getValue: (input) => input.pattern,
-      getSecondary: (input) => input.path ? `in ${input.path}` : undefined,
+      getSecondary: (input, t) => input.path ? t('chat:tools.values.inPath', { path: input.path }) : undefined,
       action: 'jump-to-results',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -352,10 +373,10 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       defaultOpen: false,
-      title: (result) => {
+      title: (result, t) => {
         const toolData = result.toolUseResult || {};
         const count = toolData.numFiles || toolData.filenames?.length || 0;
-        return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
+        return t('chat:tools.titles.foundFiles', { count });
       },
       contentType: 'file-list',
       getContentProps: (result) => {
@@ -379,10 +400,10 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       // Naming the step in flight makes a collapsed checklist say what the
       // agent is doing right now, not just how far along it is.
-      title: (input) => {
+      title: (input, t) => {
         const todos = Array.isArray(input?.todos) ? input.todos : [];
         if (todos.length === 0) {
-          return 'Updating checklist';
+          return t('chat:tools.titles.updatingChecklist');
         }
 
         const done = todos.filter((todo: any) => todo?.status === 'completed').length;
@@ -391,8 +412,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           return `${String(active.activeForm || active.content)} — ${done}/${todos.length}`;
         }
         return done === todos.length
-          ? `Done — ${done}/${todos.length}`
-          : `${done}/${todos.length} done`;
+          ? t('chat:tools.titles.checklistDone', { done, total: todos.length })
+          : t('chat:tools.titles.checklistProgress', { done, total: todos.length });
       },
       defaultOpen: true,
       contentType: 'todo-list',
@@ -410,8 +431,10 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   TodoRead: {
     input: {
       type: 'one-line',
-      label: 'TodoRead',
-      getValue: () => 'reading list',
+      // Named as the checklist it reads (see UNIFIED_TOOL_LABELS), not by the tool's id.
+      label: 'Checklist',
+      labelKey: 'chat:tools.names.checklist',
+      getValue: (_input, t) => t('chat:tools.values.readingList'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-500 dark:text-gray-400',
@@ -445,7 +468,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Task',
-      getValue: (input) => input.subject || 'Creating task',
+      labelKey: 'chat:tools.labels.task',
+      getValue: (input, t) => input.subject || t('chat:tools.values.creatingTask'),
       getSecondary: (input) => input.status || undefined,
       action: 'none',
       colorScheme: {
@@ -463,12 +487,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Task',
-      getValue: (input) => {
+      labelKey: 'chat:tools.labels.task',
+      getValue: (input, t) => {
         const parts = [];
         if (input.taskId) parts.push(`#${input.taskId}`);
         if (input.status) parts.push(input.status);
         if (input.subject) parts.push(`"${input.subject}"`);
-        return parts.join(' → ') || 'updating';
+        return parts.join(' → ') || t('chat:tools.values.updatingTask');
       },
       action: 'none',
       colorScheme: {
@@ -486,7 +511,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Tasks',
-      getValue: () => 'listing tasks',
+      labelKey: 'chat:tools.labels.tasks',
+      getValue: (_input, t) => t('chat:tools.values.listingTasks'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-500 dark:text-gray-400',
@@ -498,6 +524,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: true,
       title: 'Task list',
+      titleKey: 'chat:tools.titles.taskList',
       contentType: 'task',
       getContentProps: (result) => ({
         content: String(result?.content || '')
@@ -509,7 +536,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Task',
-      getValue: (input) => input.taskId ? `#${input.taskId}` : 'fetching',
+      labelKey: 'chat:tools.labels.task',
+      getValue: (input, t) => input.taskId ? `#${input.taskId}` : t('chat:tools.values.fetchingTask'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -521,6 +549,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: true,
       title: 'Task details',
+      titleKey: 'chat:tools.titles.taskDetails',
       contentType: 'task',
       getContentProps: (result) => ({
         content: String(result?.content || '')
@@ -538,7 +567,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   Agent: {
     input: {
       type: 'collapsible',
-      title: (input) => input.description || input.subagent_type || 'Subagent',
+      title: (input, t) => input.description || input.subagent_type || t('chat:tools.titles.subagent'),
       defaultOpen: false,
       contentType: 'markdown',
       getContentProps: (input) => ({ content: input.prompt || '' })
@@ -551,14 +580,14 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   Task: {
     input: {
       type: 'collapsible',
-      title: (input) => {
-        const subagentType = input.subagent_type || 'Agent';
-        const description = input.description || 'Running task';
-        return `Subagent / ${subagentType}: ${description}`;
-      },
+      title: (input, t) => t('chat:tools.titles.subagentTask', {
+        type: input.subagent_type || t('common:workflow.backgroundAgent'),
+        description: input.description || t('chat:tools.values.runningTask'),
+      }),
       defaultOpen: false,
       contentType: 'markdown',
-      getContentProps: (input) => {
+      getContentProps: (input, helpers) => {
+        const t = helpers?.t as TFunction | undefined;
         // If only prompt exists (and required fields), show just the prompt
         // Otherwise show all available fields
         const hasOnlyPrompt = input.prompt &&
@@ -575,15 +604,15 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
         const parts = [];
 
         if (input.model) {
-          parts.push(`**Model:** ${input.model}`);
+          parts.push(`**${t ? t('chat:tools.task.model') : 'Model:'}** ${input.model}`);
         }
 
         if (input.prompt) {
-          parts.push(`**Prompt:**\n${input.prompt}`);
+          parts.push(`**${t ? t('chat:tools.task.prompt') : 'Prompt:'}**\n${input.prompt}`);
         }
 
         if (input.resume) {
-          parts.push(`**Resuming from:** ${input.resume}`);
+          parts.push(`**${t ? t('chat:tools.task.resumingFrom') : 'Resuming from:'}** ${input.resume}`);
         }
 
         return {
@@ -598,9 +627,11 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       title: 'Subagent result',
+      titleKey: 'chat:tools.titles.subagentResult',
       defaultOpen: false,
       contentType: 'markdown',
-      getContentProps: (result) => {
+      getContentProps: (result, helpers) => {
+        const t = helpers?.t as TFunction | undefined;
         // Handle agent results which may have complex structure
         if (result && result.content) {
           let content = result.content;
@@ -622,12 +653,12 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
               .filter((item: any) => item.type === 'text')
               .map((item: any) => item.text)
               .join('\n\n');
-            return { content: textContent || 'No response text' };
+            return { content: textContent || (t ? t('chat:tools.task.noResponseText') : 'No response text') };
           }
           return { content: String(content) };
         }
         // Fallback to string representation
-        return { content: String(result || 'No response') };
+        return { content: String(result || (t ? t('chat:tools.task.noResponse') : 'No response')) };
       }
     }
   },
@@ -645,19 +676,19 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       // A single answered question puts the choice straight in the header;
       // that is the part the user came back to read.
-      title: (input: any) => {
+      title: (input: any, t) => {
         const questions = Array.isArray(input?.questions) ? input.questions : [];
         const answers = input?.answers || {};
         if (questions.length === 1) {
-          const header = questions[0]?.header || 'Question';
+          const header = questions[0]?.header || t('chat:tools.titles.question');
           const answer = answers[questions[0]?.question];
           return answer ? `${header} — ${answer}` : header;
         }
 
         const answered = questions.filter((question: any) => answers[question?.question]).length;
         return answered > 0
-          ? `${questions.length} questions — ${answered} answered`
-          : `${questions.length} questions`;
+          ? t('chat:tools.titles.questionsAnswered', { count: questions.length, answered })
+          : t('chat:tools.titles.questions', { count: questions.length });
       },
       defaultOpen: true,
       contentType: 'question-answer',
@@ -680,6 +711,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'plan',
       title: 'Implementation plan',
+      titleKey: 'chat:tools.titles.implementationPlan',
       defaultOpen: true,
       contentType: 'markdown',
       getContentProps: (input) => ({
@@ -696,6 +728,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'plan',
       title: 'Implementation plan',
+      titleKey: 'chat:tools.titles.implementationPlan',
       defaultOpen: true,
       contentType: 'markdown',
       getContentProps: (input) => ({
@@ -714,6 +747,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'collapsible',
       title: 'Sandbox script',
+      titleKey: 'chat:tools.titles.sandboxScript',
       defaultOpen: false,
       contentType: 'text',
       getContentProps: (input) => ({
@@ -724,6 +758,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       title: 'Output',
+      titleKey: 'chat:tools.output',
       contentType: 'text',
       getContentProps: (result) => ({ content: String(result?.content || ''), format: 'plain' })
     }
@@ -739,7 +774,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       // A tool with no config still deserves a line that says what it did.
       // Every row reading "Parameters" is what made unmapped provider tools
       // unreadable in the transcript.
-      title: (input) => summarizeToolInput(input),
+      title: (input, t) => summarizeToolInput(input, t),
       defaultOpen: false,
       contentType: 'text',
       getContentProps: (input) => ({
@@ -750,6 +785,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       title: 'Output',
+      titleKey: 'chat:tools.output',
       contentType: 'text',
       getContentProps: (result) => {
         let content = result?.content || '';

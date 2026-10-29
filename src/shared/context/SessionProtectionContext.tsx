@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
 } from 'react';
 import type { ReactNode } from 'react';
 
@@ -12,6 +13,7 @@ import {
 } from '@/shared/hooks/useSessionProtection';
 import type { BackgroundTaskSummary, GetSessionActivity, IsSessionProcessing, MarkSessionBackground, MarkSessionIdle, MarkSessionProcessing, SessionActivity, SessionActivityMap, SyncProcessingSessions } from '@/shared/types';
 import { api } from '@/shared/api';
+import { parseScheduledWork } from '@/shared/utils';
 
 type RunningSessionApiItem = {
   sessionId?: unknown;
@@ -20,6 +22,7 @@ type RunningSessionApiItem = {
   canInterrupt?: unknown;
   background?: unknown;
   tasks?: unknown;
+  scheduled?: unknown;
 };
 
 type RunningSessionsApiPayload = {
@@ -35,6 +38,14 @@ type SessionProtectionActions = {
   syncProcessingSessions: SyncProcessingSessions;
   isSessionProcessing: IsSessionProcessing;
   getSessionActivity: GetSessionActivity;
+  /**
+   * Reads the running sessions now, as the poll does every few seconds;
+   * settles once the map holds the answer (or the read failed). For what only
+   * the server can tell right after an event: the scheduled work a turn left
+   * (chat's realtime handlers, at its `complete`), or what a stop of it left
+   * (chat's background-tasks strip).
+   */
+  refreshRunningSessions: () => Promise<void>;
 };
 
 const SessionProtectionStateContext = createContext<SessionActivityMap | null>(null);
@@ -120,7 +131,7 @@ const parseBackgroundTasks = (value: unknown): BackgroundTaskSummary[] | undefin
   return tasks;
 };
 
-/** Mounted by the project-workspace route; tracks which sessions are busy — producing a response or running background tasks — so chat, sidebar, project-workspace and run-notifications agree on session activity. */
+/** Mounted by the project-workspace route; tracks which sessions are busy — producing a response, running background tasks or holding scheduled work — so chat, sidebar, project-workspace and run-notifications agree on session activity. */
 export function SessionProtectionProvider({ children }: { children: ReactNode }) {
   const {
     processingSessions,
@@ -132,7 +143,16 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     getSessionActivity,
   } = useSessionProtection();
 
+  // Reads are numbered as they start. Besides the poll, an event can ask for
+  // one (refreshRunningSessions), so two can be out at once, and an answer
+  // that comes back after a later read's has been applied describes an older
+  // moment: it is dropped.
+  const lastReadRef = useRef(0);
+  const lastAppliedReadRef = useRef(0);
+
   const refreshRunningSessions = useCallback(async () => {
+    lastReadRef.current += 1;
+    const read = lastReadRef.current;
     try {
       const response = await api.runningSessions();
       if (!response.ok) {
@@ -140,6 +160,10 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       }
 
       const payload = (await response.json()) as RunningSessionsApiPayload;
+      if (read < lastAppliedReadRef.current) {
+        return;
+      }
+      lastAppliedReadRef.current = read;
       const sessions = Array.isArray(payload.data?.sessions) ? payload.data.sessions : [];
 
       syncProcessingSessions(
@@ -156,6 +180,7 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
               canInterrupt: typeof session.canInterrupt === 'boolean' ? session.canInterrupt : undefined,
               background: session.background === true,
               tasks: parseBackgroundTasks(session.tasks),
+              scheduled: parseScheduledWork(session.scheduled),
             };
           })
           .filter((session): session is NonNullable<typeof session> => Boolean(session)),
@@ -185,6 +210,7 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       syncProcessingSessions,
       isSessionProcessing,
       getSessionActivity,
+      refreshRunningSessions,
     }),
     [
       getSessionActivity,
@@ -192,6 +218,7 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       markSessionBackground,
       markSessionIdle,
       markSessionProcessing,
+      refreshRunningSessions,
       syncProcessingSessions,
     ],
   );
@@ -253,7 +280,8 @@ export function useProcessingSessions(): SessionActivityMap {
 
 /**
  * The stable actions on the activity map, for code that writes it or reads it at event time without
- * re-rendering on its changes. Used by chat's ChatInterface (sends, realtime frames), project-workspace's
+ * re-rendering on its changes. Used by chat's ChatInterface (sends, realtime frames), its background-tasks
+ * strip (refreshRunningSessions once a stop of scheduled work is answered), project-workspace's
  * ProjectWorkspaceRoute (isSessionProcessing) and run-notifications, which settles a session's entry when
  * `run_ended` reports its run over.
  */

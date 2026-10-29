@@ -46,6 +46,9 @@ function createGateway(overrides: Partial<ProviderRuntimeGateway> = {}): Provide
     abort: async () => false,
     stopBackgroundTask: async () => false,
     hasBackgroundWork: () => false,
+    hasScheduledWork: () => false,
+    listScheduledWork: () => [],
+    stopScheduledWork: async () => ({ status: 'not_found' }),
     resolveToolApproval: () => {},
     getPendingApprovalsForSession: () => [],
     insert: async () => ({ accepted: true }),
@@ -116,6 +119,32 @@ test('a tab that subscribes during background work receives the run\'s later eve
     assert.ok(
       newTab.frames.some((frame) => frame.kind === 'task_status'),
       'the task event must reach the tab that subscribed after the turn ended',
+    );
+  });
+});
+
+test('a tab that subscribes while only scheduled work is left receives the run\'s later events', async () => {
+  // The turn set up a /loop: no task is outstanding, but the process is held
+  // for the loop's next firing, whose turn reports through the same writer.
+  await withIsolatedDatabase(async () => {
+    const run = startAndCompleteRun(createFakeSocket());
+
+    const newTab = createFakeSocket();
+    handleChatConnection(
+      newTab as never,
+      { user: { id: 1 } } as never,
+      { runtime: createGateway({ hasScheduledWork: (sessionId) => sessionId === SESSION_ID }) },
+    );
+    newTab.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: SESSION_ID, lastSeq: 0 }] }));
+    await settle();
+
+    assert.equal(newTab.frames[0]?.kind, 'chat_subscribed');
+    assert.equal(newTab.frames[0]?.isProcessing, false);
+    run.writer.send({ kind: 'text', provider: 'claude', sessionId: 'native-1', role: 'assistant', content: 'TICK' } as never);
+    assert.equal(
+      newTab.frames.some((frame) => frame.kind === 'text' && frame.content === 'TICK'),
+      true,
+      'the firing\'s turn must reach the tab that subscribed after the turn ended',
     );
   });
 });

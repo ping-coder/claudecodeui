@@ -410,3 +410,86 @@ test('a message sent into a held /loop while the loop runs a turn of its own, an
     assert.equal(queries.filter((query) => query.created()).length, 1);
   });
 });
+
+/** Starts a /loop from the composer, its process launched with `launch`, and waits for its first turn to end with the job held. */
+async function startLoop(gateway: Gateway, launch: Message) {
+  const { service, queries, sessionId, userId, cwd } = gateway;
+  void runDetachedChatTurn({ sessionId, userId, content: '/loop 30m check CI', options: { cwd, ...launch } }, { runtime: service });
+  await waitUntil(() => queries[0]?.prompts.length === 1);
+  const held = queries[0];
+  held.emit(init());
+  held.emit(echo(held.prompts[0]?.uuid, '/loop 30m check CI'));
+  held.emit({
+    type: 'assistant', session_id: NATIVE_ID, parent_tool_use_id: null,
+    message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_cron', name: 'CronCreate', input: { cron: '*/30 * * * *', prompt: 'check CI', recurring: true } }] },
+  });
+  held.emit({
+    type: 'user', uuid: randomUUID(), session_id: NATIVE_ID, parent_tool_use_id: null,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_cron', content: 'Scheduled recurring job b2148320 (Every 30 minutes).' }] },
+    tool_use_result: { id: 'b2148320', humanSchedule: 'Every 30 minutes', recurring: true, durable: false, nextFireAt: Date.now() + 30 * 60 * 1000 },
+  });
+  held.emit(result());
+  await waitUntil(() => !chatRunRegistry.isProcessing(sessionId));
+  await flush();
+  assert.equal(service.hasScheduledWork(sessionId), true);
+  return held;
+}
+
+// The loop started while the user allowed Bash outright.
+const LOOP_LAUNCH = { model: 'sonnet', effort: 'high', permissionMode: 'default', toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false } };
+// A queued message's options as the scheduled-messages dispatcher sends them (its `dispatchedOptions`).
+const dispatched = (options: Message) => ({ ...options, inheritUnset: true, restoreSwitchesAfterTurn: true });
+
+test('a queued message whose tool rules deny what a /loop\'s process allows is kept out by both plans the dispatcher makes, and fails if sent all the same, leaving the loop as it was', async () => {
+  await withGateway(async (gateway) => {
+    const { service, queries, sessionId, userId } = gateway;
+    const held = await startLoop(gateway, LOOP_LAUNCH);
+    // Queued once the user had stopped allowing Bash and denied git push.
+    const options = dispatched({ model: 'sonnet', effort: 'max', permissionMode: 'default', toolsSettings: { allowedTools: [], disallowedTools: ['Bash(git push:*)'], skipPermissions: false } });
+    const plan = (planOptions: Message) => service.planHandOver('claude', sessionId, { ...options, sessionId, cwd: gateway.cwd }, planOptions);
+    assert.deepEqual(await plan({ inheritUnset: true }), { heldWork: true, canHandOver: false, changes: ['effort', 'tools'], switches: [] });
+    assert.deepEqual(await plan({ inheritUnset: true, acceptProcessSettings: true }), { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] });
+
+    const failures: unknown[] = [];
+    const outcome = await runDetachedChatTurn({
+      sessionId,
+      userId,
+      content: 'Push the fix',
+      options: { ...options, acceptProcessSettings: true },
+      onHandOverFailed: (failure) => { failures.push(failure); },
+    }, { runtime: service });
+    assert.deepEqual(outcome, {
+      started: true,
+      error: 'Not sent: this message changes the tool permissions, which only a new Claude process can apply, and a new process would stop the session\'s scheduled work.',
+    });
+    assert.deepEqual(failures, [{ reason: 'stale-plan', content: outcome.error }], 'the gateway reads why off the run\'s HAND_OVER_FAILED error');
+    await flush();
+    assert.equal(chatRunRegistry.isProcessing(sessionId), false, 'the run is over');
+    assert.equal(held.prompts.length, 1, 'nothing went into the loop\'s process');
+    assert.equal(queries.filter((query) => query.created()).length, 1, 'no new process');
+    assert.deepEqual(held.calls, [], 'the loop\'s process is not interrupted, stopped or let go');
+    assert.equal(service.hasScheduledWork(sessionId), true);
+  });
+});
+
+test('a queued message whose tool rules are no stricter than a /loop\'s process goes into it on the process\'s effort and deny rules', async () => {
+  await withGateway(async (gateway) => {
+    const { service, queries, sessionId, userId } = gateway;
+    const held = await startLoop(gateway, { ...LOOP_LAUNCH, toolsSettings: { allowedTools: ['Bash'], disallowedTools: ['WebFetch'], skipPermissions: false } });
+    const options = dispatched({ model: 'sonnet', effort: 'max', permissionMode: 'default', toolsSettings: { allowedTools: ['Bash', 'Read'], disallowedTools: [], skipPermissions: false } });
+    assert.deepEqual(
+      await service.planHandOver('claude', sessionId, { ...options, sessionId, cwd: gateway.cwd }, { inheritUnset: true, acceptProcessSettings: true }),
+      { heldWork: true, canHandOver: true, changes: [], switches: [] },
+    );
+    const turn = runDetachedChatTurn({ sessionId, userId, content: 'Summarise the failures', options: { ...options, acceptProcessSettings: true } }, { runtime: service });
+    await waitUntil(() => held.prompts.length === 2);
+    assert.equal(queries.filter((query) => query.created()).length, 1, 'it went into the loop\'s process');
+    const uuid = held.prompts[1]?.uuid;
+    held.emit(echo(uuid, 'Summarise the failures'));
+    held.emit({ ...result(), user_message_uuid: uuid, user_message_uuids: [uuid] });
+    assert.deepEqual(await turn, { started: true, error: null });
+    await flush();
+    assert.deepEqual(held.calls, [], 'the loop keeps its process');
+    assert.equal(service.hasScheduledWork(sessionId), true);
+  });
+});

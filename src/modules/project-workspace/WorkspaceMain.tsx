@@ -11,6 +11,7 @@ import { PluginTabContent } from '@/modules/plugins';
 import { BrowserUsePanel, useBrowserUseEnabled } from '@/modules/browser-use';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { TaskMasterPanel, useTaskMaster, useTasksSettings } from '@/modules/task-master';
+import { formatSessionTitle } from '@/modules/sidebar';
 import type {
   AppTab,
   CodeEditorDiffInfo,
@@ -25,6 +26,7 @@ import type {
   WorkspaceViewSetter,
 } from '@/shared/types';
 import { NO_PALETTE_OPS } from '@/shared/constants';
+import { getSessionTitle } from '@/shared/utils';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { useFileOpenResolver } from '@/modules/project-workspace/hooks/useFileOpenResolver';
@@ -341,6 +343,8 @@ function WorkspaceMain({
                 <StandaloneShell
                   project={selectedProject}
                   session={selectedSession}
+                  // Named as the tab bar names it: the server's placeholder names in the interface language.
+                  sessionTitle={selectedSession ? formatSessionTitle(getSessionTitle(selectedSession, t), t) : null}
                   showHeader={false}
                   isActive
                 />

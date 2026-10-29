@@ -1,10 +1,10 @@
 import { useTranslation } from 'react-i18next';
 
 import type { ShellSessionBusy } from '@/shared/types';
-import { describeBackgroundTask, ownBackgroundTasks } from '@/shared/utils';
+import { describeBackgroundTask, describeScheduledWork, ownBackgroundTasks } from '@/shared/utils';
 
-// The most tasks the notice names; the rest are counted.
-const MAX_LISTED_TASKS = 5;
+// The most tasks and scheduled work the notice names, together; the rest are counted.
+const MAX_LISTED_ITEMS = 5;
 
 // English for each reason, the fallback where a language has no entry.
 const REASON_DEFAULTS: Record<ShellSessionBusy['reason'], string> = {
@@ -13,6 +13,12 @@ const REASON_DEFAULTS: Record<ShellSessionBusy['reason'], string> = {
   held: 'CloudCLI\'s Claude process still has this session open, most likely waiting on a Monitor or a scheduled wake-up.',
   exiting: 'CloudCLI\'s Claude process is shutting down. This usually takes seconds, at most about 6 minutes.',
   queued: 'A queued chat message goes out as soon as the session is free.',
+};
+
+// The reason, once the frame lists scheduled work: the process waits for the loops' next run, or runs them beside the tasks.
+const SCHEDULED_REASONS: Partial<Record<ShellSessionBusy['reason'], { key: string; defaultValue: string }>> = {
+  held: { key: 'heldScheduled', defaultValue: 'This session has loops waiting for their next run:' },
+  background: { key: 'backgroundScheduled', defaultValue: 'Background tasks and loops are still running:' },
 };
 
 type ShellSessionBusyNoticeProps = {
@@ -28,14 +34,21 @@ type ShellSessionBusyNoticeProps = {
  * second process would do, and offers to ask again or to stop that work and
  * open the session here. No takeover while a chat message is queued: the
  * dispatcher would send it, in a new process, as soon as the session is free.
+ * The scheduled work the held process keeps (loops, reminders) is named after
+ * the tasks, and a reason that says why the process is held says so for it.
  * After a takeover the server refused, because more had started than the
  * notice showed, it says so above the new state.
  */
 export default function ShellSessionBusyNotice({ busy, isTakingOver, onRetry, onTakeOver }: ShellSessionBusyNoticeProps) {
   const { t } = useTranslation('chat');
-  const tasks = ownBackgroundTasks(busy.tasks);
-  const listedTasks = tasks.slice(0, MAX_LISTED_TASKS);
-  const unlistedCount = tasks.length - listedTasks.length;
+  const scheduled = busy.scheduled ?? [];
+  const items = [
+    ...ownBackgroundTasks(busy.tasks).map((task) => ({ key: `task:${task.taskId}`, label: describeBackgroundTask(task, t) })),
+    ...scheduled.map((item) => ({ key: `scheduled:${item.id}`, label: describeScheduledWork(item, t) })),
+  ];
+  const listedItems = items.slice(0, MAX_LISTED_ITEMS);
+  const unlistedCount = items.length - listedItems.length;
+  const scheduledReason = scheduled.length > 0 ? SCHEDULED_REASONS[busy.reason] : undefined;
 
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center overflow-y-auto bg-card/95 p-6">
@@ -51,12 +64,14 @@ export default function ShellSessionBusyNotice({ busy, isTakingOver, onRetry, on
           </p>
         )}
         <p className="text-muted-foreground">
-          {t(`shell.sessionBusy.reason.${busy.reason}`, { defaultValue: REASON_DEFAULTS[busy.reason] })}
+          {scheduledReason
+            ? t(`shell.sessionBusy.reason.${scheduledReason.key}`, { defaultValue: scheduledReason.defaultValue })
+            : t(`shell.sessionBusy.reason.${busy.reason}`, { defaultValue: REASON_DEFAULTS[busy.reason] })}
         </p>
-        {listedTasks.length > 0 && (
+        {listedItems.length > 0 && (
           <ul className="list-disc space-y-1 ps-5 text-foreground">
-            {listedTasks.map((task) => (
-              <li key={task.taskId} className="break-words">{describeBackgroundTask(task, t)}</li>
+            {listedItems.map((item) => (
+              <li key={item.key} className="break-words">{item.label}</li>
             ))}
             {unlistedCount > 0 && (
               <li className="list-none text-muted-foreground">

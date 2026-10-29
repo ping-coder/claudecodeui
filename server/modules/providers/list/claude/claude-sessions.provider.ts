@@ -1123,6 +1123,19 @@ function parseLocalCommandPayload(content: string): ClaudeLocalCommandPayload | 
 }
 
 /**
+ * Whether a slash-command row records a command Claude Code ran by itself,
+ * asking the model nothing: `/model` (typed, or the switch the SDK's
+ * `setModel` writes), `/cost`, `/effort`. The CLI writes those with
+ * `<command-name>` first. A prompt command (`/review`, a custom command, a
+ * skill), whose expanded prompt the model goes on to answer, opens with
+ * `<command-message>` instead. A local command that does hand the model a turn,
+ * as `/goal` does, is stamped with that turn's `turnOrigin`.
+ */
+function isLocalCommandRecord(raw: AnyRecord, content: string): boolean {
+  return content.trimStart().startsWith('<command-name>') && !raw.turnOrigin;
+}
+
+/**
  * Produces the short user-visible command string that should appear in chat.
  *
  * We prefer the slash-prefixed command name because that most closely matches
@@ -1698,10 +1711,11 @@ export class ClaudeSessionsProvider implements IProviderSessions {
         }
 
         /**
-         * Local slash commands are serialized as tagged text even though they
-         * are semantically a user action. Expose the parsed fields to the
+         * Slash commands are serialized as tagged text even though they are
+         * semantically a user action. Expose the parsed fields to the
          * frontend and emit a plain user-visible command string so the command
-         * no longer disappears from history.
+         * no longer disappears from history. Only a command the CLI ran by
+         * itself is flagged local (see isLocalCommandRecord): it opens no turn.
          */
         const localCommandPayload = parseLocalCommandPayload(text);
         if (localCommandPayload) {
@@ -1718,7 +1732,7 @@ export class ClaudeSessionsProvider implements IProviderSessions {
               commandName: localCommandPayload.commandName,
               commandMessage: localCommandPayload.commandMessage,
               commandArgs: localCommandPayload.commandArgs,
-              isLocalCommand: true,
+              isLocalCommand: isLocalCommandRecord(raw, text) ? true : undefined,
             }));
           }
           return messages;

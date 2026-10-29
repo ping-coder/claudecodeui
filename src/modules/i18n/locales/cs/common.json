@@ -169,10 +169,11 @@
       "loading": "Načítání..."
     },
     "delete": {
-      "title": "Smazat položku",
       "folderWarning": "Tato složka a celý její obsah budou trvale smazány.",
       "fileWarning": "Tento soubor bude trvale smazán.",
-      "confirm": "Smazat"
+      "confirm": "Smazat",
+      "titleFolder": "Smazat složku",
+      "titleFile": "Smazat soubor"
     },
     "toast": {
       "renamed": "Přejmenováno",

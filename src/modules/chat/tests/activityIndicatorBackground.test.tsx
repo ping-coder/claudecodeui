@@ -6,7 +6,7 @@ import { test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import ActivityIndicator from '@/modules/chat/composer/ActivityIndicator';
-import type { BackgroundTaskSummary, SessionActivity } from '@/shared/types';
+import type { BackgroundTaskSummary, ScheduledWorkSummary, SessionActivity } from '@/shared/types';
 
 /**
  * The pill above the composer used to vanish at the turn's `complete` even
@@ -84,4 +84,56 @@ test('a response in flight still shows the Stop button and the primary dot', () 
   assert.ok(screen.getByRole('button', { name: 'Stop' }));
   assert.ok(container.querySelector('.bg-primary'));
   assert.equal(container.querySelector('.bg-purple-500') === null, true);
+});
+
+const loop = (overrides: Partial<ScheduledWorkSummary> = {}): ScheduledWorkSummary => ({
+  id: 'cron:b2148320',
+  kind: 'cron',
+  toolUseId: 'toolu_cron_1',
+  prompt: 'check CI',
+  startedAt: Date.now() - 125_000,
+  nextFireAt: Date.now() + 60_000,
+  recurring: true,
+  holdUntil: Date.now() + 8 * 86_400_000,
+  cron: '*/5 * * * *',
+  ...overrides,
+});
+
+const scheduledActivity = (scheduled: ScheduledWorkSummary[], tasks: BackgroundTaskSummary[] = []): SessionActivity => ({
+  statusText: null,
+  canInterrupt: false,
+  startedAt: Math.min(...tasks.map((entry) => entry.startedAt), ...scheduled.map((item) => item.startedAt)),
+  background: true,
+  tasks,
+  scheduled,
+});
+
+test('scheduled work alone is named by its one loop or reminder, or counted, never as "0 tasks"', () => {
+  const one = render(<ActivityIndicator activity={scheduledActivity([loop()])} />);
+  assert.match(one.container.textContent ?? '', /Background work…/);
+  assert.match(one.container.textContent ?? '', /Loop check CI/);
+  assert.match(one.container.textContent ?? '', /2m 5s/, 'timed from the loop\'s start');
+  assert.doesNotMatch(one.container.textContent ?? '', /tasks/);
+  one.unmount();
+
+  const reminder = render(<ActivityIndicator activity={scheduledActivity([loop({ recurring: false, prompt: 'stretch' })])} />);
+  assert.match(reminder.container.textContent ?? '', /Reminder stretch/);
+  reminder.unmount();
+
+  const loops = render(<ActivityIndicator activity={scheduledActivity([loop(), loop({ id: 'wakeup:toolu_wake_1', kind: 'wakeup' })])} />);
+  assert.match(loops.container.textContent ?? '', /2 loops/);
+  loops.unmount();
+
+  const mixed = render(<ActivityIndicator activity={scheduledActivity([loop(), loop({ id: 'cron:7b7cd8fc', recurring: false })])} />);
+  assert.match(mixed.container.textContent ?? '', /2 scheduled items/);
+});
+
+test('tasks alone say nothing of scheduled work', () => {
+  const { container } = render(<ActivityIndicator activity={backgroundActivity([task()])} />);
+  assert.equal(container.querySelector('[data-fit-detail]')?.getAttribute('title'), 'Workflow frontend-architecture-audit');
+});
+
+test('tasks and scheduled work together read as the tasks, then how much scheduled work', () => {
+  const { container } = render(<ActivityIndicator activity={scheduledActivity([loop()], [task()])} />);
+  assert.match(container.textContent ?? '', /Workflow frontend-architecture-audit · 1 loop/);
 });

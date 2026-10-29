@@ -11,6 +11,7 @@
     "starred": "מסומנים בכוכב",
     "all": "הכול",
     "untitledSession": "סשן ללא שם",
+    "untitledProviderSession": "סשן {{provider}} ללא שם",
     "newSession": "סשן חדש",
     "codexSession": "סשן Codex",
     "fetchingProjects": "טוען את הפרויקטים והסשנים של Claude",
@@ -39,7 +40,27 @@
     "clearSelection": "ניקוי",
     "deleteSelected_one": "מחיקת סשן אחד",
     "deleteSelected_two": "מחיקת שני סשנים",
-    "deleteSelected_other": "מחיקת {{count}} סשנים"
+    "deleteSelected_other": "מחיקת {{count}} סשנים",
+    "openOnLeft": "פתיחה בצד שמאל",
+    "openOnRight": "פתיחה בצד ימין",
+    "openOnRightSplit": "פתיחה בצד ימין (תצוגה מפוצלת)",
+    "openOnLeftSplit": "פתיחה בצד שמאל (תצוגה מפוצלת)"
+  },
+  "sessionMenu": {
+    "title": "אפשרויות סשן",
+    "optionsFor": "אפשרויות הסשן {{name}}",
+    "providerSession": "סשן {{provider}}",
+    "copyId": "העתקת מזהה הסשן של {{provider}}",
+    "copyIdLoading": "טוען את מזהה הסשן של {{provider}}…",
+    "copyIdCopied": "מזהה הסשן של {{provider}} הועתק",
+    "copyIdFailed": "לא ניתן להעתיק את מזהה הסשן של {{provider}}",
+    "copyIdUnavailable": "מזהה הסשן של {{provider}} לא זמין",
+    "retryClick": "אפשר ללחוץ כדי לנסות שוב.",
+    "retryTap": "אפשר להקיש כדי לנסות שוב.",
+    "fork": "פיצול הסשן",
+    "forkDescription": "ההמשך יהיה בעותק, והסשן הזה יישאר כמו שהוא.",
+    "archiveOrDelete": "העברה לארכיון או מחיקה של הסשן",
+    "nameLabel": "שם הסשן"
   },
   "tooltips": {
     "viewEnvironments": "הצגת סביבות",
@@ -59,6 +80,10 @@
     "openCommandPalette": "פתיחת לוח הפקודות",
     "attentionRequiredIndicator": "הסשן דורש תשומת לב",
     "backgroundWorkIndicator": "עבודה פועלת ברקע",
+    "altClickOtherSide": "אפשר גם ללחוץ עם Alt (או עם Option ב-Mac)",
+    "openedLeft": "פתוח בחלונית השמאלית",
+    "openedRight": "פתוח בחלונית הימנית",
+    "openedBoth": "פתוח בשתי החלוניות",
     "processingSessionIndicator": "הסשן בעיבוד"
   },
   "navigation": {
@@ -79,7 +104,9 @@
     "rename": "שינוי שם",
     "joinCommunity": "הצטרפות לקהילה",
     "reportIssue": "דיווח על בעיה",
-    "starOnGithub": "כוכב ב-GitHub"
+    "starOnGithub": "כוכב ב-GitHub",
+    "star": "כוכב",
+    "dismiss": "סגירה"
   },
   "branding": {
     "openSource": "קוד פתוח"
@@ -105,7 +132,15 @@
     "oneDayAgo": "לפני יום",
     "daysAgo_one": "לפני יום",
     "daysAgo_two": "לפני יומיים",
-    "daysAgo_other": "לפני {{count}} ימים"
+    "daysAgo_other": "לפני {{count}} ימים",
+    "compactNow": "עכשיו",
+    "compactMinutes": "{{count}} דק׳",
+    "compactHours_one": "שעה",
+    "compactHours_two": "שעתיים",
+    "compactHours_other": "{{count}} שע׳",
+    "compactDays_one": "יום",
+    "compactDays_two": "יומיים",
+    "compactDays_other": "{{count}} ימים"
   },
   "messages": {
     "deleteConfirm": "למחוק את הפריט הזה?",
@@ -155,9 +190,9 @@
     "matches_one": "התאמה אחת",
     "matches_two": "שתי התאמות",
     "matches_other": "{{count}} התאמות",
-    "projectsScanned_one": "נסרק פרויקט אחד",
-    "projectsScanned_two": "נסרקו שני פרויקטים",
-    "projectsScanned_other": "נסרקו {{count}} פרויקטים"
+    "scanProgress_one": "נסרקו {{done}} מתוך {{total}} פרויקט",
+    "scanProgress_two": "נסרקו {{done}} מתוך {{total}} פרויקטים",
+    "scanProgress_other": "נסרקו {{done}} מתוך {{total}} פרויקטים"
   },
   "recent": {
     "title": "שיחות אחרונות",
@@ -176,21 +211,22 @@
   "archived": {
     "title": "ארכיון",
     "restoreHint": "אפשר לשחזר פריטים בכל עת",
-    "loadingTitle": "טוען ארכיון...",
-    "loadingDescription": "טוען סביבות עבודה וסשנים מוסתרים שאפשר לשחזר בהמשך.",
+    "visibleOfTotal": "{{visible}} מתוך {{total}}",
+    "loadingTitle": "טוען ארכיון…",
+    "loadingDescription": "טוען פרויקטים וסשנים מוסתרים שאפשר לשחזר בהמשך.",
     "emptyTitle": "אין פריטים בארכיון",
-    "emptyDescription": "סביבות עבודה וסשנים יופיעו כאן אחרי שמסתירים אותם מהרשימה הפעילה.",
+    "emptyDescription": "פרויקטים וסשנים יופיעו כאן אחרי שמסתירים אותם מהרשימה הפעילה.",
     "noMatchingSessions": "אין פריטים תואמים בארכיון",
     "tryDifferentSearch": "כדאי לנסות מונח חיפוש אחר.",
     "restoreAction": "שחזור",
-    "restoreProject": "שחזור סביבת עבודה",
+    "restoreProject": "שחזור פרויקט",
     "restore": "שחזור סשן",
     "deletePermanently": "מחיקה לצמיתות"
   },
   "deleteConfirmation": {
     "deleteProject": "הסרת פרויקט",
     "deleteSession": "מחיקת סשן",
-    "confirmDelete": "מה לעשות עם",
+    "confirmDeleteNamed": "מה לעשות עם {{name}}?",
     "sessionCount_one": "הפרויקט מכיל שיחה אחת.",
     "sessionCount_two": "הפרויקט מכיל שתי שיחות.",
     "sessionCount_other": "הפרויקט מכיל {{count}} שיחות.",
@@ -203,18 +239,22 @@
     "deleteAllData": "מחיקת כל הנתונים לצמיתות",
     "allConversationsDeleted": "הפרויקט יוסר מסרגל הצד. הקבצים, הזיכרונות ונתוני הסשנים יישמרו.",
     "cannotUndo": "אפשר להוסיף את הפרויקט מחדש בהמשך.",
-    "confirmDeleteSessions": "מה לעשות עם",
     "deleteSessions_one": "מחיקת סשן אחד",
     "deleteSessions_two": "מחיקת שני סשנים",
     "deleteSessions_other": "מחיקת {{count}} סשנים",
-    "selectedSessions_one": "סשן נבחר אחד",
-    "selectedSessions_two": "שני סשנים נבחרים",
-    "selectedSessions_other": "{{count}} סשנים נבחרים",
+    "confirmDeleteSelected_one": "מה לעשות עם <strong>סשן נבחר אחד</strong>?",
+    "confirmDeleteSelected_two": "מה לעשות עם <strong>שני סשנים נבחרים</strong>?",
+    "confirmDeleteSelected_other": "מה לעשות עם <strong>{{count}} סשנים נבחרים</strong>?",
     "archiveSessions_one": "העברת סשן אחד לארכיון",
     "archiveSessions_two": "העברת שני סשנים לארכיון",
     "archiveSessions_other": "העברת {{count}} סשנים לארכיון",
     "archiveSessionsNotice_one": "העברה לארכיון מוציאה את הסשן מהרשימה הפעילה ושומרת את ההיסטוריה שלו.",
     "archiveSessionsNotice_two": "העברה לארכיון מוציאה את הסשנים מהרשימה הפעילה ושומרת את ההיסטוריה שלהם.",
     "archiveSessionsNotice_other": "העברה לארכיון מוציאה את הסשנים מהרשימה הפעילה ושומרת את ההיסטוריה שלהם."
+  },
+  "paneTarget": {
+    "label": "פתיחה בצד",
+    "left": "שמאל",
+    "right": "ימין"
   }
 }

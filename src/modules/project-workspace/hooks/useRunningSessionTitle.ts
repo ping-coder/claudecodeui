@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { formatSessionTitle } from '@/modules/sidebar';
 import { findSessionTab, layoutHasSession } from '@/modules/project-workspace/utils/workspaceLayout';
 import type { Project, SessionActivity, SessionActivityMap, WorkspaceLayout } from '@/shared/types';
 import { resolveDocumentSessionTitle, setDocumentTitleActivity } from '@/shared/utils';
@@ -21,7 +22,10 @@ type RunningTitleCandidate = {
   startedAt: number;
   /** A tab of either pane of this browser tab holds the session, which puts it ahead of the others. */
   isOpenHere: boolean;
-  /** The session's title, named as the page part names the focused session (resolveDocumentSessionTitle). */
+  /**
+   * The session's title, named as the page part names the focused session (resolveDocumentSessionTitle,
+   * then formatSessionTitle for the server's placeholder names).
+   */
   subject: string;
 };
 
@@ -76,7 +80,10 @@ export function useRunningSessionTitle({ activities, projects, layout }: UseRunn
         sessionId,
         startedAt: activity.startedAt,
         isOpenHere: layoutHasSession(layout, sessionId),
-        subject: resolveDocumentSessionTitle(sessionId, projects, findSessionTab(layout, sessionId)?.tab.title, t),
+        subject: formatSessionTitle(
+          resolveDocumentSessionTitle(sessionId, projects, findSessionTab(layout, sessionId)?.tab.title, t),
+          t,
+        ),
       }))
       .sort((left, right) => (left.sessionId < right.sessionId ? -1 : left.sessionId > right.sessionId ? 1 : 0));
 

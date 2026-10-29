@@ -60,6 +60,8 @@ import zhSidebar from '@/modules/i18n/locales/zh-CN/sidebar.json';
 import zhChat from '@/modules/i18n/locales/zh-CN/chat.json';
 import zhCodeEditor from '@/modules/i18n/locales/zh-CN/codeEditor.json';
 import zhTasks from '@/modules/i18n/locales/zh-CN/tasks.json';
+// oxlint-disable-next-line importx/order
+import zhGit from '@/modules/i18n/locales/zh-CN/git.json';
 import jaCommon from '@/modules/i18n/locales/ja/common.json';
 import jaSettings from '@/modules/i18n/locales/ja/settings.json';
 import jaAuth from '@/modules/i18n/locales/ja/auth.json';
@@ -156,6 +158,7 @@ import ptBRTasks from '@/modules/i18n/locales/pt-BR/tasks.json';
 // oxlint-disable-next-line importx/order
 import ptBRGit from '@/modules/i18n/locales/pt-BR/git.json';
 
+import { installBidiIsolation, installIsolateFreeCopy } from '@/modules/i18n/bidi';
 // Import supported languages configuration
 import { languages } from '@/modules/i18n/languages';
 import {
@@ -243,6 +246,7 @@ git: enGit,
         chat: zhChat,
         codeEditor: zhCodeEditor,
         tasks: zhTasks,
+        git: zhGit,
       },
       ja: {
         common: jaCommon,
@@ -365,7 +369,15 @@ git: enGit,
     // Interpolation settings
     interpolation: {
       escapeValue: false, // React already escapes values
+      // Every {{value}} goes through the format function, which isolates it in
+      // right-to-left languages (installBidiIsolation, below).
+      alwaysFormat: true,
     },
+
+    // Strings that fell back to English get a left-to-right isolate in
+    // right-to-left languages; the resolved details say where a string came from.
+    postProcess: ['bidiFallback'],
+    postProcessPassResolved: true,
 
     // React-specific settings
     react: {
@@ -374,6 +386,10 @@ git: enGit,
       bindI18nStore: false, // Don't re-render on resource changes
     },
   });
+
+installBidiIsolation(i18n);
+// A copy by hand from a right-to-left interface leaves those isolates behind.
+if (typeof document !== 'undefined') installIsolateFreeCopy(i18n);
 
 // Save language preference when it changes. Registered after init on purpose:
 // storing the start-up language would push this device's default over the

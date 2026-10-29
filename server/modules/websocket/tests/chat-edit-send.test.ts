@@ -150,6 +150,23 @@ test('an edit resumes through the turn before the one being replaced', async () 
   });
 });
 
+test('an edit that carries acceptProcessSettings runs without it: only the scheduled-messages dispatcher sets it', async () => {
+  await withGateway('claude', async ({ socket, runs }) => {
+    socket.emit('message', JSON.stringify({
+      type: 'chat.edit-send',
+      sessionId: SESSION_ID,
+      anchorId: 'e-u2',
+      content: 'a better second prompt',
+      options: { effort: 'max', acceptProcessSettings: true },
+    }));
+    await settle();
+
+    assert.equal(runs.length, 1);
+    assert.equal('acceptProcessSettings' in runs[0].options, false);
+    assert.equal(runs[0].options.resumeAnchorId, 'e-a1');
+  });
+});
+
 test('editing the first prompt starts the conversation over', async () => {
   await withGateway('claude', async ({ socket, runs }) => {
     socket.emit('message', JSON.stringify({

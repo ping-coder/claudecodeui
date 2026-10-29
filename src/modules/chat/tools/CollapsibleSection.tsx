@@ -62,7 +62,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
           <button
             onClick={onTitleClick}
             className={cn(
-              'flex-1 truncate text-start font-mono text-primary transition-colors hover:text-primary/80 hover:underline',
+              'bidi-auto flex-1 truncate text-start font-mono text-primary transition-colors hover:text-primary/80 hover:underline',
               titleClassName,
             )}
           >
@@ -87,7 +87,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
           {toolName && (
             <span className="flex-shrink-0 text-[10px] text-muted-foreground/40">/</span>
           )}
-          <span className={cn('flex-1 truncate text-start', titleClassName)}>{title}</span>
+          <span className={cn('bidi-auto flex-1 truncate text-start', titleClassName)}>{title}</span>
           {badge && <span className="ms-auto flex-shrink-0">{badge}</span>}
           {action && <span className="ms-1 flex-shrink-0">{action}</span>}
         </CollapsibleTrigger>

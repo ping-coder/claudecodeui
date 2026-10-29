@@ -18,7 +18,10 @@ type BackgroundSendDialogProps = {
  * in the process the work runs in) the message needs a new process, which the
  * dialog names: a setting changed since that process started, from the
  * server's hand-over plan or its refusal of the send. The choices are to send
- * anyway, queue the message until the work finishes, or cancel.
+ * anyway, queue the message until the work finishes, or cancel. When the
+ * work is only scheduled work (loops, reminders), a queued message would wait
+ * for it to end, days for a loop, so there is no Queue (the prompt's `queue`
+ * is false) and the description says the loops stop.
  *
  * Cancel comes first in the DOM so Dialog's open-focus lands on it: an Enter
  * pressed right after the send that opened the prompt (a double Enter, a key
@@ -32,6 +35,7 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
   const reasonId = useId();
 
   const changes = prompt?.changes;
+  const canQueue = prompt?.queue !== false;
   // The settings named; `lookup`, the server failing to prepare the turn for
   // the process at all, gets a sentence of its own.
   const changedSettings = describeHandOverChanges(changes ?? [], t);
@@ -85,22 +89,28 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
         )}
 
         <p id={descriptionId} className="mt-3 text-sm text-muted-foreground">
-          {changes
-            ? t('claudeStatus.backgroundTask.prompt.descriptionNewProcess', {
-                defaultValue: 'Sending it anyway starts a new process, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
+          {!canQueue
+            ? t('claudeStatus.backgroundTask.prompt.descriptionScheduled', {
+                defaultValue: 'This message has to run in a new process, which stops these loops.',
               })
-            : t('claudeStatus.backgroundTask.prompt.description', {
-                defaultValue: 'A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
-              })}
+            : changes
+              ? t('claudeStatus.backgroundTask.prompt.descriptionNewProcess', {
+                  defaultValue: 'Sending it anyway starts a new process, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
+                })
+              : t('claudeStatus.backgroundTask.prompt.description', {
+                  defaultValue: 'A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
+                })}
         </p>
 
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <Button type="button" variant="outline" onClick={() => onResolve('cancel')}>
             {t('claudeStatus.backgroundTask.prompt.cancel', { defaultValue: 'Cancel' })}
           </Button>
-          <Button type="button" variant="default" onClick={() => onResolve('queue')}>
-            {t('claudeStatus.backgroundTask.prompt.queue', { defaultValue: 'Queue' })}
-          </Button>
+          {canQueue && (
+            <Button type="button" variant="default" onClick={() => onResolve('queue')}>
+              {t('claudeStatus.backgroundTask.prompt.queue', { defaultValue: 'Queue' })}
+            </Button>
+          )}
           <Button type="button" variant="destructive" onClick={() => onResolve('send')}>
             {t('claudeStatus.backgroundTask.prompt.sendAnyway', { defaultValue: 'Send anyway' })}
           </Button>

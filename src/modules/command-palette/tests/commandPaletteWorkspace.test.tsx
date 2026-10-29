@@ -298,7 +298,7 @@ test('right to left the panes are named and found by where they are drawn: the f
     assert.deepEqual(groupOptionNames('Workspace').filter((name) => name.startsWith('Focus')), ['Focus right paneCtrl+1']);
     search('left');
     assert.deepEqual(groupOptionNames('Workspace').filter((name) => name.startsWith('Focus')), ['Focus left paneCtrl+2']);
-    assert.deepEqual(groupOptionNames('Open tabs'), ['Fix login bugrepo · Left paneclaude'], 'only the tab drawn on the left');
+    assert.deepEqual(groupOptionNames('Open tabs'), ['Fix login bugrepo · Left paneClaude'], 'only the tab drawn on the left');
 
     clickOption(within(screen.getByRole('group', { name: 'Workspace' })).getByRole('option', { name: /^Focus left pane/ }));
     assert.deepEqual(vi.mocked(workspace.onFocusPane).mock.calls, [['right']]);
@@ -373,9 +373,9 @@ test('Open tabs lists the tabs of both panes and activates the picked one in its
   const group = screen.getByRole('group', { name: 'Open tabs' });
   const options = within(group).getAllByRole('option');
   assert.deepEqual(options.map((option) => option.textContent), [
-    'Fix login bugrepo · Left paneclaude',
-    'Write release notesrepo · Left panecodex',
-    'Fix login bugrepo · Right paneclaude',
+    'Fix login bugrepo · Left paneClaude',
+    'Write release notesrepo · Left paneCodex',
+    'Fix login bugrepo · Right paneClaude',
   ]);
   // Only the focused pane's active tab is marked as the current one.
   assert.deepEqual(options.map((option) => option.getAttribute('aria-current')), ['true', null, null]);

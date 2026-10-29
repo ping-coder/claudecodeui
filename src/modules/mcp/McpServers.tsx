@@ -61,15 +61,26 @@ const getServerKey = (server: ProviderMcpServer): string => (
 // shown read-only so users don't edit/delete them out of sync with the feature.
 const isManagedServer = (server: ProviderMcpServer): boolean => server.name.startsWith('cloudcli-');
 
+/** Stands in for the value while a config line is translated; never reaches the screen. */
+const VALUE_SLOT = '\u0000';
+
 function ConfigLine({ label, children }: { label: string; children: string }) {
+  const { t } = useTranslation('settings');
   if (!children) {
     return null;
   }
 
+  // "Label: value" with the colon and the order from the translation (full width in Chinese). The
+  // value is the user's configuration, rendered here rather than through Trans, which shows a "<" in
+  // it escaped. Right to left, the value's isolate opens in `before` and closes in `after`.
+  const line = t('mcpServers.config.line', { label, value: VALUE_SLOT });
+  const at = line.indexOf(VALUE_SLOT);
+  const [before, after] = at < 0 ? [line, ''] : [line.slice(0, at), line.slice(at + VALUE_SLOT.length)];
   return (
     <div>
-      {label}:{' '}
+      {before}
       <code className="rounded bg-muted px-1 text-xs">{children}</code>
+      {after}
     </div>
   );
 }

@@ -154,6 +154,7 @@
   "deleteConfirmation": {
     "deleteProject": "Убрать проект",
     "deleteSession": "Удалить сеанс",
+    "confirmDeleteNamed": "Что вы хотите сделать с {{name}}?",
     "confirmDelete": "Что вы хотите сделать с",
     "sessionCount_one": "Этот проект содержит {{count}} разговор.",
     "sessionCount_few": "Этот проект содержит {{count}} разговора.",
@@ -173,6 +174,10 @@
     "deleteSessions_few": "Удалить {{count}} сеанса",
     "deleteSessions_many": "Удалить {{count}} сеансов",
     "deleteSessions_other": "Удалить {{count}} сеансов",
+    "confirmDeleteSelected_one": "Что вы хотите сделать с <strong>{{count}} выбранным сеансом</strong>?",
+    "confirmDeleteSelected_few": "Что вы хотите сделать с <strong>{{count}} выбранными сеансами</strong>?",
+    "confirmDeleteSelected_many": "Что вы хотите сделать с <strong>{{count}} выбранными сеансами</strong>?",
+    "confirmDeleteSelected_other": "Что вы хотите сделать с <strong>{{count}} выбранными сеансами</strong>?",
     "selectedSessions_one": "{{count}} выбранным сеансом",
     "selectedSessions_few": "{{count}} выбранными сеансами",
     "selectedSessions_many": "{{count}} выбранными сеансами",

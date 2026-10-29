@@ -73,7 +73,10 @@
     "version": "Version",
     "select": "Select",
     "selectAll": "Select All",
-    "deselectAll": "Deselect All"
+    "deselectAll": "Deselect All",
+    "cancel": "Cancel",
+    "done": "Done",
+    "failed": "Failed"
   },
   "time": {
     "justNow": "Just now",
@@ -129,6 +132,15 @@
     "newFolder": "New Folder (Cmd+Shift+N)",
     "refresh": "Refresh",
     "collapseAll": "Collapse All",
+    "dropToUpload": "Drop files to upload",
+    "dropToUploadTo": "Drop files to upload to \"{{folder}}\"",
+    "uploadingFiles": "Uploading files",
+    "uploadFiles": "Upload files (max {{size}} each)",
+    "uploadToFolder": "Upload files to \"{{folder}}\"",
+    "uploadComplete": "Upload complete",
+    "uploadFailed": "Upload failed",
+    "uploadedCount_one": "Uploaded {{uploaded}} of {{total}} file",
+    "uploadedCount_other": "Uploaded {{uploaded}} of {{total}} files",
     "ignoredByGitignore": "Matches a .gitignore rule",
     "context": {
       "rename": "Rename",
@@ -141,7 +153,44 @@
       "refresh": "Refresh",
       "menuLabel": "File context menu",
       "loading": "Loading..."
-    }
+    },
+    "delete": {
+      "folderWarning": "This folder and all its contents will be permanently deleted.",
+      "fileWarning": "This file will be permanently deleted.",
+      "confirm": "Delete",
+      "titleFolder": "Delete Folder",
+      "titleFile": "Delete File"
+    },
+    "toast": {
+      "renamed": "Renamed successfully",
+      "fileDeleted": "File deleted",
+      "folderDeleted": "Folder deleted",
+      "fileCreated": "File created successfully",
+      "folderCreated": "Folder created successfully",
+      "pathCopied": "Path copied to clipboard",
+      "copyFailed": "Failed to copy path",
+      "folderDownloaded": "Folder downloaded as ZIP"
+    },
+    "validation": {
+      "emptyName": "Filename cannot be empty",
+      "invalidChars": "Filename contains invalid characters",
+      "reserved": "Filename is a reserved name",
+      "dotsOnly": "Filename cannot be only dots"
+    },
+    "uploadError": {
+      "noProject": "Select a project before uploading files.",
+      "tooMany": "You can upload up to {{max}} files at once.",
+      "tooLarge": "{{fileName}} is larger than {{size}}.",
+      "readDropped": "Could not read the dropped files.",
+      "network": "Upload failed. Check your connection and try again.",
+      "canceled": "Upload canceled.",
+      "status": "Upload failed (HTTP {{status}})",
+      "server": "Upload failed: {{error}}"
+    },
+    "uploadedAll_one": "Uploaded {{count}} file successfully",
+    "uploadedAll_other": "Uploaded {{count}} files successfully",
+    "filesCount_one": "{{count}} file",
+    "filesCount_other": "{{count}} files"
   },
   "projectWizard": {
     "title": "Create New Project",
@@ -355,7 +404,6 @@
     "errorTitle": "Something went wrong",
     "errorDescription": "An error occurred while loading the chat interface.",
     "errorDetails": "Error Details",
-    "tryAgain": "Try Again",
     "projectFallback": "Project",
     "openMenu": "Open menu",
     "noProjectSelected": "No Project Selected",
@@ -415,6 +463,7 @@
     "newChatIn": "New chat in {{project}}",
     "split": "Split view",
     "splitDisabled": "Widen the window to split",
+    "labelWithShortcut": "{{label}} ({{shortcut}})",
     "merge": "Merge panes",
     "focusLeftPane": "Focus left pane",
     "focusRightPane": "Focus right pane",
@@ -438,10 +487,14 @@
     "tabsButton": "Tabs ({{count}})",
     "fullscreen": "Full screen",
     "exitFullscreen": "Exit full screen",
-    "fullscreenRefused": "The browser refused full screen ({{detail}}); the workspace only fills the window.",
+    "fullscreenRefused": "The browser refused full screen ({{detail}}), so this only fills the window.",
     "fullscreenInWindow": "The browser kept full screen inside the window: this tab may be shared, cast or recorded by an extension, or an extension may be handling full screen.",
     "fullscreenWindowTipApple": "Press ⌃⌘F for a full-screen window; to hide the toolbar, turn off View > Always Show Toolbar in Full Screen (⇧⌘F).",
     "fullscreenWindowTip": "Press F11 for a full-screen window.",
+    "fullscreenPartial": "Full screen covers only part of the screen (window {{width}}×{{height}}, screen {{screenWidth}}×{{screenHeight}}): the window may be in Split View or tiled.",
+    "fullscreenPartialTip": "Take the window out of Split View or the tile, then choose full screen again.",
+    "fullscreenIframe": "This page is embedded in a page that does not allow full screen; open CloudCLI in its own tab for the whole screen.",
+    "fullscreenNoApi": "This browser has no full screen for web pages, so this only fills the window.",
     "showSidebar": "Show sidebar",
     "emptyTitle": "No conversation open",
     "emptyOtherTitle": "This side is empty",

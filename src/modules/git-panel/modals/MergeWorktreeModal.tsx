@@ -22,24 +22,26 @@ export default function MergeWorktreeModal({
   onClose,
   onMerge,
 }: MergeWorktreeModalProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [squash, setSquash] = useState(true);
   const [message, setMessage] = useState('');
   const [removeAfterMerge, setRemoveAfterMerge] = useState(true);
   /** Tracks whether the user edited the message, so toggling squash only rewrites untouched defaults. */
   const [messageEdited, setMessageEdited] = useState(false);
-  // Default commit message for the current branch/squash combination.
+  // Default commit message for the current branch/squash combination. It goes into
+  // the git history, so it stays in English whatever the interface language, like
+  // the merge messages git writes itself.
   const defaultMessage = useCallback((branch: string | null, nextSquash: boolean): string => {
     if (!branch) {
       return '';
     }
     return nextSquash
-      ? t('git:merge.defaultSquash', { branch })
-      : t('git:merge.defaultMerge', { branch });
+      ? t('git:merge.defaultSquash', { branch, lng: 'en' })
+      : t('git:merge.defaultMerge', { branch, lng: 'en' });
   }, [t]);
 
   // Remembers which worktree the editable message belongs to, so the effect
-  // below can tell a newly opened worktree apart from a locale change.
+  // below can tell a newly opened worktree apart from a squash toggle.
   const messageWorktreeRef = useRef<WorktreeInfo | null>(null);
 
   useEffect(() => {
@@ -55,12 +57,11 @@ export default function MergeWorktreeModal({
       setMessageEdited(false);
       return;
     }
-    // Same worktree after the locale changed: refresh the untouched default
-    // message so the submitted merge uses the active language.
+    // Same worktree: keep an untouched default message in step with the squash choice.
     if (!messageEdited) {
       setMessage(defaultMessage(worktree.branch, squash));
     }
-  }, [worktree, i18n.language, squash, messageEdited, defaultMessage]);
+  }, [worktree, squash, messageEdited, defaultMessage]);
 
 
   const handleSquashChange = (nextSquash: boolean) => {

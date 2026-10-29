@@ -1,8 +1,10 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import type { MouseEvent, MutableRefObject } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CodeEditorFile } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
+import { useBrowserFullscreen } from '@/shared/hooks/useBrowserFullscreen';
 import {
   EDITOR_DIVIDER_WIDTH_PX,
   EDITOR_PANEL_MIN_WIDTH_PX,
@@ -11,6 +13,7 @@ import {
 } from '@/shared/constants';
 import CodeEditor from '@/modules/code-editor/CodeEditor';
 import FilesTreeDivider from '@/modules/code-editor/FilesTreeDivider';
+import { holdFloatingEditor } from '@/modules/code-editor/utils/floatingEditor';
 
 type EditorSidebarProps = {
   editingFile: CodeEditorFile | null;
@@ -51,7 +54,14 @@ export default function EditorSidebar({
   projectPath,
   fillSpace,
 }: EditorSidebarProps) {
+  const { t } = useTranslation('codeEditor');
   const [poppedOut, setPoppedOut] = useState(false);
+  // The editor's full screen (text, media and binary views alike), from the docked header or the
+  // floating one. Held here, not in CodeEditor, because it keeps the editor floating while it lasts:
+  // a docked editor floats over the screen and docks again after; one entered from a window
+  // narrower than the mobile breakpoint is not docked when the window widens to the screen.
+  const editorFullscreen = useBrowserFullscreen({ source: 'codeEditor' });
+  const isEditorFullscreen = editorFullscreen.isMaximized;
   const containerRef = useRef<HTMLDivElement>(null);
   // Only the ceiling is state; the applied width is derived below. Holding a
   // second copy of the width meant every drag frame rendered twice, and keeping
@@ -59,7 +69,7 @@ export default function EditorSidebar({
   // every one of those frames.
   const [maxEditorWidth, setMaxEditorWidth] = useState<number | null>(null);
   // Side by side with another pane, a floating editor would cover both panes.
-  const { isSplitPane } = useWorkspacePane();
+  const { isSplitPane, isFocusedPane } = useWorkspacePane();
   // Set once a split pane too narrow to dock the editor has expanded it in place
   // (or found it expanded). The expand prop only toggles, and several
   // measurements (this effect, the observer's first callback, a resize,
@@ -76,7 +86,8 @@ export default function EditorSidebar({
       narrowPaneExpandedRef.current = false;
       return;
     }
-    if (isMobile || poppedOut) return;
+    // A floating editor is not measured against the pane; a full-screen one stays floating.
+    if (isMobile || poppedOut || isEditorFullscreen) return;
 
     const updateAvailableWidth = () => {
       if (!containerRef.current) return;
@@ -124,7 +135,7 @@ export default function EditorSidebar({
       window.removeEventListener('resize', updateAvailableWidth);
       resizeObserver.disconnect();
     };
-  }, [editingFile, editorExpanded, isMobile, isSplitPane, onToggleEditorExpand, poppedOut]);
+  }, [editingFile, editorExpanded, isEditorFullscreen, isMobile, isSplitPane, onToggleEditorExpand, poppedOut]);
 
   const effectiveWidth = maxEditorWidth === null
     ? editorWidth
@@ -133,20 +144,39 @@ export default function EditorSidebar({
   // Closing always leaves the floating layout behind so the next file opens
   // docked again; stable identities keep the editor's keyboard shortcuts and
   // toolbar extension from being rebuilt on every render.
+  const { exit: exitEditorFullscreen } = editorFullscreen;
   const handleClose = useCallback(() => {
     setPoppedOut(false);
+    exitEditorFullscreen();
     onCloseEditor();
-  }, [onCloseEditor]);
+  }, [exitEditorFullscreen, onCloseEditor]);
+
+  // Closed from outside (another file's guard, the pane): no full screen without an editor.
+  useEffect(() => {
+    if (!editingFile) {
+      exitEditorFullscreen();
+    }
+  }, [editingFile, exitEditorFullscreen]);
 
   const handlePopOut = useCallback(() => setPoppedOut(true), []);
+
+  // One CodeEditor element in one position for every layout; only the wrappers
+  // change, so switching layouts never remounts it and drops the buffer.
+  const isFloating = isMobile || poppedOut || isEditorFullscreen;
+
+  // A floating editor covers the focused pane, so a short Escape is its own (it closes, or leaves
+  // full screen) once nothing above it took the press; the chat underneath does not stop its run on it.
+  const hasEditingFile = editingFile !== null;
+  useEffect(() => {
+    if (!hasEditingFile || !isFloating || !isFocusedPane) {
+      return undefined;
+    }
+    return holdFloatingEditor();
+  }, [hasEditingFile, isFloating, isFocusedPane]);
 
   if (!editingFile) {
     return null;
   }
-
-  // One CodeEditor element in one position for every layout; only the wrappers
-  // change, so switching layouts never remounts it and drops the buffer.
-  const isFloating = isMobile || poppedOut;
 
   // The Files view splits the pane by the tree's share; every other view docks the editor at its own width.
   const isFilesSplit = Boolean(fillSpace) && !editorExpanded && !isFloating;
@@ -166,16 +196,19 @@ export default function EditorSidebar({
           ref={resizeHandleRef}
           onMouseDown={onResizeStart}
           className="group relative w-1 flex-shrink-0 cursor-col-resize bg-gray-200 transition-colors hover:bg-blue-500 dark:bg-gray-700 dark:hover:bg-blue-600"
-          title="Drag to resize"
+          title={t('resizeEditor', { defaultValue: 'Drag to resize' })}
         >
           <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 opacity-0 transition-opacity group-hover:opacity-100 dark:bg-blue-600" />
         </div>
       )}
 
+      {/* Docked, the box is a stacking context of its own (isolate). CodeMirror lifts its panels (the
+          diff bar, the search panel) to z-index 300 and its tooltips to 500, which put them over a
+          dialog's overlay; inside the box they stay with the editor, under anything layered above it. */}
       <div
         className={isFloating
           ? 'contents'
-          : `h-full overflow-hidden border-s border-gray-200 dark:border-gray-700 ${useFlexLayout ? 'min-w-0 flex-1' : ''}`}
+          : `isolate h-full overflow-hidden border-s border-gray-200 dark:border-gray-700 ${useFlexLayout ? 'min-w-0 flex-1' : ''}`}
         style={isFloating || useFlexLayout ? undefined : { width: `${effectiveWidth}px`, minWidth: `${EDITOR_PANEL_MIN_WIDTH_PX}px` }}
       >
         <CodeEditor
@@ -184,6 +217,8 @@ export default function EditorSidebar({
           onUnsavedChangesChange={onUnsavedChangesChange}
           projectPath={projectPath}
           isSidebar={!isFloating}
+          isFullscreen={isEditorFullscreen}
+          onToggleFullscreen={editorFullscreen.toggle}
           isExpanded={!isFloating && editorExpanded}
           onToggleExpand={isFloating ? null : onToggleEditorExpand}
           onPopOut={isFloating ? null : handlePopOut}

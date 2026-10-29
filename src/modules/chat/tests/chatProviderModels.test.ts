@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
+import '@/modules/i18n';
 import { resetUserPreferences, writeUserPreference } from '@/shared/userSettings';
 
 /**

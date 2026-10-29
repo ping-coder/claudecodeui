@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { fireEvent } from '@testing-library/react';
 import { afterEach, test } from 'vitest';
 
+import { i18n } from '@/modules/i18n';
 import type { UntitledPaneTabLabels, WorkspaceSessionTab } from '@/shared/types';
 import { focusWithLentTabIndex, focusWorkspacePaneElement, resolvePaneTabTitle } from '@/shared/utils';
 
@@ -13,6 +14,7 @@ import { focusWithLentTabIndex, focusWorkspacePaneElement, resolvePaneTabTitle }
  */
 
 const LABELS: UntitledPaneTabLabels = { newChat: 'New chat', missing: 'This conversation no longer exists' };
+const en = i18n.getFixedT('en');
 
 const makeTab = (overrides: Partial<WorkspaceSessionTab> = {}): WorkspaceSessionTab => ({
   key: 'tab-1',
@@ -31,24 +33,30 @@ afterEach(() => {
 });
 
 test('a draft is always the new chat, whatever titles are around', () => {
-  assert.equal(resolvePaneTabTitle(makeTab({ sessionId: null }), 'Live title', LABELS), 'New chat');
+  assert.equal(resolvePaneTabTitle(makeTab({ sessionId: null }), 'Live title', LABELS, en), 'New chat');
 });
 
 test('the live title wins over the snapshot, which wins over the placeholders', () => {
-  assert.equal(resolvePaneTabTitle(makeTab(), 'Live title', LABELS), 'Live title');
-  assert.equal(resolvePaneTabTitle(makeTab(), undefined, LABELS), 'Snapshot title');
-  assert.equal(resolvePaneTabTitle(makeTab(), null, LABELS), 'Snapshot title');
-  assert.equal(resolvePaneTabTitle(makeTab(), '', LABELS), 'Snapshot title');
+  assert.equal(resolvePaneTabTitle(makeTab(), 'Live title', LABELS, en), 'Live title');
+  assert.equal(resolvePaneTabTitle(makeTab(), undefined, LABELS, en), 'Snapshot title');
+  assert.equal(resolvePaneTabTitle(makeTab(), null, LABELS, en), 'Snapshot title');
+  assert.equal(resolvePaneTabTitle(makeTab(), '', LABELS, en), 'Snapshot title');
 });
 
 test('without any title a missing session says so and others get the generic session title', () => {
-  assert.equal(resolvePaneTabTitle(makeTab({ title: '', isMissing: true }), undefined, LABELS), LABELS.missing);
-  assert.equal(resolvePaneTabTitle(makeTab({ title: '' }), undefined, LABELS), 'New Session');
-  assert.equal(resolvePaneTabTitle(makeTab({ title: '', provider: 'cursor' }), undefined, LABELS), 'Untitled Session');
+  assert.equal(resolvePaneTabTitle(makeTab({ title: '', isMissing: true }), undefined, LABELS, en), LABELS.missing);
+  assert.equal(resolvePaneTabTitle(makeTab({ title: '' }), undefined, LABELS, en), 'New Session');
+  assert.equal(resolvePaneTabTitle(makeTab({ title: '', provider: 'cursor' }), undefined, LABELS, en), 'Untitled Session');
   assert.equal(
-    resolvePaneTabTitle(makeTab({ title: '', session: { id: 'session-1', summary: 'From the session object' } }), undefined, LABELS),
+    resolvePaneTabTitle(makeTab({ title: '', session: { id: 'session-1', summary: 'From the session object' } }), undefined, LABELS, en),
     'From the session object',
   );
+});
+
+test('the generic session title follows the interface language', () => {
+  const zh = i18n.getFixedT('zh-CN');
+  assert.equal(resolvePaneTabTitle(makeTab({ title: '' }), undefined, LABELS, zh), '新会话');
+  assert.equal(resolvePaneTabTitle(makeTab({ title: '', provider: 'cursor' }), undefined, LABELS, zh), '未命名会话');
 });
 
 const renderPanes = () => {

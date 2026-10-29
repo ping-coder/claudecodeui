@@ -25,6 +25,31 @@ const AUTH_ERROR_MESSAGES = {
   sessionExpired: 'errors.sessionExpired',
 } as const;
 
+/**
+ * The codes the login and register routes send in the AppError envelope, with the message each shows
+ * in the interface language; the envelope's own message is English. Other codes show that message.
+ */
+const LOGIN_ERROR_KEYS = new Map<string, string>([
+  ['AUTH_INVALID_CREDENTIALS', 'login.errors.invalidCredentials'],
+  ['AUTH_CREDENTIALS_REQUIRED', 'login.errors.requiredFields'],
+]);
+const REGISTER_ERROR_KEYS = new Map<string, string>([
+  ['AUTH_CREDENTIALS_REQUIRED', 'register.errors.requiredFields'],
+  ['AUTH_CREDENTIALS_TOO_SHORT', 'register.errors.credentialsTooShort'],
+  ['AUTH_USER_ALREADY_CONFIGURED', 'register.errors.alreadyConfigured'],
+  ['AUTH_USERNAME_CONFLICT', 'register.errors.usernameTaken'],
+]);
+
+/** The `error.code` of the AppError envelope, or an empty string for any other body. */
+function readApiErrorCode(body: unknown): string {
+  if (!body || typeof body !== 'object') {
+    return '';
+  }
+  const { error } = body as { error?: unknown };
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' ? code : '';
+}
+
 type AuthActionResult = { success: true } | { success: false; error: string };
 
 type AuthSessionPayload = {
@@ -323,7 +348,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
         if (!response.ok || !payload?.token || !payload.user) {
           // Most auth failures arrive as the structured AppError envelope; passing its
           // `error` object on would render it as a React child and blank the screen.
-          const message = readApiErrorMessage(payload) ?? t(AUTH_ERROR_MESSAGES.loginFailed);
+          const knownKey = LOGIN_ERROR_KEYS.get(readApiErrorCode(payload));
+          const message = knownKey
+            ? t(knownKey)
+            : readApiErrorMessage(payload) ?? t(AUTH_ERROR_MESSAGES.loginFailed);
           setError(message);
           return { success: false, error: message };
         }
@@ -347,7 +375,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
         const payload = await parseJsonSafely<AuthSessionPayload>(response);
 
         if (!response.ok || !payload?.token || !payload.user) {
-          const message = readApiErrorMessage(payload) ?? t(AUTH_ERROR_MESSAGES.registrationFailed);
+          const knownKey = REGISTER_ERROR_KEYS.get(readApiErrorCode(payload));
+          const message = knownKey
+            ? t(knownKey)
+            : readApiErrorMessage(payload) ?? t(AUTH_ERROR_MESSAGES.registrationFailed);
           setError(message);
           return { success: false, error: message };
         }
