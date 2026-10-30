@@ -4,6 +4,7 @@ import type { ChatMessage, DiffLine, LLMProvider } from '@/shared/types';
 import { stripBidiIsolates } from '@/shared/direction';
 import { getToolConfig } from '@/modules/chat/tools';
 import {
+  describeControlNote,
   describeTaskNotificationFallback,
   formatDateTime,
   formatUsageLimitText,
@@ -146,6 +147,12 @@ export function buildTranscriptMarkdown(input: BuildTranscriptMarkdownInput): st
 
     if (message.isThinking) {
       sections.push(`### ${t('chat:export.document.thinking', { provider: providerLabel })}`, '', readString(message.content));
+      continue;
+    }
+
+    // A prompt CloudCLI sent on its own reads as a line of its own, as on screen.
+    if (message.controlNote) {
+      sections.push(`_${describeControlNote(message.controlNote, readString(message.content), t)}_`);
       continue;
     }
 

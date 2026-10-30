@@ -146,6 +146,30 @@ test('a send that asks to keep the background work starts as usual when its turn
   });
 });
 
+test('a send that asks to keep the background work starts when a process of its own keeps the work, and a refusal says what exactly keeps the turn out', async () => {
+  let plan: ProviderHandOverPlan = { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], replaceKeepsWork: true };
+  const { runtime, runs } = createGateway(async () => plan);
+  await withChat(runtime, async ({ socket }) => {
+    send(socket, { keepBackgroundWork: true });
+    await settle();
+    assert.equal(runs.length, 1, 'cron jobs alone hold the process, and its own brings them back');
+    assert.equal(socket.frames.some((frame) => frame.kind === 'send_refused'), false);
+
+    plan = {
+      heldWork: true,
+      canHandOver: false,
+      changes: ['permissionMode'],
+      switches: [],
+      details: { permissionMode: { process: 'plan', message: 'bypassPermissions', reason: 'bypass_not_allowed' } },
+    };
+    send(socket, { keepBackgroundWork: true });
+    await settle();
+    assert.equal(runs.length, 1);
+    const refusal = socket.frames.find((frame) => frame.kind === 'send_refused');
+    assert.deepEqual(refusal?.details, plan.details);
+  });
+});
+
 test('a send without the flag never asks and goes ahead, stopping the work as before', async () => {
   const { runtime, plans, runs } = createGateway(async () => ({ heldWork: true, canHandOver: false, changes: ['effort'], switches: [] }));
   await withChat(runtime, async ({ socket }) => {

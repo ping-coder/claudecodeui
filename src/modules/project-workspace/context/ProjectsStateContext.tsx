@@ -44,6 +44,14 @@ type ProjectPanesState = {
    * turns dirty or clean: a layout change that would unmount a pane with unsaved edits asks first.
    */
   setPaneEditorUnsaved: (paneId: string, hasUnsavedChanges: boolean) => void;
+  /** A pane's refresh token (by WorkspacePaneState.id): its views reload, without remounting, when it moves. */
+  getPaneRefreshToken: (paneId: string) => number;
+  /** Refreshes a pane's active tab: its view, its chat and its editor (unless the buffer holds edits). */
+  refreshTab: (side: WorkspacePaneSide) => void;
+  /** Refreshes every mounted pane, the project list, the sidebar lists and the app state; single-flight. */
+  refreshWorkspace: () => Promise<void>;
+  /** A refreshWorkspace is on its way: its buttons spin and stay disabled. */
+  isRefreshingWorkspace: boolean;
 };
 
 /** What ProjectSidebarRegion needs to render the sidebar module for the focused pane. */
@@ -70,6 +78,10 @@ type ProjectCommandState = {
   openSessionById: (sessionId: string, options?: SessionOpenOptions) => void;
   layout: WorkspaceLayout;
   actions: WorkspaceLayoutActions;
+  /** The palette's Refresh tab and Refresh all (see ProjectPanesState). */
+  refreshTab: (side: WorkspacePaneSide) => void;
+  refreshWorkspace: () => Promise<void>;
+  isRefreshingWorkspace: boolean;
 };
 
 /** What the headless page effects need: palette registrations, notification clicks and the document title's page and running parts. */
@@ -93,6 +105,8 @@ type ProjectsStateProviderProps = {
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   isMobile: boolean;
   isSessionProcessing: IsSessionProcessing;
+  /** Refresh all's share outside the workspace state (see useProjectsState). */
+  refreshAppState?: () => Promise<unknown> | void;
 };
 
 const ProjectPanesContext = createContext<ProjectPanesState | null>(null);
@@ -108,6 +122,7 @@ export function ProjectsStateProvider({
   subscribe,
   isMobile,
   isSessionProcessing,
+  refreshAppState,
 }: ProjectsStateProviderProps) {
   const state = useProjectsState({
     sessionId,
@@ -115,6 +130,7 @@ export function ProjectsStateProvider({
     subscribe,
     isMobile,
     isSessionProcessing,
+    refreshAppState,
   });
 
   const panesState = useMemo<ProjectPanesState>(
@@ -132,17 +148,25 @@ export function ProjectsStateProvider({
       refreshProjectsSilently: state.refreshProjectsSilently,
       setCanShowBothPanes: state.setCanShowBothPanes,
       setPaneEditorUnsaved: state.setPaneEditorUnsaved,
+      getPaneRefreshToken: state.getPaneRefreshToken,
+      refreshTab: state.refreshTab,
+      refreshWorkspace: state.refreshWorkspace,
+      isRefreshingWorkspace: state.isRefreshingWorkspace,
     }),
     [
       state.actions,
       state.attentionSessionIds,
       state.fallbackProject,
+      state.getPaneRefreshToken,
       state.isLoadingProjects,
+      state.isRefreshingWorkspace,
       state.layout,
       state.openSettings,
       state.paneProjects,
       state.projects,
       state.refreshProjectsSilently,
+      state.refreshTab,
+      state.refreshWorkspace,
       state.renameSession,
       state.setCanShowBothPanes,
       state.setPaneEditorUnsaved,
@@ -171,14 +195,20 @@ export function ProjectsStateProvider({
       openSessionById: state.openSessionById,
       layout: state.layout,
       actions: state.actions,
+      refreshTab: state.refreshTab,
+      refreshWorkspace: state.refreshWorkspace,
+      isRefreshingWorkspace: state.isRefreshingWorkspace,
     }),
     [
       commandSelectedProject,
       state.actions,
       state.handleNewSession,
+      state.isRefreshingWorkspace,
       state.layout,
       state.openSessionById,
       state.openSettings,
+      state.refreshTab,
+      state.refreshWorkspace,
       state.setActiveTab,
     ],
   );
@@ -227,11 +257,12 @@ function useRequiredProjectContext<T>(value: T | null, hookName: string): T {
 }
 
 /**
- * Read by ProjectMainRegion to draw both panes, change the layout and collect the panes' unsaved-editor
- * reports, by ProjectWorkspaceShell for the workspace shortcuts, the phone's immersive menu button and
- * to report whether two panes fit, by ProjectCommandPalette for the titles and project names of its
- * Open tabs, and by ProjectRunNotifications for the session names in run alerts, the sessions the panes
- * on display show and opening a session from a banner.
+ * Read by ProjectMainRegion to draw both panes, change the layout, collect the panes' unsaved-editor
+ * reports and hand each pane its refresh token and refresh actions, by ProjectWorkspaceShell for the
+ * workspace shortcuts, the phone's immersive menu and refresh buttons and to report whether two panes
+ * fit, by ProjectCommandPalette for the titles and project names of its Open tabs, and by
+ * ProjectRunNotifications for the session names in run alerts, the sessions the panes on display show
+ * and opening a session from a banner.
  */
 export function useProjectPanesState(): ProjectPanesState {
   return useRequiredProjectContext(useContext(ProjectPanesContext), 'useProjectPanesState');

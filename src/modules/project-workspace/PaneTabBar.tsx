@@ -1,4 +1,4 @@
-import { ChevronDown, Columns2, Loader2, Maximize2, Minimize2, MoreHorizontal, PanelLeftOpen, Plus, X } from 'lucide-react';
+import { ChevronDown, Columns2, Loader2, Maximize2, Minimize2, MoreHorizontal, PanelLeftOpen, Plus, RefreshCw, RotateCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   DragEvent as ReactDragEvent,
@@ -15,6 +15,7 @@ import PaneTabRenameInput from '@/modules/project-workspace/PaneTabRenameInput';
 import { formatSessionTitle } from '@/modules/sidebar';
 import {
   PANE_TAB_DRAG_EFFECT,
+  WORKSPACE_FULLSCREEN_REFRESH_SHORTCUT,
   WORKSPACE_FULLSCREEN_SHORTCUT,
   WORKSPACE_PANE_SIDES,
   WORKSPACE_SPLIT_SHORTCUT,
@@ -78,6 +79,14 @@ type PaneTabBarProps = {
    * keeps its width and the tabs give way. Default false.
    */
   trailingCanShrink?: boolean;
+  /** The pane shows a tab's content, so "Refresh tab" has something to refresh. */
+  canRefreshTab?: boolean;
+  /** Refreshes this pane's active tab; without it the bar offers no refresh. */
+  onRefreshTab?: () => void;
+  /** Refreshes everything; the rightmost pane's bar carries its button, every pane menu the item. */
+  onRefreshWorkspace?: () => void;
+  /** A workspace refresh is on its way: Refresh all spins and does nothing. */
+  isRefreshingWorkspace?: boolean;
 };
 
 /** Open state of the tab context menu: which tab it acts on and the viewport point it opens at. */
@@ -191,6 +200,10 @@ export default function PaneTabBar({
   showProjectNames,
   trailingContent,
   trailingCanShrink = false,
+  canRefreshTab = false,
+  onRefreshTab,
+  onRefreshWorkspace,
+  isRefreshingWorkspace = false,
 }: PaneTabBarProps) {
   const { t } = useTranslation();
   const { canSplit, isImmersive, toggleImmersive, isSidebarPeekOpen, setSidebarPeekOpen } = useWorkspaceChrome();
@@ -535,6 +548,23 @@ export default function PaneTabBar({
     }
   };
 
+  const refreshTabLabel = t('workspace.refreshTab', { defaultValue: 'Refresh tab' });
+  const refreshAllLabel = t('workspace.refreshAll', { defaultValue: 'Refresh all' });
+
+  /** Refresh always acts on the pane's active tab: a background tab is brought up first, then refreshed. */
+  const refreshTabFromMenu = (tabKey: string) => {
+    if (tabKey !== pane.activeTabKey) {
+      actions.activateTab(side, tabKey);
+    }
+    onRefreshTab?.();
+  };
+
+  const refreshWorkspaceUnlessBusy = () => {
+    if (!isRefreshingWorkspace) {
+      onRefreshWorkspace?.();
+    }
+  };
+
   const menuTab = tabMenu ? tabs.find((tab) => tab.key === tabMenu.tabKey) ?? null : null;
   const menuTabIndex = menuTab ? tabs.indexOf(menuTab) : -1;
   const otherSide = getOtherPaneSide(side);
@@ -593,6 +623,14 @@ export default function PaneTabBar({
         void copyTextToClipboard(menuTab.sessionId as string);
       },
     }] : []),
+    ...(onRefreshTab ? [{
+      key: 'refresh',
+      label: refreshTabLabel,
+      separatorBefore: true,
+      // A conversation that is gone has nothing to reload.
+      disabled: Boolean(menuTab.isMissing),
+      onSelect: () => refreshTabFromMenu(menuTab.key),
+    }] : []),
   ] : [];
 
   const allTabsItems = tabs.map((tab) => {
@@ -617,6 +655,20 @@ export default function PaneTabBar({
         }
       },
     },
+    ...(onRefreshTab ? [{
+      key: 'refreshTab',
+      label: refreshTabLabel,
+      disabled: !canRefreshTab,
+      showDividerBefore: true,
+      onSelect: onRefreshTab,
+    }] : []),
+    ...(onRefreshWorkspace ? [{
+      key: 'refreshAll',
+      label: isRefreshingWorkspace ? t('workspace.refreshing', { defaultValue: 'Refreshing…' }) : refreshAllLabel,
+      disabled: isRefreshingWorkspace,
+      showDividerBefore: !onRefreshTab,
+      onSelect: refreshWorkspaceUnlessBusy,
+    }] : []),
     {
       key: 'closeAll',
       label: t('workspace.closeAllTabs', { defaultValue: 'Close all tabs' }),
@@ -644,6 +696,13 @@ export default function PaneTabBar({
     ? t('workspace.exitFullscreen', { defaultValue: 'Exit full screen' })
     : t('workspace.fullscreen', { defaultValue: 'Full screen' });
   const fullscreenTooltip = t('workspace.labelWithShortcut', { label: fullscreenLabel, shortcut: fullscreenShortcut });
+  // F5 (and Ctrl/Cmd+R) refresh all only while the browser is in full screen, where a page reload would leave it.
+  const refreshAllTooltip = isRefreshingWorkspace
+    ? t('workspace.refreshing', { defaultValue: 'Refreshing…' })
+    : t('workspace.labelWithShortcut', {
+      label: refreshAllLabel,
+      shortcut: t('workspace.refreshAllInFullscreen', { shortcut: formatShortcut(WORKSPACE_FULLSCREEN_REFRESH_SHORTCUT) }),
+    });
   const newChatLabel = newChatProject
     ? t('workspace.newChatIn', { project: newChatProject.displayName, defaultValue: 'New chat in {{project}}' })
     : t('workspace.newChat', { defaultValue: 'New chat' });
@@ -873,6 +932,23 @@ export default function PaneTabBar({
       )}
 
       <div className="flex flex-shrink-0 items-center gap-0.5 pe-1">
+        {onRefreshTab && (
+          <Tooltip content={refreshTabLabel} position="bottom">
+            <button
+              type="button"
+              aria-label={refreshTabLabel}
+              aria-disabled={!canRefreshTab || undefined}
+              onClick={() => {
+                if (canRefreshTab) {
+                  onRefreshTab();
+                }
+              }}
+              className={cn(ICON_BUTTON_CLASS_NAME, !canRefreshTab && 'cursor-not-allowed opacity-50 hover:bg-transparent')}
+            >
+              <RotateCw className="h-4 w-4" />
+            </button>
+          </Tooltip>
+        )}
         {(tabs.length > 0 || isSplit) && (
           <ActionMenu
             label={t('workspace.paneMenu', { defaultValue: 'Pane actions' })}
@@ -889,6 +965,20 @@ export default function PaneTabBar({
           // The tooltips open toward the start of the line: these buttons end the row at the edge of
           // the window (its left edge right to left), where a tooltip centred below them was cut off.
           <div data-workspace-control="" className="flex items-center gap-0.5">
+            {onRefreshWorkspace && (
+              <Tooltip content={refreshAllTooltip} position="left">
+                <button
+                  type="button"
+                  aria-label={refreshAllLabel}
+                  aria-disabled={isRefreshingWorkspace || undefined}
+                  aria-busy={isRefreshingWorkspace || undefined}
+                  onClick={refreshWorkspaceUnlessBusy}
+                  className={ICON_BUTTON_CLASS_NAME}
+                >
+                  <RefreshCw className={cn('h-4 w-4', isRefreshingWorkspace && 'animate-spin')} />
+                </button>
+              </Tooltip>
+            )}
             <Tooltip content={splitTooltip} position="left">
               <button
                 type="button"

@@ -5,7 +5,10 @@ import type { Project,FileTreeNode } from '@/shared/types';
 
 type UseFileTreeDataResult = {
   files: FileTreeNode[];
+  /** The first load of a project's tree: nothing to show yet. */
   loading: boolean;
+  /** A reload of a tree already on screen, which stays up meanwhile. */
+  refreshing: boolean;
   error: string | null;
   refreshFiles: () => void;
 };
@@ -30,9 +33,14 @@ function readResponseErrorMessage(responseBody: string): string | null {
 export function useFileTreeData(selectedProject: Project | null): UseFileTreeDataResult {
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
+  // A reload behind a tree already shown: the header's refresh icon spins while the rows, an open
+  // rename or new-item box and the scroll position stay where they are.
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // The project whose tree is on screen; a reload of that same project keeps it up instead of the loading state.
+  const shownProjectIdRef = useRef<string | null>(null);
 
   const refreshFiles = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
@@ -44,11 +52,14 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
     const projectId = selectedProject?.projectId;
 
     if (!projectId) {
+      shownProjectIdRef.current = null;
       setFiles([]);
       setLoading(false);
+      setRefreshing(false);
       setError(null);
       return;
     }
+    const isReload = shownProjectIdRef.current === projectId;
 
     // Abort previous request
     if (abortControllerRef.current) {
@@ -61,8 +72,12 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
 
     const fetchFiles = async () => {
       if (isActive) {
-        setLoading(true);
-        setError(null);
+        if (isReload) {
+          setRefreshing(true);
+        } else {
+          setLoading(true);
+          setError(null);
+        }
       }
       try {
         // Gitignored entries come back greyed out rather than missing, so files
@@ -77,6 +92,7 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
           const errorText = await response.text();
           console.error('File fetch failed:', response.status, errorText);
           if (isActive) {
+            shownProjectIdRef.current = null;
             setFiles([]);
             setError(readResponseErrorMessage(errorText) ?? DEFAULT_LOAD_ERROR);
           }
@@ -85,7 +101,9 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
 
         const data = (await response.json()) as FileTreeNode[];
         if (isActive) {
+          shownProjectIdRef.current = projectId;
           setFiles(data);
+          setError(null);
         }
       } catch (error) {
         if ((error as { name?: string }).name === 'AbortError') {
@@ -94,12 +112,14 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
 
         console.error('Error fetching files:', error);
         if (isActive) {
+          shownProjectIdRef.current = null;
           setFiles([]);
           setError(DEFAULT_LOAD_ERROR);
         }
       } finally {
         if (isActive) {
           setLoading(false);
+          setRefreshing(false);
         }
       }
     };
@@ -115,6 +135,7 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
   return {
     files,
     loading,
+    refreshing,
     error,
     refreshFiles,
   };

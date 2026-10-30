@@ -1,6 +1,10 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 
+import {
+  listDispatchWaits,
+  requestDispatchPass,
+} from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
 
@@ -42,6 +46,33 @@ router.get(
   }),
 );
 
+/**
+ * Why the user's queued and scheduled messages for a session wait, as the
+ * dispatcher last worked it out: `{ waits }` (see `DispatchWait`). The
+ * `dispatch_waiting` frames say when it changes.
+ */
+router.get(
+  '/waiting',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = readString(req.query.sessionId, 'sessionId');
+    res.json(createApiSuccessResponse({ waits: listDispatchWaits(readUserId(req), sessionId) }));
+  }),
+);
+
+/**
+ * Sends the session's queued message with the settings of the process held
+ * for its loops (`useProcessSettings`), on the next pass, which runs now.
+ */
+router.post(
+  '/queued/use-process-settings',
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    scheduledMessagesService.useProcessSettingsForQueued(readUserId(req), readString(body.sessionId, 'sessionId'));
+    requestDispatchPass();
+    res.json(createApiSuccessResponse({ useProcessSettings: true }));
+  }),
+);
+
 router.post(
   '/',
   asyncHandler(async (req: Request, res: Response) => {
@@ -54,6 +85,27 @@ router.post(
       scheduledFor: readString(body.scheduledFor, 'scheduledFor'),
     });
     res.status(201).json(createApiSuccessResponse(result));
+  }),
+);
+
+/**
+ * Changes a pending message: `{ useProcessSettings: true }` sends it with the
+ * settings of the process held for its session's loops, on the next pass,
+ * which runs now. Nothing else can be changed.
+ */
+router.patch(
+  '/:id',
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.useProcessSettings !== true) {
+      throw new AppError('Only useProcessSettings: true can be set.', {
+        code: 'INVALID_REQUEST_BODY',
+        statusCode: 400,
+      });
+    }
+    scheduledMessagesService.useProcessSettings(readUserId(req), readString(req.params.id, 'id'));
+    requestDispatchPass();
+    res.json(createApiSuccessResponse({ useProcessSettings: true }));
   }),
 );
 

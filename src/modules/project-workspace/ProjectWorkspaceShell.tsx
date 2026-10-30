@@ -30,7 +30,7 @@ function ProjectWorkspaceShell({
   sendMessage,
   navigate,
 }: ProjectWorkspaceShellProps) {
-  const { layout, actions, setSidebarOpen, setCanShowBothPanes } = useProjectPanesState();
+  const { layout, actions, setSidebarOpen, setCanShowBothPanes, refreshWorkspace, isRefreshingWorkspace } = useProjectPanesState();
   const {
     isImmersive,
     isBrowserFullscreen,
@@ -74,6 +74,7 @@ function ProjectWorkspaceShell({
     actions,
     toggleImmersive: toggleImmersiveWithClosedPeek,
     closeSidebarPeek,
+    refreshWorkspace,
   });
 
   const isPeekShown = isSidebarPeekOpen && isImmersive && !isMobile;
@@ -90,6 +91,10 @@ function ProjectWorkspaceShell({
   const openSidebarDrawer = useCallback(() => {
     setSidebarOpen(true);
   }, [setSidebarOpen]);
+
+  const refreshFromCapsule = useCallback(() => {
+    void refreshWorkspace();
+  }, [refreshWorkspace]);
 
   return (
     <WorkspaceChromeProvider value={chrome}>
@@ -121,7 +126,12 @@ function ProjectWorkspaceShell({
         )}
         {/* Phones hide the header while immersive, so this capsule is the way back out. */}
         {isMobile && isImmersive && (
-          <ImmersiveExitControl onOpenMenu={openSidebarDrawer} onExit={exitImmersive} />
+          <ImmersiveExitControl
+            onOpenMenu={openSidebarDrawer}
+            onRefresh={refreshFromCapsule}
+            isRefreshing={isRefreshingWorkspace}
+            onExit={exitImmersive}
+          />
         )}
         <ProjectCommandPalette />
         {/* Last flex child on purpose: when pinned it docks to the right of the main region. */}

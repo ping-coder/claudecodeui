@@ -120,7 +120,12 @@ const setIssue = (issue: BrowserFullscreenIssue | null) => {
   setSnapshot({ issue });
 };
 
-const getFullscreenElement = (): Element | null => {
+/**
+ * The element the document shows in full screen, from the standard API or Safari's prefixed one;
+ * null when nothing is. Also read by project-workspace's useWorkspaceShortcuts, whose reload keys
+ * refresh in place while the page is in full screen.
+ */
+export const getFullscreenElement = (): Element | null => {
   const prefixedDocument = document as PrefixedFullscreenDocument;
   return prefixedDocument.fullscreenElement ?? prefixedDocument.webkitFullscreenElement ?? null;
 };

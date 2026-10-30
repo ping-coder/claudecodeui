@@ -177,6 +177,34 @@ describe('the pinned question', () => {
     assert.equal(result.current.inserts.length === 0, true);
   });
 
+  it('stays on the turn\'s question past the note for a prompt CloudCLI sent to stop loops', () => {
+    // The stop turn's prompt is CloudCLI's, not the user's: it is an assistant note, and opens no turn.
+    const stopNote: ChatMessage = {
+      type: 'assistant',
+      timestamp: at(21),
+      content: 'Asked Claude to stop 1 loop',
+      controlNote: { kind: 'scheduled-stop', count: 1, jobIds: ['b2148320'] },
+    };
+    const { container } = createTranscript([
+      { timestamp: q1.timestamp as string, top: -900 },
+      { timestamp: q2.timestamp as string, top: -300 },
+    ]);
+    const scrollContainerRef = { current: container };
+    const messages = [q1, a1, q2, a2, stopNote, assistant(at(22), 'Cancelled the loop.')];
+    const { result } = renderHook(() => usePinnedQuestion({
+      scrollContainerRef,
+      chatMessages: messages,
+      renderedCount: messages.length,
+      isUserScrolledUp: false,
+      hasMoreMessages: false,
+      readEarlierQuestion: neverRead,
+    }));
+    flushFrames();
+
+    assert.equal(result.current.question === q2, true);
+    assert.equal(result.current.inserts.length === 0, true);
+  });
+
   it('is the turn of the first rendered row when no turn opens above the line, even with its question loaded but not rendered', () => {
     const a2b = assistant(at(22));
     const a2c = assistant(at(24));

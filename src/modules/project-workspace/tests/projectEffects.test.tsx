@@ -69,6 +69,7 @@ vi.mock('@/shared/context/SessionProtectionContext', () => ({
 vi.mock('@/shared/context/WebSocketContext', () => ({
   useWebSocket: () => ({ ws: null, sendMessage: () => undefined, subscribe: () => () => undefined }),
 }));
+vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ refreshPlugins: async () => undefined }) }));
 vi.mock('@/shared/hooks/useDeviceSettings', () => ({ useDeviceSettings: () => ({ isMobile: false }) }));
 vi.mock('@/modules/project-workspace/ProjectWorkspaceShell', () => ({ default: () => <div data-testid="workspace-shell" /> }));
 // The page-wide provider writes, each with whether it was marked automatic; reading stays real.

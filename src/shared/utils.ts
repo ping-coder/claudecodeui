@@ -7,6 +7,7 @@ import type {
   BackgroundTaskSummary,
   ChatMessage,
   DocumentTitleStatus,
+  HandOverBlockDetail,
   LLMProvider,
   Project,
   ProjectSession,
@@ -616,8 +617,9 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === 'nu
  * The scheduled work a server reply or frame lists (see ScheduledWorkSummary),
  * item by item: one in a shape this client does not read hides only itself.
  * Undefined when the value is no list, as from a server that does not report
- * scheduled work. Read by the activity map's running-sessions poll and the
- * shell module's `session_busy` reader.
+ * scheduled work. Read by the activity map's running-sessions poll, the
+ * shell module's `session_busy` reader and chat's read of a session's paused
+ * loops (usePausedScheduledWork).
  */
 export function parseScheduledWork(value: unknown): ScheduledWorkSummary[] | undefined {
   if (!Array.isArray(value)) {
@@ -653,6 +655,7 @@ export function parseScheduledWork(value: unknown): ScheduledWorkSummary[] | und
       ...(isFiniteNumber(item.expiresAt) ? { expiresAt: item.expiresAt } : {}),
       ...(item.durable === true ? { durable: true } : {}),
       ...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+      ...(item.paused === true ? { paused: true as const } : {}),
     });
   }
   return items;
@@ -695,6 +698,98 @@ export function describeHandOverChanges(changes: string[], t: TFunction): { coun
     count: labels.length,
     text: `${labels.slice(0, -1).join(separator)}${lastSeparator}${labels[labels.length - 1]}`,
   };
+}
+
+const readStringList = (value: unknown): string[] => (
+  Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+);
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+/**
+ * The server's `details` of a hand-over plan or a `send_refused` (see
+ * HandOverBlockDetail), read field by field; undefined when nothing in it
+ * reads.
+ */
+export function parseHandOverDetails(value: unknown): HandOverBlockDetail | undefined {
+  if (!isPlainRecord(value)) {
+    return undefined;
+  }
+  const details: HandOverBlockDetail = {};
+  if (isPlainRecord(value.tools)) {
+    details.tools = { notAllowed: readStringList(value.tools.notAllowed), alsoDenied: readStringList(value.tools.alsoDenied) };
+  }
+  const mode = value.permissionMode;
+  if (isPlainRecord(mode) && typeof mode.process === 'string' && typeof mode.message === 'string') {
+    details.permissionMode = {
+      process: mode.process,
+      message: mode.message,
+      reason: mode.reason === 'cannot_switch' ? 'cannot_switch' : 'bypass_not_allowed',
+    };
+  }
+  const model = value.model;
+  if (isPlainRecord(model) && typeof model.process === 'string' && typeof model.message === 'string') {
+    details.model = { process: model.process, message: model.message };
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
+/**
+ * What exactly keeps a message out of the process a Claude session holds (see
+ * HandOverBlockDetail), as sentences in the user's language, one per cause:
+ * the permission mode the loop was started in, the tools the message no
+ * longer allows or now denies, a model the process cannot switch to. The
+ * process is called the loop's only when loops alone hold it (`heldFor`
+ * `loops`); otherwise, a task holding it too, the background process. Takes
+ * a `t` bound to the chat namespace; used by chat's waiting-message notice
+ * and its background-send dialog.
+ */
+export function describeHandOverDetails(
+  details: HandOverBlockDetail | undefined,
+  t: TFunction,
+  heldFor: 'loops' | 'work',
+): string[] {
+  if (!details) {
+    return [];
+  }
+  const loops = heldFor === 'loops';
+  const list = (tools: string[]) => tools.join(t('claudeStatus.backgroundTask.prompt.changeSeparator', { defaultValue: ', ' }));
+  const lines: string[] = [];
+  const mode = details.permissionMode;
+  if (mode?.reason === 'bypass_not_allowed') {
+    if (mode.process === 'plan') {
+      lines.push(loops
+        ? t('dispatchWait.detail.bypassPlan', { defaultValue: 'The loop was started in plan mode, without skipping permissions' })
+        : t('dispatchWait.detail.bypassPlanWork', { defaultValue: 'The background process was started in plan mode, without skipping permissions' }));
+    } else {
+      lines.push(loops
+        ? t('dispatchWait.detail.bypass', { defaultValue: 'The loop was started without skipping permissions, and cannot skip them now' })
+        : t('dispatchWait.detail.bypassWork', { defaultValue: 'The background process was started without skipping permissions, and cannot skip them now' }));
+    }
+  } else if (mode) {
+    lines.push(loops
+      ? t('dispatchWait.detail.cannotSwitch', { mode: mode.process, defaultValue: 'The loop\'s process cannot switch from {{mode}} mode' })
+      : t('dispatchWait.detail.cannotSwitchWork', { mode: mode.process, defaultValue: 'The background process cannot switch from {{mode}} mode' }));
+  }
+  if (details.tools?.notAllowed.length) {
+    lines.push(t('dispatchWait.detail.notAllowed', {
+      tools: list(details.tools.notAllowed),
+      defaultValue: 'Your tool permissions no longer allow {{tools}}',
+    }));
+  }
+  if (details.tools?.alsoDenied.length) {
+    lines.push(t('dispatchWait.detail.alsoDenied', {
+      tools: list(details.tools.alsoDenied),
+      defaultValue: 'Your tool permissions now deny {{tools}}',
+    }));
+  }
+  if (details.model) {
+    lines.push(loops
+      ? t('dispatchWait.detail.model', { model: details.model.message, defaultValue: 'The loop\'s process cannot switch to {{model}}' })
+      : t('dispatchWait.detail.modelWork', { model: details.model.message, defaultValue: 'The background process cannot switch to {{model}}' }));
+  }
+  return lines;
 }
 
 // ---------------------------
@@ -1083,11 +1178,12 @@ export const convertMarkdownToPlainText = (markdown: string): string => {
  * nor a local command (isLocalCommand: /model, /cost, which Claude Code runs without asking the model).
  * A slash command that hands the model a turn, such as /review or a custom command, opens one like any
  * message. The user-role entries the transcript draws as the assistant's (a background task's report, a
- * compaction summary, a local command's output) are assistant rows by the time normalizedToChatMessages
- * hands them over. The server's isTurnQuestion (server/modules/providers/services/sessions.service.ts)
- * applies the same rule to stored rows; change the two together. Read by chat's usePinnedQuestion and
- * ChatMessagesPane (which question a turn is pinned under) and runProgress (where the turn in flight starts).
+ * compaction summary, a local command's output, a prompt CloudCLI sent on its own with its controlNote)
+ * are assistant rows by the time normalizedToChatMessages hands them over. The server's isTurnQuestion
+ * (server/modules/providers/services/sessions.service.ts) applies the same rule to stored rows; change
+ * the two together. Read by chat's usePinnedQuestion and ChatMessagesPane (which question a turn is
+ * pinned under) and runProgress (where the turn in flight starts).
  */
 export const isTurnOpener = (message: ChatMessage): boolean => (
-  message.type === 'user' && !message.inserted && !message.isLocalCommand
+  message.type === 'user' && !message.inserted && !message.isLocalCommand && !message.controlNote
 );

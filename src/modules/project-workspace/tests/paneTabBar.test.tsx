@@ -747,3 +747,103 @@ test('what the pane puts after the tabs sits between the blank stretch and the p
   assert.equal(container().classList.contains('flex-shrink'), true);
   assert.equal(container().classList.contains('flex-shrink-0'), false);
 });
+
+test('"Refresh tab" sits just before the pane menu and works only while the pane shows a tab\'s content', () => {
+  const onRefreshTab = vi.fn();
+  const view = renderBar({ onRefreshTab, canRefreshTab: true });
+  const refreshButton = () => screen.getByRole('button', { name: 'Refresh tab' });
+
+  const paneMenuButton = screen.getByRole('button', { name: 'Pane actions' });
+  assert.equal(Boolean(refreshButton().compareDocumentPosition(paneMenuButton) & Node.DOCUMENT_POSITION_FOLLOWING), true, 'before the pane menu');
+  assert.equal(refreshButton().closest('[data-tab-bar-trailing], [data-workspace-control]') === null, true, 'with the pane\'s own controls');
+  fireEvent.click(refreshButton());
+  assert.equal(onRefreshTab.mock.calls.length, 1);
+
+  view.rerender(
+    <WorkspaceChromeProvider value={chrome}>{barElement({ onRefreshTab, canRefreshTab: false })}</WorkspaceChromeProvider>,
+  );
+  assert.equal(refreshButton().getAttribute('aria-disabled'), 'true');
+  fireEvent.click(refreshButton());
+  assert.equal(onRefreshTab.mock.calls.length, 1);
+});
+
+test('"Refresh all" rides with split and full screen in the rightmost bar only, spins while it runs and names F5 for full screen', () => {
+  vi.useFakeTimers();
+  const onRefreshWorkspace = vi.fn();
+  render(
+    <WorkspaceChromeProvider value={chrome}>
+      <div data-testid="left-bar">{barElement({ side: 'left', isSplit: true, isSideBySide: true, showWorkspaceControls: false, onRefreshWorkspace })}</div>
+      <div data-testid="right-bar">{barElement({ side: 'right', isSplit: true, isSideBySide: true, isFocused: false, isLeftmost: false, panelId: 'pane-right-tabpanel', onRefreshWorkspace })}</div>
+    </WorkspaceChromeProvider>,
+  );
+  const leftBar = screen.getByTestId('left-bar');
+  const rightBar = screen.getByTestId('right-bar');
+
+  assert.equal(within(leftBar).queryByRole('button', { name: 'Refresh all' }) === null, true);
+  const refreshAll = within(rightBar).getByRole('button', { name: 'Refresh all' });
+  // A workspace control: pressing it moves no pane focus.
+  const workspaceControls = refreshAll.closest('[data-workspace-control]');
+  assert.equal(workspaceControls !== null, true);
+  const mergeButton = within(rightBar).getByRole('button', { name: 'Merge panes' });
+  assert.equal(workspaceControls?.contains(mergeButton) ?? false, true);
+  assert.equal(Boolean(refreshAll.compareDocumentPosition(mergeButton) & Node.DOCUMENT_POSITION_FOLLOWING), true, 'before split');
+  fireEvent.click(refreshAll);
+  assert.equal(onRefreshWorkspace.mock.calls.length, 1);
+
+  fireEvent.mouseOver(refreshAll);
+  act(() => {
+    vi.advanceTimersByTime(400);
+  });
+  assert.equal(screen.queryByText('Refresh all (F5 in full screen)') !== null, true);
+});
+
+test('while a refresh of everything runs, its button spins and a press does nothing', () => {
+  const onRefreshWorkspace = vi.fn();
+  renderBar({ onRefreshWorkspace, isRefreshingWorkspace: true });
+  const refreshAll = screen.getByRole('button', { name: 'Refresh all' });
+
+  assert.equal(refreshAll.getAttribute('aria-busy'), 'true');
+  assert.equal(refreshAll.querySelector('svg')?.classList.contains('animate-spin') ?? false, true);
+  fireEvent.click(refreshAll);
+  assert.equal(onRefreshWorkspace.mock.calls.length, 0);
+});
+
+test('"Refresh tab" in a background tab\'s menu brings that tab up first, then refreshes; a gone conversation cannot be refreshed', () => {
+  const onRefreshTab = vi.fn();
+  const missingTab = makeTab('t5', { isMissing: true, session: null });
+  const pane: WorkspacePaneState = { ...PANE, tabs: [...TABS, missingTab] };
+  const display = new Map(DISPLAY).set('t5', { title: 'Gone chat', projectName: 'Alpha', activity: null });
+  renderBar({ pane, tabDisplay: display, onRefreshTab, canRefreshTab: true });
+
+  fireEvent.contextMenu(tabNamed('Fourth chat'), { clientX: 10, clientY: 10 });
+  const items = within(screen.getByRole('menu')).getAllByRole('menuitem');
+  assert.equal(items.at(-1)?.textContent, 'Refresh tab', 'the last item');
+  fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Refresh tab' }));
+  assert.deepEqual(vi.mocked(actions.activateTab).mock.calls, [['left', 't4']]);
+  assert.equal(onRefreshTab.mock.calls.length, 1);
+
+  // The active tab is refreshed as it is.
+  fireEvent.contextMenu(tabNamed('First chat'), { clientX: 10, clientY: 10 });
+  fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Refresh tab' }));
+  assert.equal(vi.mocked(actions.activateTab).mock.calls.length, 1);
+  assert.equal(onRefreshTab.mock.calls.length, 2);
+
+  fireEvent.contextMenu(tabNamed('Gone chat'), { clientX: 10, clientY: 10 });
+  assert.equal((within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Refresh tab' }) as HTMLButtonElement).disabled, true);
+});
+
+test('the pane menu offers "Refresh tab" and "Refresh all" right after "Rename session"', () => {
+  const onRefreshTab = vi.fn();
+  const onRefreshWorkspace = vi.fn();
+  renderBar({ onRefreshTab, canRefreshTab: true, onRefreshWorkspace });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Pane actions' }));
+  const labels = within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent);
+  assert.deepEqual(labels.slice(0, 3), ['Rename session', 'Refresh tab', 'Refresh all']);
+  fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Refresh tab' }));
+  assert.equal(onRefreshTab.mock.calls.length, 1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Pane actions' }));
+  fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Refresh all' }));
+  assert.equal(onRefreshWorkspace.mock.calls.length, 1);
+});

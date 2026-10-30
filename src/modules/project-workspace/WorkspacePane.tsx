@@ -1,4 +1,4 @@
-import { Layers, Maximize2, MessageSquareOff, Minimize2 } from 'lucide-react';
+import { Layers, Maximize2, MessageSquareOff, Minimize2, RefreshCw } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -39,8 +39,8 @@ import { DeploymentEnvironmentBadge } from '@/shared/ui';
 import { visualPaneSide } from '@/shared/direction';
 import { cn, getPaneScopedDomId } from '@/shared/utils';
 
-/** Room the tab bar keeps for its buttons and about two full-width tabs before the view bar may join it. */
-const VIEW_BAR_INLINE_BASE_PX = 640;
+/** Room the tab bar keeps for its buttons (refresh ones included) and about two full-width tabs before the view bar may join it. */
+const VIEW_BAR_INLINE_BASE_PX = 704;
 /** Rough width of one labelled view pill (icon, label, padding). */
 const VIEW_PILL_SLOT_PX = 88;
 /** The view row's horizontal padding, plus the view bar's own padding and gaps. */
@@ -126,6 +126,14 @@ type WorkspacePaneProps = {
   refreshProjectsSilently: () => Promise<void>;
   /** Hears this pane's editor turn dirty or clean (by pane id), so layout changes that would unmount the pane ask first. */
   onEditorUnsavedChange: (paneId: string, hasUnsavedChanges: boolean) => void;
+  /** This pane's refresh token: when it moves, the active tab's view, chat and editor reload in place. */
+  refreshToken: number;
+  /** Refreshes a pane's active tab. */
+  onRefreshTab: (side: WorkspacePaneSide) => void;
+  /** Refreshes every pane and the workspace's lists. */
+  onRefreshWorkspace: () => Promise<void> | void;
+  /** A workspace refresh is on its way: its buttons spin and do nothing. */
+  isRefreshingWorkspace: boolean;
   /** Width and visibility, decided by the pane group. */
   className?: string;
   style?: CSSProperties;
@@ -217,6 +225,10 @@ function WorkspacePane({
   renameSession,
   refreshProjectsSilently,
   onEditorUnsavedChange,
+  refreshToken,
+  onRefreshTab,
+  onRefreshWorkspace,
+  isRefreshingWorkspace,
   className,
   style,
 }: WorkspacePaneProps) {
@@ -393,6 +405,14 @@ function WorkspacePane({
     onClaimShell(side);
   }, [onClaimShell, side]);
 
+  const refreshThisTab = useCallback(() => {
+    onRefreshTab(side);
+  }, [onRefreshTab, side]);
+
+  const refreshWorkspace = useCallback(() => {
+    void onRefreshWorkspace();
+  }, [onRefreshWorkspace]);
+
   const closeActiveTab = () => {
     if (activeTab) {
       actions.closeTab(side, activeTab.key);
@@ -458,8 +478,19 @@ function WorkspacePane({
     const fullscreenLabel = isImmersive
       ? t('workspace.exitFullscreen', { defaultValue: 'Exit full screen' })
       : t('workspace.fullscreen', { defaultValue: 'Full screen' });
+    // A phone shows one pane, so the one refresh button refreshes everything, that pane's tab included.
     return (
       <>
+        <button
+          type="button"
+          onClick={refreshWorkspace}
+          aria-label={t('workspace.refreshAll', { defaultValue: 'Refresh all' })}
+          aria-disabled={isRefreshingWorkspace || undefined}
+          aria-busy={isRefreshingWorkspace || undefined}
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+        >
+          <RefreshCw className={cn('h-4 w-4', isRefreshingWorkspace && 'animate-spin')} aria-hidden="true" />
+        </button>
         {showTabsButton && (
           <button
             type="button"
@@ -481,7 +512,7 @@ function WorkspacePane({
         </button>
       </>
     );
-  }, [isImmersive, isMobile, onOpenTabsSheet, showTabsButton, t, tabCount, toggleImmersive]);
+  }, [isImmersive, isMobile, isRefreshingWorkspace, onOpenTabsSheet, refreshWorkspace, showTabsButton, t, tabCount, toggleImmersive]);
 
   // Phones hide every header while immersive; the floating capsule is the way out.
   const mobileHeader = isMobile && !isImmersive
@@ -613,6 +644,10 @@ function WorkspacePane({
           showProjectNames={showProjectNames}
           trailingContent={tabBarTrailing}
           trailingCanShrink={isImmersive && paneTier !== 'wide'}
+          canRefreshTab={hasContent && !isLoadingProjects}
+          onRefreshTab={refreshThisTab}
+          onRefreshWorkspace={refreshWorkspace}
+          isRefreshingWorkspace={isRefreshingWorkspace}
         />
       )}
       <div id={panelId} {...tabPanelProps} className="relative flex min-h-0 flex-1 flex-col">
@@ -649,6 +684,7 @@ function WorkspacePane({
               onRenameSession={renameSession}
               onEditorUnsavedChange={reportEditorUnsaved}
               onKeepTab={keepActiveTab}
+              refreshToken={refreshToken}
             />
           </div>
         )}

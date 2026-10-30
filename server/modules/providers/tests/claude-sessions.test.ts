@@ -8,6 +8,7 @@ import test from 'node:test';
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { ClaudeSessionSynchronizer } from '@/modules/providers/list/claude/claude-session-synchronizer.provider.js';
+import { buildScheduledStopMessage } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import { buildLookupMap, extractFirstValidJsonlData } from '@/shared/utils.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
@@ -632,6 +633,42 @@ test('Claude history reports a forked background agent stopped: no transcript, n
     });
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('the live echo of the stop prompt is the note its transcript row reads back as; the same text inside anything else is not', () => {
+  const provider = new ClaudeSessionsProvider();
+  const stop = buildScheduledStopMessage({ jobIds: [], wakeup: true });
+  const [note, ...rest] = provider.normalizeMessage({
+    type: 'user',
+    isReplay: true,
+    session_id: SESSION_ID,
+    parent_tool_use_id: null,
+    uuid: 'stop-prompt-live',
+    message: { role: 'user', content: stop },
+  }, SESSION_ID);
+  assert.equal(rest.length, 0);
+  assert.deepEqual(
+    { id: note?.id, kind: note?.kind, role: note?.role, content: note?.content, controlNote: note?.controlNote, anchored: note?.transcriptAnchorId !== undefined },
+    {
+      id: 'stop-prompt-live',
+      kind: 'text',
+      role: 'assistant',
+      content: 'Asked Claude to stop the dynamic loop',
+      controlNote: { kind: 'scheduled-stop', count: 1, jobIds: [], wakeup: true },
+      anchored: false,
+    },
+  );
+
+  const others: Array<[string, Record<string, unknown>]> = [
+    ['a subagent prompt', { parent_tool_use_id: 'toolu_agent', message: { role: 'user', content: stop } }],
+    ['a tool result', { message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: stop }] } }],
+    ['text beside an image', { message: { role: 'user', content: [{ type: 'text', text: stop }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }] } }],
+    ['a prompt that quotes it', { message: { role: 'user', content: `Why did you get "${stop}"?` } }],
+  ];
+  for (const [label, fields] of others) {
+    const messages = provider.normalizeMessage({ type: 'user', session_id: SESSION_ID, uuid: `other-${label}`, ...fields }, SESSION_ID);
+    assert.equal(messages.some((message) => message.controlNote !== undefined), false, label);
   }
 });
 
@@ -2204,6 +2241,53 @@ test('synchronizeFile uses custom-title from JSONL when no DB custom_name and no
       assert.ok(result);
       const session = sessionsDb.getSessionById(result!);
       assert.equal(session?.custom_name, 'Renamed via cli');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('synchronizeFile skips a last-prompt that is a prompt CloudCLI sent on its own, keeping the user\'s earlier one', { concurrency: false }, async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-control-prompt-'));
+  const workspacePath = path.join(tmp, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tmp);
+
+  try {
+    const claudeHome = path.join(tmp, '.claude');
+    await mkdir(claudeHome, { recursive: true });
+    await writeFile(path.join(claudeHome, 'history.jsonl'), '', 'utf8');
+
+    await writeSessionJsonl(workspacePath, 'test-session-1.jsonl', [
+      JSON.stringify({
+        parentUuid: null,
+        isSidechain: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        type: 'assistant',
+        uuid: 'msg-1',
+        sessionId: 'test-session-1',
+      }),
+      JSON.stringify({ type: 'last-prompt', lastPrompt: 'Watch the deploy', sessionId: 'test-session-1' }),
+      JSON.stringify({
+        type: 'last-prompt',
+        lastPrompt: buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false }),
+        sessionId: 'test-session-1',
+      }),
+      // Longer than the CLI keeps whole: its first 200 characters, then "…".
+      JSON.stringify({
+        type: 'last-prompt',
+        lastPrompt: `${buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: true }).slice(0, 200).trim()}…`,
+        sessionId: 'test-session-1',
+      }),
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      const synchronizer = new ClaudeSessionSynchronizer();
+      const result = await synchronizer.synchronizeFile(path.join(workspacePath, 'test-session-1.jsonl'));
+
+      assert.ok(result);
+      assert.equal(sessionsDb.getSessionById(result!)?.custom_name, 'Watch the deploy');
     });
   } finally {
     restoreHomeDir();

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { InsertStatus, InsertStatusEvent, SendRefusedEvent, ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
-import { playNotificationSound } from '@/shared/utils';
+import { parseHandOverDetails, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { collectRunningBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
@@ -48,6 +48,22 @@ const REPLAY_FRAME_KEYS_PER_SESSION = 5_000;
 
 /** How many inserts' statuses one chat remembers; inserts are rare, and the oldest are forgotten first. */
 const REMEMBERED_INSERT_STATUSES = 1_000;
+
+/**
+ * Gateway frames another listener on the socket owns: `run_ended` for
+ * run-notifications, which announces the run's end; `stop_task_status` and
+ * `resume_loops_status` for the background-tasks strip, which follows the stop
+ * or the resume of scheduled work it asked for; `dispatch_waiting` for the
+ * composer, which says why a queued or scheduled message waits. None is a
+ * transcript row, so no chat stores it: each names a session but has no id,
+ * and the store's merge reads every live row's id.
+ */
+const OTHER_LISTENERS_GATEWAY_KINDS: ReadonlySet<string> = new Set([
+  'run_ended',
+  'stop_task_status',
+  'resume_loops_status',
+  'dispatch_waiting',
+]);
 
 /**
  * How far along an insert each status is. An insert only moves forward, so a
@@ -435,10 +451,8 @@ export function useChatRealtimeHandlers({
         return;
       }
 
-      // A gateway frame for run-notifications, which announces the run's end,
-      // or for the background-tasks strip, which follows the stop of scheduled
-      // work it asked for; neither is a transcript row, so no chat stores it.
-      if (msg.kind === 'run_ended' || msg.kind === 'stop_task_status') {
+      // A frame for another listener (see OTHER_LISTENERS_GATEWAY_KINDS).
+      if (OTHER_LISTENERS_GATEWAY_KINDS.has(msg.kind)) {
         return;
       }
 
@@ -568,12 +582,14 @@ export function useChatRealtimeHandlers({
         // `clientRequestId` when the server hands one back.
         case 'send_refused': {
           if (frameSessionId) {
+            const details = parseHandOverDetails(msg.details);
             onSendRefused?.({
               sessionId: frameSessionId,
               reason: typeof msg.reason === 'string' ? msg.reason : '',
               changes: Array.isArray(msg.changes)
                 ? msg.changes.filter((change): change is string => typeof change === 'string')
                 : [],
+              ...(details ? { details } : {}),
               ...(typeof msg.clientRequestId === 'string' && msg.clientRequestId
                 ? { clientRequestId: msg.clientRequestId }
                 : {}),

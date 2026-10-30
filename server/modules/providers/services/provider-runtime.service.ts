@@ -1,4 +1,4 @@
-import { sessionsDb } from '@/modules/database/index.js';
+import { scheduleHoldsDb, sessionsDb } from '@/modules/database/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
@@ -6,7 +6,9 @@ import type { IProvider } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
   BackgroundTaskSummary,
+  HandOverBlockDetail,
   LLMProvider,
+  PausedScheduledWork,
   ProviderCancelInsertGatewayResult,
   ProviderHandOverPlan,
   ProviderHandOverPlanOptions,
@@ -36,6 +38,8 @@ type ProviderRuntimeServiceDependencies = {
   getProviderModels: typeof providerModelsService.getProviderModels;
   /** The session's row: which provider runs it and its project. Null for an unknown session. */
   getSession(sessionId: string): { provider: string; project_path: string | null } | null;
+  /** Where runtimes record the sessions they hold for scheduled work (see `ScheduleHoldRecord`). */
+  scheduleHolds: NonNullable<ProviderRuntimeContext['scheduleHolds']>;
 };
 
 const defaultDependencies: ProviderRuntimeServiceDependencies = {
@@ -46,7 +50,53 @@ const defaultDependencies: ProviderRuntimeServiceDependencies = {
     providerModelsService.resolveResumeModel(provider, sessionId, requestedModel),
   getProviderModels: (provider) => providerModelsService.getProviderModels(provider),
   getSession: (sessionId) => sessionsDb.getSessionById(sessionId),
+  scheduleHolds: {
+    save: (record) => scheduleHoldsDb.save(record),
+    remove: (sessionId, runId) => scheduleHoldsDb.removeForRun(sessionId, runId),
+  },
 };
+
+/**
+ * A session's paused scheduled work as the gateway reads it (see
+ * `PausedScheduledWork`): `heldHere` when a process of this server holds the
+ * session, which then has nothing paused.
+ */
+export type SessionPausedScheduledWork = PausedScheduledWork & { heldHere: boolean };
+
+const readStrings = (value: unknown): string[] => (
+  Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+);
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+/**
+ * A runtime's `details` of a hand-over plan (see `HandOverBlockDetail`), read
+ * field by field as the plan goes out over REST; undefined when nothing in it
+ * reads.
+ */
+function readHandOverDetails(value: unknown): HandOverBlockDetail | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const details: HandOverBlockDetail = {};
+  if (isRecord(value.tools)) {
+    details.tools = { notAllowed: readStrings(value.tools.notAllowed), alsoDenied: readStrings(value.tools.alsoDenied) };
+  }
+  const mode = value.permissionMode;
+  if (isRecord(mode) && typeof mode.process === 'string' && typeof mode.message === 'string') {
+    details.permissionMode = {
+      process: mode.process,
+      message: mode.message,
+      reason: mode.reason === 'cannot_switch' ? 'cannot_switch' : 'bypass_not_allowed',
+    };
+  }
+  const model = value.model;
+  if (isRecord(model) && typeof model.process === 'string' && typeof model.message === 'string') {
+    details.model = { process: model.process, message: model.message };
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
+}
 
 /**
  * Creates the application-facing provider runtime dispatcher.
@@ -68,6 +118,13 @@ export function createProviderRuntimeService(
       dependencies.resolveResumeModel(provider.id, sessionId, requestedModel),
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
     normalizeMessage: (raw, sessionId) => provider.sessions.normalizeMessage(raw, sessionId),
+    ...(provider.sessions.readRevivedCronJobs
+      ? {
+        readRevivedCronJobs: (sessionId: string, options: { anchorId: string | null; now: number }) =>
+          provider.sessions.readRevivedCronJobs!(sessionId, options),
+      }
+      : {}),
+    scheduleHolds: dependencies.scheduleHolds,
     async isProviderInstalled() {
       try {
         return (await provider.auth.getStatus()).installed;
@@ -101,6 +158,26 @@ export function createProviderRuntimeService(
   const holdsProcess = (item: ScheduledWorkSummary): boolean => item.nextFireAt === null
     || item.nextFireAt <= item.holdUntil;
 
+  const describeSessionHold = (sessionId: string): SessionHold | null => {
+    let processState: ProviderProcessState | null = null;
+    const tasks: BackgroundTaskSummary[] = [];
+    for (const provider of dependencies.listProviders()) {
+      const state = provider.runtime.processState?.(sessionId) ?? null;
+      if (state === 'running' || (state === 'exiting' && processState === null)) {
+        processState = state;
+      }
+      for (const entry of provider.runtime.listBackgroundWork?.() ?? []) {
+        if (entry.sessionId === sessionId) {
+          tasks.push(...entry.tasks);
+        }
+      }
+    }
+    const scheduled = listSessionScheduledWork(sessionId);
+    return processState === null && tasks.length === 0 && scheduled.length === 0
+      ? null
+      : { processState, tasks, scheduled };
+  };
+
   const planHandOver = async (
     providerName: LLMProvider,
     sessionId: string,
@@ -111,11 +188,15 @@ export function createProviderRuntimeService(
     const plan = await runtime.planHandOver?.(sessionId, options, planOptions);
     // A runtime that never holds a process has nothing to hand over. The
     // runtime's answer is read field by field: it goes out over REST as is.
+    const details = readHandOverDetails(plan?.details);
     return {
       heldWork: plan?.heldWork === true,
       canHandOver: plan?.canHandOver === true,
       changes: Array.isArray(plan?.changes) ? [...plan.changes] : [],
       switches: Array.isArray(plan?.switches) ? [...plan.switches] : [],
+      ...(details ? { details } : {}),
+      ...(plan?.replaceKeepsWork === true ? { replaceKeepsWork: true } : {}),
+      ...(plan?.replaceKeepsWork === true && plan.afterCliTurn === true ? { afterCliTurn: true } : {}),
     };
   };
 
@@ -258,24 +339,45 @@ export function createProviderRuntimeService(
      * it. The websocket module's Shell handler reads it before starting a CLI
      * on the session.
      */
-    describeSessionHold(sessionId: string): SessionHold | null {
-      let processState: ProviderProcessState | null = null;
-      const tasks: BackgroundTaskSummary[] = [];
-      for (const provider of dependencies.listProviders()) {
-        const state = provider.runtime.processState?.(sessionId) ?? null;
-        if (state === 'running' || (state === 'exiting' && processState === null)) {
-          processState = state;
-        }
-        for (const entry of provider.runtime.listBackgroundWork?.() ?? []) {
-          if (entry.sessionId === sessionId) {
-            tasks.push(...entry.tasks);
-          }
-        }
+    describeSessionHold,
+
+    /**
+     * The session's loops that no process runs (see `PausedScheduledWork`):
+     * what a restart of the server leaves of them. Nothing, with `heldHere`,
+     * while a process of this server holds the session (`describeSessionHold`):
+     * its work is listed by `listScheduledWork` then, and paused work never
+     * is, nor counts for `hasScheduledWork`. The providers routes list it, and
+     * the chat gateway resumes or stops it.
+     */
+    async describePausedScheduledWork(sessionId: string): Promise<SessionPausedScheduledWork> {
+      const none: SessionPausedScheduledWork = { items: [], resumeContent: null, heldElsewhere: false, heldHere: false };
+      const session = dependencies.getSession(sessionId);
+      if (!session) {
+        return none;
       }
-      const scheduled = listSessionScheduledWork(sessionId);
-      return processState === null && tasks.length === 0 && scheduled.length === 0
-        ? null
-        : { processState, tasks, scheduled };
+      if (describeSessionHold(sessionId) !== null) {
+        return { ...none, heldHere: true };
+      }
+      const provider = dependencies.resolveProvider(session.provider);
+      if (!provider.sessions.readPausedScheduledWork) {
+        return none;
+      }
+      const paused = await provider.sessions.readPausedScheduledWork(sessionId);
+      // A process may have started while the transcript was read.
+      if (describeSessionHold(sessionId) !== null) {
+        return { ...none, heldHere: true };
+      }
+      return { ...paused, heldHere: false };
+    },
+
+    /**
+     * The server is shutting down: every runtime that records its holds for
+     * scheduled work keeps the records (see `IProviderRuntime.prepareForShutdown`).
+     */
+    prepareForShutdown(): void {
+      for (const provider of dependencies.listProviders()) {
+        provider.runtime.prepareForShutdown?.();
+      }
     },
 
     /**

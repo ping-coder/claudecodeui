@@ -28,3 +28,22 @@ test('the gateway\'s own acceptProcessSettings, passed as an extra option, is ke
   assert.equal(options.cwd, '/projects/app');
   assert.equal(options.sessionId, 'session-1');
 });
+
+test('a client\'s ownSettings never reaches a turn\'s run options; the dispatcher\'s, passed as an extra option, is kept with its effort split as a turn\'s', () => {
+  const fromClient = buildTurnRunOptions({
+    sessionId: 'session-1',
+    projectPath: '/projects/app',
+    clientOptions: { effort: 'max', ownSettings: { permissionMode: 'bypassPermissions' } },
+  });
+  assert.equal('ownSettings' in fromClient, false);
+
+  const fromDispatcher = buildTurnRunOptions({
+    sessionId: 'session-1',
+    projectPath: '/projects/app',
+    clientOptions: { inheritUnset: true, ownSettings: { permissionMode: 'bypassPermissions' } },
+    extraOptions: { ownSettings: { model: 'opus', effort: ' ultracode ', permissionMode: 'plan' } },
+  });
+  assert.deepEqual(fromDispatcher.ownSettings, { model: 'opus', effort: 'xhigh', ultracode: true, permissionMode: 'plan' });
+  assert.equal(fromDispatcher.effort, undefined);
+  assert.equal(fromDispatcher.permissionMode, undefined);
+});

@@ -33,19 +33,26 @@ const STOPPABLE_WAKEUP_ID = /^wakeup:[\w-]{1,128}$/;
 export const canStopScheduledWork = (item: ScheduledWorkSummary): boolean =>
   (item.kind === 'wakeup' ? STOPPABLE_WAKEUP_ID : STOPPABLE_CRON_ID).test(item.id);
 
+/** Whether any of the items is paused: a restart of the server left it with no process (see ScheduledWorkSummary). */
+export const hasPausedScheduledWork = (items: readonly ScheduledWorkSummary[]): boolean =>
+  items.some((item) => item.paused === true);
+
 /**
  * Whether stopping `targets` lets go of the session's process rather than
  * running a turn, by the server's rule as far as this page can see: only a
  * wake-up is stopped, and the process keeps nothing else, no task
  * (`hasTasks`) and no cron job among `scheduled`. The server may know of more
  * (a task report it has yet to relay, a Monitor), and its answer is what
- * counts.
+ * counts. Paused work has no process to let go of: stopping it always takes
+ * a turn.
  */
 export const stopReleasesProcess = (
   targets: readonly ScheduledWorkSummary[],
   scheduled: readonly ScheduledWorkSummary[],
   hasTasks: boolean,
-): boolean => !hasTasks && [...targets, ...scheduled].every((item) => item.kind === 'wakeup');
+): boolean => !hasTasks
+  && !hasPausedScheduledWork(targets)
+  && [...targets, ...scheduled].every((item) => item.kind === 'wakeup');
 
 /**
  * A /loop command at the start of a prompt: `/loop`, and the interval when it opens with one as
@@ -207,12 +214,19 @@ export function formatScheduledTime(at: number, nowMs: number, t: TFunction, loc
  * loop's cadence and next run (`Every 5 minutes`, `Next: 14:05`), a
  * reminder's time. A time that has come reads `Due now`; an item whose next
  * run is unknown shows its cadence alone; one due past the time CloudCLI
- * holds the process for it is said not to run.
+ * holds the process for it is said not to run. A paused item (no process
+ * runs it: a restart of the server, an abort or a CLI that ended left it so)
+ * says so, then a loop's cadence: it runs nothing until it is resumed.
  */
 export function describeScheduledTiming(item: ScheduledWorkSummary, nowMs: number, t: TFunction, locale?: string): string[] {
   const { nextFireAt } = item;
   const dueNow = () => t('scheduledWork.dueNow', { defaultValue: 'Due now' });
   const parts: string[] = [];
+  if (item.paused) {
+    parts.push(t('scheduledWork.paused', { defaultValue: 'Paused (no process running)' }));
+    const cadence = item.recurring ? describeScheduledCadence(item, t, locale) : '';
+    return cadence ? [...parts, cadence] : parts;
+  }
   if (!item.recurring && nextFireAt !== null) {
     parts.push(nextFireAt <= nowMs ? dueNow() : formatScheduledTime(nextFireAt, nowMs, t, locale));
   } else {

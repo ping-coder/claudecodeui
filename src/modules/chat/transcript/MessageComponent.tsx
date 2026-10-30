@@ -7,7 +7,7 @@ import { GitBranchIcon, PencilIcon } from 'lucide-react';
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,Project } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
 import { describeHandOverChanges, getPaneScopedDomId } from '@/shared/utils';
-import { describeTaskNotificationFallback, formatTimeOfDay, formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
+import { describeControlNote, describeTaskNotificationFallback, formatTimeOfDay, formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
 import { ToolRenderer, ToolErrorDisplay, SubagentPanel, WorkflowPanel, shouldHideToolResult } from '@/modules/chat/tools';
 import { LLMProviderLogo } from '@/shared/ui';
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/modules/chat/transcript/Reasoning';
@@ -93,17 +93,25 @@ const describeBackgroundWorkStopped = (changes: string[], fallback: string, t: T
 };
 
 /**
- * The Claude runtime's notice that a message meant to go into the process the
- * session holds for its loops and reminders (a queued or scheduled message
- * sent with acceptProcessSettings) did not, so it was not sent and the loops
- * go on: an `error` row with code HAND_OVER_FAILED, worded by its `reason`
- * (`stale-plan`, `lookup`; any other reads as the general case).
+ * The Claude runtime's notice that a message meant to keep the session's
+ * loops and reminders going did not go, so it was not sent and the loops go
+ * on: an `error` row with code HAND_OVER_FAILED, worded by its `reason`.
+ * `stale-plan` and `lookup` are a queued or scheduled message sent with
+ * acceptProcessSettings that the process did not take; `work-started` is a
+ * send that waited for the loop's run, a composer one included, which that
+ * run started more work for. Any other reads as the general case.
  */
 const describeHandOverFailed = (reason: unknown, t: TFunction): string => {
-  if (reason === 'stale-plan') {
-    return t('claudeStatus.handOverFailed.stalePlan');
+  switch (reason) {
+    case 'stale-plan':
+      return t('claudeStatus.handOverFailed.stalePlan');
+    case 'lookup':
+      return t('claudeStatus.handOverFailed.lookup');
+    case 'work-started':
+      return t('claudeStatus.handOverFailed.workStarted');
+    default:
+      return t('claudeStatus.handOverFailed.other');
   }
-  return reason === 'lookup' ? t('claudeStatus.handOverFailed.lookup') : t('claudeStatus.handOverFailed.other');
 };
 
 /**
@@ -112,7 +120,8 @@ const describeHandOverFailed = (reason: unknown, t: TFunction): string => {
  */
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
   const { t, i18n } = useTranslation('chat');
-  const isGrouped = prevMessage && prevMessage.type === message.type &&
+  // A control note stands apart: the row after it starts a group of its own.
+  const isGrouped = prevMessage && prevMessage.type === message.type && !prevMessage.controlNote &&
     ((prevMessage.type === 'assistant') ||
       (prevMessage.type === 'user') ||
       (prevMessage.type === 'tool') ||
@@ -126,6 +135,13 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
       }
       if (message.type === 'error' && message.errorCode === 'HAND_OVER_FAILED') {
         return describeHandOverFailed(message.errorReason, t);
+      }
+      // The CLI refused a turn's switch to skipping permissions; `errorReason` is the mode it ran in.
+      if (message.type === 'error' && message.errorCode === 'PERMISSION_MODE_NOT_SWITCHED' && typeof message.errorReason === 'string') {
+        return t('claudeStatus.permissionModeNotSwitched', {
+          mode: message.errorReason,
+          defaultValue: 'Claude Code refused to skip permissions: this turn runs in {{mode}} mode, and asks before it uses tools.',
+        });
       }
       // An error the server sent no words for.
       if (message.type === 'error' && !String(message.content || '').trim()) {
@@ -281,6 +297,16 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               </div>
             </details>
           )}
+        </div>
+      ) : message.controlNote ? (
+        /* A prompt CloudCLI sent on its own, such as the stop of a loop: one row, the jobs in its title */
+        <div className="w-full">
+          <div className="flex items-center gap-2 py-0.5" title={message.controlNote.jobIds?.join(', ') || undefined}>
+            <span className="inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-gray-400 dark:bg-gray-500" />
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {describeControlNote(message.controlNote, String(message.content || ''), t)}
+            </span>
+          </div>
         </div>
       ) : message.isTaskNotification ? (
         /* Compact task notification on the left */

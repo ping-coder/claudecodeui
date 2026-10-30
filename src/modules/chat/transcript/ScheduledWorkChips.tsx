@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Loader2, X } from 'lucide-react';
+import { Clock, Loader2, Play, X } from 'lucide-react';
 
 import { useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
-import type { ChatMessage, ScheduledWorkStopStatus, ScheduledWorkSummary } from '@/shared/types';
+import type { ChatMessage, ResumeLoopsStatus, ScheduledWorkStopStatus, ScheduledWorkSummary } from '@/shared/types';
 import { cn } from '@/shared/utils';
 import {
   canStopScheduledWork,
@@ -21,7 +21,10 @@ import {
 const CLOCK_TICK_MS = 15_000;
 
 type ScheduledWorkChipsProps = {
-  /** The session's scheduled work, from the activity map: only the server adds or takes away an item. */
+  /**
+   * The session's scheduled work, from the activity map, or its paused loops (`paused`, read while
+   * no process holds the session): only the server adds or takes away an item.
+   */
   items: ScheduledWorkSummary[];
   /** Whether the session has a background task running, which keeps its process held whatever a stop ends. */
   hasTasks: boolean;
@@ -35,16 +38,27 @@ type ScheduledWorkChipsProps = {
   sendMessage: (message: unknown) => void;
   onReveal: (message: ChatMessage) => void;
   onLoadAll: () => void;
+  /** Reads the paused loops again, once a stop or a resume of them has its answer. */
+  onPausedChange?: () => Promise<void> | void;
+  /** The composer's settings, which a resume runs with when the server has none of the loops' own. */
+  buildResumeOptions?: () => Record<string, unknown>;
 };
 
-/** What a stop came to, said under the chips: it was not cancelled, or it has to wait for the turn. */
-type StopNotice = { id: string; kind: 'failed' | 'afterTurn' };
+/**
+ * What a stop or a resume came to, said under the chips: it was not cancelled, or it has to wait
+ * for the turn; the loops were not resumed, a Claude CLI elsewhere runs them, or the resume has to
+ * wait for the turn. A resume's notice names no item (`id` null): it stands for every paused one.
+ */
+type StopNotice = {
+  id: string | null;
+  kind: 'failed' | 'afterTurn' | 'resumeFailed' | 'resumeHeldElsewhere' | 'resumeAfterTurn';
+};
 
 /** A stop this strip sent and has no final answer to: the item it named, and the items it stops. */
 type StopRequest = { taskId: string; itemIds: readonly string[] };
 
-/** A `clientRequestId` for a stop: unique on the page, which is all the server's answers need to name it. */
-const createStopRequestId = (): string => `stop_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+/** A `clientRequestId` for a stop or a resume: unique on the page, which is all the server's answers need to name it. */
+const createRequestId = (kind: 'stop' | 'resume'): string => `${kind}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 
 /**
  * Rendered by chat's BackgroundTasksStrip after the session's tasks, while
@@ -69,6 +83,14 @@ const createStopRequestId = (): string => `stop_${Date.now().toString(36)}_${Mat
  * the pane can stop. The answers come on the socket every pane shares: each
  * stop carries an id of its own, which its answers carry back, so only the
  * stops this strip asked for count.
+ *
+ * A paused item (a restart of the server ended its process) reads so, and
+ * its ✕ asks for a turn in a new process, whatever its kind. While any is
+ * paused, Resume follows the chips: `chat.resume-loops` has CloudCLI run one
+ * turn that brings all of them back, with the settings their process ran
+ * with (else the composer's, `buildResumeOptions`). It reads "Resuming…"
+ * until the turn starts, which takes the session out of the paused state,
+ * or the server's `resume_loops_status` says why it did not.
  */
 export function ScheduledWorkChips({
   items,
@@ -80,6 +102,8 @@ export function ScheduledWorkChips({
   sendMessage,
   onReveal,
   onLoadAll,
+  onPausedChange,
+  buildResumeOptions,
 }: ScheduledWorkChipsProps) {
   const { t, i18n } = useTranslation('chat');
   const { subscribe } = useWebSocket();
@@ -91,11 +115,17 @@ export function ScheduledWorkChips({
   // carried, which its `stop_task_status` frames carry back.
   const [stopping, setStopping] = useState<ReadonlyMap<string, StopRequest>>(() => new Map());
   const [notice, setNotice] = useState<StopNotice | null>(null);
+  // The resume this strip sent and has no answer to, by the id it carried.
+  const [resumeRequestId, setResumeRequestId] = useState<string | null>(null);
   const stopButtonsRef = useRef(new Map<string, HTMLButtonElement>());
   // What the socket listener reads when a frame comes, synced after every commit.
   const stoppingRef = useRef(stopping);
+  const resumeRequestIdRef = useRef(resumeRequestId);
+  const onPausedChangeRef = useRef(onPausedChange);
   useLayoutEffect(() => {
     stoppingRef.current = stopping;
+    resumeRequestIdRef.current = resumeRequestId;
+    onPausedChangeRef.current = onPausedChange;
   });
 
   useEffect(() => {
@@ -122,11 +152,53 @@ export function ScheduledWorkChips({
     if (!sessionId) {
       return undefined;
     }
+    // The running sessions read again, and the paused loops with them.
+    const readAgain = () => Promise.all([refreshRunningSessions(), onPausedChangeRef.current?.()]);
     return subscribe((event) => {
       // A frame the socket lost is lost for good: the items show what the
       // next poll says.
       if (event.kind === 'websocket_reconnected') {
         setStopping(new Map());
+        setResumeRequestId(null);
+        return;
+      }
+      if (
+        event.kind === 'resume_loops_status'
+        && event.sessionId === sessionId
+        && resumeRequestIdRef.current !== null
+        && (event.clientRequestId === undefined || event.clientRequestId === resumeRequestIdRef.current)
+      ) {
+        const status = event.status as ResumeLoopsStatus;
+        const settleResume = (resumeNotice?: StopNotice) => {
+          setResumeRequestId(null);
+          if (resumeNotice) {
+            setNotice(resumeNotice);
+          }
+        };
+        switch (status) {
+          case 'started':
+            // The resuming turn runs, a turn like any other; once it is over
+            // the session's process lists the loops it holds.
+            markSessionProcessing(sessionId);
+            break;
+          case 'finished':
+          case 'not_found':
+            void readAgain().then(() => settleResume());
+            break;
+          case 'busy':
+            settleResume({ id: null, kind: 'resumeAfterTurn' });
+            break;
+          case 'held_elsewhere':
+            // Said rather than read again: a read would list nothing, and the
+            // items would go without a word.
+            settleResume({ id: null, kind: 'resumeHeldElsewhere' });
+            break;
+          case 'failed':
+            settleResume({ id: null, kind: 'resumeFailed' });
+            break;
+          default:
+            break;
+        }
         return;
       }
       if (event.kind !== 'stop_task_status' || event.sessionId !== sessionId || typeof event.taskId !== 'string') {
@@ -146,7 +218,7 @@ export function ScheduledWorkChips({
       // Gone, or never there: the item reads "Stopping…" until the running
       // sessions read again say so, and it is not drawn any more.
       const settleOnceRead = () => {
-        void refreshRunningSessions().then(() => settleStop(requestId));
+        void readAgain().then(() => settleStop(requestId));
       };
       switch (status) {
         case 'stopped':
@@ -184,10 +256,14 @@ export function ScheduledWorkChips({
     setConfirmingId(null);
   }
 
-  const stoppable = canStop && sessionId ? items.filter(canStopScheduledWork) : [];
+  // A paused item has no process to drive: CloudCLI's runtime starts one to stop it.
+  const stoppable = sessionId ? items.filter((item) => (canStop || item.paused) && canStopScheduledWork(item)) : [];
   const stoppingIds = new Set([...stopping.values()].flatMap((request) => request.itemIds));
   const confirming = stoppable.find((item) => item.id === confirmingId);
-  const shownNotice = notice && items.some((item) => item.id === notice.id) ? notice : null;
+  const paused = items.filter((item) => item.paused);
+  const shownNotice = notice && (notice.id === null ? paused.length > 0 : items.some((item) => item.id === notice.id))
+    ? notice
+    : null;
 
   // While it asks, the question owns Escape (it carries data-escape-layer, so
   // nothing underneath takes the key): Escape closes it wherever the focus
@@ -230,11 +306,26 @@ export function ScheduledWorkChips({
     setConfirmingId(null);
   };
 
+  const resume = () => {
+    if (!sessionId || resumeRequestId !== null) {
+      return;
+    }
+    if (isTurnRunning) {
+      setNotice({ id: null, kind: 'resumeAfterTurn' });
+      return;
+    }
+    const requestId = createRequestId('resume');
+    sendMessage({ type: 'chat.resume-loops', sessionId, options: buildResumeOptions?.() ?? {}, clientRequestId: requestId });
+    setResumeRequestId(requestId);
+    setConfirmingId(null);
+    setNotice(null);
+  };
+
   const stop = (item: ScheduledWorkSummary, all: boolean) => {
     if (!sessionId) {
       return;
     }
-    const requestId = createStopRequestId();
+    const requestId = createRequestId('stop');
     sendMessage({ type: 'chat.stop-task', sessionId, taskId: item.id, ...(all ? { allScheduled: true } : {}), clientRequestId: requestId });
     setStopping((current) => new Map(current).set(requestId, {
       taskId: item.id,
@@ -258,6 +349,25 @@ export function ScheduledWorkChips({
   };
 
   const afterTurnLabel = t('scheduledWork.stopAfterTurn', { defaultValue: 'Stop it after this turn ends' });
+
+  const describeNotice = (kind: StopNotice['kind']): string => {
+    switch (kind) {
+      case 'failed':
+        return t('scheduledWork.stopFailed', {
+          defaultValue: 'It was not cancelled. Try again, or ask Claude in the message box to cancel it.',
+        });
+      case 'resumeFailed':
+        return t('scheduledWork.resumeFailed', { defaultValue: 'The loops were not resumed. Try again.' });
+      case 'resumeHeldElsewhere':
+        return t('scheduledWork.resumeHeldElsewhere', {
+          defaultValue: 'Another Claude CLI holds this session and runs its loops.',
+        });
+      case 'resumeAfterTurn':
+        return t('scheduledWork.resumeAfterTurn', { defaultValue: 'Resume them after this turn ends' });
+      default:
+        return afterTurnLabel;
+    }
+  };
 
   // The others of its kind that "Stop all" would take too, and have its prompt.
   const samePromptCount = confirming ? countSamePromptWork(confirming, stoppable) : 0;
@@ -380,14 +490,35 @@ export function ScheduledWorkChips({
           {!stopAllFirst && stoppable.length >= 2 && stopAllButton(quietButton)}
         </div>
       )}
+      {paused.length > 0 && sessionId && (
+        resumeRequestId !== null ? (
+          <span className="flex flex-shrink-0 items-center gap-1 px-1 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            {t('scheduledWork.resuming', { defaultValue: 'Resuming…' })}
+          </span>
+        ) : (
+          <button
+            type="button"
+            // Greyed out rather than disabled, as the ✕ is.
+            aria-disabled={isTurnRunning || undefined}
+            onClick={resume}
+            title={isTurnRunning
+              ? t('scheduledWork.resumeAfterTurn', { defaultValue: 'Resume them after this turn ends' })
+              : t('scheduledWork.resumeTitle', { defaultValue: 'Resume the paused loops: CloudCLI runs one turn to start them again' })}
+            className={cn(
+              'flex flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-medium text-foreground',
+              isTurnRunning ? 'cursor-not-allowed opacity-40' : 'hover:bg-muted',
+            )}
+          >
+            <Play className="h-3 w-3 text-blue-500 dark:text-blue-400" aria-hidden />
+            {t('scheduledWork.resume', { defaultValue: 'Resume' })}
+          </button>
+        )
+      )}
       {shownNotice && (
         // Read out by the strip, which is a live region.
         <span className="basis-full px-1.5 text-muted-foreground">
-          {shownNotice.kind === 'failed'
-            ? t('scheduledWork.stopFailed', {
-              defaultValue: 'It was not cancelled. Try again, or ask Claude in the message box to cancel it.',
-            })
-            : afterTurnLabel}
+          {describeNotice(shownNotice.kind)}
         </span>
       )}
     </>

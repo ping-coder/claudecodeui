@@ -39,6 +39,8 @@ type GitPanelController = {
   operationError: string | null;
   clearOperationError: () => void;
   refreshAll: () => void;
+  /** Reloads the history view's commit list (refreshAll leaves it alone). */
+  fetchRecentCommits: () => Promise<void>;
   switchBranch: (branchName: string) => Promise<boolean>;
   createBranch: (branchName: string) => Promise<boolean>;
   deleteBranch: (branchName: string, force?: boolean) => Promise<boolean>;
@@ -832,6 +834,7 @@ export function useGitPanelController({
     operationError,
     clearOperationError,
     refreshAll,
+    fetchRecentCommits,
     switchBranch,
     createBranch,
     deleteBranch,

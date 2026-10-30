@@ -40,6 +40,8 @@ type CodeEditorProps = {
   isExpanded?: boolean;
   onToggleExpand?: (() => void) | null;
   onPopOut?: (() => void) | null;
+  /** The workspace's refresh token: a clean buffer rereads the file, a media preview refetches it. */
+  reloadToken?: number;
 };
 
 /** Rendered by the code-editor module's own EditorSidebar, and re-exported on the module barrel, as the full CodeMirror editor for one open file. */
@@ -54,6 +56,7 @@ export default function CodeEditor({
   isExpanded = false,
   onToggleExpand = null,
   onPopOut = null,
+  reloadToken,
 }: CodeEditorProps) {
   const { t } = useTranslation('codeEditor');
   const paletteOps = usePaletteOps();
@@ -82,11 +85,13 @@ export default function CodeEditor({
     previewKind,
     fileProjectId,
     hasUnsavedChanges,
+    reloadSkipped,
     handleSave,
     handleDownload,
   } = useCodeEditorDocument({
     file,
     projectPath,
+    reloadToken,
   });
 
   // Every way of closing (Escape, the header X, the binary and media views)
@@ -271,6 +276,7 @@ export default function CodeEditor({
         file={file}
         kind={previewKind}
         projectId={fileProjectId}
+        reloadToken={reloadToken}
         isSidebar={isSidebar}
         isFullscreen={isFullscreen}
         onClose={requestClose}
@@ -359,6 +365,12 @@ export default function CodeEditor({
               unsavedChanges: t('unsavedChanges.indicator', 'Unsaved changes'),
             }}
           />
+
+          {reloadSkipped && (
+            <div role="status" className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+              {t('common:workspace.editorReloadSkippedUnsaved', { defaultValue: 'Unsaved changes: the file was not reloaded' })}
+            </div>
+          )}
 
           {saveError && (
             <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300">

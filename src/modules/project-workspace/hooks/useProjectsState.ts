@@ -15,6 +15,7 @@ import type {
 } from '@/shared/types';
 import { useWorkspaceLayout } from '@/modules/project-workspace/hooks/useWorkspaceLayout';
 import { useWorkspaceNavigation } from '@/modules/project-workspace/hooks/useWorkspaceNavigation';
+import { useWorkspaceRefresh } from '@/modules/project-workspace/hooks/useWorkspaceRefresh';
 import { findLoadedSession } from '@/modules/project-workspace/utils/resolveSessionTarget';
 import { getActiveTab, getPane, layoutHasSession } from '@/modules/project-workspace/utils/workspaceLayout';
 
@@ -25,6 +26,8 @@ type UseProjectsStateArgs = {
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   isMobile: boolean;
   isSessionProcessing: IsSessionProcessing;
+  /** Refresh all's share outside the workspace state: reconnect a dropped socket, the running sessions, the plugin list. */
+  refreshAppState?: () => Promise<unknown> | void;
 };
 
 /**
@@ -343,6 +346,7 @@ export function useProjectsState({
   subscribe,
   isMobile,
   isSessionProcessing,
+  refreshAppState,
 }: UseProjectsStateArgs) {
   const workspace = useWorkspaceLayout({ initialSessionId: sessionId });
   const { layoutRef } = workspace;
@@ -684,6 +688,9 @@ export function useProjectsState({
         && event.kind !== 'stream_end'
         && event.kind !== 'permission_resolved'
         && event.kind !== 'permission_cancelled'
+        // Why a message waits, and a resume's progress, carry no new content.
+        && event.kind !== 'dispatch_waiting'
+        && event.kind !== 'resume_loops_status'
       ) {
         markSessionAttention(eventSessionId);
       }
@@ -822,6 +829,17 @@ export function useProjectsState({
     }
   }, [commit, layoutRef, projects]);
 
+  // Refresh a tab or everything without reloading the page, which would drop the browser's full screen
+  // and everything only held in memory. The project list comes from handleSidebarRefresh: one request,
+  // never the loading screen, which would unmount the chats and the editors.
+  const {
+    refreshEpoch,
+    getPaneRefreshToken,
+    refreshTab,
+    refreshWorkspace,
+    isRefreshingWorkspace,
+  } = useWorkspaceRefresh({ layoutRef, refreshProjects: handleSidebarRefresh, refreshAppState });
+
   /**
    * Persists a new title for one session and writes it onto every local copy
    * — the sidebar row in `projects` and each tab holding the session, which
@@ -941,6 +959,7 @@ export function useProjectsState({
       isLoading: isLoadingProjects,
       loadingProgress,
       onRefresh: handleSidebarRefresh,
+      refreshEpoch,
       onShowSettings: () => setShowSettings(true),
       showSettings,
       settingsInitialTab,
@@ -959,6 +978,7 @@ export function useProjectsState({
       loadingProgress,
       projects,
       recordBrowsedProject,
+      refreshEpoch,
       selectedProject,
       selectedSession,
       settingsInitialTab,
@@ -1034,6 +1054,10 @@ export function useProjectsState({
     visibleSessionIds,
     setCanShowBothPanes,
     setPaneEditorUnsaved,
+    getPaneRefreshToken,
+    refreshTab,
+    refreshWorkspace,
+    isRefreshingWorkspace,
     /** Focused pane's project; null for an empty pane. */
     selectedProject,
     /** Focused pane's session; null for a new chat or an empty pane. */

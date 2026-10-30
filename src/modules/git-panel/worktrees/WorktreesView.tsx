@@ -13,6 +13,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { Project,WorktreeInfo } from '@/shared/types';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { useWorktreesController } from '@/modules/git-panel/hooks/useWorktreesController';
 import MergeWorktreeModal from '@/modules/git-panel/modals/MergeWorktreeModal';
 import NewWorktreeModal from '@/modules/git-panel/modals/NewWorktreeModal';
@@ -24,6 +25,8 @@ type WorktreesViewProps = {
   localBranches: string[];
   onProjectSelect?: (project: Project) => void;
   onProjectsRefresh?: () => void;
+  /** The workspace pane's refresh token: when it moves, the worktree list reloads, as its own refresh button does. */
+  refreshToken?: number;
 };
 
 /** Shortens an absolute worktree path to "container/folder" for display. */
@@ -168,6 +171,7 @@ export default function WorktreesView({
   localBranches,
   onProjectSelect,
   onProjectsRefresh,
+  refreshToken,
 }: WorktreesViewProps) {
   const { t } = useTranslation();
   const {
@@ -183,6 +187,9 @@ export default function WorktreesView({
     mergeWorktree,
     removeWorktree,
   } = useWorktreesController({ selectedProject, onProjectSelect, onProjectsRefresh });
+  useRefreshSignal(refreshToken, () => {
+    void refreshWorktrees();
+  });
 
   const [showNewWorktreeModal, setShowNewWorktreeModal] = useState(false);
   const [mergeTarget, setMergeTarget] = useState<WorktreeInfo | null>(null);

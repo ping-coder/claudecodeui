@@ -85,6 +85,26 @@ describe('markdown export', () => {
     // A three-backtick fence would be closed early by the payload itself.
     expect(markdown).toContain('````');
   });
+
+  it('writes the note for a prompt CloudCLI sent on its own as a line of its own, in the interface language', async () => {
+    const stopNote = {
+      type: 'assistant',
+      content: 'Asked Claude to stop 2 loops',
+      controlNote: { kind: 'scheduled-stop', count: 2, jobIds: ['b2148320', '7b7cd8fc'] },
+      timestamp: new Date('2026-08-24T09:03:00.000Z'),
+    } as ChatMessage;
+    const markdown = await buildTranscriptExport('markdown', { ...input, messages: [userMessage, stopNote] }, exportedAt);
+    expect(markdown).toContain('\n_Asked Claude to stop 2 loops_\n');
+    expect(markdown.match(/### Claude/g)).toBeNull();
+
+    const chinese = await buildTranscriptExport('markdown', {
+      ...input,
+      messages: [stopNote],
+      t: i18n.getFixedT('zh-CN'),
+      language: 'zh-CN',
+    }, exportedAt);
+    expect(chinese).toContain('_已让 Claude 停止 2 个循环_');
+  });
 });
 
 describe('json export', () => {
@@ -174,6 +194,19 @@ describe('html export', () => {
     // The fenced block became real markup; the fence characters are gone.
     expect(html).toContain('<code');
     expect(html).not.toContain('```js');
+  });
+
+  it('draws the note for a prompt CloudCLI sent on its own as on screen, with the jobs in its title', async () => {
+    const stopNote = {
+      type: 'assistant',
+      content: 'Asked Claude to stop 2 loops',
+      controlNote: { kind: 'scheduled-stop', count: 2, jobIds: ['b2148320', '7b7cd8fc'] },
+      timestamp: new Date('2026-08-24T09:03:00.000Z'),
+    } as ChatMessage;
+    const html = await buildTranscriptExport('html', { ...input, messages: [stopNote] }, exportedAt);
+
+    expect(html).toContain('Asked Claude to stop 2 loops');
+    expect(html).toContain('title="b2148320, 7b7cd8fc"');
   });
 
   it('escapes a session title that contains markup', async () => {

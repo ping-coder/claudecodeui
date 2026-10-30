@@ -1,8 +1,9 @@
-import { memo } from 'react';
+import { memo, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { ChatInstancesProvider } from '@/modules/chat';
 import { PaletteOpsProvider } from '@/modules/command-palette';
+import { usePlugins } from '@/modules/plugins';
 import { ProjectsStateProvider } from '@/modules/project-workspace/context/ProjectsStateContext';
 import {
   SessionProtectionProvider,
@@ -33,10 +34,18 @@ function ProjectWorkspaceRouteContent() {
   const navigate = useNavigate();
   const { sessionId } = useParams<{ sessionId?: string }>();
   const { isMobile } = useDeviceSettings({ trackPWA: false });
-  const { ws, sendMessage, subscribe } = useWebSocket();
-  const { isSessionProcessing } = useSessionProtectionActions();
+  const { ws, sendMessage, subscribe, reconnectNow } = useWebSocket();
+  const { isSessionProcessing, refreshRunningSessions } = useSessionProtectionActions();
+  const { refreshPlugins } = usePlugins();
 
   useVisualViewportKeyboardOffset();
+
+  // Refresh all's share outside the workspace state. A dropped socket reconnects now instead of after
+  // its retry delay; the reconnect then has every chat catch up on its own (websocket_reconnected).
+  const refreshAppState = useCallback(() => {
+    reconnectNow();
+    return Promise.allSettled([refreshRunningSessions(), refreshPlugins()]);
+  }, [reconnectNow, refreshPlugins, refreshRunningSessions]);
 
   return (
     <ProjectsStateProvider
@@ -45,6 +54,7 @@ function ProjectWorkspaceRouteContent() {
       subscribe={subscribe}
       isMobile={isMobile}
       isSessionProcessing={isSessionProcessing}
+      refreshAppState={refreshAppState}
     >
       <ProjectWorkspaceShell
         isMobile={isMobile}

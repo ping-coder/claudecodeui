@@ -9,6 +9,7 @@ import test from 'node:test';
 import express, { type NextFunction, type Request, type Response } from 'express';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { buildScheduledStopMessage } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import providerRouter from '@/modules/providers/provider.routes.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
@@ -161,6 +162,38 @@ test('conversation search streams title matches before transcript results', asyn
     assert.equal(titlePayload.titleResults[0]?.sessionId, 'title-only-session');
     assert.equal(titlePayload.titleResults[0]?.sessionTitle, 'Release planning notes');
     assert.equal(titlePayload.titleResults[0]?.provider, 'codex');
+  });
+});
+
+test('conversation search leaves out the prompt CloudCLI sends to stop loops', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    const sessionId = 'claude-search-control-prompt';
+    const transcriptPath = path.join(path.dirname(workspacePath), `${sessionId}.jsonl`);
+    const row = (uuid: string, role: 'user' | 'assistant', content: unknown) => JSON.stringify({
+      type: role, uuid, sessionId, timestamp: '2026-10-30T09:00:00.000Z', message: { role, content },
+    });
+    await writeFile(transcriptPath, `${[
+      row('question', 'user', 'Watch the deploy every five minutes'),
+      row('stop', 'user', buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false })),
+      row('reply', 'assistant', [{ type: 'text', text: 'Cancelled the loop.' }]),
+    ].join('\n')}\n`);
+    sessionsDb.createSession(sessionId, 'claude', workspacePath, 'Loop session', undefined, undefined, transcriptPath);
+
+    const matchedRows = async (query: string) => {
+      const response = await fetch(`${baseUrl}/api/providers/search/sessions?q=${encodeURIComponent(query)}&limit=50`);
+      const eventStream = await response.text();
+      return eventStream
+        .split('\n\n')
+        .filter((event) => event.startsWith('event: result\n'))
+        .flatMap((event) => {
+          const payload = JSON.parse(event.slice(event.indexOf('data: ') + 'data: '.length)) as {
+            projectResult: { sessions: Array<{ matches: Array<{ messageUuid: string | null }> }> } | null;
+          };
+          return payload.projectResult?.sessions.flatMap((session) => session.matches.map((match) => match.messageUuid)) ?? [];
+        });
+    };
+    assert.deepEqual(await matchedRows('deploy'), ['question']);
+    assert.deepEqual(await matchedRows('CronDelete'), []);
   });
 });
 
@@ -817,6 +850,7 @@ test('the hand-over plan route answers whether a send with these options keeps t
   // with background work left; the runtime plans with the run options the
   // send would get.
   const planned: Array<{ sessionId: string; options: Record<string, unknown> }> = [];
+  let answer: Record<string, unknown> = { heldWork: true, canHandOver: false, changes: ['effort'] };
   const realResolveProvider = providerRegistry.resolveProvider;
   providerRegistry.resolveProvider = ((provider: string) => {
     if (provider !== 'claude') {
@@ -827,7 +861,7 @@ test('the hand-over plan route answers whether a send with these options keeps t
       runtime: {
         planHandOver: async (sessionId: string, options: Record<string, unknown>) => {
           planned.push({ sessionId, options });
-          return { heldWork: true, canHandOver: false, changes: ['effort'] };
+          return answer;
         },
       },
     } as unknown as IProvider;
@@ -859,6 +893,31 @@ test('the hand-over plan route answers whether a send with these options keeps t
       const malformed = await ask('held-session', { options: ['effort'] });
       assert.equal(malformed.status, 400);
       assert.equal(planned.length, 1, 'neither reaches the runtime');
+
+      // What exactly keeps the turn out, and a process of its own that keeps
+      // the work, go out as the runtime said, field by field.
+      answer = {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['tools', 'permissionMode'],
+        details: {
+          tools: { notAllowed: ['WebFetch'], alsoDenied: [], extra: 1 },
+          permissionMode: { process: 'plan', message: 'bypassPermissions', reason: 'bypass_not_allowed' },
+          model: 'not an object',
+        },
+        replaceKeepsWork: true,
+      };
+      const detailed = await ask('held-session', { options: {} });
+      assert.deepEqual((await detailed.json() as { data: unknown }).data, {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['tools', 'permissionMode'],
+        details: {
+          tools: { notAllowed: ['WebFetch'], alsoDenied: [] },
+          permissionMode: { process: 'plan', message: 'bypassPermissions', reason: 'bypass_not_allowed' },
+        },
+        replaceKeepsWork: true,
+      });
     });
   } finally {
     providerRegistry.resolveProvider = realResolveProvider;
@@ -959,4 +1018,54 @@ test('the turn-question route refuses a missing, empty, oversized or unprintable
     assert.equal(unknown.status, 404);
     assert.equal(unknown.payload.error?.code, 'SESSION_NOT_FOUND');
   });
+});
+
+test('the paused-work route lists the loops no process runs, and none while a process of this server holds the session', async () => {
+  const paused: ScheduledWorkSummary[] = [{
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_01CronCreate',
+    prompt: 'check CI',
+    startedAt: 1_700_000_000_000,
+    nextFireAt: 1_700_000_300_000,
+    recurring: true,
+    holdUntil: 1_700_691_200_000,
+    paused: true,
+  }];
+  let processState: 'running' | null = null;
+  const claude = {
+    id: 'claude',
+    runtime: {
+      processState: () => processState,
+      listBackgroundWork: () => [],
+      listScheduledWork: () => [],
+    },
+    sessions: {
+      readPausedScheduledWork: async () => ({ items: paused, resumeContent: 'resume', heldElsewhere: false }),
+    },
+  } as unknown as IProvider;
+  const realListProviders = providerRegistry.listProviders;
+  const realResolveProvider = providerRegistry.resolveProvider;
+  providerRegistry.listProviders = () => [claude];
+  providerRegistry.resolveProvider = () => claude;
+
+  try {
+    await withIsolatedHome(() => withProviderServer(async (baseUrl, workspacePath) => {
+      await mkdir(workspacePath, { recursive: true });
+      sessionsDb.createSession('paused-session', 'claude', workspacePath);
+      const read = async (sessionId: string) => {
+        const response = await fetch(`${baseUrl}/api/providers/sessions/${sessionId}/paused-scheduled-work`);
+        assert.equal(response.status, 200);
+        return (await response.json() as { data: { scheduled: unknown[] } }).data.scheduled;
+      };
+
+      assert.deepEqual(await read('paused-session'), paused);
+      processState = 'running';
+      assert.deepEqual(await read('paused-session'), []);
+      assert.deepEqual(await read('no-such-session'), []);
+    }));
+  } finally {
+    providerRegistry.listProviders = realListProviders;
+    providerRegistry.resolveProvider = realResolveProvider;
+  }
 });

@@ -758,6 +758,20 @@ export function splitLegacyUltracodeEffort<
 // ---------------------------
 //----------------- CHAT TURN OPTION UTILITIES ------------
 /**
+ * A turn's effort and ultracode as its options name them: `effort` trimmed,
+ * undefined when blank, the legacy `ultracode` effort split into xhigh with
+ * ultracode on, and `ultracode` only as a real boolean (see
+ * `buildTurnRunOptions`).
+ */
+function splitTurnEffort(options: AnyRecord): { effort: string | undefined; ultracode: boolean | undefined } {
+  const requestedEffort = typeof options.effort === 'string' ? options.effort.trim() : '';
+  return splitLegacyUltracodeEffort({
+    effort: requestedEffort || undefined,
+    ultracode: typeof options.ultracode === 'boolean' ? options.ultracode : undefined,
+  });
+}
+
+/**
  * The run options a provider runtime gets for one chat turn of a session,
  * built from the `options` its client sent (a `chat.send`, or a queued or
  * scheduled message replaying one) and the session's row:
@@ -768,15 +782,18 @@ export function splitLegacyUltracodeEffort<
  * - `sessionId` is the app session id;
  * - `cwd` is the client's when it named one, else the session's project;
  * - `projectPath` is the session's project, else the client's;
- * - a client's `acceptProcessSettings` is dropped: whether a turn runs on
- *   the held process's own settings is the scheduled-messages dispatcher's
- *   call (see `ProviderHandOverPlanOptions`), which passes it in
- *   `extraOptions`.
+ * - a client's `acceptProcessSettings` and `ownSettings` are dropped:
+ *   whether a turn runs on the held process's own settings, and what it
+ *   runs with when no process lends them (`ownSettings`, see
+ *   `IProviderRuntime.run`), is the scheduled-messages dispatcher's call
+ *   (see `ProviderHandOverPlanOptions`), which passes them in
+ *   `extraOptions`; the effort and ultracode in `ownSettings` are split as
+ *   the turn's own are.
  *
  * `extraOptions` (how an edited message asks to resume partway, the
- * dispatcher's `acceptProcessSettings`) go over the client's. Attachments
- * pass through as sent: the chat gateway re-validates them and sets its own
- * before a run.
+ * dispatcher's `acceptProcessSettings` and `ownSettings`) go over the
+ * client's. Attachments pass through as sent: the chat gateway re-validates
+ * them and sets its own before a run.
  *
  * Used by the chat gateway for every turn it runs, by the provider runtime
  * service to plan whether a `chat.send` would go into the process a runtime
@@ -790,18 +807,18 @@ export function buildTurnRunOptions(input: {
   clientOptions: AnyRecord;
   extraOptions?: AnyRecord;
 }): AnyRecord & { effort: string | undefined; ultracode: boolean | undefined } {
-  const { acceptProcessSettings: _fromClient, ...clientOptions } = input.clientOptions;
-  const requestedEffort = typeof clientOptions.effort === 'string' ? clientOptions.effort.trim() : '';
-  const { effort, ultracode } = splitLegacyUltracodeEffort({
-    effort: requestedEffort || undefined,
-    ultracode: typeof clientOptions.ultracode === 'boolean' ? clientOptions.ultracode : undefined,
-  });
+  const {
+    acceptProcessSettings: _fromClient,
+    ownSettings: _ownFromClient,
+    ...clientOptions
+  } = input.clientOptions;
+  const ownSettings = readObjectRecord(input.extraOptions?.ownSettings);
 
   return {
     ...clientOptions,
     ...input.extraOptions,
-    effort,
-    ultracode,
+    ...(ownSettings ? { ownSettings: { ...ownSettings, ...splitTurnEffort(ownSettings) } } : {}),
+    ...splitTurnEffort(clientOptions),
     sessionId: input.sessionId,
     cwd: clientOptions.cwd ?? input.projectPath ?? undefined,
     projectPath: input.projectPath ?? clientOptions.projectPath,

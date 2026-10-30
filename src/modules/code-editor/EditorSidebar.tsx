@@ -29,6 +29,8 @@ type EditorSidebarProps = {
   onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
   projectPath?: string;
   fillSpace?: boolean;
+  /** The workspace pane's refresh token: a clean buffer rereads its file (the editor itself never remounts, so edits and full screen stay). */
+  reloadToken?: number;
 };
 
 // The narrowest docked editor box: the editor and the divider in front of it.
@@ -53,6 +55,7 @@ export default function EditorSidebar({
   onUnsavedChangesChange,
   projectPath,
   fillSpace,
+  reloadToken,
 }: EditorSidebarProps) {
   const { t } = useTranslation('codeEditor');
   const [poppedOut, setPoppedOut] = useState(false);
@@ -222,6 +225,7 @@ export default function EditorSidebar({
           isExpanded={!isFloating && editorExpanded}
           onToggleExpand={isFloating ? null : onToggleEditorExpand}
           onPopOut={isFloating ? null : handlePopOut}
+          reloadToken={reloadToken}
         />
       </div>
     </div>

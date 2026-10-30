@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { api, readApiJson } from '@/shared/api';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import type { CodeEditorFile } from '@/shared/types';
 import { isBinaryFile } from '@/modules/code-editor/utils/binaryFile';
 import { getPreviewKind } from '@/modules/code-editor/utils/previewableFile';
@@ -8,7 +9,12 @@ import { getPreviewKind } from '@/modules/code-editor/utils/previewableFile';
 type UseCodeEditorDocumentParams = {
   file: CodeEditorFile;
   projectPath?: string;
+  /** The workspace's refresh token: when it moves, a clean buffer is read again from disk. */
+  reloadToken?: number;
 };
+
+/** How long the "not reloaded, unsaved changes" notice stays up. */
+const RELOAD_SKIPPED_NOTICE_MS = 6000;
 
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
@@ -23,7 +29,7 @@ const getErrorMessage = (error: unknown) => {
 // after an undo) unless both sides of the comparison are normalised.
 const normalizeLineEndings = (text: string) => text.replace(/\r\n?/g, '\n');
 
-export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocumentParams) => {
+export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCodeEditorDocumentParams) => {
   const [content, setContent] = useState('');
   // The text as last loaded from disk or written back by a save. The buffer is
   // compared against it to tell whether closing or switching files would
@@ -49,6 +55,12 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
   // when another file is opened belongs to the previous file and must not land
   // on the new one's buffer, baseline or save state.
   const loadGenerationRef = useRef(0);
+  // Counts the rereads a workspace refresh started. A newer reread, or a save, makes an older one's answer
+  // stale: it must not put back what the disk held before the save.
+  const reloadGenerationRef = useRef(0);
+  // The file whose buffer a workspace refresh left alone because it held edits: the header says so for a
+  // moment. Kept as the path, so opening another file drops the notice by itself.
+  const [reloadSkippedPath, setReloadSkippedPath] = useState<string | null>(null);
 
   useEffect(() => {
     const loadGeneration = ++loadGenerationRef.current;
@@ -133,6 +145,7 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
 
     const saveGeneration = loadGenerationRef.current;
     const isStaleSave = () => loadGenerationRef.current !== saveGeneration;
+    reloadGenerationRef.current += 1;
 
     setSaving(true);
     setSaveError(null);
@@ -215,6 +228,58 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     [content, isBinary, loading, normalizedSavedContent, previewKind, savedContent],
   );
 
+  // What a reread checks when its answer arrives: edits typed while it was out keep the buffer.
+  const latestBufferRef = useRef({ hasUnsavedChanges, saving });
+  useLayoutEffect(() => {
+    latestBufferRef.current = { hasUnsavedChanges, saving };
+  });
+
+  // A workspace refresh rereads the file from disk, in place (no loading state, so the editor keeps its
+  // scroll and cursor), and only while the buffer is clean: edits are never dropped, the header says the
+  // file was left as it is instead. Media previews refetch on their own; binaries and diffs from a chat
+  // message have nothing on disk to reread here.
+  useRefreshSignal(reloadToken, () => {
+    const hasDiffSnapshot = Boolean(file.diffInfo) && fileDiffNewString !== undefined && fileDiffOldString !== undefined;
+    if (loading || previewKind || isBinary || hasDiffSnapshot || !fileProjectId) {
+      return;
+    }
+    if (hasUnsavedChanges || saving) {
+      setReloadSkippedPath(filePath);
+      return;
+    }
+    const loadGeneration = loadGenerationRef.current;
+    const reloadGeneration = ++reloadGenerationRef.current;
+    const isStaleReload = () => loadGenerationRef.current !== loadGeneration || reloadGenerationRef.current !== reloadGeneration;
+    void (async () => {
+      try {
+        const response = await api.readFile(fileProjectId, filePath);
+        const data = await readApiJson<{ content: string }>(response);
+        if (isStaleReload()) {
+          return;
+        }
+        if (latestBufferRef.current.hasUnsavedChanges || latestBufferRef.current.saving) {
+          setReloadSkippedPath(filePath);
+          return;
+        }
+        setContent(data.content);
+        setSavedContent(data.content);
+      } catch (error) {
+        // The buffer stays as it was: an error placeholder would replace a file that is fine on screen.
+        console.error('Error reloading file:', error);
+      }
+    })();
+  });
+
+  // The notice shows while that file is open with edits still unsaved, and goes after a short while.
+  const reloadSkipped = reloadSkippedPath === filePath && (hasUnsavedChanges || saving);
+  useEffect(() => {
+    if (reloadSkippedPath === null) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setReloadSkippedPath(null), RELOAD_SKIPPED_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [reloadSkippedPath]);
+
   return {
     content,
     setContent,
@@ -226,6 +291,7 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     previewKind,
     fileProjectId,
     hasUnsavedChanges,
+    reloadSkipped,
     handleSave,
     handleDownload,
   };

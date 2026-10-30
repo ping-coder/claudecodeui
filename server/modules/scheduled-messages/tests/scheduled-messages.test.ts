@@ -10,6 +10,7 @@ import {
   dispatchDueScheduledMessages,
   dispatchQueuedMessages,
   initializeScheduledMessageDispatcher,
+  listDispatchWaits,
 } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
@@ -177,18 +178,18 @@ const PROCESS_ONLY_SETTINGS: HandOverChange[] = ['effort', 'ultracode', 'tools']
 
 /**
  * What keeps a turn out of a held process, as Claude's runtime reads
- * `acceptProcessSettings` (`accepts`: the turn sets it): nothing, when the
- * process is held for scheduled work alone (`heldForScheduledWorkAlone`) and
- * only settings it cannot switch keep the turn out, which then runs with the
- * process's own; otherwise `changes` as they are.
+ * `acceptProcessSettings` (`accepts`: the turn sets it): when the process is
+ * held for scheduled work alone (`heldForScheduledWorkAlone`), the changes
+ * but the settings it cannot switch, which the turn then runs with the
+ * process's own of; otherwise `changes` as they are.
  */
 function changesOnceAccepted(
   changes: HandOverChange[],
   accepts: boolean,
   heldForScheduledWorkAlone: boolean,
 ): HandOverChange[] {
-  return accepts && heldForScheduledWorkAlone && changes.every((change) => PROCESS_ONLY_SETTINGS.includes(change))
-    ? []
+  return accepts && heldForScheduledWorkAlone
+    ? changes.filter((change) => !PROCESS_ONLY_SETTINGS.includes(change))
     : changes;
 }
 
@@ -1266,14 +1267,14 @@ test('a message at an effort only a new process can apply still waits when the h
   }
 });
 
-test('a message that needs a new process for its working directory still waits while a /loop alone holds the process', async () => {
+test('a message that needs a new process for its working directory still waits while a /loop alone holds the process, kept out by the working directory alone once it takes the process\'s settings', async () => {
   await withIsolatedDatabase(async (userId) => {
     const runs: RunCall[] = [];
     const { runtime, plans, stops } = createHeldProcessRuntime(runs, SESSION_ID, {
       cwd: projectPathOf(SESSION_ID),
       effort: 'high',
     });
-    scheduledMessagesService.schedule({
+    const scheduled = scheduledMessagesService.schedule({
       userId,
       sessionId: SESSION_ID,
       content: 'look at the other checkout',
@@ -1284,7 +1285,12 @@ test('a message that needs a new process for its working directory still waits w
     assert.equal(await dispatchDueScheduledMessages(runtime), 0);
     assert.equal(runs.length, 0);
     assert.deepEqual(stops, []);
-    assert.deepEqual(plans.map((plan) => plan.planOptions), [{ inheritUnset: true }]);
+    assert.deepEqual(plans.map((plan) => plan.planOptions), [{ inheritUnset: true }, { inheritUnset: true, acceptProcessSettings: true }]);
+    assert.deepEqual(
+      listDispatchWaits(userId, SESSION_ID).map((wait) => [wait.target, wait.reason, wait.changes]),
+      [[{ kind: 'scheduled', id: scheduled.id }, 'held_settings', ['cwd']]],
+      'the wait names what really keeps it out',
+    );
   });
 });
 
@@ -1364,7 +1370,7 @@ test('an acceptProcessSettings a message\'s stored options carry is dropped: onl
   });
 });
 
-/** What Claude's runtime says when the held process does not take an accepting turn after all (failAcceptingTurn). */
+/** What Claude's runtime says when the held process does not take an accepting turn after all (failHandOver). */
 const HAND_OVER_FAILED_CONTENT = 'Not sent: this message changes the reasoning effort, which only a new Claude process can apply, and a new process would stop the session\'s scheduled work.';
 
 /**

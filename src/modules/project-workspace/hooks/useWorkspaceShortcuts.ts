@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 
 import { getActiveTab, getPane } from '@/modules/project-workspace/utils/workspaceLayout';
+import { getFullscreenElement } from '@/shared/browserFullscreen';
 import {
   ESCAPE_LAYER_SELECTOR,
   WORKSPACE_FOCUS_LEFT_PANE_SHORTCUT,
   WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT,
+  WORKSPACE_FULLSCREEN_REFRESH_SHORTCUT,
   WORKSPACE_FULLSCREEN_SHORTCUT,
   WORKSPACE_SPLIT_SHORTCUT,
 } from '@/shared/constants';
@@ -27,6 +29,8 @@ type UseWorkspaceShortcutsOptions = {
    * rule (it closes when the focused tab changes) does not catch them.
    */
   closeSidebarPeek: () => void;
+  /** Refresh all, which F5 and Mod+R run instead of reloading the page while the browser is in full screen. */
+  refreshWorkspace?: () => unknown;
 };
 
 /** Each shortcut's keys, in formatShortcut's tokens: the same constants the tooltips, hints and palette show. */
@@ -85,6 +89,29 @@ const isInsideTerminal = (target: EventTarget | null): boolean => (
 );
 
 /**
+ * Whether a key press is the browser's plain reload: F5, or Mod+R (Ctrl+R, Command+R on Apple
+ * platforms). Shift (a hard reload), Alt and the other primary modifier leave it alone, and so does
+ * Ctrl+F5. R is read from the character the layout gives the key, as the browser does; a layout that
+ * types no Latin letter there falls back to the physical key.
+ */
+const isPlainReloadKey = (event: KeyboardEvent): boolean => {
+  if (event.shiftKey || event.altKey) {
+    return false;
+  }
+  if (event.key === WORKSPACE_FULLSCREEN_REFRESH_SHORTCUT[0]) {
+    return !event.ctrlKey && !event.metaKey;
+  }
+  const isApple = isApplePlatform();
+  const isModDown = isApple ? event.metaKey : event.ctrlKey;
+  const isOtherPrimaryDown = isApple ? event.ctrlKey : event.metaKey;
+  if (!isModDown || isOtherPrimaryDown) {
+    return false;
+  }
+  const key = event.key.toLowerCase();
+  return key === 'r' || (!/^[a-z]$/.test(key) && event.code === 'KeyR');
+};
+
+/**
  * Whether a layer that owns the keyboard is open: a modal dialog, a menu, or another Escape layer. A
  * non-modal dialog (the immersive sidebar drawer) only owns Escape, so the workspace keys still work.
  */
@@ -94,8 +121,11 @@ const isKeyboardOwnedByLayer = (): boolean => Array.from(document.querySelectorA
 /**
  * Used by ProjectWorkspaceShell as the single registration point of the workspace shortcuts:
  * Mod+\ split or merge, Mod+1 / Mod+2 focus the left / right pane (only while split; unsplit they stay
- * with the browser, which switches its tabs with them) and Mod+Shift+Enter full screen. Listens on
- * window in the capture phase, so the terminal and the editors cannot swallow these keys first; desktop only.
+ * with the browser, which switches its tabs with them) and Mod+Shift+Enter full screen, desktop only.
+ * While the browser is in full screen, F5 and Mod+R refresh the whole workspace instead of reloading the
+ * page, which would leave full screen and lose what only lives in memory; on any device, as a tablet
+ * keyboard has them too. Listens on window in the capture phase, so the terminal and the editors cannot
+ * swallow these keys first.
  */
 export function useWorkspaceShortcuts(options: UseWorkspaceShortcutsOptions): void {
   // The newest options, read when a key arrives, so the one window listener is never re-registered.
@@ -165,7 +195,28 @@ export function useWorkspaceShortcuts(options: UseWorkspaceShortcutsOptions): vo
       }
     };
 
+    // A reload in browser full screen would leave it: the workspace refreshes in place instead. Inside a
+    // terminal, F5 and Ctrl+R are the shell's (reverse search); Command+R never reaches one.
+    const handleFullscreenReload = (event: KeyboardEvent): boolean => {
+      const { refreshWorkspace } = optionsRef.current;
+      if (!refreshWorkspace || getFullscreenElement() === null || event.isComposing || !isPlainReloadKey(event)) {
+        return false;
+      }
+      if (isInsideTerminal(event.target) && !(isApplePlatform() && event.metaKey)) {
+        return false;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) {
+        void refreshWorkspace();
+      }
+      return true;
+    };
+
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (handleFullscreenReload(event)) {
+        return;
+      }
       const shortcut = readWorkspaceShortcut(event);
       // Keys another handler consumed and keys typed while an IME composes are not ours.
       if (!shortcut || event.defaultPrevented || event.isComposing || optionsRef.current.isMobile) {

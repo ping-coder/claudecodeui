@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import type { NormalizedMessage } from '@/shared/types';
+import { isTurnOpener } from '@/shared/utils';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 
 function message(
@@ -270,4 +271,20 @@ test('an updated event finds a call launched before this page loaded through its
 
   const [row] = normalizedToChatMessages([workflowCall, launchAck, killed]);
   assert.equal(row?.taskStatus?.status, 'stopped');
+});
+
+test('a control note stays on the assistant row it is drawn as, which opens no turn', () => {
+  const controlNote = { kind: 'scheduled-stop' as const, count: 1, jobIds: ['b2148320'] };
+  const [note, reply] = normalizedToChatMessages([
+    message('stop-prompt', { content: 'Asked Claude to stop 1 loop', controlNote }),
+    message('reply', { content: 'Cancelled the loop.' }),
+  ]);
+
+  assert.equal(note?.type, 'assistant');
+  assert.deepEqual(note?.controlNote, controlNote);
+  assert.equal(note?.transcriptAnchorId, undefined);
+  assert.equal(isTurnOpener(note!), false);
+  assert.equal(reply?.controlNote, undefined);
+  // A user row that somehow carried one would open no turn either.
+  assert.equal(isTurnOpener({ type: 'user', content: 'x', timestamp: 0, controlNote }), false);
 });

@@ -17,6 +17,7 @@ import {
 
 import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
 import { useBrowserFullscreen } from '@/shared/hooks/useBrowserFullscreen';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { cn } from '@/shared/utils';
 import { Badge, Button } from '@/shared/ui';
 import { api, readApiJson, ApiRequestError } from '@/shared/api';
@@ -58,6 +59,8 @@ type BrowserUseSession = {
 type BrowserUsePanelProps = {
   isVisible: boolean;
   onShowSettings?: (tab?: SettingsMainTab) => void;
+  /** The workspace pane's refresh token: when it moves, the status and sessions reload in place (a remount would leave its full screen). */
+  refreshToken?: number;
 };
 
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
@@ -143,7 +146,7 @@ function getStatusDot(status: BrowserUseSession['status']): string {
 const PROMPT_KEYS = ['browserUse.prompt1', 'browserUse.prompt2'];
 
 /** Used by the project-workspace module to render the Browser tab's session list and live preview. */
-export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUsePanelProps) {
+export default function BrowserUsePanel({ isVisible, onShowSettings, refreshToken }: BrowserUsePanelProps) {
   const { t } = useTranslation('settings');
   const [status, setStatus] = useState<BrowserUseStatus | null>(null);
   const [sessions, setSessions] = useState<BrowserUseSession[]>([]);
@@ -237,6 +240,10 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
     if (!isVisible) return;
     void refresh();
   }, [isVisible, refresh]);
+
+  useRefreshSignal(refreshToken, () => {
+    void refresh();
+  });
 
   const runAction = useCallback(async (action: () => Promise<void>) => {
     setIsBusy(true);

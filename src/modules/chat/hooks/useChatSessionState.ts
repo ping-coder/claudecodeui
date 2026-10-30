@@ -3,7 +3,7 @@ import type { MutableRefObject } from 'react';
 
 import { api } from '@/shared/api';
 import type { AddChatMessageOptions, MarkSessionIdle, SessionActivityMap,Project,ProjectSession,LLMProvider,NormalizedMessage,ChatMessage,DiffCalculator,RevealMessageOptions } from '@/shared/types';
-import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
+import type { SessionSlot, SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { resolveLatestRefreshLimit, SESSION_MESSAGES_PAGE_SIZE } from '@/modules/chat/utils/sessionMessagePagination';
 import { createMessageHistoryRefreshCoordinator } from '@/modules/chat/utils/messageHistoryRefreshCoordinator';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
@@ -45,6 +45,109 @@ const REVEAL_HOLD_CANCEL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydow
 
 /** How long a revealed row flashes, as long as a search hit does. */
 const REVEAL_HIGHLIGHT_MS = 4000;
+
+/** The user's input on the transcript itself that scrolls it, its scrollbar included. */
+const TRANSCRIPT_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown'] as const;
+
+/** Keys that scroll the transcript when it has the keyboard. */
+const TRANSCRIPT_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+
+/**
+ * Live rows younger than this survive a refresh of an idle transcript even
+ * when the history read does not have them: a reply that just finished can
+ * take a moment to reach the transcript on disk.
+ */
+const REFRESH_KEEP_REALTIME_MS = 15_000;
+
+/** What a read of the newest rows did, as the store reports it (see refreshLatestFromServer). */
+type LatestRefreshOutcome = { applied: boolean; deferred: boolean; latestTotal?: number };
+
+/** The row a refresh keeps in place while the user reads above the bottom, found again by its time. */
+type RefreshScrollAnchor = {
+  timestamp: string;
+  /** Which of the rows with this time it is: the rows of one tool run can share theirs. */
+  occurrence: number;
+  /** How far its top is below the transcript's top edge. */
+  offset: number;
+};
+
+/**
+ * The transcript's rows in order, each once: a lazy row's wrapper carries the
+ * row's time, and so does the content inside it while mounted.
+ */
+function listTimestampedRows(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('[data-message-timestamp]'))
+    .filter((element) => {
+      const outer = element.parentElement?.closest('[data-message-timestamp]');
+      return !outer || !container.contains(outer);
+    });
+}
+
+/** The first row still showing at the transcript's top edge; null when none is. */
+function captureRefreshScrollAnchor(container: HTMLElement): RefreshScrollAnchor | null {
+  const containerTop = container.getBoundingClientRect().top;
+  const occurrences = new Map<string, number>();
+  for (const row of listTimestampedRows(container)) {
+    const timestamp = row.getAttribute('data-message-timestamp') ?? '';
+    const occurrence = occurrences.get(timestamp) ?? 0;
+    occurrences.set(timestamp, occurrence + 1);
+    const bounds = row.getBoundingClientRect();
+    if (bounds.bottom > containerTop) {
+      return { timestamp, occurrence, offset: bounds.top - containerTop };
+    }
+  }
+  return null;
+}
+
+/**
+ * The first message of the visible window, found again by its time: which of
+ * the window's messages with that time it is, counted from the newest, so
+ * rows that come in after it or drop off above it do not change the count.
+ */
+type WindowTop = {
+  timestamp: string;
+  fromNewest: number;
+};
+
+function captureWindowTop(visibleMessages: ChatMessage[]): WindowTop | null {
+  if (visibleMessages.length === 0) {
+    return null;
+  }
+  const timestamp = String(visibleMessages[0].timestamp);
+  return {
+    timestamp,
+    fromNewest: visibleMessages.filter((message) => String(message.timestamp) === timestamp).length,
+  };
+}
+
+/** Where `top` is in `messages`; -1 when it is gone. */
+function findWindowTop(messages: ChatMessage[], top: WindowTop): number {
+  let seen = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (String(messages[index].timestamp) === top.timestamp) {
+      seen += 1;
+      if (seen === top.fromNewest) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
+/** The row `anchor` names in the transcript as it is now; null when it is gone. */
+function findRefreshScrollAnchor(container: HTMLElement, anchor: RefreshScrollAnchor): HTMLElement | null {
+  let occurrence = 0;
+  for (const row of listTimestampedRows(container)) {
+    if (row.getAttribute('data-message-timestamp') !== anchor.timestamp) {
+      continue;
+    }
+    if (occurrence === anchor.occurrence) {
+      return row;
+    }
+    occurrence += 1;
+  }
+  return null;
+}
 
 /**
  * Scrolls `container` so the top of `row` lands REVEAL_START_OFFSET_PX below
@@ -110,6 +213,33 @@ function holdRowAtStart(container: HTMLElement, row: HTMLElement): () => void {
     stop();
   }
   return stop;
+}
+
+/**
+ * Calls `onInput` at the user's first input that scrolls `container` by
+ * hand: a wheel, touch or press on it, or a scrolling key pressed outside a
+ * text field. Typing in the composer or clicking elsewhere does not count.
+ * Returns what stops watching.
+ */
+function watchScrollInput(container: HTMLElement, onInput: () => void): () => void {
+  const onKeyDown = (event: KeyboardEvent) => {
+    const target = event.target;
+    const isTextField = target instanceof HTMLElement
+      && (target.isContentEditable || target.matches('input, textarea, select'));
+    if (!isTextField && TRANSCRIPT_SCROLL_KEYS.has(event.key)) {
+      onInput();
+    }
+  };
+  for (const type of TRANSCRIPT_SCROLL_EVENTS) {
+    container.addEventListener(type, onInput, { capture: true, passive: true });
+  }
+  window.addEventListener('keydown', onKeyDown, true);
+  return () => {
+    for (const type of TRANSCRIPT_SCROLL_EVENTS) {
+      container.removeEventListener(type, onInput, true);
+    }
+    window.removeEventListener('keydown', onKeyDown, true);
+  };
 }
 
 /**
@@ -324,7 +454,11 @@ export function useChatSessionState({
   const revealUntilRef = useRef(0);
   /** Ends the hold on the row the last start-aligned reveal brought into view, while it runs. */
   const stopRevealHoldRef = useRef<(() => void) | null>(null);
-  /** Counts revealMessage calls, so the retries of one a later call replaced give up. */
+  /**
+   * Counts the jumps to a row: revealMessage calls and search hits scrolled
+   * to. The retries of a reveal a later jump replaced give up, and a refresh
+   * whose read was out leaves the view where a jump took it.
+   */
   const revealCountRef = useRef(0);
   /**
    * The load of every message in flight, with the session it is for: a call
@@ -373,6 +507,23 @@ export function useChatSessionState({
    * runs exactly one reset pass in this local chat state domain.
    */
   const previousNewSessionTriggerRef = useRef(newSessionTrigger ?? 0);
+  /**
+   * The session a refresh asked for while the chat was hidden. A hidden chat
+   * reads no history, so the refresh runs once the chat shows this session.
+   */
+  const pendingRefreshRef = useRef<string | null>(null);
+  /** refreshTranscript, for the activation effect that runs a refresh left pending. */
+  const refreshTranscriptRef = useRef<() => Promise<void>>(async () => undefined);
+  /**
+   * The row a refresh keeps in place, and the tick whose layout effect puts it
+   * back once the new rows are committed. A tick of its own: the scroll
+   * restore of a loaded page waits for the row count to change, which a
+   * refresh need not do.
+   */
+  const refreshAnchorRef = useRef<RefreshScrollAnchor | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+  /** The deferred scroll to the bottom after a refresh of a transcript that followed its newest rows. */
+  const refreshFollowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const createDiff = useMemo<DiffCalculator>(() => createCachedDiffCalculator(), []);
 
@@ -429,6 +580,7 @@ export function useChatSessionState({
     pendingScrollRestoreRef.current = null;
     pendingInitialScrollRef.current = true;
     lastLoadedSessionKeyRef.current = null;
+    pendingRefreshRef.current = null;
 
     if (loadAllOverlayTimerRef.current) {
       clearTimeout(loadAllOverlayTimerRef.current);
@@ -465,8 +617,11 @@ export function useChatSessionState({
   isActiveRef.current = isActive;
   activeSessionIdRef.current = activeSessionId;
 
-  const latestRefreshExecutorRef = useRef<(sessionId: string) => Promise<boolean | void>>(
-    async () => true,
+  // Stitches the session's newest rows onto the loaded ones and mirrors the
+  // slot's paging. Resolves to what the store reports: whether the rows went
+  // on, the total the server gave, and whether the read waits for the chat.
+  const latestRefreshExecutorRef = useRef<(sessionId: string) => Promise<LatestRefreshOutcome>>(
+    async () => ({ applied: false, deferred: false }),
   );
   latestRefreshExecutorRef.current = async (sessionId: string) => {
     const result = await sessionStore.refreshLatestFromServer(sessionId, {
@@ -488,13 +643,13 @@ export function useChatSessionState({
         setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
       }
     }
-    return !result.deferred;
+    return result;
   };
 
   const refreshCoordinatorRef = useRef<ReturnType<typeof createMessageHistoryRefreshCoordinator> | null>(null);
   if (!refreshCoordinatorRef.current) {
     refreshCoordinatorRef.current = createMessageHistoryRefreshCoordinator(
-      (sessionId) => latestRefreshExecutorRef.current(sessionId),
+      async (sessionId) => !(await latestRefreshExecutorRef.current(sessionId)).deferred,
       (sessionId) => isActiveRef.current && activeSessionIdRef.current === sessionId,
     );
   }
@@ -730,6 +885,23 @@ export function useChatSessionState({
     }
   }, [chatMessages.length, isActive, isUserScrolledUp]);
 
+  // Ends whatever owns the transcript's scroll for a while: a search jump
+  // still retrying and a revealed row being held in place. Their retries give
+  // up, so the transcript follows its newest rows, or keeps the user's place,
+  // as it would without them.
+  const cancelScrollHolds = useCallback(() => {
+    if (searchScrollTimerRef.current) {
+      clearTimeout(searchScrollTimerRef.current);
+      searchScrollTimerRef.current = null;
+    }
+    searchScrollActiveRef.current = false;
+    setSearchTarget(null);
+    stopRevealHoldRef.current?.();
+    stopRevealHoldRef.current = null;
+    revealUntilRef.current = 0;
+    revealCountRef.current += 1;
+  }, []);
+
   // Reset scroll/pagination state on session change
   useEffect(() => {
     // A search jump belongs to the transcript it was requested against. Left
@@ -742,26 +914,30 @@ export function useChatSessionState({
     // Clearing it here is safe for the jump itself: the effect that reads
     // `__searchTargetSnippet` off the newly selected session runs after this
     // one, so a session opened *from* a search result re-arms immediately.
-    if (searchScrollTimerRef.current) {
-      clearTimeout(searchScrollTimerRef.current);
-      searchScrollTimerRef.current = null;
-    }
-    searchScrollActiveRef.current = false;
-    setSearchTarget(null);
     // So does a reveal: its retries give up, and the session opened follows
     // its newest rows from the start.
-    stopRevealHoldRef.current?.();
-    stopRevealHoldRef.current = null;
-    revealUntilRef.current = 0;
-    revealCountRef.current += 1;
+    cancelScrollHolds();
+    // A refresh waiting for the chat to show, or for its rows to commit, was
+    // for the transcript left.
+    pendingRefreshRef.current = null;
+    refreshAnchorRef.current = null;
+    if (refreshFollowTimerRef.current) {
+      clearTimeout(refreshFollowTimerRef.current);
+      refreshFollowTimerRef.current = null;
+    }
 
     pendingInitialScrollRef.current = true;
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     topLoadLockRef.current = false;
     pendingScrollRestoreRef.current = null;
     wasNearTopRef.current = false;
+    // The ref too, at once: a refresh asked for in this same commit (a tab's
+    // menu opens the tab and refreshes it in one click) reads it before the
+    // effect mirroring the state runs, and would keep the place the session
+    // left had as if it were the reader's in this one.
+    isUserScrolledUpRef.current = false;
     setIsUserScrolledUp(false);
-  }, [selectedProject?.projectId, selectedSession?.id]);
+  }, [cancelScrollHolds, selectedProject?.projectId, selectedSession?.id]);
 
   // Initial scroll to bottom — robust to lazy content reflow.
   // The previous implementation fired one scrollToBottom() at +200ms and
@@ -868,9 +1044,10 @@ export function useChatSessionState({
       && Boolean(existingSlot?.fetchedAt);
 
     // Returning from another tab must not reset pagination or scroll. Refresh
-    // a stale hydrated session through the bounded tail path instead.
+    // a stale hydrated session through the bounded tail path instead, unless
+    // a refresh asked for while hidden is about to read it whole.
     if (isCurrentHydratedSession) {
-      if (sessionStore.isStale(selectedSessionId)) {
+      if (sessionStore.isStale(selectedSessionId) && pendingRefreshRef.current !== selectedSessionId) {
         void requestLatestMessages(selectedSessionId);
       }
       return;
@@ -937,13 +1114,22 @@ export function useChatSessionState({
 
   // Hidden refresh signals are coalesced. An initial page load supersedes a
   // pending latest refresh for an unhydrated/loading slot; otherwise activation
-  // flushes exactly one request for the selected session.
+  // flushes exactly one request for the selected session, or runs the refresh
+  // the user asked for while the chat was hidden, which reads more.
   useEffect(() => {
     if (!isActive || !activeSessionId) return;
 
     const slot = sessionStore.getSessionSlot(activeSessionId);
     if (!slot?.fetchedAt || slot.status === 'loading') {
       refreshCoordinatorRef.current?.discardPending(activeSessionId);
+      if (pendingRefreshRef.current === activeSessionId) {
+        pendingRefreshRef.current = null;
+      }
+      return;
+    }
+
+    if (pendingRefreshRef.current === activeSessionId) {
+      void refreshTranscriptRef.current();
       return;
     }
 
@@ -1073,6 +1259,7 @@ export function useChatSessionState({
         );
 
         if (targetElement) {
+          revealCountRef.current += 1;
           targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
           targetElement.classList.add('search-highlight-flash');
           setTimeout(() => targetElement.classList.remove('search-highlight-flash'), 4000);
@@ -1130,6 +1317,9 @@ export function useChatSessionState({
     if (chatMessages.length <= visibleMessageCount) return chatMessages;
     return chatMessages.slice(-visibleMessageCount);
   }, [chatMessages, visibleMessageCount]);
+  // The window as last rendered, for a refresh to keep its first row.
+  const visibleMessagesRef = useRef(visibleMessages);
+  visibleMessagesRef.current = visibleMessages;
 
   useEffect(() => {
     if (!isActive) return;
@@ -1284,6 +1474,216 @@ export function useChatSessionState({
     return normalizedToChatMessages(sessionStore.getMessages(sessionId));
   }, [sessionStore]);
 
+  // Re-reads the session's file-backed token usage for a refresh. A failed
+  // read leaves the count shown, and one that lands after the chat moved to
+  // another session is dropped.
+  const reloadTokenUsage = useCallback(async (sessionId: string) => {
+    try {
+      const response = await api.providers.sessionTokenUsage(sessionId);
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json();
+      if (activeSessionIdRef.current === sessionId) {
+        setTokenBudget(payload.data ?? null);
+      }
+    } catch (error) {
+      console.error('Failed to refresh token usage:', error);
+    }
+  }, []);
+
+  /**
+   * Reads the session's transcript again, as the user asked to: the tab's
+   * refresh. The chat stays mounted, so the composer, its attachments and a
+   * stream being written are kept.
+   *
+   * - Hidden: nothing is read (a hidden chat sends no history requests); the
+   *   refresh runs once the chat shows the session again.
+   * - A turn running: only the newest rows are read, as after a reconnect.
+   *   Swapping the whole window under a live stream would show rows twice.
+   * - Otherwise: the rows loaded so far are read again as one window, all of
+   *   them when every message was loaded, and live rows the history never
+   *   took are dropped once old enough, but only when no work at all runs.
+   *
+   * A reader at the bottom stays there, and so does one who went back there
+   * while the read was out; one scrolled up keeps the row at the top of the
+   * view where it was, unless they scrolled meanwhile or a jump to a row
+   * moved the view.
+   */
+  const refreshTranscript = useCallback(async (): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    if (!isActiveRef.current) {
+      pendingRefreshRef.current = sessionId;
+      // Also marked dirty for the history coordinator, as any refresh signal a
+      // hidden chat gets is; the refresh run on activation takes its place.
+      void refreshCoordinatorRef.current?.request(sessionId, false);
+      return;
+    }
+    pendingRefreshRef.current = null;
+
+    cancelScrollHolds();
+    if (refreshFollowTimerRef.current) {
+      clearTimeout(refreshFollowTimerRef.current);
+      refreshFollowTimerRef.current = null;
+    }
+    const container = scrollContainerRef.current;
+    const anchor = isUserScrolledUpRef.current && container ? captureRefreshScrollAnchor(container) : null;
+    const windowTop = anchor ? captureWindowTop(visibleMessagesRef.current) : null;
+    // Putting the row back would undo where the user, or a jump to a row,
+    // moved the view while the read was out.
+    let isViewMoved = false;
+    const revealCount = revealCountRef.current;
+    const stopWatchingScroll = anchor && container
+      ? watchScrollInput(container, () => {
+        isViewMoved = true;
+      })
+      : null;
+    // The window renders only the newest rows, so rows that come in push the
+    // oldest out, the anchor row among them. Widened by exactly as many, the
+    // window still starts at the same message, so the rows above the anchor
+    // group and count as when it was captured, and it can be found and put
+    // back. A window that grew meanwhile stays as wide.
+    const keepAnchorRendered = () => {
+      if (!windowTop) {
+        return;
+      }
+      const messages = normalizedToChatMessages(sessionStore.getMessages(sessionId));
+      const index = findWindowTop(messages, windowTop);
+      if (index >= 0) {
+        setVisibleMessageCount((count) => Math.max(count, messages.length - index));
+      }
+    };
+
+    try {
+      const activity = processingSessionsRef.current?.get(sessionId);
+      if (activity && !activity.background) {
+        await requestLatestMessages(sessionId);
+      } else {
+        // Comes after a load of every message still running, so it reads them all.
+        const loadAll = loadAllInFlightRef.current;
+        if (loadAll?.sessionId === sessionId) {
+          await loadAll.promise;
+        }
+        if (activeSessionIdRef.current !== sessionId) {
+          return;
+        }
+
+        const isLoadedEverything = (slot: SessionSlot | undefined) => (
+          allMessagesLoadedRef.current || Boolean(slot?.fetchedAt && !slot.hasMore)
+        );
+        // This refresh covers whatever tail refresh was waiting.
+        refreshCoordinatorRef.current?.discardPending(sessionId);
+        // The total the server reported when the rows written since could not
+        // be stitched on; 0 when they were, or nothing was read.
+        let unstitchedTotal = 0;
+        if (!isLoadedEverything(sessionStore.getSessionSlot(sessionId))) {
+          // Rows written since the last read are stitched onto the loaded ones
+          // first, keeping every loaded row: read at the depth loaded before,
+          // the window would lose its oldest rows, the reader's among them, to
+          // as many new ones.
+          const tail = await latestRefreshExecutorRef.current(sessionId);
+          if (activeSessionIdRef.current !== sessionId) {
+            return;
+          }
+          unstitchedTotal = tail.applied ? 0 : tail.latestTotal ?? 0;
+          keepAnchorRendered();
+        }
+
+        const slot = await sessionStore.fetchFromServer(sessionId, {
+          // Sized when the read runs, so a page loaded before it counts too.
+          // Rows that could not be stitched on leave the loaded depth as it
+          // was, so the read reaches back as many rows further as the
+          // transcript grew.
+          limit: (current) => (
+            isLoadedEverything(current)
+              ? null
+              : Math.max(SESSION_MESSAGES_PAGE_SIZE, current.offset + Math.max(0, unstitchedTotal - current.total))
+          ),
+          offset: 0,
+          canRequest: () => (
+            isActiveRef.current
+            && activeSessionIdRef.current === sessionId
+          ),
+          // Background work can still write rows the history does not have yet,
+          // and so can a turn started while the read is out.
+          dropStaleRealtime: processingSessionsRef.current?.get(sessionId)
+            ? undefined
+            : {
+              keepNewerThanMs: REFRESH_KEEP_REALTIME_MS,
+              shouldDrop: () => !processingSessionsRef.current?.get(sessionId),
+            },
+        });
+        if (activeSessionIdRef.current !== sessionId) {
+          return;
+        }
+        if (!slot) {
+          // Hidden before the read could start: it runs when the chat shows.
+          if (!isActiveRef.current) {
+            pendingRefreshRef.current = sessionId;
+          }
+          return;
+        }
+        if (slot.status !== 'error') {
+          setHasMoreMessages(slot.hasMore);
+          setTotalMessages(slot.total);
+          messagesOffsetRef.current = slot.offset;
+          if (slot.tokenUsage !== undefined) {
+            setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
+          }
+        }
+      }
+    } finally {
+      stopWatchingScroll?.();
+    }
+
+    if (activeSessionIdRef.current !== sessionId) {
+      return;
+    }
+    void reloadTokenUsage(sessionId);
+
+    if (!isUserScrolledUpRef.current) {
+      refreshFollowTimerRef.current = setTimeout(() => {
+        refreshFollowTimerRef.current = null;
+        if (!isUserScrolledUpRef.current && Date.now() >= revealUntilRef.current) {
+          scrollToBottom();
+        }
+      }, 200);
+    } else if (anchor && !isViewMoved && revealCountRef.current === revealCount) {
+      keepAnchorRendered();
+      refreshAnchorRef.current = anchor;
+      setRefreshTick((tick) => tick + 1);
+    }
+  }, [cancelScrollHolds, reloadTokenUsage, requestLatestMessages, scrollToBottom, sessionStore]);
+  refreshTranscriptRef.current = refreshTranscript;
+
+  // Puts the row a refresh kept back where it was, once the rows the refresh
+  // read are committed: rows above it may have come or gone, or changed
+  // height as they mounted afresh.
+  useLayoutEffect(() => {
+    const anchor = refreshAnchorRef.current;
+    refreshAnchorRef.current = null;
+    const container = scrollContainerRef.current;
+    if (!anchor || !container) {
+      return;
+    }
+    const row = findRefreshScrollAnchor(container, anchor);
+    if (!row) {
+      return;
+    }
+    const offset = row.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += offset - anchor.offset;
+  }, [refreshTick]);
+
+  useEffect(() => () => {
+    if (refreshFollowTimerRef.current) {
+      clearTimeout(refreshFollowTimerRef.current);
+    }
+  }, []);
+
   const loadEarlierMessages = useCallback(() => {
     setVisibleMessageCount((prev) => prev + 100);
   }, []);
@@ -1379,5 +1779,6 @@ export function useChatSessionState({
     scrollToBottomAndReset,
     handleScroll,
     requestLatestMessages,
+    refreshTranscript,
   };
 }

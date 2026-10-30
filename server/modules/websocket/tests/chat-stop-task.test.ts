@@ -593,3 +593,37 @@ test('two stops of one item on a socket that two panes share are told apart: the
     ]);
   });
 });
+
+test('a stop that ends the session\'s scheduled work, by letting go of its process or by a turn that cancels it all, asks for a dispatch pass; one that leaves work held does not', async () => {
+  for (const [label, answer, cancels, expected] of [
+    ['let go', { status: 'stopped' }, false, 1],
+    ['cancelled in a turn', CANCEL_TURN, true, 1],
+    ['still held after the turn', CANCEL_TURN, false, 0],
+    ['nothing held', { status: 'not_found' }, false, 0],
+  ] as const) {
+    await withSession(async () => {
+      let listed = [scheduledItem(CRON_ID)];
+      const { runtime } = createScheduledWorkGateway({
+        stop: async () => answer as ScheduledWorkStopResult,
+        listed: () => listed,
+        turn: async (writer) => {
+          if (cancels) {
+            listed = [];
+          }
+          writer.sendComplete({ exitCode: 0 });
+        },
+      });
+      const released: string[] = [];
+      const socket = createFakeSocket();
+      handleChatConnection(socket as never, { user: { id: 7 } } as never, {
+        runtime,
+        onScheduledWorkReleased: (sessionId) => { released.push(sessionId); },
+      });
+
+      socket.emit('message', JSON.stringify({ type: 'chat.stop-task', sessionId: SESSION_ID, taskId: CRON_ID, allScheduled: true }));
+      await settle();
+
+      assert.deepEqual(released, expected === 1 ? [SESSION_ID] : [], label);
+    });
+  }
+});

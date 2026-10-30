@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 
 import { api } from '@/shared/api';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
 import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionOpenOptions, SessionTitleSearchResult, SessionWithProvider, SidebarConversationOpenRequest, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
@@ -65,6 +66,8 @@ type UseSidebarControllerArgs = {
   isMobile: boolean;
   t: TFunction;
   onRefresh: () => Promise<void> | void;
+  /** Moves with the workspace's Refresh all, which reloads the project list itself: only the archived and recent lists reload here. */
+  refreshEpoch?: number;
   /** Records the browsed project (a desktop title click); it opens and clears nothing. */
   onProjectSelect: (project: Project) => void;
   onSessionSelect: (session: ProjectSession, options?: SessionOpenOptions) => void;
@@ -90,6 +93,7 @@ export function useSidebarController({
   isMobile,
   t,
   onRefresh,
+  refreshEpoch,
   onProjectSelect,
   onSessionSelect,
   onSessionDelete,
@@ -387,6 +391,13 @@ export function useSidebarController({
   useEffect(() => {
     void fetchArchivedSessions();
   }, [fetchArchivedSessions]);
+
+  useRefreshSignal(refreshEpoch, () => {
+    void fetchArchivedSessions();
+    if (searchMode === 'conversations') {
+      void fetchRecentConversationsPage(0, false);
+    }
+  });
 
   useEffect(() => {
     if (searchMode !== 'conversations' || debouncedSearchQuery.length >= 2) {

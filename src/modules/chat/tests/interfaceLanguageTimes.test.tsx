@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 
 import { i18n } from '@/modules/i18n';
 import MessageComponent from '@/modules/chat/transcript/MessageComponent';
@@ -73,6 +73,12 @@ describe('a message\'s time', () => {
 });
 
 describe('a scheduled message\'s time', () => {
+  // Before its time: a message past it reads as due and waiting.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.parse(AT) - 60 * 60_000));
+  });
+
   const scheduled: ScheduledMessage = {
     id: 'scheduled-1',
     sessionId: 'session-1',

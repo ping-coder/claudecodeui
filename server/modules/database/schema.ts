@@ -305,6 +305,34 @@ CREATE TABLE IF NOT EXISTS superseded_provider_sessions (
 );
 `;
 
+/**
+ * Sessions whose Claude process this server holds for scheduled work (a
+ * /loop, a reminder), with what the process runs with. A restart of the
+ * server kills the processes; on the next start the server resumes the loops
+ * of the sessions recorded here. A row is removed when the server lets go of
+ * the process for any reason of its own, and kept when the process dies with
+ * the server.
+ */
+export const SCHEDULE_HOLDS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS schedule_holds (
+    session_id TEXT PRIMARY KEY NOT NULL,
+    provider TEXT NOT NULL,
+    provider_session_id TEXT,
+    project_path TEXT,
+    cwd TEXT,
+    -- The chat user whose turn left the process held, for the resumed turn.
+    user_id TEXT,
+    -- The run that wrote the row: only its own release removes it.
+    run_id TEXT NOT NULL,
+    -- Model, permission mode, effort, ultracode and tool settings, as JSON.
+    launch_options TEXT NOT NULL DEFAULT '{}',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- When a pass on start left the loops paused: not resumed on start again
+    -- until a process holds the session, which clears it.
+    left_paused_at DATETIME
+);
+`;
+
 export const INIT_SCHEMA_SQL = `
 -- Initialize authentication database
 PRAGMA foreign_keys = ON;
@@ -358,4 +386,6 @@ ${USER_PREFERENCES_TABLE_SCHEMA_SQL}
 ${SESSION_DRAFTS_TABLE_SCHEMA_SQL}
 
 ${SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL}
+
+${SCHEDULE_HOLDS_TABLE_SCHEMA_SQL}
 `;

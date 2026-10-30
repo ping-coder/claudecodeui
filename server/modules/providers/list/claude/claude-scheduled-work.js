@@ -368,6 +368,217 @@ export function resolveScheduleHoldMax(env) {
   return DEFAULT_SCHEDULE_HOLD_MAX_MS;
 }
 
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+/** Whether a task a `session_cron_carry` row carries has the fields the CLI requires of one. */
+const isCarriedCronTask = (task) => isPlainObject(task)
+  && typeof task.id === 'string'
+  && typeof task.cron === 'string'
+  && typeof task.prompt === 'string'
+  && Number.isFinite(task.createdAt)
+  && typeof task.recurring === 'boolean';
+
+/**
+ * What a session's transcript says about its scheduled work, read as Claude
+ * Code 2.1.312 reads it when it resumes a session (its `L8t`): `rows` are
+ * the rows of the chain the resume replays, in file order.
+ *
+ * - `cronCalls`: each CronCreate call, `calledAt` its row's time, plus each
+ *   task the last `session_cron_carry` row carries (a compaction carries the
+ *   jobs made before it), as `carried:<id>`;
+ * - `results`: each tool_result that is not an error, by tool_use id, with
+ *   its row's `toolUseResult` and time;
+ * - `deletedCronIds`: the id of every CronDelete call, whether it worked or
+ *   not, and the ids carry rows say have ended;
+ * - `wakeupCalls`: each ScheduleWakeup call; `wakeupCallsAtLastLoopFire`
+ *   how many of them came before the last fire of a self-paced loop.
+ * @param {Array<Record<string, any>>} rows
+ */
+export function scanTranscriptScheduling(rows) {
+  const cronCalls = [];
+  const results = new Map();
+  const deletedCronIds = new Set();
+  const wakeupCalls = [];
+  let wakeupCallsAtLastLoopFire = 0;
+  let carried = [];
+  for (const row of rows) {
+    if (row?.type === 'system' && row.subtype === 'scheduled_task_fire' && row.taskKind === 'loop') {
+      wakeupCallsAtLastLoopFire = wakeupCalls.length;
+    }
+    if (row?.type === 'assistant') {
+      const content = row.message?.content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      const calledAt = Date.parse(row.timestamp);
+      for (const block of content) {
+        if (block?.type !== 'tool_use') {
+          continue;
+        }
+        const input = isPlainObject(block.input) ? block.input : {};
+        if (block.name === 'CronCreate') {
+          cronCalls.push({ toolUseId: block.id, input, calledAt });
+        } else if (block.name === 'CronDelete') {
+          if (typeof input.id === 'string') {
+            deletedCronIds.add(input.id);
+          }
+        } else if (block.name === 'ScheduleWakeup') {
+          wakeupCalls.push({ toolUseId: block.id, input, calledAt });
+        }
+      }
+    } else if (row?.type === 'user') {
+      const content = row.message?.content;
+      if (!Array.isArray(content) || !isPlainObject(row.toolUseResult)) {
+        continue;
+      }
+      const resultAt = Date.parse(row.timestamp);
+      for (const block of content) {
+        if (block?.type === 'tool_result' && !block.is_error) {
+          results.set(block.tool_use_id, { output: row.toolUseResult, resultAt });
+        }
+      }
+    } else if (row?.type === 'attachment' && row.attachment?.type === 'session_cron_carry') {
+      const { tasks, ended } = row.attachment;
+      carried = Array.isArray(tasks) ? tasks.filter(isCarriedCronTask) : [];
+      for (const id of Array.isArray(ended) ? ended : []) {
+        if (typeof id === 'string') {
+          deletedCronIds.add(id);
+        }
+      }
+    }
+  }
+  for (const task of carried) {
+    const toolUseId = `carried:${task.id}`;
+    cronCalls.push({ toolUseId, input: { cron: task.cron, prompt: task.prompt }, calledAt: task.createdAt, carried: true });
+    results.set(toolUseId, { output: { id: task.id, recurring: task.recurring, durable: false }, resultAt: task.createdAt });
+  }
+  return { cronCalls, results, deletedCronIds, wakeupCalls, wakeupCallsAtLastLoopFire };
+}
+
+/**
+ * The cron jobs a CLI that resumes the session brings back, by Claude Code
+ * 2.1.312's rules (its `os` and `ns`; 2.1.309 has the same), with nothing on
+ * its stream to say so. A job counts when its CronCreate result names an id;
+ * not when it is durable (the project's .claude/scheduled_tasks.json keeps
+ * it), deleted, or lacks a cron or a prompt. A recurring job lasts until
+ * `recurringMaxAgeMs` past its creation, a one-shot job until its time; the
+ * first job of an id wins. The CLI dates a job by its call's row; one whose
+ * row has no readable time is left out here (the CLI would keep it, with no
+ * date to work its times out from).
+ *
+ * `predictable` as for a job made live (see createScheduledWork): the time
+ * its result named lies between the times its call's and its result's rows
+ * give, a second either way. A carried job is taken as predictable.
+ * @param {Array<Record<string, any>>|ReturnType<typeof scanTranscriptScheduling>} rowsOrScan
+ * @param {number} now - Epoch ms
+ * @param {typeof DEFAULT_CRON_CONFIG} [config]
+ * @returns {Array<{ jobId: string, toolUseId: string, cron: string, prompt: string, recurring: boolean, createdAt: number, humanSchedule: string, predictable: boolean }>}
+ */
+export function findRevivedCronJobs(rowsOrScan, now, config = DEFAULT_CRON_CONFIG) {
+  const scan = Array.isArray(rowsOrScan) ? scanTranscriptScheduling(rowsOrScan) : rowsOrScan;
+  const revived = [];
+  const seen = new Set();
+  for (const call of scan.cronCalls) {
+    const result = scan.results.get(call.toolUseId);
+    const output = result?.output;
+    if (!output || typeof output.id !== 'string' || output.durable === true || scan.deletedCronIds.has(output.id)) {
+      continue;
+    }
+    const { cron, prompt } = call.input;
+    if (typeof cron !== 'string' || typeof prompt !== 'string' || !Number.isFinite(call.calledAt)) {
+      continue;
+    }
+    const recurring = output.recurring !== false;
+    if (recurring) {
+      if (config.recurringMaxAgeMs !== 0 && now - call.calledAt >= config.recurringMaxAgeMs) {
+        continue;
+      }
+    } else {
+      const due = nextScheduledFire({ cron, recurring: false, id: output.id, createdAt: call.calledAt }, config);
+      if (due === null || due < now) {
+        continue;
+      }
+    }
+    if (seen.has(output.id)) {
+      continue;
+    }
+    seen.add(output.id);
+    let predictable = call.carried === true;
+    if (!predictable && recurring && Number.isFinite(output.nextFireAt)) {
+      const resultAt = Number.isFinite(result.resultAt) ? result.resultAt : call.calledAt;
+      const atCall = nextScheduledFire({ cron, recurring, id: output.id, createdAt: call.calledAt }, config);
+      const atResult = nextScheduledFire({ cron, recurring, id: output.id, createdAt: resultAt }, config);
+      predictable = atCall !== null
+        && atResult !== null
+        && output.nextFireAt >= Math.min(atCall, atResult) - 1000
+        && output.nextFireAt <= Math.max(atCall, atResult) + 1000;
+    }
+    revived.push({
+      jobId: output.id,
+      toolUseId: call.toolUseId,
+      cron,
+      prompt,
+      recurring,
+      createdAt: call.calledAt,
+      humanSchedule: typeof output.humanSchedule === 'string' ? output.humanSchedule : '',
+      predictable,
+    });
+  }
+  return revived;
+}
+
+/**
+ * The wake-up of a self-paced /loop that was still to come when the
+ * session's last process ended, or null. The CLI brings it back only from a
+ * job directory, which CloudCLI's processes do not have, so a resumed
+ * session has none: the loop is over until the model calls ScheduleWakeup
+ * again. As the CLI tells a pending one (its `rs`): the last ScheduleWakeup
+ * that has a result, which set a time (`scheduledFor`), was not a stop, has
+ * a prompt, and no fire of a self-paced loop came after it. CloudCLI also
+ * lets go of one due more than `recurringMaxAgeMs` ago.
+ * @param {Array<Record<string, any>>|ReturnType<typeof scanTranscriptScheduling>} rowsOrScan
+ * @param {number} now - Epoch ms
+ * @param {typeof DEFAULT_CRON_CONFIG} [config]
+ * @returns {{ toolUseId: string, prompt: string, reason: string, scheduledFor: number, calledAt: number } | null}
+ */
+export function findPendingWakeup(rowsOrScan, now, config = DEFAULT_CRON_CONFIG) {
+  const scan = Array.isArray(rowsOrScan) ? scanTranscriptScheduling(rowsOrScan) : rowsOrScan;
+  const index = scan.wakeupCalls.findLastIndex((call) => scan.results.has(call.toolUseId));
+  if (index === -1 || scan.wakeupCallsAtLastLoopFire > index) {
+    return null;
+  }
+  const call = scan.wakeupCalls[index];
+  const { output } = scan.results.get(call.toolUseId);
+  if (
+    call.input.stop === true
+    || output.stopped === true
+    || !Number.isFinite(output.scheduledFor)
+    || output.scheduledFor <= 0
+    || typeof call.input.prompt !== 'string'
+    || now - output.scheduledFor >= config.recurringMaxAgeMs
+  ) {
+    return null;
+  }
+  return {
+    toolUseId: call.toolUseId,
+    prompt: call.input.prompt,
+    reason: typeof call.input.reason === 'string' ? call.input.reason.trim() : '',
+    scheduledFor: output.scheduledFor,
+    calledAt: Number.isFinite(call.calledAt) ? call.calledAt : output.scheduledFor,
+  };
+}
+
+/**
+ * How long the wake-up of a resumed self-paced loop waits: what was left of
+ * its wait, at least the CLI's shortest, at most its longest.
+ * @param {number} scheduledFor - When the wake-up was due, epoch ms
+ * @param {number} now - Epoch ms
+ * @returns {number} Seconds
+ */
+export function resumedWakeupDelaySeconds(scheduledFor, now) {
+  return Math.min(WAKEUP_MAX_DELAY_S, Math.max(WAKEUP_MIN_DELAY_S, Math.ceil((scheduledFor - now) / 1000)));
+}
+
 // How far ahead of its time a fire may be put down to a job whose time the
 // run worked out itself (see createScheduledWork).
 const FIRE_EARLY_MS = 5 * 1000;
@@ -411,9 +622,250 @@ export function buildScheduledStopMessage({ jobIds, wakeup }) {
 }
 
 /**
+ * Reads a stop message back: the jobs and the wake-up it names, for a text
+ * buildScheduledStopMessage writes exactly, and null for any other. Strict
+ * by construction: what it reads is accepted only when building the message
+ * from it gives the same text back.
+ * @param {unknown} text
+ * @returns {{ jobIds: string[], wakeup: boolean } | null}
+ */
+export function parseScheduledStopMessage(text) {
+  if (typeof text !== 'string' || !text.endsWith(` ${STOP_REPLY}`)) {
+    return null;
+  }
+  const targets = {
+    jobIds: [...text.matchAll(/"([0-9a-f]{8})"/g)].map((match) => match[1]),
+    wakeup: text.includes(' call ScheduleWakeup with stop: true. '),
+  };
+  if (targets.jobIds.length === 0 && !targets.wakeup) {
+    return null;
+  }
+  return buildScheduledStopMessage(targets) === text ? targets : null;
+}
+
+// The resume message's fixed sentences: the current ones, which hold true
+// however the loops were left with no process, and those of the first
+// release, which blamed a restart and are still read back from transcripts.
+const RESUME_WORDING = {
+  lead: 'No process was running this session\'s loops.',
+  wakeupLead: 'The dynamic /loop\'s wake-up ended with its process: resume it now by calling ScheduleWakeup yourself, not through an agent, with these arguments: ',
+};
+const RESUME_WORDING_V1 = {
+  lead: 'CloudCLI restarted.',
+  wakeupLead: 'The restart ended the dynamic /loop: resume it now by calling ScheduleWakeup yourself, not through an agent, with these arguments: ',
+};
+const RESUME_NO_TOOLS = 'Do not call any tools.';
+const RESUME_REPLY = 'Do nothing else, and reply in one short sentence.';
+
+/**
+ * The message of the turn that resumes the loops of a session no process
+ * runs (see readPausedScheduledWork in claude-sessions.provider.ts): a
+ * restart of the server left them so, an abort, or a CLI that ended on its
+ * own. The CLI brings the cron jobs back on its own as it resumes the
+ * session, so for those it asks only for a short reply, with no tool. A
+ * self-paced loop the CLI does not bring back: the model calls ScheduleWakeup
+ * again with the arguments given (the loop's prompt and reason, the wait
+ * left), and `noop: true`, as nothing changed on this tick. Always in
+ * English: it goes to the model.
+ * @param {{ jobIds: string[], wakeup: { delaySeconds: number, prompt: string, reason: string } | null }} work
+ * @returns {string}
+ */
+export function buildLoopsResumeMessage(work) {
+  return composeLoopsResumeMessage(work, RESUME_WORDING);
+}
+
+/** The resume message in the wording given (see RESUME_WORDING). */
+function composeLoopsResumeMessage({ jobIds, wakeup }, { lead, wakeupLead }) {
+  const parts = [lead];
+  if (jobIds.length > 0) {
+    const quoted = jobIds.map((jobId) => `"${jobId}"`).join(', ');
+    parts.push(jobIds.length === 1
+      ? `Scheduled job ${quoted} runs again on its own schedule.`
+      : `Scheduled jobs ${quoted} run again on their own schedule.`);
+  }
+  if (wakeup) {
+    const args = JSON.stringify({ delaySeconds: wakeup.delaySeconds, prompt: wakeup.prompt, reason: wakeup.reason, noop: true });
+    parts.push(`${wakeupLead}${args}.`);
+  } else {
+    parts.push(RESUME_NO_TOOLS);
+  }
+  parts.push(RESUME_REPLY);
+  return parts.join(' ');
+}
+
+/**
+ * Reads a resume message back: the jobs and the wake-up it names, for a text
+ * buildLoopsResumeMessage writes exactly, in its current wording or that of
+ * the first release (RESUME_WORDING_V1), and null for any other. The
+ * wake-up's arguments are one JSON object between a fixed lead and the fixed
+ * end, so a prompt of any text reads back whole. Strict by construction, as
+ * parseScheduledStopMessage.
+ * @param {unknown} text
+ * @returns {{ jobIds: string[], wakeup: { delaySeconds: number, prompt: string, reason: string } | null } | null}
+ */
+export function parseLoopsResumeMessage(text) {
+  if (typeof text !== 'string' || !text.endsWith(` ${RESUME_REPLY}`)) {
+    return null;
+  }
+  const wording = [RESUME_WORDING, RESUME_WORDING_V1].find(({ lead }) => text.startsWith(`${lead} `));
+  if (!wording) {
+    return null;
+  }
+  const leadAt = text.indexOf(wording.wakeupLead);
+  let wakeup = null;
+  if (leadAt !== -1) {
+    const argsEnd = text.length - RESUME_REPLY.length - 2;
+    if (text[argsEnd] !== '.') {
+      return null;
+    }
+    try {
+      const args = JSON.parse(text.slice(leadAt + wording.wakeupLead.length, argsEnd));
+      if (
+        !args
+        || !Number.isInteger(args.delaySeconds)
+        || typeof args.prompt !== 'string'
+        || typeof args.reason !== 'string'
+        || args.noop !== true
+      ) {
+        return null;
+      }
+      wakeup = { delaySeconds: args.delaySeconds, prompt: args.prompt, reason: args.reason };
+    } catch {
+      return null;
+    }
+  }
+  const jobsPart = leadAt === -1 ? text : text.slice(0, leadAt);
+  const jobIds = [...jobsPart.matchAll(/"([0-9a-f]{8})"/g)].map((match) => match[1]);
+  if (jobIds.length === 0 && !wakeup) {
+    return null;
+  }
+  const work = { jobIds, wakeup };
+  return composeLoopsResumeMessage(work, wording) === text ? work : null;
+}
+
+/**
+ * The prompts CloudCLI sends the model on its own, by kind: how to read one
+ * back from its text, how each of its texts starts (`leads`, for the cut-down
+ * copy the CLI keeps of a long prompt, see isControlLastPrompt), and the note
+ * the chat shows for it. Nothing the CLI writes marks such a prompt, so its
+ * transcript row reads like one the user typed, and only its text tells it
+ * apart (see parseControlPrompt).
+ *
+ * `scheduled-stop`: the turn that has Claude stop loops. Its note counts the
+ * cron jobs and the wake-up it stops, and names the jobs.
+ *
+ * `loops-resume`: the turn that resumes the loops no process runs. Its note
+ * counts the cron jobs and the self-paced loop it resumes, and names the
+ * jobs.
+ */
+const CONTROL_PROMPTS = {
+  'scheduled-stop': {
+    parse: parseScheduledStopMessage,
+    leads: [
+      'End the dynamic /loop now: ',
+      'Stop these loops now: call CronDelete once for each id: ',
+      'Cancel scheduled job ',
+      'Cancel these scheduled jobs now: call CronDelete once for each id: ',
+    ],
+    note: ({ jobIds, wakeup }) => {
+      const count = jobIds.length + (wakeup ? 1 : 0);
+      return {
+        note: { count, jobIds, ...(wakeup ? { wakeup: true } : {}) },
+        content: jobIds.length === 0
+          ? 'Asked Claude to stop the dynamic loop'
+          : `Asked Claude to stop ${count} ${count === 1 ? 'loop' : 'loops'}`,
+      };
+    },
+  },
+  'loops-resume': {
+    parse: parseLoopsResumeMessage,
+    leads: [`${RESUME_WORDING.lead} `, `${RESUME_WORDING_V1.lead} `],
+    note: ({ jobIds, wakeup }) => {
+      const count = jobIds.length + (wakeup ? 1 : 0);
+      return {
+        note: { count, jobIds, ...(wakeup ? { wakeup: true } : {}) },
+        content: `Resumed ${count} ${count === 1 ? 'loop' : 'loops'}`,
+      };
+    },
+  },
+};
+
+/**
+ * Reads a prompt CloudCLI sent the model on its own back from its text: its
+ * kind and what that kind's parser read. Null for any other text, the
+ * user's own messages included.
+ * @param {unknown} text
+ * @returns {({ kind: 'scheduled-stop', jobIds: string[], wakeup: boolean }
+ *   | { kind: 'loops-resume', jobIds: string[], wakeup: { delaySeconds: number, prompt: string, reason: string } | null }) | null}
+ */
+export function parseControlPrompt(text) {
+  if (typeof text !== 'string') {
+    return null;
+  }
+  for (const [kind, { parse }] of Object.entries(CONTROL_PROMPTS)) {
+    const parsed = parse(text);
+    if (parsed) {
+      return { kind, ...parsed };
+    }
+  }
+  return null;
+}
+
+// What the CLI keeps of a prompt as a session's `lastPrompt` (Claude Code
+// 2.1.312): newlines made spaces, and one longer than this cut to its first
+// this many characters, trimmed, then "…".
+const LAST_PROMPT_MAX_CHARS = 200;
+// How short a cut-down prompt can come out: a few characters go with the
+// trim and a split surrogate pair.
+const LAST_PROMPT_MIN_CUT_CHARS = LAST_PROMPT_MAX_CHARS - 10;
+
+/**
+ * Whether the text of a session's `last-prompt` row is a prompt CloudCLI sent
+ * the model on its own (parseControlPrompt). One longer than the CLI keeps
+ * whole is checked by how it starts (the kinds' `leads`) and the length the
+ * CLI cuts it to, as the rest is gone.
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function isControlLastPrompt(text) {
+  if (typeof text !== 'string') {
+    return false;
+  }
+  if (parseControlPrompt(text)) {
+    return true;
+  }
+  if (!text.endsWith('…')) {
+    return false;
+  }
+  const kept = text.slice(0, -1);
+  return kept.length >= LAST_PROMPT_MIN_CUT_CHARS
+    && kept.length <= LAST_PROMPT_MAX_CHARS
+    && Object.values(CONTROL_PROMPTS).some(({ leads }) => leads.some((lead) => kept.startsWith(lead)));
+}
+
+/**
+ * The note that stands in for a prompt CloudCLI sent the model on its own:
+ * `controlNote` (`{ kind, count, jobIds?, wakeup? }`), which the client words
+ * in the user's language, and `content`, the English fallback. Null for any
+ * other text.
+ * @param {unknown} text
+ * @returns {{ controlNote: import('@/shared/types.js').ControlNote, content: string } | null}
+ */
+export function readControlNote(text) {
+  const prompt = parseControlPrompt(text);
+  if (!prompt) {
+    return null;
+  }
+  const { kind, ...parsed } = prompt;
+  const { note, content } = CONTROL_PROMPTS[kind].note(parsed);
+  return { controlNote: { kind, ...note }, content };
+}
+
+/**
  * Keeps the scheduled work of one run's process: what its CronCreate and
- * ScheduleWakeup calls set up, which fire was whose, and when to give up on
- * work that never fires.
+ * ScheduleWakeup calls set up, the jobs its CLI brought back from the
+ * transcript as it resumed the session (noteCronRevived), which fire was
+ * whose, and when to give up on work that never fires.
  *
  * A cron job keeps its id, call, cron, the CLI's `humanSchedule`, prompt,
  * `recurring`, `durable`, `createdAt` (when its result came), `nextFireAt`,
@@ -483,6 +935,8 @@ export function createScheduledWork({
   let wakeup = null;
   /** Fires put down to no job, oldest first. */
   const unattributedFires = [];
+  /** The ids of the jobs a CronDelete cancelled, which a job brought back late (noteCronRevived) does not undo. */
+  const deletedJobIds = new Set();
 
   const holds = (nextFireAt, holdUntil) => nextFireAt === null || nextFireAt <= holdUntil;
   const missedAt = (nextFireAt, at, lastTurnEndedAt) => nextFireAt !== null
@@ -618,10 +1072,86 @@ export function createScheduledWork({
       });
     },
 
+    /**
+     * A job the CLI brings back from the transcript as it resumes the session
+     * (findRevivedCronJobs), `revivedAt` no later than the CLI starts. It
+     * keeps its creation, so it expires and is held as it would have been. A
+     * recurring job counts its next fire from `revivedAt`, as the CLI counts
+     * from the moment it brought the job back, when its times are predictable;
+     * otherwise its time is not known. A one-shot job keeps its time. A job
+     * already kept, or one a CronDelete of this process cancelled (the read
+     * of the transcript can finish after the first turn's calls), is left as
+     * it is.
+     * @param {ReturnType<typeof findRevivedCronJobs>[number]} job
+     * @param {number} revivedAt
+     */
+    noteCronRevived({ jobId, toolUseId, cron, prompt, recurring, createdAt, humanSchedule, predictable }, revivedAt) {
+      if (jobs.has(jobId) || deletedJobIds.has(jobId)) {
+        return;
+      }
+      const nextFireAt = recurring
+        ? (predictable ? nextScheduledFire({ cron, recurring: true, id: jobId, createdAt, lastFiredAt: revivedAt }, config) : null)
+        : nextScheduledFire({ cron, recurring: false, id: jobId, createdAt }, config);
+      const timed = nextFireAt !== null;
+      jobs.set(jobId, {
+        key: jobId,
+        jobId,
+        toolUseId,
+        cron,
+        humanSchedule: humanSchedule ?? '',
+        prompt,
+        recurring,
+        durable: false,
+        createdAt,
+        nextFireAt,
+        predictable: recurring && predictable,
+        lastFiredAt: recurring ? revivedAt : null,
+        timed,
+        holdUntil: timed
+          ? createdAt + scheduleHoldMaxMs
+          : Math.min(revivedAt + holdMaxMs, createdAt + scheduleHoldMaxMs),
+        // Until the CLI's first word (confirmRevivedTimes).
+        revivedAt: recurring && timed ? revivedAt : null,
+      });
+    },
+
+    /**
+     * The CLI's first word (its init) came at `at`: it brought its jobs back
+     * by then. A recurring job revived at `revivedAt` whose next fire counted
+     * from `at` is another (a cron time fell between the two) cannot be told
+     * from the CLI's, which counts from somewhere in between: its time is not
+     * known from now on, as for a job whose result named none. A time that
+     * moves with the moment it counts from (the `*\/5` case of
+     * nextScheduledFire) is kept: the CLI's comes no earlier.
+     * @param {number} at
+     */
+    confirmRevivedTimes(at) {
+      for (const job of jobs.values()) {
+        if (job.revivedAt === null || job.revivedAt === undefined) {
+          continue;
+        }
+        const revivedAt = job.revivedAt;
+        job.revivedAt = null;
+        if (job.lastFiredAt !== revivedAt || job.nextFireAt === null) {
+          continue;
+        }
+        const atInit = nextScheduledFire({ cron: job.cron, recurring: true, id: job.jobId, createdAt: job.createdAt, lastFiredAt: at }, config);
+        const movesWithBase = atInit !== null && atInit - job.nextFireAt === at - revivedAt;
+        if (atInit !== job.nextFireAt && !movesWithBase) {
+          log(`${describeJob(job)} may have come back after one of its cron times; its next fire is not known`);
+          job.nextFireAt = null;
+          job.timed = false;
+          job.predictable = false;
+          job.holdUntil = Math.min(at + holdMaxMs, job.createdAt + scheduleHoldMaxMs);
+        }
+      }
+    },
+
     /** A CronDelete call's result (not an error). @param {unknown} jobId */
     noteCronDeleted(jobId) {
       if (typeof jobId === 'string') {
         jobs.delete(jobId);
+        deletedJobIds.add(jobId);
       }
     },
 
@@ -798,6 +1328,20 @@ export function createScheduledWork({
     },
 
     /**
+     * Whether a CLI that resumes the session brings all of this work back
+     * (findRevivedCronJobs): there are cron jobs and no wake-up, which no
+     * resume brings back, and each job has the id the CLI named and is not
+     * durable (the project's .claude/scheduled_tasks.json keeps those, which
+     * no spike has followed across a resume).
+     * @returns {boolean}
+     */
+    revivesOnResume() {
+      return wakeup === null
+        && jobs.size > 0
+        && [...jobs.values()].every((job) => typeof job.jobId === 'string' && !job.durable);
+    },
+
+    /**
      * The work as the runtime lists it (`ScheduledWorkSummary`), oldest first.
      * @returns {Array<import('@/shared/types.js').ScheduledWorkSummary>}
      */
@@ -833,6 +1377,44 @@ export function createScheduledWork({
       jobs.clear();
       wakeup = null;
       unattributedFires.length = 0;
+      deletedJobIds.clear();
     },
   };
+}
+
+/**
+ * The scheduled work a session's transcript holds that no process runs: the
+ * cron jobs a CLI that resumes the session would bring back, and the wake-up
+ * of a self-paced loop that was still to come (findPendingWakeup), as the
+ * runtime lists work (`ScheduledWorkSummary`), each `paused`, oldest first.
+ * The jobs' times are those of a process that would resume the session at
+ * `now`; the wake-up keeps the time it was due, its id the call that set it
+ * (`wakeup:<toolUseId>`).
+ * @param {{ cronJobs: ReturnType<typeof findRevivedCronJobs>, wakeup: ReturnType<typeof findPendingWakeup> }} work
+ * @param {number} now - Epoch ms
+ * @param {{ holdMaxMs: number, scheduleHoldMaxMs: number, config?: typeof DEFAULT_CRON_CONFIG }} limits
+ * @returns {Array<import('@/shared/types.js').ScheduledWorkSummary>}
+ */
+export function describePausedScheduledWork({ cronJobs, wakeup }, now, { holdMaxMs, scheduleHoldMaxMs, config = DEFAULT_CRON_CONFIG }) {
+  const work = createScheduledWork({ holdMaxMs, scheduleHoldMaxMs, graceMs: 0, config });
+  for (const job of cronJobs) {
+    work.noteCronRevived(job, now);
+  }
+  const items = work.list();
+  if (wakeup) {
+    items.push({
+      id: `wakeup:${wakeup.toolUseId}`,
+      kind: 'wakeup',
+      toolUseId: wakeup.toolUseId,
+      prompt: describeLoopPrompt(wakeup.prompt),
+      startedAt: wakeup.calledAt,
+      nextFireAt: wakeup.scheduledFor,
+      recurring: true,
+      holdUntil: wakeup.calledAt + scheduleHoldMaxMs,
+      ...(wakeup.reason ? { reason: wakeup.reason } : {}),
+    });
+  }
+  return items
+    .map((item) => ({ ...item, paused: true }))
+    .sort((first, second) => first.startedAt - second.startedAt);
 }

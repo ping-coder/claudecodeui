@@ -337,6 +337,29 @@ function pruneRealtimeSupersededByServer(
   });
 }
 
+/**
+ * After a full history read of an idle session, drops the live rows no later
+ * read would take away: a protocol error, an echo the server never claimed,
+ * the leftovers of a run whose end the socket missed. Only rows older than
+ * `cutoffMs` go, as a reply that just finished may not be on disk yet. The
+ * stream being written stays, and so does the echo of an edit: the history
+ * has its turn cut until the replacement is persisted. A row whose time cannot
+ * be read cannot be shown to be recent, so it goes too.
+ */
+function dropStaleRealtimeRows(
+  sessionId: string,
+  realtimeMessages: NormalizedMessage[],
+  cutoffMs: number,
+): NormalizedMessage[] {
+  return realtimeMessages.filter((message) => {
+    if (message.id === `__streaming_${sessionId}` || message.replacesAnchorId) {
+      return true;
+    }
+    const time = readMessageTime(message);
+    return time !== null && time >= cutoffMs;
+  });
+}
+
 function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
   if (realtime.length === 0) {
     return dedupeAdjacentAssistantEchoes(server);
@@ -391,6 +414,12 @@ type LatestHistoryRefreshResult = {
   applied: boolean;
   changed: boolean;
   deferred: boolean;
+  /**
+   * The total the server reported last, when a page was read. A refresh that
+   * could not stitch its rows on leaves the slot's total as it was, so this
+   * is what tells how far the transcript grew since.
+   */
+  latestTotal?: number;
 };
 
 type CanRequestHistory = () => boolean;
@@ -474,7 +503,7 @@ async function refreshLatestSlotFromServer(
       const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest);
       if (bridgePage.total !== latestPage.total) {
         console.warn(`[SessionStore] History changed while bridging ${sessionId}; retaining cached suffix.`);
-        return { applied: false, changed: false, deferred: false };
+        return { applied: false, changed: false, deferred: false, latestTotal: bridgePage.total };
       }
       if (bridgePage.messages.length === 0) break;
 
@@ -484,7 +513,7 @@ async function refreshLatestSlotFromServer(
         || !olderPagePrecedesCachedHistory(bridgePage.messages, fetchedWindow)
       ) {
         console.warn(`[SessionStore] History shifted while bridging ${sessionId}; retaining cached suffix.`);
-        return { applied: false, changed: false, deferred: false };
+        return { applied: false, changed: false, deferred: false, latestTotal: latestPage.total };
       }
 
       fetchedWindow = bridgeMerge.messages;
@@ -523,7 +552,7 @@ async function refreshLatestSlotFromServer(
 
   if (!nextServerMessages) {
     console.warn(`[SessionStore] Could not bridge latest history for ${sessionId}; retaining cached suffix.`);
-    return { applied: false, changed, deferred: false };
+    return { applied: false, changed, deferred: false, latestTotal: latestPage.total };
   }
 
   slot.serverMessages = nextServerMessages;
@@ -537,7 +566,7 @@ async function refreshLatestSlotFromServer(
   );
   recomputeMergedIfNeeded(slot);
 
-  return { applied: true, changed: true, deferred: false };
+  return { applied: true, changed: true, deferred: false, latestTotal: latestPage.total };
 }
 
 // ─── Stale threshold ─────────────────────────────────────────────────────────
@@ -579,13 +608,23 @@ export function useSessionStore() {
    *
    * Provider and project metadata are resolved server-side from `sessionId`.
    * The endpoint returns the standard `{ success, data }` envelope.
+   *
+   * `limit` given as a function is called with the slot when the queued read
+   * runs, so it counts what the reads queued before it loaded.
+   *
+   * `dropStaleRealtime` also drops the live rows the read did not take that
+   * were already older than its window when the read went out (see
+   * dropStaleRealtimeRows): a row that came later cannot be in the read. Its
+   * `shouldDrop` is asked once the read lands, and a no keeps them all, as
+   * does a failed read.
    */
   const fetchFromServer = useCallback(async (
     sessionId: string,
     opts: {
-      limit?: number | null;
+      limit?: number | null | ((slot: SessionSlot) => number | null);
       offset?: number;
       canRequest?: CanRequestHistory;
+      dropStaleRealtime?: { keepNewerThanMs: number; shouldDrop?: () => boolean };
     } = {},
   ) => {
     const slot = getSlot(sessionId);
@@ -593,7 +632,7 @@ export function useSessionStore() {
     notify(sessionId);
 
     return enqueueHistoryMutation(slot, async () => {
-      const { canRequest = () => true, ...requestOptions } = opts;
+      const { canRequest = () => true, dropStaleRealtime, limit, offset } = opts;
       if (!canRequest()) {
         slot.status = 'idle';
         notify(sessionId);
@@ -601,17 +640,28 @@ export function useSessionStore() {
       }
 
       try {
-        const data = await requestSessionHistoryPage(sessionId, requestOptions);
+        const requestedAt = Date.now();
+        const data = await requestSessionHistoryPage(sessionId, {
+          limit: typeof limit === 'function' ? limit(slot) : limit,
+          offset,
+        });
         slot.serverMessages = data.messages;
         slot.total = data.total;
         slot.hasMore = data.hasMore;
-        slot.offset = (requestOptions.offset ?? 0) + data.messages.length;
+        slot.offset = (offset ?? 0) + data.messages.length;
         slot.fetchedAt = Date.now();
         slot.status = 'idle';
         slot.realtimeMessages = pruneRealtimeSupersededByServer(
           slot.serverMessages,
           slot.realtimeMessages,
         );
+        if (dropStaleRealtime && (dropStaleRealtime.shouldDrop?.() ?? true)) {
+          slot.realtimeMessages = dropStaleRealtimeRows(
+            sessionId,
+            slot.realtimeMessages,
+            requestedAt - dropStaleRealtime.keepNewerThanMs,
+          );
+        }
         recomputeMergedIfNeeded(slot);
         if (data.tokenUsage !== undefined) {
           slot.tokenUsage = data.tokenUsage;

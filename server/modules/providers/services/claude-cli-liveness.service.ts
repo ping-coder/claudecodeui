@@ -224,3 +224,26 @@ export async function listLiveClaudeCliRuns(
     record.startedAt === null ? [] : [{ startedAt: record.startedAt, entrypoint: record.entrypoint }]
   ));
 }
+
+/**
+ * Whether any live Claude CLI process is registered for `providerSessionId`,
+ * at rest or not: a Shell-tab `claude --resume`, a REPL in a terminal, or a
+ * run of another CloudCLI instance sharing `~/.claude`. Unlike
+ * `listLiveClaudeCliRuns`, a process at rest counts: it holds the session's
+ * cron jobs, which it brought back from the transcript and fires itself.
+ *
+ * Used by the providers module's Claude sessions provider before it reports
+ * a session's loops as paused, which a resume would otherwise run twice.
+ *
+ * `directory` defaults to the CLI's own registry; tests point it at a fixture.
+ */
+export async function hasLiveClaudeCliProcess(
+  providerSessionId: string,
+  directory = registryDirectory(),
+): Promise<boolean> {
+  if (!providerSessionId) {
+    return false;
+  }
+  const live = await readLiveRegistryRecords(directory, (record) => record.providerSessionId === providerSessionId);
+  return live.length > 0;
+}

@@ -29,6 +29,7 @@ import { NO_PALETTE_OPS } from '@/shared/constants';
 import { getSessionTitle } from '@/shared/utils';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { useFileOpenResolver } from '@/modules/project-workspace/hooks/useFileOpenResolver';
 import { EditorSidebar, useEditorSidebar } from '@/modules/code-editor';
 import PaneViewBar from '@/modules/project-workspace/PaneViewBar';
@@ -85,6 +86,12 @@ type WorkspaceMainProps = {
   onEditorUnsavedChange: (hasUnsavedChanges: boolean) => void;
   /** The user opened a file from the chat: a preview tab becomes a kept one, as on a view switch. */
   onKeepTab: () => void;
+  /**
+   * The pane's refresh token. When it moves, the view on screen reloads, the chat catches up and a clean
+   * editor rereads its file. Nothing that holds unsaved text or the browser's full screen is remounted:
+   * only the terminal (which reattaches to its running shell) and a plugin tab (which reloads its code).
+   */
+  refreshToken?: number;
 };
 
 type PaneViewNoticeProps = {
@@ -144,6 +151,7 @@ function WorkspaceMain({
   onRenameSession,
   onEditorUnsavedChange,
   onKeepTab,
+  refreshToken,
 }: WorkspaceMainProps) {
   const { t } = useTranslation();
   const preferences = useUiPreferences();
@@ -164,6 +172,15 @@ function WorkspaceMain({
   const isTaskMasterElsewhere = !isFocusedPane
     && Boolean(selectedProject)
     && taskMasterProject?.projectId !== selectedProject?.projectId;
+
+  // The Tasks panel stays mounted under every view, so it gets a token of its own that only moves when
+  // a refresh lands while it is the view on screen.
+  const [tasksRefreshToken, setTasksRefreshToken] = useState(0);
+  useRefreshSignal(refreshToken, () => {
+    if (activeTab === 'tasks' && !isTaskMasterElsewhere) {
+      setTasksRefreshToken((token) => token + 1);
+    }
+  });
 
   const {
     editingFile,
@@ -315,6 +332,7 @@ function WorkspaceMain({
                   sendByCtrlEnter={sendByCtrlEnter}
                   externalMessageUpdate={externalMessageUpdate}
                   newSessionTrigger={newSessionTrigger}
+                  refreshTrigger={refreshToken}
                   onShowAllTasks={tasksEnabled ? showAllTasks : null}
                 />
               </WorkspaceErrorBoundary>
@@ -326,6 +344,7 @@ function WorkspaceMain({
                   selectedProject={selectedProject}
                   onFileOpen={handleFileOpen}
                   revealDirectory={revealDirectory}
+                  refreshToken={refreshToken}
                 />
               </div>
             )}
@@ -340,7 +359,10 @@ function WorkspaceMain({
               />
             ) : isPaneVisible && (
               <div className="h-full w-full overflow-hidden">
+                {/* A refresh remounts it: the new socket reattaches to the shell the server keeps and replays
+                    its output, nothing restarts. */}
                 <StandaloneShell
+                  key={refreshToken}
                   project={selectedProject}
                   session={selectedSession}
                   // Named as the tab bar names it: the server's placeholder names in the interface language.
@@ -359,6 +381,7 @@ function WorkspaceMain({
                   onFileOpen={handleFileOpen}
                   onProjectSelect={onProjectSelect}
                   onProjectsRefresh={onProjectsRefresh}
+                  refreshToken={refreshToken}
                 />
               </div>
             )}
@@ -373,18 +396,20 @@ function WorkspaceMain({
                 />
               )
             ) : (
-              <TaskMasterPanel isVisible={activeTab === 'tasks' && isPaneVisible} />
+              <TaskMasterPanel isVisible={activeTab === 'tasks' && isPaneVisible} refreshToken={tasksRefreshToken} />
             ))}
 
             {shouldShowBrowserTab && activeTab === 'browser' && (
               <div className="h-full overflow-hidden">
-                <BrowserUsePanel isVisible={isPaneVisible} onShowSettings={onShowSettings} />
+                <BrowserUsePanel isVisible={isPaneVisible} onShowSettings={onShowSettings} refreshToken={refreshToken} />
               </div>
             )}
 
             {activeTab.startsWith('plugin:') && (
               <div className="h-full overflow-hidden">
+                {/* A refresh remounts it, which fetches and mounts the plugin's code again. */}
                 <PluginTabContent
+                  key={`${activeTab}:${refreshToken ?? 0}`}
                   pluginName={activeTab.replace('plugin:', '')}
                   selectedProject={selectedProject}
                   selectedSession={selectedSession}
@@ -405,6 +430,7 @@ function WorkspaceMain({
             onUnsavedChangesChange={handleEditorUnsavedChange}
             projectPath={selectedProject.path}
             fillSpace={activeTab === 'files'}
+            reloadToken={refreshToken}
           />
         </div>
       </div>

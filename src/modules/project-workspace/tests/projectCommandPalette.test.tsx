@@ -52,6 +52,9 @@ const handleNewSession = vi.fn<(project: Project) => void>();
 const openSettings = vi.fn<(tab?: string) => void>();
 const setActiveTab = vi.fn();
 const openSessionById = vi.fn<WorkspaceLayoutActions['openSessionById']>();
+const refreshTab = vi.fn<(side: 'left' | 'right') => void>();
+const refreshWorkspace = vi.fn<() => Promise<void>>(async () => undefined);
+let isRefreshingWorkspace = false;
 let actions: WorkspaceLayoutActions;
 
 vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
@@ -63,6 +66,9 @@ vi.mock('@/modules/project-workspace/context/ProjectsStateContext', () => ({
     openSessionById,
     layout: useSyncExternalStore(subscribeToLayout, () => layoutState),
     actions,
+    refreshTab,
+    refreshWorkspace,
+    isRefreshingWorkspace,
   }),
   useProjectPanesState: () => ({ projects: projectsState, paneProjects: paneProjectsState }),
 }));
@@ -174,6 +180,9 @@ beforeEach(() => {
   handleNewSession.mockReset();
   openSessionById.mockReset();
   toggleImmersive.mockReset();
+  refreshTab.mockReset();
+  refreshWorkspace.mockClear();
+  isRefreshingWorkspace = false;
 });
 
 afterEach(() => {
@@ -263,6 +272,45 @@ test('the tab commands act on the focused pane\'s active tab and the rest pass s
   assert.equal(palette().onShowTab, setActiveTab);
   // Let the focus hand-offs these commands scheduled run here rather than in the next test.
   await nextFrame();
+});
+
+test('Refresh tab acts on the focused pane and is offered only while it shows a tab; Refresh all says when one already runs', () => {
+  setLayoutState({
+    left: createPane([createTab('tab-left', 'session-left')], 'tab-left'),
+    right: createPane([createTab('tab-gone', 'session-gone', { projectId: '', isMissing: true })], 'tab-gone'),
+    focusedSide: 'left',
+    splitRatio: 0.5,
+  });
+  const view = renderBinding();
+
+  assert.equal(workspaceCommands().canRefreshTab, true);
+  act(() => workspaceCommands().onRefreshTab?.());
+  assert.deepEqual(refreshTab.mock.calls, [['left']]);
+  act(() => workspaceCommands().onRefreshAll?.());
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
+  assert.equal(workspaceCommands().isRefreshingWorkspace, false);
+
+  // A conversation that is gone has nothing to refresh.
+  act(() => actions.focusPane('right'));
+  assert.equal(workspaceCommands().canRefreshTab, false);
+
+  isRefreshingWorkspace = true;
+  view.rerender(
+    <WorkspaceChromeProvider
+      value={{
+        isImmersive: false,
+        isBrowserFullscreen: false,
+        toggleImmersive,
+        exitImmersive: () => undefined,
+        isSidebarPeekOpen: false,
+        setSidebarPeekOpen: () => undefined,
+        canSplit: true,
+      }}
+    >
+      <ProjectCommandPalette />
+    </WorkspaceChromeProvider>,
+  );
+  assert.equal(workspaceCommands().isRefreshingWorkspace, true);
 });
 
 test('when a palette command moves the focused pane, DOM focus follows into it', async () => {

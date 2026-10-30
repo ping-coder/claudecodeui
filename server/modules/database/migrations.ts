@@ -12,6 +12,7 @@ import {
   SESSION_DRAFTS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
+  SCHEDULE_HOLDS_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
   USER_PREFERENCES_TABLE_SCHEMA_SQL,
   USER_NOTIFICATION_PREFERENCES_TABLE_SCHEMA_SQL,
@@ -436,6 +437,12 @@ const addSupersededTranscriptPathColumn = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'superseded_provider_sessions', columnNames, 'jsonl_path', 'TEXT');
 };
 
+/** Adds `left_paused_at` to a `schedule_holds` table made before the column existed. */
+const addScheduleHoldLeftPausedColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'schedule_holds').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'schedule_holds', columnNames, 'left_paused_at', 'DATETIME');
+};
+
 const addForkedFromSessionIdColumn = (db: Database): void => {
   const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
   addColumnToTableIfNotExists(db, 'sessions', columnNames, 'forked_from_session_id', 'TEXT');
@@ -766,6 +773,8 @@ export const runMigrations = (db: Database) => {
     addForkedFromSessionIdColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
+    db.exec(SCHEDULE_HOLDS_TABLE_SCHEMA_SQL);
+    addScheduleHoldLeftPausedColumn(db);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_provider_session_id ON sessions(provider_session_id)');

@@ -5,8 +5,13 @@ export { chatRunRegistry } from './services/chat-run-registry.service.js';
 // sessions it (re)indexed from disk through the same builder the chat gateway
 // uses, so both paths put the identical delta on the wire.
 export { broadcastSessionUpserted, broadcastSessionUpsertedBatch } from './services/session-upsert-broadcast.service.js';
+// The scheduled-messages dispatcher says why a message waits (`dispatch_waiting`).
+export { broadcastGatewayEvent } from './services/gateway-broadcast.service.js';
 // runDetachedChatTurn: used by the scheduled-messages module to run a turn
 // from a timer, with no socket to stream to or report errors on.
 // holdsWorkPastTurn: the composition root keeps a run registered by it.
 export { holdsWorkPastTurn, runDetachedChatTurn } from './services/chat-websocket.service.js';
 export type { HandOverFailure, ProviderRuntimeGateway } from './services/chat-websocket.service.js';
+// The composition root resumes, once started, the loops of the sessions the
+// server held for scheduled work when it went down.
+export { RESUME_LOOPS_START_DELAY_MS, resumeHeldLoopsOnStart } from './services/loops-resume.service.js';

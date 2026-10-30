@@ -5,11 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, sessionDraftsDb, sessionsDb, userDb } from '@/modules/database/index.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
 import { claudeRuntime, listClaudeSDKBackgroundWork } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
+import { closeScheduledMessageDispatcher, initializeScheduledMessageDispatcher } from '@/modules/scheduled-messages/index.js';
 import { chatRunRegistry, connectedClients, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type { ProviderRuntimeContext } from '@/shared/types.js';
@@ -437,8 +438,8 @@ async function startLoop(gateway: Gateway, launch: Message) {
 
 // The loop started while the user allowed Bash outright.
 const LOOP_LAUNCH = { model: 'sonnet', effort: 'high', permissionMode: 'default', toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false } };
-// A queued message's options as the scheduled-messages dispatcher sends them (its `dispatchedOptions`).
-const dispatched = (options: Message) => ({ ...options, inheritUnset: true, restoreSwitchesAfterTurn: true });
+// A queued message's options as the scheduled-messages dispatcher sends them (its `dispatchedTurn`).
+const dispatched = (options: Message) => ({ ...options, inheritUnset: true, restoreSwitchesAfterTurn: true, keepBackgroundWork: true });
 
 test('a queued message whose tool rules deny what a /loop\'s process allows is kept out by both plans the dispatcher makes, and fails if sent all the same, leaving the loop as it was', async () => {
   await withGateway(async (gateway) => {
@@ -447,8 +448,19 @@ test('a queued message whose tool rules deny what a /loop\'s process allows is k
     // Queued once the user had stopped allowing Bash and denied git push.
     const options = dispatched({ model: 'sonnet', effort: 'max', permissionMode: 'default', toolsSettings: { allowedTools: [], disallowedTools: ['Bash(git push:*)'], skipPermissions: false } });
     const plan = (planOptions: Message) => service.planHandOver('claude', sessionId, { ...options, sessionId, cwd: gateway.cwd }, planOptions);
-    assert.deepEqual(await plan({ inheritUnset: true }), { heldWork: true, canHandOver: false, changes: ['effort', 'tools'], switches: [] });
-    assert.deepEqual(await plan({ inheritUnset: true, acceptProcessSettings: true }), { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] });
+    // A process of its own would bring the loop's cron job back, which the
+    // dispatcher sends it to when its own settings keep it out
+    // (`replaceKeepsWork`); a turn that accepts the process's settings never
+    // starts one.
+    const details = { tools: { notAllowed: ['Bash'], alsoDenied: ['Bash(git push:*)'] } };
+    assert.deepEqual(
+      await plan({ inheritUnset: true }),
+      { heldWork: true, canHandOver: false, changes: ['effort', 'tools'], switches: [], details, replaceKeepsWork: true },
+    );
+    assert.deepEqual(
+      await plan({ inheritUnset: true, acceptProcessSettings: true }),
+      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], details, replaceKeepsWork: true },
+    );
 
     const failures: unknown[] = [];
     const outcome = await runDetachedChatTurn({
@@ -469,6 +481,109 @@ test('a queued message whose tool rules deny what a /loop\'s process allows is k
     assert.equal(queries.filter((query) => query.created()).length, 1, 'no new process');
     assert.deepEqual(held.calls, [], 'the loop\'s process is not interrupted, stopped or let go');
     assert.equal(service.hasScheduledWork(sessionId), true);
+  });
+});
+
+test('a queued message whose tool rules are stricter than a cron loop\'s process goes in a process of its own, which takes the loop over, and waits for nothing', async () => {
+  await withGateway(async (gateway) => {
+    const { service, queries, sessionId, userId } = gateway;
+    const held = await startLoop(gateway, LOOP_LAUNCH);
+    const waits: unknown[] = [];
+    connectedClients.add({
+      readyState: 1,
+      send: (data: string) => {
+        const frame = JSON.parse(data) as Message;
+        if (frame.kind === 'dispatch_waiting') {
+          waits.push(frame.wait);
+        }
+      },
+    } as never);
+    try {
+      // Queued once the user had stopped allowing Bash.
+      sessionDraftsDb.appendQueuedMessage(userId, sessionId, {
+        content: 'Check CI now',
+        options: { model: 'sonnet', effort: 'high', permissionMode: 'default', toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false } },
+        attachments: [],
+      });
+      // The dispatcher's first pass runs as it starts.
+      initializeScheduledMessageDispatcher(service);
+      await waitUntil(() => held.calls.includes('release'));
+      assert.equal(held.prompts.length, 1, 'nothing went into the loop\'s process');
+      held.end();
+      await waitUntil(() => queries.length === 2 && queries[1].prompts.length === 1);
+      assert.equal((queries[1].prompts[0]?.message as { content?: unknown } | undefined)?.content, 'Check CI now');
+      queries[1].emit(init());
+      queries[1].emit(result());
+      await waitUntil(() => queries[1].calls.includes('release'));
+      assert.deepEqual(sessionDraftsDb.listQueuedMessages(), [], 'sent');
+      assert.deepEqual(waits, [], 'it never waited');
+    } finally {
+      closeScheduledMessageDispatcher();
+    }
+  });
+});
+
+test('a queued message whose tool rules are stricter than a cron loop\'s process goes while the loop fires, and its process of its own takes the loop over once the fire is over', async (t) => {
+  // The runtime logs each turn that starts waiting for a turn of the CLI's own.
+  let fireWaits = 0;
+  const log = console.log.bind(console);
+  t.mock.method(console, 'log', (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('it waits for the turn the CLI runs on its own to be over')) {
+      fireWaits += 1;
+    }
+    log(...args);
+  });
+  await withGateway(async (gateway) => {
+    const { service, queries, sessionId, userId } = gateway;
+    const held = await startLoop(gateway, LOOP_LAUNCH);
+    const waits: unknown[] = [];
+    connectedClients.add({
+      readyState: 1,
+      send: (data: string) => {
+        const frame = JSON.parse(data) as Message;
+        if (frame.kind === 'dispatch_waiting') {
+          waits.push(frame.wait);
+        }
+      },
+    } as never);
+    // Queued once the user had stopped allowing Bash.
+    const options = { model: 'sonnet', effort: 'high', permissionMode: 'default', toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false } };
+    try {
+      // The loop's job fires.
+      held.emit({ type: 'command_lifecycle', uuid: randomUUID(), session_id: NATIVE_ID, command_uuid: randomUUID(), state: 'started', wakeup_source: 'schedule_wakeup' });
+      held.emit(init());
+      held.emit(assistantText('Checking CI.'));
+      const plan = () => service.planHandOver('claude', sessionId, { ...dispatched(options), sessionId, cwd: gateway.cwd }, { inheritUnset: true });
+      const deadline = performance.now() + 5000;
+      while (!(await plan()).afterCliTurn && performance.now() < deadline) {
+        await flush(1);
+      }
+      assert.deepEqual(
+        await plan(),
+        { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], details: { tools: { notAllowed: ['Bash'], alsoDenied: [] } }, replaceKeepsWork: true, afterCliTurn: true },
+      );
+
+      sessionDraftsDb.appendQueuedMessage(userId, sessionId, { content: 'Check CI now', options, attachments: [] });
+      // The dispatcher's first pass runs as it starts; the message's run waits for the fire.
+      initializeScheduledMessageDispatcher(service);
+      await waitUntil(() => fireWaits === 1);
+      assert.deepEqual(held.calls, [], 'the fire is not interrupted, and the loop\'s process is not let go');
+      assert.deepEqual(waits, [], 'nothing waits, and nothing offers to stop the loop');
+
+      held.emit(result());
+      await waitUntil(() => held.calls.includes('release'));
+      assert.equal(held.prompts.length, 1, 'nothing went into the loop\'s process');
+      held.end();
+      await waitUntil(() => queries.length === 2 && queries[1].prompts.length === 1);
+      assert.equal((queries[1].prompts[0]?.message as { content?: unknown } | undefined)?.content, 'Check CI now');
+      queries[1].emit(init());
+      queries[1].emit(result());
+      await waitUntil(() => queries[1].calls.includes('release'));
+      assert.deepEqual(sessionDraftsDb.listQueuedMessages(), [], 'sent');
+      assert.deepEqual(waits, [], 'it never waited');
+    } finally {
+      closeScheduledMessageDispatcher();
+    }
   });
 });
 

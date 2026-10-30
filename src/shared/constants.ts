@@ -286,7 +286,7 @@ export const PROVIDER_TERMINAL_SIGN_IN_COMMANDS: Partial<Record<LLMProvider, str
 export const ESCAPE_LAYER_SELECTOR = '[data-escape-layer], [aria-modal="true"], [role="menu"]';
 
 /**
- * Split or merge the workspace. Like the three shortcuts below it is written in formatShortcut's tokens:
+ * Split or merge the workspace. Like the shortcuts below it is written in formatShortcut's tokens:
  * project-workspace's useWorkspaceShortcuts matches the keys it names (by physical key), and its tab
  * bar tooltips and empty-pane hints show them, so the keys and what the hints say change together.
  */
@@ -300,6 +300,13 @@ export const WORKSPACE_FOCUS_RIGHT_PANE_SHORTCUT = ['mod', '2'] as const;
 
 /** Toggle full screen (see WORKSPACE_SPLIT_SHORTCUT for who reads it). */
 export const WORKSPACE_FULLSCREEN_SHORTCUT = ['mod', 'shift', 'enter'] as const;
+
+/**
+ * The browser's reload key, which refreshes the whole workspace in place while the document is in browser
+ * full screen (a page reload would leave it); Mod+R does the same. project-workspace's useWorkspaceShortcuts
+ * catches both, and the Refresh all tooltip names this one.
+ */
+export const WORKSPACE_FULLSCREEN_REFRESH_SHORTCUT = ['F5'] as const;
 
 // ---------------------------
 

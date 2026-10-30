@@ -99,3 +99,14 @@ test('a replacement echo survives a kept turn that repeats its text', () => {
   const persisted = [...kept, userRow('persisted', 'continue', '2026-01-01T00:00:25.000Z')];
   assert.deepEqual(removeOptimisticUserEchoes(persisted, [echo]), []);
 });
+
+test('a live row without a string id is kept as it is, and does not stop the echoes around it from retiring', () => {
+  const persisted = createUserMessage('claude_text', '2026-07-28T20:30:26.000Z', { content: 'hello' });
+  const local = createUserMessage('local_text', '2026-07-28T20:30:21.000Z', { content: 'hello' });
+  const idless = { kind: 'resume_loops_status', sessionId: 'session-1', timestamp: '2026-07-28T20:30:22.000Z' } as unknown as NormalizedMessage;
+
+  const remainingRealtime = removeOptimisticUserEchoes([persisted], [idless, local]);
+
+  assert.equal(remainingRealtime.length, 1);
+  assert.equal(remainingRealtime[0] === idless, true);
+});

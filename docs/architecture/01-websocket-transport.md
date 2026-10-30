@@ -13,7 +13,7 @@ serves the app, and it decides what a connection is by looking at the pathname �
 no second server and no socket.io-style namespacing. Every path authenticates once, at the
 HTTP upgrade, before any handler runs. The path that matters is `/ws`, the chat socket: a
 browser tab opens exactly one, and every feature that needs live data subscribes to that
-one socket rather than opening its own. The protocol on it is deliberately small — six
+one socket rather than opening its own. The protocol on it is deliberately small — nine
 inbound message types, every outbound frame tagged with a `kind` — so the client needs one
 switch statement and no provider-specific branching. The server trusts the client for the
 session id and the prompt text and nothing else: provider, project path and the
@@ -65,7 +65,7 @@ every open `/ws` socket in the process. A run's writer holds only the sockets wa
 | `server/modules/websocket/services/websocket-auth.service.ts` | `verifyWebSocketClient` — the upgrade-time gate for every path |
 | `server/modules/auth/auth.middleware.ts` | `authenticateWebSocket` — first DB user in platform mode, JWT verification in OSS mode |
 | `server/modules/websocket/services/websocket-state.service.ts` | `connectedClients`, the set of open `/ws` sockets, and `WS_OPEN_STATE` |
-| `server/modules/websocket/services/chat-websocket.service.ts` | The `/ws` protocol: the six inbound handlers, `protocol_error`, the attachment trust boundary, `runDetachedChatTurn` |
+| `server/modules/websocket/services/chat-websocket.service.ts` | The `/ws` protocol: the nine inbound handlers, `protocol_error`, the attachment trust boundary, `runDetachedChatTurn` |
 | `server/modules/websocket/services/chat-run-registry.service.ts` | `chatRunRegistry` — one run per session, `seq` stamping, the replay buffer, the exactly-one-`complete` contract |
 | `server/modules/websocket/services/chat-session-writer.service.ts` | `ChatSessionWriter` — the object runtimes write into; swallows `session_created`, fans out to every attached socket |
 | `server/modules/websocket/services/session-upsert-broadcast.service.ts` | The only builder of `session_upserted`, and the batched broadcast helper |
@@ -176,25 +176,35 @@ frame with no `kind` at all (`:96-98`), which is how the Task Master frames pass
 
 ## The chat protocol going up
 
-**RULE: six `type` values, dispatched by one switch (`chat-websocket.service.ts:676-698`).
-Anything else is answered with `protocol_error` / `UNKNOWN_MESSAGE_TYPE`; anything that
-throws is answered with `INTERNAL_ERROR`.**
+**RULE: nine `type` values, dispatched by one switch (`handleChatConnection` in
+`chat-websocket.service.ts`). Anything else is answered with `protocol_error` /
+`UNKNOWN_MESSAGE_TYPE`; anything that throws is answered with `INTERNAL_ERROR`.**
 
 | `type` | Payload | What the server does |
 | --- | --- | --- |
-| `chat.send` | `sessionId`, `content`, `options` | Resolves the session row, registers the run, dispatches to the provider runtime (`:146-158`). On a session whose previous turn left background work running, the new turn's CLI process supersedes the one that work runs under, so the work is stopped or finishes unheard; the composer asks the user before sending such a turn |
-| `chat.edit-send` | as above plus `anchorId` | Announces `history_truncated`, rewinds or resumes the provider transcript at the anchor, then dispatches (`:314-408`) |
-| `chat.abort` | `sessionId` | Aborts the runtime and emits the terminal `complete` on its behalf (`:415-438`) |
+| `chat.send` | `sessionId`, `content`, `options`, `clientRequestId?` | Resolves the session row, registers the run, dispatches to the provider runtime (`handleChatSend`). On a session whose process is held for background work, Claude runs the turn in that process when it can, and the work keeps running; otherwise the turn's own process replaces the held one and stops the work. A process held for cron jobs alone is replaced without losing them (the new CLI brings them back), once a job's fire under way is over. The composer asks the server first: a send it expects to keep the work carries `options.keepBackgroundWork`, which has the gateway answer `send_refused` to the asking socket rather than stop the work; otherwise it asks the user |
+| `chat.edit-send` | as above plus `anchorId` | Announces `history_truncated`, rewinds or resumes the provider transcript at the anchor, then dispatches (`handleChatEditSend`) |
+| `chat.insert` | `sessionId`, `insertId`, `content` | Writes a user message into the running turn, which the model reads once its current tool batch ends (`handleChatInsert`; Claude only). A refusal comes back to the asking socket as a `refused` `insert_status`; an accepted insert is reported by the runtime on the session's stream |
+| `chat.insert-cancel` | `sessionId`, `insertId` | Withdraws an insert the model has not read (`handleChatInsertCancel`). The runtime reports the withdrawal on the session's stream; a failure comes back to the asking socket as a `cancel_failed` `insert_status` |
+| `chat.abort` | `sessionId` | Aborts the runtime and emits the terminal `complete` on its behalf (`handleChatAbort`) |
 | `chat.stop-task` | `sessionId`, `taskId`, `allScheduled?`, `clientRequestId?` | Stops one background task (agent, workflow or backgrounded command) through the provider runtime; the runtime reports the stop on the session's stream. A `cron:` or `wakeup:` taskId names a /loop's scheduled work instead (`allScheduled` stops all of the session's): the runtime lets go of its process or a detached turn has the model cancel it, with the asking socket attached, and each step comes back to the asking socket as `stop_task_status`, carrying the stop's `clientRequestId` |
-| `chat.subscribe` | `sessions: [{ sessionId, lastSeq }]` | Acks with `chat_subscribed`, attaches this socket to a running run — or to a completed one whose session still has background or scheduled work — and replays what was missed for running runs (`:448-504`) |
-| `chat.permission-response` | `requestId`, `allow`, `updatedInput?`, `message?`, `rememberEntry?` | Resolves one pending tool approval (`:511-522`) |
+| `chat.resume-loops` | `sessionId`, `options?`, `clientRequestId?` | Resumes paused loops: the session's transcript still holds them but no process runs them, after a server restart or anything else that ended the process: a detached turn in a new process, with the settings the session's last hold ran with (else `options`, the composer's), the asking socket attached. Each step comes back to the asking socket as `resume_loops_status` |
+| `chat.subscribe` | `sessions: [{ sessionId, lastSeq }]` | Acks with `chat_subscribed`, attaches this socket to a running run — or to a completed one whose session still has background or scheduled work — and replays what was missed for running runs (`handleChatSubscribe`) |
+| `chat.permission-response` | `requestId`, `allow`, `updatedInput?`, `message?`, `rememberEntry?` | Resolves one pending tool approval (`handlePermissionResponse`) |
 
-All six are built in exactly five client files: the composer builds sends, aborts and
-permission answers (`useChatComposerState.ts:825-837`, `:1121-1124`, `:1149-1156`),
-`chat.stop-task` is built by the background-tasks strip's ✕ (`BackgroundTasksStrip.tsx`, and
-`ScheduledWorkChips.tsx` for scheduled work, which reads its `stop_task_status` answers), and
-`chat.subscribe` is built in `useChatSessionState.ts:668-674` and
-`ChatInterface.tsx:267-273`.
+All nine are built in seven client files, all under `src/modules/chat/`:
+
+- `hooks/useChatComposerState.ts`: `chat.send` and `chat.edit-send`, `chat.abort`,
+  `chat.permission-response`.
+- `hooks/usePendingInserts.ts`: `chat.insert` and `chat.insert-cancel`.
+- `chat.stop-task` has three builders: the background-tasks strip's ✕
+  (`transcript/BackgroundTasksStrip.tsx`); `transcript/ScheduledWorkChips.tsx` for scheduled
+  work, which reads its `stop_task_status` answers; and `composer/useDispatchWaits.ts`, whose
+  "Stop the loop and send" on a waiting queued or scheduled message sends it with
+  `allScheduled` and follows its own `stop_task_status` answers by `clientRequestId`.
+- `transcript/ScheduledWorkChips.tsx` also builds `chat.resume-loops` for paused loops, and
+  reads its `resume_loops_status` answers.
+- `chat.subscribe`: `hooks/useChatSessionState.ts` and `ChatInterface.tsx`.
 
 ### The client is not trusted past the session id
 
@@ -292,6 +302,7 @@ Two kinds in those unions never appear where you would look for them:
 | `protocol_error` | `chat-websocket.service.ts:127` | Error row, spinner cleared |
 | `session_upserted` | `session-upsert-broadcast.service.ts:81-105` | `useProjectsState` — sidebar rows and alias folding |
 | `loading_progress` | `projects-with-sessions-fetch.service.ts:164-175` | `useProjectsState` — project scan progress (`:720-736`) |
+| `dispatch_waiting` | `scheduled-message-dispatcher.service.ts` (`noteWait`, `clearWait`), via `broadcastGatewayEvent` | `useDispatchWaits` — why a queued or scheduled message waits, shown under it with its actions. Sent to every socket only when the wait changes, with ids and codes but no message text; `GET /api/scheduled-messages/waiting?sessionId=` gives the owner the current waits |
 
 ### The one exception
 

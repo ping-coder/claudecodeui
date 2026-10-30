@@ -7,6 +7,7 @@ import { rgPath } from '@vscode/ripgrep';
 
 import { isClaudeNonTurnMessageRow, stripAnsiSequences } from '@/shared/utils.js';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { parseControlPrompt } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 
 type AnyRecord = Record<string, any>;
 type SearchableProvider = 'claude' | 'codex';
@@ -462,7 +463,7 @@ function extractClaudeSearchableMessage(entry: AnyRecord): ClaudeSearchableMessa
         : null;
     }
 
-    if (!content || isInternalContent(content)) {
+    if (!content || isInternalContent(content) || parseControlPrompt(content)) {
       return null;
     }
 

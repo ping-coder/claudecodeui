@@ -263,7 +263,10 @@ export type MessageKind =
  * background work and could not: the gateway started no run, and tells only
  * the asking socket, without `seq` (see `ProviderHandOverPlan`).
  * `stop_task_status` answers a `chat.stop-task` that names scheduled work
- * the same way, once for each step of the stop (see `ScheduledWorkSummary`).
+ * the same way, once for each step of the stop (see `ScheduledWorkSummary`),
+ * and `resume_loops_status` a `chat.resume-loops` (see `PausedScheduledWork`).
+ * `dispatch_waiting` says why a queued or scheduled message waits (see
+ * `DispatchWaitingEvent`).
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
@@ -272,7 +275,9 @@ export type GatewayEventKind =
   | 'loading_progress'
   | 'protocol_error'
   | 'send_refused'
-  | 'stop_task_status';
+  | 'stop_task_status'
+  | 'resume_loops_status'
+  | 'dispatch_waiting';
 
 /**
  * Complete set of `kind` values emitted to websocket clients.
@@ -396,6 +401,23 @@ export type CompactionInfo = {
   error?: string | null;
 };
 
+/**
+ * A prompt CloudCLI sent the model on its own, which the transcript keeps as
+ * if the user had typed it, read back from its text (parseControlPrompt in
+ * claude-scheduled-work.js). The chat shows it as a short note on an
+ * assistant row, so it opens no turn and offers no edit or fork.
+ * `scheduled-stop`: the turn that has Claude stop loops, `count` of them:
+ * the cron jobs in `jobIds`, plus the dynamic loop when `wakeup`.
+ * `loops-resume`: the turn that resumes the loops no process runs, counted
+ * the same way.
+ */
+export type ControlNote = {
+  kind: 'scheduled-stop' | 'loops-resume';
+  count: number;
+  jobIds?: string[];
+  wakeup?: boolean;
+};
+
 export type NormalizedMessage = {
   id: string;
   /**
@@ -449,6 +471,8 @@ export type NormalizedMessage = {
   isCompactSummary?: boolean;
   /** Set on the row that stands in for a compaction, so the UI can draw it as one. */
   compact?: CompactionInfo;
+  /** Set on the assistant row that stands in for a prompt CloudCLI sent the model on its own (see `ControlNote`). */
+  controlNote?: ControlNote;
   images?: unknown;
   /** Non-image files attached to a user turn after provider history normalization. */
   files?: unknown;
@@ -625,8 +649,10 @@ export type SessionHold = {
  * (see `IProviderRuntime.listScheduledWork`): a job CronCreate scheduled (a
  * /loop with an interval, a reminder), or the next wake-up of a self-paced
  * /loop (ScheduleWakeup). No task event reports either, so they are listed
- * apart from `BackgroundTaskSummary`. Only work created in the live process
- * is listed: jobs a new process revives from the transcript are not.
+ * apart from `BackgroundTaskSummary`. The jobs a process brings back from
+ * the transcript as it resumes the session are listed with those it made:
+ * the runtime reads them off the transcript before it starts the process
+ * (`ProviderRuntimeContext.readRevivedCronJobs`).
  *
  * - `id`: `cron:<jobId>`, or `wakeup:<chainId>` where the chain id is the
  *   tool_use id of the chain's first ScheduleWakeup; it stays the same while
@@ -655,6 +681,8 @@ export type SessionHold = {
  *   after it is its last.
  * - `durable`: the job is saved in the project's .claude/scheduled_tasks.json.
  * - `reason`: the delay reason the model gave for a wake-up.
+ * - `paused`: no process runs it (see `PausedScheduledWork`); never set on
+ *   work a live process holds.
  */
 export type ScheduledWorkSummary = {
   id: string;
@@ -670,15 +698,85 @@ export type ScheduledWorkSummary = {
   expiresAt?: number;
   durable?: boolean;
   reason?: string;
+  paused?: true;
 };
 
 /**
  * How `IProviderRuntime.stopScheduledWork` reads a stop: `all` targets every
  * piece of scheduled work of the session that can be stopped, not only the
- * one named.
+ * one named. `paused` is the session's paused work (see
+ * `PausedScheduledWork`), which the caller passes when no process of this
+ * server holds the session: a stop then names that work.
  */
 export type ScheduledWorkStopOptions = {
   all?: boolean;
+  paused?: ScheduledWorkSummary[];
+};
+
+/**
+ * A cron job a Claude CLI that resumes a session brings back from its
+ * transcript (findRevivedCronJobs in claude-scheduled-work.js): its id, the
+ * CronCreate call (`carried:<id>` for one a compaction carried), its cron
+ * and prompt, `createdAt` (the call's row), the CLI's `humanSchedule`, and
+ * `predictable` when its times follow the scheduler's defaults.
+ */
+export type RevivedCronJob = {
+  jobId: string;
+  toolUseId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  createdAt: number;
+  humanSchedule: string;
+  predictable: boolean;
+};
+
+/**
+ * The scheduled work a session's transcript holds that no process runs, as
+ * a provider's sessions read it (`IProviderSessions.readPausedScheduledWork`):
+ * what a restart of the server, an abort or a CLI that ended leaves of the
+ * session's loops. `items` are the
+ * work, each `paused`, oldest first; `resumeContent` the message of the turn
+ * that resumes it, null with no item. `heldElsewhere`: a live CLI outside this
+ * server holds the session, which runs its loops, so nothing is paused.
+ */
+export type PausedScheduledWork = {
+  items: ScheduledWorkSummary[];
+  resumeContent: string | null;
+  heldElsewhere: boolean;
+};
+
+/**
+ * What a process held for scheduled work runs with, recorded so a restart of
+ * the server can resume its loops with the same settings (see
+ * `ScheduleHoldRecord`): the run options' model, permission mode, effort,
+ * ultracode and tool settings, as the process has them now.
+ */
+export type ScheduleHoldLaunchOptions = {
+  model: string | null;
+  permissionMode: string;
+  effort: string | null;
+  ultracode: boolean | null;
+  allowedTools: string[];
+  disallowedTools: string[];
+  skipPermissions: boolean;
+};
+
+/**
+ * A session whose process a provider runtime holds for scheduled work, kept
+ * in the database so the server can resume its loops after a restart
+ * (`ProviderRuntimeContext.scheduleHolds`). `runId` names the run that wrote
+ * it, so only that run's release removes it.
+ */
+export type ScheduleHoldRecord = {
+  sessionId: string;
+  provider: LLMProvider;
+  providerSessionId: string | null;
+  projectPath: string | null;
+  cwd: string | null;
+  userId: string | number | null;
+  runId: string;
+  launchOptions: ScheduleHoldLaunchOptions;
 };
 
 /**
@@ -956,6 +1054,26 @@ export type ProviderRuntimeContext = {
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
   /**
+   * The cron jobs a CLI that resumes the session brings back from its
+   * transcript (see `IProviderSessions.readRevivedCronJobs`): the runtime
+   * holds a resumed process for them. Absent for a provider that keeps no
+   * transcript of them.
+   */
+  readRevivedCronJobs?(
+    sessionId: string,
+    options: { anchorId: string | null; now: number },
+  ): Promise<RevivedCronJob[]>;
+  /**
+   * Where the runtime records the sessions whose process it holds for
+   * scheduled work (see `ScheduleHoldRecord`): `save` once held and as what
+   * it holds changes, `remove` when it lets go. Absent in tests that do not
+   * look at it.
+   */
+  scheduleHolds?: {
+    save(record: ScheduleHoldRecord): void;
+    remove(sessionId: string, runId: string): void;
+  };
+  /**
    * Builds the SDK query for a run. Production leaves this unset and the
    * runtime uses the SDK's own; tests supply a scripted stream so the hold
    * and background-work paths can be driven without a CLI process.
@@ -1176,6 +1294,23 @@ export type ProviderHandOverPlanOptions = {
  *   turn to (nothing held, a turn under way, an edited message), and when
  *   the turn's options could not be resolved (`lookup`).
  *
+ * - `details`: what exactly the `tools`, `permissionMode` and `model` among
+ *   `changes` are (see `HandOverBlockDetail`); absent when none of them keeps
+ *   the turn out.
+ * - `replaceKeepsWork`: the turn cannot go in, but a process of its own keeps
+ *   the work: the held process is kept for cron jobs alone, which the new CLI
+ *   brings back from the transcript as it resumes the session, and the turn
+ *   changes nothing a resumed process cannot take (no `cwd`, no `lookup`).
+ *   Such a send goes, and starts that process; nothing is stopped. Absent
+ *   otherwise.
+ * - `afterCliTurn`: with `replaceKeepsWork`, the held process's CLI runs a
+ *   turn of its own (a job's fire), which starting that process now would
+ *   interrupt: the turn's run waits for that turn to be over before it starts
+ *   it, so the send still goes, and nothing asks. Should that turn leave work
+ *   a new process would stop, a run whose options set `keepBackgroundWork:
+ *   true` fails instead (HAND_OVER_FAILED, reason `work-started`), and the
+ *   work goes on.
+ *
  * A session with no held process, and every runtime that never holds one,
  * answer `{ heldWork: false, canHandOver: false, changes: [], switches: [] }`.
  */
@@ -1184,6 +1319,101 @@ export type ProviderHandOverPlan = {
   canHandOver: boolean;
   changes: HandOverChange[];
   switches: HandOverSwitch[];
+  details?: HandOverBlockDetail;
+  replaceKeepsWork?: boolean;
+  afterCliTurn?: boolean;
+};
+
+/**
+ * What exactly keeps a turn out of the held process, for the changes that
+ * can say more than their name (see `ProviderHandOverPlan.details`):
+ *
+ * - `tools`: what the process allows that the turn does not (`notAllowed`),
+ *   and what the turn denies that the process does not (`alsoDenied`);
+ * - `permissionMode`: the process's mode and the turn's; `bypass_not_allowed`
+ *   when the turn's is bypassPermissions and the process was not launched to
+ *   allow it, `cannot_switch` when the process cannot switch modes at all;
+ * - `model`: the process's model and the turn's, which it cannot switch to.
+ */
+export type HandOverBlockDetail = {
+  tools?: { notAllowed: string[]; alsoDenied: string[] };
+  permissionMode?: { process: string; message: string; reason: 'bypass_not_allowed' | 'cannot_switch' };
+  model?: { process: string; message: string };
+};
+
+/**
+ * Which waiting message a `DispatchWait` is about: the session's queued
+ * message (one per session), or a due scheduled message by its row id.
+ */
+export type DispatchWaitTarget = { kind: 'queued' } | { kind: 'scheduled'; id: string };
+
+/**
+ * Why the scheduled-messages dispatcher holds a message back:
+ *
+ * - `held_settings`: the session's process is held for background work and
+ *   the message changes what only a new process can apply (`changes`);
+ * - `held_work`: the session's process runs work the message would stop (a
+ *   task, or a turn under way in a process held for work), whatever its
+ *   settings;
+ * - `retry`: the held process turned the queued message, or a due one whose
+ *   turn the CLI's own turn left work for (`work-started`), away at the
+ *   hand-over, and it waits until `retryAt` to be tried again;
+ * - `behind`: an earlier due message of the session waits, and this one
+ *   follows it.
+ */
+export type DispatchWaitReason = 'held_settings' | 'held_work' | 'retry' | 'behind';
+
+/**
+ * What the user can do about a waiting message: stop the session's loops so
+ * it goes, send it with the held process's settings, keep waiting, or cancel
+ * it.
+ */
+export type DispatchWaitAction = 'stop_work_and_send' | 'use_process_settings' | 'keep_waiting' | 'cancel';
+
+/**
+ * A message the scheduled-messages dispatcher holds back, and why. Kept in
+ * memory, worked out again on every pass, and sent on as `dispatch_waiting`
+ * when it changes. Carries no message text.
+ *
+ * `heldFor` is `loops` when the session's process is held for scheduled
+ * work alone (loops, cron jobs), else `work` (a task holds it too, or
+ * nothing scheduled does); `changes` and `details` are what keeps a
+ * `held_settings` message out (see `ProviderHandOverPlan`); `since` is when
+ * it started waiting; `holdUntil` the latest the session's process is held
+ * for its scheduled work, which is also the latest the message waits (epoch
+ * ms; null when nothing scheduled holds it); `stopTaskId` the scheduled work
+ * item a `stop_work_and_send` names in its `chat.stop-task` (with
+ * `allScheduled`).
+ */
+export type DispatchWait = {
+  target: DispatchWaitTarget;
+  sessionId: string;
+  provider: LLMProvider;
+  reason: DispatchWaitReason;
+  heldFor: 'loops' | 'work';
+  changes: HandOverChange[];
+  details?: HandOverBlockDetail;
+  since: string;
+  holdUntil: number | null;
+  retryAt?: number;
+  stopTaskId?: string;
+  actions: DispatchWaitAction[];
+};
+
+/**
+ * The gateway's word that a message started waiting, waits for another
+ * reason, or no longer waits (`wait: null`: it went, was cancelled, or the
+ * hold ended). Broadcast to every chat socket, like `run_ended`, so it names
+ * only the session and the message's target; GET
+ * /api/scheduled-messages/waiting gives the current waits of one session to
+ * its owner.
+ */
+export type DispatchWaitingEvent = {
+  kind: Extract<GatewayEventKind, 'dispatch_waiting'>;
+  sessionId: string;
+  target: DispatchWaitTarget;
+  wait: DispatchWait | null;
+  timestamp: string;
 };
 
 // ---------------------------

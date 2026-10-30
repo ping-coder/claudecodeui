@@ -234,7 +234,22 @@ export type ScheduledWorkSummary = {
   durable?: boolean;
   /** Wake-up only: why the model picked the delay. */
   reason?: string;
+  /**
+   * No process runs it (a restart of the server, an abort or a CLI that ended let go of it), and it waits in
+   * the transcript (GET /api/providers/sessions/:id/paused-scheduled-work). A paused job's times are
+   * those a resume now would give it; a paused self-paced loop keeps the time it was due.
+   */
+  paused?: true;
 };
+
+/**
+ * How a `chat.resume-loops` stands, as the server's `resume_loops_status` frame (answered to the
+ * asking socket alone) says: `started` (the turn that resumes the paused loops began), `finished`
+ * (that turn is over), `busy` (a turn is under way; ask again after it), `held_elsewhere` (a Claude
+ * CLI outside this server holds the session and runs its loops), `not_found` (nothing is paused) or
+ * `failed`. Read by chat's background-tasks strip.
+ */
+export type ResumeLoopsStatus = 'started' | 'finished' | 'busy' | 'held_elsewhere' | 'not_found' | 'failed';
 
 /**
  * How a `chat.stop-task` for scheduled work stands, as the server's
@@ -564,6 +579,21 @@ export type CompactionInfo = {
   error?: string | null;
 };
 
+/**
+ * A prompt CloudCLI sent the model on its own, which the transcript keeps as if the user had typed it.
+ * The server reads it back from its text and sends an assistant row carrying this note instead, so it
+ * opens no turn and offers no edit or fork. `scheduled-stop`: the turn that has Claude stop loops,
+ * `count` of them: the cron jobs in `jobIds`, plus the dynamic loop when `wakeup`. `loops-resume`: the
+ * turn that resumes the loops no process runs, counted the same way. A kind this client
+ * does not know shows the row's English `content`.
+ */
+export type ControlNote = {
+  kind: 'scheduled-stop' | 'loops-resume';
+  count: number;
+  jobIds?: string[];
+  wakeup?: boolean;
+};
+
 /** Where a background task — a spawned agent, a workflow run or a backgrounded command — stands: `stopped` is one whose session process ended before it reported, so no outcome exists and none is coming. */
 export type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
@@ -632,6 +662,8 @@ export type ChatMessage = {
   compact?: CompactionInfo;
   /** The summary that compaction produced, folded into the row above rather than left loose. */
   compactSummary?: string;
+  /** Set on the row that stands in for a prompt CloudCLI sent the model on its own, drawn as a short note. */
+  controlNote?: ControlNote;
   isSubagentContainer?: boolean;
   /** The agent this row spawned, when it spawned one. Its presence is what makes a row a subagent container. */
   subagent?: SubagentInfo;
@@ -813,6 +845,8 @@ export type NormalizedMessage = {
   isCompactSummary?: boolean;
   /** Set by the provider on the row that stands in for a compaction. */
   compact?: CompactionInfo;
+  /** Set by the provider on the assistant row that stands in for a prompt CloudCLI sent the model on its own. */
+  controlNote?: ControlNote;
   images?: Array<{ path?: string; data?: string; name?: string }>;
   files?: Array<{ path?: string; name?: string; mimeType?: string; size?: number }>;
   toolName?: string;
@@ -898,7 +932,7 @@ export type NormalizedMessage = {
    * the turn could not be handed to the held process at all.
    */
   changes?: string[];
-  /** With `code` HAND_OVER_FAILED: `stale-plan` or `lookup`; any other value reads as the general case. */
+  /** With `code` HAND_OVER_FAILED: `stale-plan`, `lookup` or `work-started`; any other value reads as the general case. */
   reason?: string;
 };
 
@@ -1112,7 +1146,54 @@ export type BackgroundSendChoice = 'send' | 'queue' | 'cancel';
 export type BackgroundSendPrompt = {
   work: string[];
   changes?: string[];
+  /** What exactly the `tools`, `permissionMode` and `model` among `changes` are, when the server said. */
+  details?: HandOverBlockDetail;
   queue?: false;
+};
+
+/**
+ * What exactly keeps a message out of the process a Claude session holds for its background work,
+ * for the settings that can say more than their name (the server's hand-over plan, its
+ * `send_refused`, or a waiting message's `DispatchWait`): the tools the process allows that the
+ * message does not (`notAllowed`) and those it denies besides (`alsoDenied`); the process's
+ * permission mode and the message's, with `bypass_not_allowed` when the message skips permissions
+ * and the process was not started to allow that; a model the process cannot switch to.
+ */
+export type HandOverBlockDetail = {
+  tools?: { notAllowed: string[]; alsoDenied: string[] };
+  permissionMode?: { process: string; message: string; reason: 'bypass_not_allowed' | 'cannot_switch' };
+  model?: { process: string; message: string };
+};
+
+/** Which waiting message a `DispatchWait` is about: the session's queued one, or a scheduled one by its id. */
+export type DispatchWaitTarget = { kind: 'queued' } | { kind: 'scheduled'; id: string };
+
+/**
+ * Why the server holds a queued or scheduled message back, as GET /api/scheduled-messages/waiting
+ * and the `dispatch_waiting` frame say: `held_settings` (the session's process is held for its
+ * loops or background work, and the message changes what only a new process can apply: `changes`,
+ * `details`), `held_work` (work the message would stop runs), `retry` (the held process turned it
+ * away; tried again at `retryAt`) or `behind` (an earlier scheduled message waits). `heldFor` is
+ * `loops` when loops alone hold the session's process, `work` when a task holds it too or nothing
+ * scheduled does (then the wait is not worded as one for a loop); a server older than the field
+ * sends none, and meant `loops`. `holdUntil` is the latest the loops hold the process, so the
+ * latest the message waits (epoch ms, server clock). `actions` are what the user can do: stop the
+ * loops and send (`stopTaskId` names the item a `chat.stop-task` with `allScheduled` takes), send
+ * with the held process's settings, keep waiting, cancel.
+ */
+export type DispatchWait = {
+  target: DispatchWaitTarget;
+  sessionId: string;
+  provider: string;
+  reason: 'held_settings' | 'held_work' | 'retry' | 'behind';
+  heldFor?: 'loops' | 'work';
+  changes: string[];
+  details?: HandOverBlockDetail;
+  since: string;
+  holdUntil: number | null;
+  retryAt?: number;
+  stopTaskId?: string;
+  actions: Array<'stop_work_and_send' | 'use_process_settings' | 'keep_waiting' | 'cancel'>;
 };
 
 /**
@@ -1130,6 +1211,7 @@ export type SendRefusedEvent = {
   sessionId: string;
   reason: string;
   changes: string[];
+  details?: HandOverBlockDetail;
   clientRequestId?: string;
 };
 
@@ -2086,6 +2168,14 @@ export type CommandPaletteWorkspaceCommands = {
   onCloseFocusedPane: () => void;
   onActivateTab: (side: WorkspacePaneSide, tabKey: string) => void;
   onToggleFullscreen: () => void;
+  /** Refreshes the focused pane's active tab in place; the command is offered only when this is given. */
+  onRefreshTab?: () => void;
+  /** The focused pane shows a tab's content, so Refresh tab has something to refresh. */
+  canRefreshTab?: boolean;
+  /** Refreshes the whole workspace without reloading the page; the command is offered only when this is given. */
+  onRefreshAll?: () => void;
+  /** A refresh of the whole workspace is on its way: Refresh all shows as unavailable. */
+  isRefreshingWorkspace?: boolean;
 };
 
 // ---------------------------

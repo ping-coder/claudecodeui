@@ -12,6 +12,9 @@ export { providerModelsDb } from '@/modules/database/repositories/provider-model
 export { projectsDb } from '@/modules/database/repositories/projects.db.js';
 export { pushSubscriptionsDb } from '@/modules/database/repositories/push-subscriptions.js';
 export { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
+// scheduleHoldsDb: written by Providers (the Claude runtime, through its run context) for the sessions it holds for scheduled work; read by WebSocket to resume their loops after a restart.
+export { scheduleHoldsDb } from '@/modules/database/repositories/schedule-holds.db.js';
+export type { StoredScheduleHold } from '@/modules/database/repositories/schedule-holds.db.js';
 // sessionDraftsDb: used by User for drafts, Scheduled Messages for server-owned queued turns, and the WebSocket Shell handler (wired in server/index.ts), which holds a CLI back while a queued turn waits.
 export { sessionDraftsDb } from '@/modules/database/repositories/session-drafts.db.js';
 export type {

@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { useGitPanelController } from '@/modules/git-panel/hooks/useGitPanelController';
 import { useRevertLocalCommit } from '@/modules/git-panel/hooks/useRevertLocalCommit';
 import type { ConfirmationRequest, FileOpenHandler, GitPanelView, Project } from '@/shared/types';
@@ -23,6 +24,8 @@ type GitPanelProps = {
   onProjectSelect?: (project: Project) => void;
   /** Silently re-syncs the sidebar project list after worktree projects are created/archived. */
   onProjectsRefresh?: () => void;
+  /** The workspace pane's refresh token: when it moves, the open view reloads in place (no remount, so the view and its expanded diffs stay). */
+  refreshToken?: number;
 };
 
 /** Exported through the git-panel barrel; the project-workspace module renders it as the source-control sidebar tab. */
@@ -32,6 +35,7 @@ export default function GitPanel({
   onFileOpen,
   onProjectSelect,
   onProjectsRefresh,
+  refreshToken,
 }: GitPanelProps) {
   const { t } = useTranslation();
   const [activeView, setActiveView] = useState<GitPanelView>('changes');
@@ -62,6 +66,7 @@ export default function GitPanel({
     operationError,
     clearOperationError,
     refreshAll,
+    fetchRecentCommits,
     switchBranch,
     createBranch,
     deleteBranch,
@@ -82,6 +87,15 @@ export default function GitPanel({
     selectedProject,
     activeView,
     onFileOpen,
+  });
+
+  // Status, branches and remote always; the commit list only when the history view shows it. Compare and
+  // Worktrees reload their own data on the same token.
+  useRefreshSignal(refreshToken, () => {
+    refreshAll();
+    if (activeView === 'history') {
+      void fetchRecentCommits();
+    }
   });
 
   const { isRevertingLocalCommit, revertLatestLocalCommit } = useRevertLocalCommit({
@@ -203,6 +217,7 @@ export default function GitPanel({
               wrapText={wrapText}
               onWrapTextChange={setWrapText}
               onOpenFile={openFile}
+              refreshToken={refreshToken}
             />
           )}
 
@@ -228,6 +243,7 @@ export default function GitPanel({
               localBranches={localBranches}
               onProjectSelect={onProjectSelect}
               onProjectsRefresh={onProjectsRefresh}
+              refreshToken={refreshToken}
             />
           )}
 

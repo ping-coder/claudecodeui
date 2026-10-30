@@ -137,6 +137,10 @@ const setLayout = (layout: WorkspaceLayout, attentionSessionIds: ReadonlySet<str
     setSidebarOpen: vi.fn(),
     renameSession: vi.fn(async () => true),
     refreshProjectsSilently: vi.fn(async () => undefined),
+    getPaneRefreshToken: () => 0,
+    refreshTab: vi.fn(),
+    refreshWorkspace: vi.fn(async () => undefined),
+    isRefreshingWorkspace: false,
   };
 };
 
@@ -371,7 +375,7 @@ const stubSilentResizeObserver = () => {
 };
 
 test('each pane is measured, not the viewport: a wide one carries its view bar in the tab bar, a narrower one gets a row of its own', () => {
-  measurePanes({ left: 1000, right: 700 });
+  measurePanes({ left: 1100, right: 700 });
   setLayout(splitLayout());
   const view = render(regionElement({ canSplit: true }));
 
@@ -425,7 +429,7 @@ test('immersive, a pane below the wide tier labels only its active view and lets
   assert.deepEqual([canTrailingShrink('left'), canTrailingShrink('right')], [true, true]);
   view.unmount();
 
-  measurePanes({ left: 1000, right: 1000 });
+  measurePanes({ left: 1100, right: 1100 });
   render(regionElement({ canSplit: true, isImmersive: true }));
   assert.deepEqual([isFilesLabelHidden('left'), isFilesLabelHidden('right')], [false, false]);
   assert.deepEqual([canTrailingShrink('left'), canTrailingShrink('right')], [false, false], 'the tabs give way first');
@@ -676,7 +680,7 @@ test('a pane only re-renders when its width crosses a tier, not on every pixel o
     const leftRenders = () => mainRenders.filter((props) => props.side === 'left').length;
     const before = leftRenders();
 
-    // Ten frames of a divider drag, 3px each, all within the medium tier (384-991px for four views).
+    // Ten frames of a divider drag, 3px each, all within the medium tier (384-1055px for four views).
     for (let frame = 0; frame < 10; frame += 1) {
       leftWidth -= 3;
       act(() => {
@@ -687,7 +691,7 @@ test('a pane only re-renders when its width crosses a tier, not on every pixel o
     assert.equal(leftRenders(), before, 'no re-render while the width stays within one tier');
 
     // Into the wide tier: the view bar joins the tab bar.
-    leftWidth = 1000;
+    leftWidth = 1100;
     act(() => {
       notifyResize.forEach((notify) => notify());
     });
@@ -710,12 +714,12 @@ test('collapsed, the switcher dot also counts background work left running on th
 });
 
 test('each view raises the room the view bar needs in the tab bar, and turning one on re-tiers the pane at once', () => {
-  measurePanes({ left: 1050 });
+  measurePanes({ left: 1100 });
   setLayout(unsplitLayout());
   const view = render(regionElement({ canSplit: false }));
-  assert.equal(lastMainProps('left')?.hideHeader, true, 'four views fit beside the tabs from 992px');
+  assert.equal(lastMainProps('left')?.hideHeader, true, 'four views fit beside the tabs from 1056px');
 
-  // Browser makes five views, which need 1080px: no resize is needed to notice.
+  // Browser makes five views, which need 1144px: no resize is needed to notice.
   browserUse.enabled = true;
   view.rerender(regionElement({ canSplit: false }));
   assert.equal(lastMainProps('left')?.hideHeader, false);

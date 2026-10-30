@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
@@ -13,11 +13,13 @@ import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspa
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
 import { hasMaximizedOverlay } from '@/shared/browserFullscreen';
-import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
+import { ESCAPE_LAYER_SELECTOR, PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { useElementWidth } from '@/shared/hooks/useElementWidth';
+import { readUserPreference } from '@/shared/userSettings';
 import { buildModelRunOptions } from '@/shared/utils';
 import type {
   ChatMessage,
+  DispatchWaitTarget,
   KeyboardLockNavigator,
   Project,
   ProjectSession,
@@ -26,10 +28,12 @@ import type {
 } from '@/shared/types';
 import { useChatProviderState } from '@/modules/chat/hooks/useChatProviderState';
 import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessages';
+import { useDispatchWaits } from '@/modules/chat/composer/useDispatchWaits';
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
+import { usePausedScheduledWork } from '@/modules/chat/hooks/usePausedScheduledWork';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
 import {
   useProcessingSessions,
@@ -57,6 +61,11 @@ type ChatInterfaceProps = {
   sendByCtrlEnter?: boolean;
   externalMessageUpdate?: number;
   newSessionTrigger?: number;
+  /**
+   * Bumped by the hosting pane to refresh this chat: the tab's refresh, or
+   * refresh all. Increment-only; the value on mount refreshes nothing.
+   */
+  refreshTrigger?: number;
   onTaskClick?: (...args: unknown[]) => void;
   onShowAllTasks?: (() => void) | null;
 };
@@ -126,6 +135,7 @@ function ChatInterface({
   sendByCtrlEnter,
   externalMessageUpdate,
   newSessionTrigger,
+  refreshTrigger,
   onShowAllTasks,
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
@@ -230,6 +240,7 @@ function ChatInterface({
     scrollToBottomAndReset,
     handleScroll,
     requestLatestMessages,
+    refreshTranscript,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -594,8 +605,20 @@ function ChatInterface({
     }
   }, [onNavigateToSession, selectedSession?.id]);
 
-  const { scheduledMessages, schedule: scheduleMessage, cancel: cancelScheduledMessage } =
-    useScheduledMessages(currentSessionId || selectedSession?.id || null);
+  const {
+    scheduledMessages,
+    schedule: scheduleMessage,
+    cancel: cancelScheduledMessage,
+    refresh: refreshScheduledMessages,
+  } = useScheduledMessages(currentSessionId || selectedSession?.id || null);
+  // A scheduled message that stops waiting has gone, or failed: the list reads it again.
+  const handleWaitEnded = useCallback((target: DispatchWaitTarget) => {
+    if (target.kind === 'scheduled') {
+      void refreshScheduledMessages();
+    }
+  }, [refreshScheduledMessages]);
+  const dispatchWaits = useDispatchWaits(currentSessionId || selectedSession?.id || null, sendMessage, handleWaitEnded);
+
 
   /**
    * Hands the composer's current text to the server to send later, and clears
@@ -689,6 +712,104 @@ function ChatInterface({
   // here can stop, and with no activity nothing here runs at all.
   const canStopBackgroundTasks = sessionActivity !== null && !isCliDrivenActivity(sessionActivity);
 
+  // A Claude session's loops a restart of the server left with no process:
+  // read while nothing runs in the session, for the strip to list with Resume.
+  const pausedScheduledWork = usePausedScheduledWork(
+    provider === 'claude' ? activitySessionId : null,
+    provider === 'claude' && Boolean(activitySessionId) && sessionActivity === null && !isProcessing,
+  );
+
+  const { refresh: refreshDispatchWaits } = dispatchWaits;
+  const { refresh: refreshPausedScheduledWork } = pausedScheduledWork;
+
+  // Counts the refreshes of this chat; part of the pinned question bar's key,
+  // so a refresh drops the answers the bar cached from the server.
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+
+  /**
+   * Refreshes the chat in place, never by remounting it: the draft, the
+   * attachments, a message being edited, pending inserts and a stream being
+   * written all stay. The transcript is read first and the session subscribed
+   * after, as on a reconnect: the ack sets the activity indicator, the pending
+   * permission prompts and replays what a running turn sent that this chat
+   * missed. Then what else the chat read once is read again. A draft has
+   * nothing to refresh.
+   */
+  const refreshChat = useCallback(async () => {
+    const sessionId = selectedSession?.id || currentSessionId;
+    if (!selectedProject || !sessionId) {
+      return;
+    }
+
+    await refreshTranscript();
+    // The chat moved on while the transcript was read: the session it shows
+    // now was subscribed when it opened.
+    if (viewedSessionIdRef.current !== sessionId) {
+      return;
+    }
+    if (ws) {
+      statusCheckSentAtRef.current.set(sessionId, Date.now());
+      sendMessage({
+        type: 'chat.subscribe',
+        sessions: [{
+          sessionId,
+          lastSeq: lastSeqRef.current.get(sessionId) ?? 0,
+        }],
+      });
+    }
+    void refreshRunningSessions();
+    void refreshScheduledMessages();
+    void refreshDispatchWaits();
+    void refreshPausedScheduledWork();
+    setRefreshGeneration((generation) => generation + 1);
+  }, [
+    currentSessionId,
+    refreshDispatchWaits,
+    refreshPausedScheduledWork,
+    refreshRunningSessions,
+    refreshScheduledMessages,
+    refreshTranscript,
+    selectedProject,
+    selectedSession?.id,
+    sendMessage,
+    statusCheckSentAtRef,
+    ws,
+  ]);
+
+  // Compared by value, as newSessionTrigger is: each bump refreshes once,
+  // whatever else re-runs this effect.
+  const previousRefreshTriggerRef = useRef(refreshTrigger ?? 0);
+  useEffect(() => {
+    const trigger = refreshTrigger ?? 0;
+    if (trigger === previousRefreshTriggerRef.current) {
+      return;
+    }
+    previousRefreshTriggerRef.current = trigger;
+    void refreshChat();
+  }, [refreshChat, refreshTrigger]);
+  // What a resume of them runs with when the server has none of their own
+  // settings: the composer's, as a send would take them.
+  const buildResumeOptions = useCallback(() => ({
+    ...buildModelRunOptions({
+      model: currentProviderModel,
+      effort: currentProviderEffort,
+      ultracode: currentProviderUltracode,
+    }),
+    permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
+    toolsSettings: readUserPreference(PROVIDER_PERMISSION_PREFERENCE_KEYS[provider], {
+      allowedTools: [],
+      disallowedTools: [],
+      skipPermissions: false,
+    }),
+  }), [
+    currentProviderEffort,
+    currentProviderModel,
+    currentProviderUltracode,
+    permissionMode,
+    provider,
+    resolvePermissionModeForProvider,
+  ]);
+
   // What the activity tab's progress readout counts, read from the same rows
   // the transcript's cards draw: a running workflow's agents, else the turn's
   // checklist. Every loaded row, since a workflow launched pages back can
@@ -754,8 +875,9 @@ function ChatInterface({
             <div ref={chatColumnRef} data-chat-column="" className="flex min-h-0 flex-1 flex-col">
               {showPinnedQuestion && (
                 <PinnedQuestionBar
-                  // A session's own: its cached answer and open panel go with it.
-                  key={activitySessionId ?? ''}
+                  // A session's own: its cached answer and open panel go with
+                  // it. A refresh starts it afresh too.
+                  key={`${activitySessionId ?? ''}:${refreshGeneration}`}
                   scrollContainerRef={scrollContainerRef}
                   chatMessages={chatMessages}
                   renderedCount={visibleMessages.length}
@@ -805,6 +927,9 @@ function ChatInterface({
                 revealMessage={revealMessage}
                 backgroundTasks={sessionActivity?.tasks}
                 backgroundScheduled={sessionActivity?.scheduled}
+                pausedScheduled={pausedScheduledWork.items}
+                onPausedScheduledChange={pausedScheduledWork.refresh}
+                buildResumeOptions={buildResumeOptions}
                 canStopBackgroundTasks={canStopBackgroundTasks}
                 sendMessage={sendMessage}
                 loadAllMessages={loadAllMessages}
@@ -888,6 +1013,7 @@ function ChatInterface({
           onResolveBackgroundSendPrompt={resolveBackgroundSendPrompt}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
+          dispatchWaits={dispatchWaits}
           pendingInserts={pendingInserts}
           onWithdrawInsert={withdrawInsert}
           insertUnavailableReason={insertUnavailableReason}

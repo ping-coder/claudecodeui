@@ -1,4 +1,4 @@
-import { scheduledMessagesDb, sessionsDb } from '@/modules/database/index.js';
+import { scheduledMessagesDb, sessionDraftsDb, sessionsDb } from '@/modules/database/index.js';
 import type { ScheduledMessageRow } from '@/modules/database/index.js';
 import { AppError } from '@/shared/utils.js';
 
@@ -119,6 +119,29 @@ export const scheduledMessagesService = {
 
   listPending(userId: number): ScheduledMessage[] {
     return scheduledMessagesDb.listPendingForUser(userId).map(toScheduledMessage);
+  },
+
+  /**
+   * Has a pending message go with the settings of the process held for its
+   * session's loops, as the user chose for one that waited on them.
+   */
+  useProcessSettings(userId: number, id: string): void {
+    if (!scheduledMessagesDb.useProcessSettings(userId, id)) {
+      throw new AppError('That message has already been sent or cancelled.', {
+        code: 'SCHEDULED_MESSAGE_NOT_PENDING',
+        statusCode: 409,
+      });
+    }
+  },
+
+  /** The same for the message the user queued for a session. */
+  useProcessSettingsForQueued(userId: number, sessionId: string): void {
+    if (!sessionDraftsDb.useProcessSettings(userId, sessionId)) {
+      throw new AppError('Nothing is queued for that session any more.', {
+        code: 'QUEUED_MESSAGE_NOT_FOUND',
+        statusCode: 409,
+      });
+    }
   },
 
   /** Cancels a pending message, or dismisses a failed one. */

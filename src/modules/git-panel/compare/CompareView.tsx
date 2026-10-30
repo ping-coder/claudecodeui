@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import type { GitBranchDiffFile, GitStatusResponse } from '@/shared/types';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { useBranchCompare } from '@/modules/git-panel/hooks/useBranchCompare';
 import CompareFileItem from '@/modules/git-panel/compare/CompareFileItem';
 
@@ -16,6 +17,8 @@ type CompareViewProps = {
   wrapText: boolean;
   onWrapTextChange: (wrapText: boolean) => void;
   onOpenFile: (filePath: string) => Promise<void>;
+  /** The workspace pane's refresh token: when it moves, the comparison reloads, as its own refresh button does. */
+  refreshToken?: number;
 };
 
 const NO_EXPANDED_FILES: ReadonlySet<string> = new Set();
@@ -31,6 +34,7 @@ export default function CompareView({
   wrapText,
   onWrapTextChange,
   onOpenFile,
+  refreshToken,
 }: CompareViewProps) {
   const { t } = useTranslation();
   const {
@@ -45,6 +49,7 @@ export default function CompareView({
     loadFileDiff,
     refresh,
   } = useBranchCompare({ projectId, currentBranch, localBranches, remoteRefs, gitStatus });
+  useRefreshSignal(refreshToken, refresh);
   // Rows whose diff is open, tagged with the base they were opened under so a
   // base switch collapses them instead of showing an open row with no diff.
   // Kept here (not in the hook) because it is purely presentational.

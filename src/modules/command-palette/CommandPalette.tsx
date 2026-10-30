@@ -22,6 +22,7 @@ import {
   PanelRight,
   PanelRightClose,
   RefreshCw,
+  RotateCw,
   Settings,
   SquareX,
   SunMoon,
@@ -816,8 +817,8 @@ type WorkspaceCommand = {
 };
 
 /**
- * Split or merge, focus a pane, move or close tabs, close a side, full screen. Commands that would do
- * nothing right now are left out; Split stays, disabled, to say why it is unavailable.
+ * Split or merge, focus a pane, move or close tabs, close a side, refresh, full screen. Commands that
+ * would do nothing right now are left out; Split and Refresh all stay, disabled, to say why they are unavailable.
  */
 function workspaceCommands(workspace: CommandPaletteWorkspaceCommands, t: TFunction): WorkspaceCommand[] {
   const { canSplit, isSplit, isImmersive, openTabs } = workspace;
@@ -889,6 +890,25 @@ function workspaceCommands(workspace: CommandPaletteWorkspaceCommands, t: TFunct
       label: t('workspace.closePane'),
       Icon: SquareX,
       onSelect: workspace.onCloseFocusedPane,
+    });
+  }
+  if (workspace.onRefreshTab && workspace.canRefreshTab) {
+    commands.push({
+      id: 'refresh-tab',
+      value: `${t('workspace.refreshTab')} refresh reload tab 刷新 重新加载`,
+      label: t('workspace.refreshTab'),
+      Icon: RotateCw,
+      onSelect: workspace.onRefreshTab,
+    });
+  }
+  if (workspace.onRefreshAll) {
+    commands.push({
+      id: 'refresh-all',
+      value: `${t('workspace.refreshAll')} refresh reload all 刷新 重新加载`,
+      label: t('workspace.refreshAll'),
+      Icon: RefreshCw,
+      unavailableReason: workspace.isRefreshingWorkspace ? t('workspace.refreshing') : undefined,
+      onSelect: workspace.onRefreshAll,
     });
   }
   commands.push({

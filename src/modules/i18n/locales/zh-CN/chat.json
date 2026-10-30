@@ -446,8 +446,10 @@
     "handOverFailed": {
       "stalePlan": "没有发送：运行这个会话循环和定时的进程已不再按计划接收这条消息，换新进程会停掉它们。",
       "lookup": "没有发送：无法把这条消息交给运行这个会话循环和定时的进程。",
-      "other": "没有发送：这条消息进不了运行这个会话循环和定时的进程，换新进程会停掉它们。"
-    }
+      "other": "没有发送：这条消息进不了运行这个会话循环和定时的进程，换新进程会停掉它们。",
+      "workStarted": "没有发送：循环的进程这时又起了新的工作，换新进程会停掉它。"
+    },
+    "permissionModeNotSwitched": "Claude Code 拒绝跳过权限：这一轮以 {{mode}} 模式运行，用工具前会先询问。"
   },
   "runProgress": {
     "agents_other": "{{done}}/{{count}} 个智能体",
@@ -529,7 +531,17 @@
       "sameReminders_other": "这个会话里还有 {{count}} 个提示词一样的定时。"
     },
     "stopping": "取消中…",
-    "stopFailed": "没取消成功，可以再试，或在输入框里让 Claude 取消。"
+    "stopFailed": "没取消成功，可以再试，或在输入框里让 Claude 取消。",
+    "stopNote_other": "已让 Claude 停止 {{count}} 个循环",
+    "stopNoteWakeup": "已让 Claude 停止动态循环",
+    "resumeNote_other": "恢复了 {{count}} 个循环",
+    "paused": "已暂停（没有进程在跑）",
+    "resume": "恢复",
+    "resumeTitle": "恢复暂停的循环：CloudCLI 会跑一轮对话，让它们接着运行",
+    "resuming": "恢复中…",
+    "resumeAfterTurn": "这一轮结束后再恢复",
+    "resumeFailed": "没恢复成功，可以再试。",
+    "resumeHeldElsewhere": "另一个 Claude CLI 正在运行这个会话的循环。"
   },
   "projectSelection": {
     "startChatWithProvider": "选择一个项目以开始与 {{provider}} 聊天"
@@ -687,7 +699,52 @@
     "failureReason": {
       "stalePlan": "运行这个会话循环和定时的进程已不再按计划接收这条消息，换新进程会停掉它们。",
       "lookup": "无法把这条消息交给运行这个会话循环和定时的进程。"
-    }
+    },
+    "dueWaiting": "{{when}} 已到期，还在等"
+  },
+  "dispatchWait": {
+    "heldSettings": "在等循环结束（最晚 {{time}}）：这条消息改了{{changes}}",
+    "heldSettingsUntimed": "在等循环结束：这条消息改了{{changes}}",
+    "heldLoop": "在等循环结束（最晚 {{time}}）",
+    "heldLoopUntimed": "在等循环结束",
+    "heldWork": "在等后台工作结束",
+    "heldSettingsWork": "在等后台工作结束：这条消息改了{{changes}}",
+    "retry": "循环的进程没接这条消息，{{time}} 再试",
+    "retryUntimed": "循环的进程没接这条消息，稍后再试",
+    "behind": "在等前面一条定时消息先发出",
+    "detail": {
+      "bypass": "循环启动时没有跳过权限，现在也跳不了",
+      "bypassPlan": "循环是在 plan 模式下启动的，没有跳过权限",
+      "cannotSwitch": "循环的进程切换不了 {{mode}} 模式",
+      "notAllowed": "你的工具权限不再允许 {{tools}}",
+      "alsoDenied": "你的工具权限新禁止了 {{tools}}",
+      "model": "循环的进程切换不到 {{model}}",
+      "bypassWork": "后台进程启动时没有跳过权限，现在也跳不了",
+      "bypassPlanWork": "后台进程是在 plan 模式下启动的，没有跳过权限",
+      "cannotSwitchWork": "后台进程切换不了 {{mode}} 模式",
+      "modelWork": "后台进程切换不到 {{model}}"
+    },
+    "action": {
+      "stopAndSend": "停掉循环再发",
+      "useProcessSettings": "用循环的设置发",
+      "useProcessSettingsWork": "用后台进程的设置发",
+      "keepWaiting": "继续等",
+      "cancel": "取消"
+    },
+    "consequence": {
+      "plan": "用循环的设置发，会像循环一样以 plan 模式运行，Claude 只出计划。",
+      "tools": "用循环的设置发，会沿用循环的工具权限，{{tools}} 照样允许。",
+      "settings": "用循环的设置发，会用循环的模型、推理级别和权限运行。",
+      "planWork": "用后台进程的设置发，会以 plan 模式运行，Claude 只出计划。",
+      "toolsWork": "用后台进程的设置发，会沿用它的工具权限，{{tools}} 照样允许。",
+      "settingsWork": "用后台进程的设置发，会用它的模型、推理级别和权限运行。"
+    },
+    "showActions": "选项",
+    "stopping": "正在停掉循环…",
+    "using": "正在用循环的设置发送…",
+    "usingWork": "正在用后台进程的设置发送…",
+    "stopFailed": "循环没停下来。再试一次，或者在任务条上停掉它。",
+    "useFailed": "没有成功，这条消息可能已经发出了。"
   },
   "misc": {
     "copyToClipboard": "复制到剪贴板",

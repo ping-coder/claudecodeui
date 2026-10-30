@@ -4,13 +4,18 @@ import test from 'node:test';
 import {
   DEFAULT_CRON_CONFIG,
   DEFAULT_SCHEDULE_HOLD_MAX_MS,
+  buildLoopsResumeMessage,
   buildScheduledStopMessage,
   createScheduledWork,
   describeLoopPrompt,
+  isControlLastPrompt,
   isStoppableScheduledWorkId,
   nextMatch,
   nextScheduledFire,
+  parseControlPrompt,
   parseCron,
+  parseScheduledStopMessage,
+  readControlNote,
   readWakeupTime,
   resolveScheduleHoldMax,
 } from '@/modules/providers/list/claude/claude-scheduled-work.js';
@@ -163,6 +168,114 @@ test('the stop message names every job to delete, and the wake-up', () => {
   assert.equal(buildScheduledStopMessage({ jobIds: ['b2148320', '7b7cd8fc'], wakeup: false }), `Cancel these scheduled jobs now: call CronDelete once for each id: "b2148320", "7b7cd8fc". ${tail}`);
   assert.equal(buildScheduledStopMessage({ jobIds: [], wakeup: true }), `End the dynamic /loop now: call ScheduleWakeup with stop: true. ${tail}`);
   assert.equal(buildScheduledStopMessage({ jobIds: ['b2148320', '7b7cd8fc'], wakeup: true }), `Stop these loops now: call CronDelete once for each id: "b2148320", "7b7cd8fc"; then call ScheduleWakeup with stop: true. ${tail}`);
+});
+
+test('a stop message reads back as the jobs and the wake-up it was built from, whichever of the four shapes it takes', () => {
+  const shapes = [
+    { jobIds: ['b2148320'], wakeup: false },
+    { jobIds: ['b2148320', '7b7cd8fc'], wakeup: false },
+    { jobIds: ['b2148320', '7b7cd8fc', '0a1b2c3d'], wakeup: false },
+    { jobIds: [], wakeup: true },
+    { jobIds: ['b2148320'], wakeup: true },
+    { jobIds: ['b2148320', '7b7cd8fc'], wakeup: true },
+  ];
+  for (const targets of shapes) {
+    const text = buildScheduledStopMessage(targets);
+    assert.deepEqual(parseScheduledStopMessage(text), targets, text);
+    assert.deepEqual(parseControlPrompt(text), { kind: 'scheduled-stop', ...targets }, text);
+  }
+});
+
+test('nothing but a stop message exactly as CloudCLI writes it reads as one', () => {
+  const tail = 'Make the calls yourself, not through an agent. Do nothing else, and reply in one short sentence.';
+  const one = buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false });
+  const texts = [
+    '',
+    'Stop the loop',
+    tail,
+    ` ${tail}`,
+    `${one} `,
+    ` ${one}`,
+    `${one}\nAlso tell me a joke.`,
+    one.replace(tail, 'Reply in one short sentence.'),
+    // An id that is not the CLI's eight-digit hex one.
+    `Cancel scheduled job B2148320 now: call CronDelete with id "B2148320". ${tail}`,
+    `Cancel scheduled job b214832 now: call CronDelete with id "b214832". ${tail}`,
+    // The two ids of the one-job shape differ.
+    `Cancel scheduled job b2148320 now: call CronDelete with id "7b7cd8fc". ${tail}`,
+    // The many-jobs shape with one id, and the one-job shape listing two.
+    `Cancel these scheduled jobs now: call CronDelete once for each id: "b2148320". ${tail}`,
+    `Cancel scheduled job b2148320 now: call CronDelete with id "b2148320", "7b7cd8fc". ${tail}`,
+    `Stop these loops now: call CronDelete once for each id: ; then call ScheduleWakeup with stop: true. ${tail}`,
+    `Please end the dynamic /loop now: call ScheduleWakeup with stop: true. ${tail}`,
+  ];
+  for (const text of texts) {
+    assert.equal(parseScheduledStopMessage(text), null, JSON.stringify(text));
+    assert.equal(parseControlPrompt(text), null, JSON.stringify(text));
+    assert.equal(readControlNote(text), null, JSON.stringify(text));
+  }
+  for (const value of [null, undefined, 42, { text: one }, [one]]) {
+    assert.equal(parseControlPrompt(value), null, String(value));
+  }
+});
+
+test('a stop message\'s note counts the jobs and the wake-up it stops, with an English line to fall back on', () => {
+  assert.deepEqual(readControlNote(buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false })), {
+    controlNote: { kind: 'scheduled-stop', count: 1, jobIds: ['b2148320'] },
+    content: 'Asked Claude to stop 1 loop',
+  });
+  assert.deepEqual(readControlNote(buildScheduledStopMessage({ jobIds: ['b2148320', '7b7cd8fc'], wakeup: true })), {
+    controlNote: { kind: 'scheduled-stop', count: 3, jobIds: ['b2148320', '7b7cd8fc'], wakeup: true },
+    content: 'Asked Claude to stop 3 loops',
+  });
+  assert.deepEqual(readControlNote(buildScheduledStopMessage({ jobIds: [], wakeup: true })), {
+    controlNote: { kind: 'scheduled-stop', count: 1, jobIds: [], wakeup: true },
+    content: 'Asked Claude to stop the dynamic loop',
+  });
+});
+
+test('a session\'s last prompt reads as one CloudCLI sent on its own whole, or cut down as the CLI keeps a long one', () => {
+  // As Claude Code 2.1.312 stamps a `last-prompt` row.
+  const asLastPrompt = (text: string) => {
+    const flat = text.replaceAll('\n', ' ').trim();
+    return flat.length > 200 ? `${flat.slice(0, 200).trim()}…` : flat;
+  };
+  const wakeup = { delaySeconds: 600, prompt: 'check the deploy, then report back on what changed', reason: 'watching CI' };
+  const long = [
+    buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: true }),
+    buildScheduledStopMessage({ jobIds: ['b2148320', '7b7cd8fc', '0a1b2c3d', '1a2b3c4d'], wakeup: false }),
+    buildLoopsResumeMessage({ jobIds: [], wakeup }),
+    buildLoopsResumeMessage({ jobIds: ['b2148320', '7b7cd8fc'], wakeup }),
+    // A resume as the first release wrote it.
+    `CloudCLI restarted. The restart ended the dynamic /loop: resume it now by calling ScheduleWakeup yourself, not through an agent, with these arguments: ${JSON.stringify({ ...wakeup, noop: true })}. Do nothing else, and reply in one short sentence.`,
+  ];
+  for (const text of long) {
+    assert.equal(text.length > 200, true, text);
+    const stamped = asLastPrompt(text);
+    assert.equal(parseControlPrompt(stamped), null, 'the cut-down text no longer parses');
+    assert.equal(isControlLastPrompt(stamped), true, stamped);
+  }
+  for (const text of [
+    buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false }),
+    buildScheduledStopMessage({ jobIds: [], wakeup: true }),
+    buildLoopsResumeMessage({ jobIds: ['b2148320'], wakeup: null }),
+  ]) {
+    assert.equal(isControlLastPrompt(asLastPrompt(text)), true, text);
+  }
+
+  const userPrompts = [
+    'Watch the deploy',
+    'Stop these loops now: call CronDelete once for each id: …',
+    asLastPrompt(`Please look at this: ${'a long request '.repeat(20)}`),
+    asLastPrompt(`${'x'.repeat(30)}Stop these loops now: call CronDelete once for each id: ${'"b2148320", '.repeat(20)}`),
+    `${'Cancel these scheduled jobs now: call CronDelete once for each id: '.padEnd(210, 'x')}…`,
+  ];
+  for (const text of userPrompts) {
+    assert.equal(isControlLastPrompt(text), false, text);
+  }
+  for (const value of [null, undefined, 42]) {
+    assert.equal(isControlLastPrompt(value), false, String(value));
+  }
 });
 
 test('only a job with the CLI\'s eight-digit hex id, or a wake-up chain, can be stopped', () => {

@@ -67,6 +67,12 @@ type ChatMessagesPaneProps = {
   backgroundTasks?: BackgroundTaskSummary[];
   /** The scheduled work (loops, reminders) the session's held process keeps, from the activity map, for the strip to list. */
   backgroundScheduled?: ScheduledWorkSummary[];
+  /** The session's paused loops, which a restart of the server left with no process, for the strip to list with Resume. */
+  pausedScheduled?: ScheduledWorkSummary[];
+  /** Reads the paused loops again. */
+  onPausedScheduledChange?: () => Promise<void> | void;
+  /** The composer's settings, for a resume of the paused loops. */
+  buildResumeOptions?: () => Record<string, unknown>;
   /**
    * Whether CloudCLI's own runtime drives the viewed session's run, so the
    * background-tasks strip can offer to stop the tasks the transcript's rows
@@ -144,6 +150,9 @@ function ChatMessagesPane({
   revealMessage,
   backgroundTasks,
   backgroundScheduled,
+  pausedScheduled,
+  onPausedScheduledChange,
+  buildResumeOptions,
   canStopBackgroundTasks,
   sendMessage,
   loadAllMessages,
@@ -221,6 +230,9 @@ function ChatMessagesPane({
               messages={chatMessages}
               tasks={backgroundTasks}
               scheduled={backgroundScheduled}
+              paused={pausedScheduled}
+              onPausedChange={onPausedScheduledChange}
+              buildResumeOptions={buildResumeOptions}
               sessionId={selectedSession?.id || currentSessionId}
               canStopTasks={canStopBackgroundTasks}
               isTurnRunning={isProcessing}

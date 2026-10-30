@@ -1,12 +1,18 @@
+import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Clock, X } from 'lucide-react';
 
-import type { ScheduledMessage } from '@/shared/types';
+import type { DispatchWait, ScheduledMessage } from '@/shared/types';
 import { formatDateTime } from '@/modules/chat/utils/chatFormatting';
 
 type ScheduledMessageListProps = {
   scheduledMessages: ScheduledMessage[];
   onCancel: (id: string) => void;
+  /** Why the server holds a due message back, when it does (see DispatchWait). */
+  waitFor?: (id: string) => DispatchWait | null;
+  /** What a waiting message's row shows of its wait (DispatchWaitNotice). */
+  renderWait?: (wait: DispatchWait) => ReactNode;
 };
 
 /**
@@ -26,9 +32,20 @@ const FAILURE_REASON_KEYS: Readonly<Record<string, string>> = {
  * Failed ones are shown too: a message that did not go is exactly the thing a
  * user needs to know about, and the server records why. Dismissing one goes
  * through the same cancel endpoint, so it stays gone across reloads.
+ *
+ * A pending message past its time says it is due and waiting; one the server
+ * holds back also says why, and what the user can do (`renderWait`).
  */
-export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledMessageListProps) {
+/** How often the list reads the clock again, so a message whose time comes reads as due. */
+const CLOCK_TICK_MS = 30_000;
+
+export function ScheduledMessageList({ scheduledMessages, onCancel, waitFor, renderWait }: ScheduledMessageListProps) {
   const { t, i18n } = useTranslation('chat');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), CLOCK_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
   const visible = scheduledMessages.filter(
     (message) => message.status === 'pending' || message.status === 'failed',
   );
@@ -41,6 +58,9 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
     <div className="mx-auto mb-2 flex max-w-[54.25rem] flex-col gap-1.5">
       {visible.map((message) => {
         const isFailed = message.status === 'failed';
+        const wait = !isFailed ? waitFor?.(message.id) ?? null : null;
+        // Past its time and still pending: the server holds it back, or is about to send it.
+        const due = !isFailed && (wait !== null || Date.parse(message.scheduledFor) <= nowMs);
         const failureReason = message.failureReason ?? '';
         const failureReasonKey = Object.prototype.hasOwnProperty.call(FAILURE_REASON_KEYS, failureReason)
           ? FAILURE_REASON_KEYS[failureReason]
@@ -64,7 +84,7 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
               <p className="text-[11px] text-muted-foreground">
                 {isFailed
                   ? t('schedule.failed', { reason: failureReasonKey ? t(failureReasonKey) : failureReason })
-                  : t('schedule.pending', {
+                  : t(due ? 'schedule.dueWaiting' : 'schedule.pending', {
                     // In the interface language. A right-to-left one isolates the value (i18n's bidi
                     // handling), so the date keeps its order inside the sentence.
                     when: formatDateTime(message.scheduledFor, i18n.language),
@@ -72,6 +92,7 @@ export function ScheduledMessageList({ scheduledMessages, onCancel }: ScheduledM
               </p>
               {/* bidi-auto: right to left, the message reads by its own first letter and is cut at its end. */}
               <p className="bidi-auto mt-0.5 truncate text-foreground">{message.content}</p>
+              {wait && renderWait?.(wait)}
             </div>
             <button
               type="button"

@@ -13,6 +13,7 @@ import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMo
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
 import type { DirectoryRevealRequest, FileTreeDetailedColumn, FileTreeImageSelection, FileTreeNode,Project } from '@/shared/types';
 import { useElementWidth } from '@/shared/hooks/useElementWidth';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { formatFileSize, formatRelativeTime, isImageFile } from '@/modules/file-tree/utils/fileTreeUtils';
 import { directoryRevealFolders } from '@/modules/file-tree/utils/revealDirectory';
 import { ScrollArea, Input } from '@/shared/ui';
@@ -49,10 +50,12 @@ type FileTreeProps = {
   // Directory to reveal (from an in-chat `path/` reference): its ancestors are
   // expanded so the folder is visible without hunting through the tree.
   revealDirectory?: DirectoryRevealRequest | null;
+  // The workspace pane's refresh token: when it moves, the tree reloads behind the rows already shown.
+  refreshToken?: number;
 };
 
 /** Exported through the file-tree barrel; the project-workspace module renders it as the Files sidebar tab. */
-export default function FileTree({ selectedProject, onFileOpen, revealDirectory }: FileTreeProps) {
+export default function FileTree({ selectedProject, onFileOpen, revealDirectory, refreshToken }: FileTreeProps) {
   const { t } = useTranslation();
   const [selectedImage, setSelectedImage] = useState<FileTreeImageSelection | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -72,7 +75,8 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
     }
   }, [toast]);
 
-  const { files, loading, error, refreshFiles } = useFileTreeData(selectedProject);
+  const { files, loading, refreshing, error, refreshFiles } = useFileTreeData(selectedProject);
+  useRefreshSignal(refreshToken, refreshFiles);
   const { viewMode, changeViewMode } = useFileTreeViewMode();
   const { expandedDirs, toggleDirectory, expandDirectories, collapseAll } = useExpandedDirectories();
   const { searchQuery, setSearchQuery, filteredFiles } = useFileTreeSearch({
@@ -251,7 +255,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory 
         onNewFolder={() => operations.handleStartCreate('', 'directory')}
         onRefresh={refreshFiles}
         onCollapseAll={collapseAll}
-        loading={loading}
+        loading={loading || refreshing}
         operationLoading={operationLoading}
         isUploading={upload.uploadProgress?.status === 'uploading'}
         uploadProgress={upload.uploadProgress?.progress ?? null}

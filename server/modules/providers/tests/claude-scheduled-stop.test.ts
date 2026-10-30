@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
+import { buildScheduledStopMessage } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import { claudeRuntime, queryClaudeSDK } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
 import type { NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
@@ -332,6 +333,83 @@ test('a cron job takes a turn that deletes it; the turn goes into the held proce
     assert.deepEqual([held.first.finishedReports(), turn.writer.finishedReports()], [0, 0]);
   } finally {
     await finish(held, runs);
+  }
+});
+
+test('the stop prompt\'s echo goes on as a note where its turn starts, ahead of the CronDelete, while the echo of a prompt the user wrote is dropped', async () => {
+  const held = await startRun((script) => createCronJob(script, 'b2148320'));
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    const stop = await claudeRuntime.stopScheduledWork(held.sessionId, 'cron:b2148320');
+    assert.equal(stop.status, 'turn');
+    if (stop.status !== 'turn') {
+      return;
+    }
+    const turn = runTurn(held, stop.content, stop.options);
+    runs.push(turn.run);
+    await waitUntil(() => held.script.prompts.length === 2);
+    const uuid = String(held.script.prompts[1]?.uuid);
+    held.script.emit(echo(uuid, stop.content));
+    deleteCronJob(held.script, 'b2148320');
+    held.script.emit(resultFor(uuid));
+    await waitUntil(() => turn.writer.sent.some((message) => message.kind === 'complete'));
+
+    const rows = turn.writer.sent
+      .filter((message) => message.kind === 'text' || message.kind === 'tool_use')
+      .map((message) => ({ id: message.id, kind: message.kind, role: message.role, toolName: message.toolName, controlNote: message.controlNote }));
+    assert.deepEqual(rows.slice(0, 2), [
+      {
+        id: uuid,
+        kind: 'text',
+        role: 'assistant',
+        toolName: undefined,
+        controlNote: { kind: 'scheduled-stop', count: 1, jobIds: ['b2148320'] },
+      },
+      { id: rows[1]?.id, kind: 'tool_use', role: undefined, toolName: 'CronDelete', controlNote: undefined },
+    ]);
+    assert.equal(turn.writer.sent.some((message) => message.role === 'user' && message.kind === 'text'), false, 'no user row for the stop');
+    assert.equal(
+      held.first.sent.some((message) => message.role === 'user' && message.kind === 'text'),
+      false,
+      'the echo of the run\'s own prompt is still dropped',
+    );
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a stop turn that starts a process of its own sends the note for its first prompt, where a prompt the user wrote is dropped', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-scheduled-stop-'));
+  const content = buildScheduledStopMessage({ jobIds: ['b2148320', '7b7cd8fc'], wakeup: false });
+  try {
+    for (const [prompt, note] of [
+      ['What changed?', false],
+      [content, true],
+    ] as const) {
+      const { createQuery, script } = createScriptedQuery();
+      const writer = createWriter();
+      const sessionId = `app-scheduled-stop-new-${randomUUID()}`;
+      const run = queryClaudeSDK(prompt, { sessionId, cwd }, writer.writer as never, { ...createContext(), createQuery });
+      await waitUntil(() => script.prompts.length === 1);
+      const uuid = String(script.prompts[0]?.uuid);
+      script.emit(init());
+      script.emit(echo(uuid, prompt));
+      script.emit(resultFor(uuid));
+      await waitUntil(() => writer.sent.some((message) => message.kind === 'complete'));
+      script.end();
+      await run;
+      assert.deepEqual(
+        writer.sent
+          .filter((message) => message.kind === 'text')
+          .map((message) => ({ id: message.id, role: message.role, controlNote: message.controlNote })),
+        note
+          ? [{ id: uuid, role: 'assistant', controlNote: { kind: 'scheduled-stop', count: 2, jobIds: ['b2148320', '7b7cd8fc'] } }]
+          : [],
+        prompt,
+      );
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 

@@ -75,6 +75,10 @@ function ProjectMainRegion({
     renameSession,
     refreshProjectsSilently,
     setPaneEditorUnsaved,
+    getPaneRefreshToken,
+    refreshTab,
+    refreshWorkspace,
+    isRefreshingWorkspace,
   } = useProjectPanesState();
   const { canSplit, isImmersive } = useWorkspaceChrome();
   const { sidebarVisible } = useUiPreferences();
@@ -357,6 +361,10 @@ function ProjectMainRegion({
         renameSession={renameSession}
         refreshProjectsSilently={refreshProjectsSilently}
         onEditorUnsavedChange={setPaneEditorUnsaved}
+        refreshToken={getPaneRefreshToken(pane.id)}
+        onRefreshTab={refreshTab}
+        onRefreshWorkspace={refreshWorkspace}
+        isRefreshingWorkspace={isRefreshingWorkspace}
         className={className}
         style={style}
       />
@@ -385,6 +393,8 @@ function ProjectMainRegion({
           tabDisplay={tabDisplay}
           newChatProject={paneProjects[focusedSide] ?? fallbackProject}
           actions={actions}
+          onRefreshAll={refreshWorkspace}
+          isRefreshingWorkspace={isRefreshingWorkspace}
         />
       )}
     </div>

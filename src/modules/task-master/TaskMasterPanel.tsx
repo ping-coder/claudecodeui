@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { PRDEditor } from '@/modules/prd-editor';
+import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
 import { useTaskMaster } from '@/modules/task-master/context/TaskMasterContext';
 import { useProjectPrdFiles } from '@/modules/task-master/hooks/useProjectPrdFiles';
 import type { PrdFile, TaskMasterTask, TaskSelection } from '@/shared/types';
@@ -9,12 +10,14 @@ import TaskDetailModal from '@/modules/task-master/modals/TaskDetailModal';
 
 type TaskMasterPanelProps = {
   isVisible: boolean;
+  /** Moves when the workspace refreshes while Tasks is on screen: tasks and PRDs reload in place (a remount would drop an open PRD draft and its full screen). */
+  refreshToken?: number;
 };
 
 const PRD_SAVE_MESSAGE = 'PRD saved successfully!';
 
 /** Exported through the task-master barrel; the project-workspace module renders it as the workspace's Tasks tab. */
-export default function TaskMasterPanel({ isVisible }: TaskMasterPanelProps) {
+export default function TaskMasterPanel({ isVisible, refreshToken }: TaskMasterPanelProps) {
   const { tasks, currentProject, refreshTasks } = useTaskMaster();
 
   const [selectedTask, setSelectedTask] = useState<TaskMasterTask | null>(null);
@@ -27,6 +30,11 @@ export default function TaskMasterPanel({ isVisible }: TaskMasterPanelProps) {
   const notificationTimeoutRef = useRef<number | null>(null);
 
   const { prdFiles, refreshPrdFiles } = useProjectPrdFiles({ projectId: currentProject?.projectId });
+
+  useRefreshSignal(refreshToken, () => {
+    void refreshTasks();
+    void refreshPrdFiles();
+  });
 
   const showPrdNotification = useCallback((message: string) => {
     if (notificationTimeoutRef.current) {

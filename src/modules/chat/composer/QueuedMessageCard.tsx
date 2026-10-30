@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PencilIcon, XIcon } from 'lucide-react';
 
@@ -6,6 +7,11 @@ type QueuedMessageCardProps = {
   attachmentCount?: number;
   onEdit: () => void;
   onDelete: () => void;
+  /**
+   * Why the server holds the message back, and what the user can do about it (DispatchWaitNotice),
+   * when it does: it then stands in for "Will send when this finishes".
+   */
+  waitNotice?: ReactNode;
 };
 
 /**
@@ -18,6 +24,7 @@ export default function QueuedMessageCard({
   attachmentCount = 0,
   onEdit,
   onDelete,
+  waitNotice,
 }: QueuedMessageCardProps) {
   const { t } = useTranslation('chat');
 
@@ -29,9 +36,11 @@ export default function QueuedMessageCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-primary/70">
             <span>{t('input.queue.label', { defaultValue: 'Queued' })}</span>
-            <span className="normal-case text-muted-foreground/60">
-              · {t('input.queue.willSend', { defaultValue: 'Will send when this finishes' })}
-            </span>
+            {!waitNotice && (
+              <span className="normal-case text-muted-foreground/60">
+                · {t('input.queue.willSend', { defaultValue: 'Will send when this finishes' })}
+              </span>
+            )}
           </div>
           {/* Follow-ups queued while one waits are joined into this message, so
               it scrolls instead of clamping: everything that will be sent stays
@@ -48,6 +57,7 @@ export default function QueuedMessageCard({
               {t('input.queue.filesAttached', { count: attachmentCount })}
             </p>
           )}
+          {waitNotice}
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">

@@ -77,6 +77,9 @@ function ProjectCommandPalette() {
     openSessionById,
     layout,
     actions,
+    refreshTab,
+    refreshWorkspace,
+    isRefreshingWorkspace,
   } = useProjectCommandState();
   // Only for the Open tabs titles and project names: useProjectCommandState carries neither projects nor pane projects.
   const { projects, paneProjects } = useProjectPanesState();
@@ -129,6 +132,9 @@ function ProjectCommandPalette() {
   );
 
   const isSplit = layout.right !== null;
+  // The focused pane shows something to refresh: a tab whose conversation still exists, in a known project.
+  const focusedTab = getActiveTab(getPane(layout, layout.focusedSide));
+  const canRefreshTab = Boolean(focusedTab && !focusedTab.isMissing && paneProjects[layout.focusedSide]);
   const workspace = useMemo<CommandPaletteWorkspaceCommands>(() => {
     const readFocusedTab = () => {
       const current = layoutRef.current;
@@ -157,8 +163,14 @@ function ProjectCommandPalette() {
       onActivateTab: (side, tabKey) => runMovingFocus(() => actions.activateTab(side, tabKey)),
       // Called straight from the palette's click or Enter, so the browser still sees a user gesture.
       onToggleFullscreen: toggleImmersive,
+      onRefreshTab: () => refreshTab(layoutRef.current.focusedSide),
+      canRefreshTab,
+      onRefreshAll: () => {
+        void refreshWorkspace();
+      },
+      isRefreshingWorkspace,
     };
-  }, [actions, canSplit, isImmersive, isSplit, openTabs, runMovingFocus, toggleImmersive]);
+  }, [actions, canRefreshTab, canSplit, isImmersive, isRefreshingWorkspace, isSplit, openTabs, refreshTab, refreshWorkspace, runMovingFocus, toggleImmersive]);
 
   return (
     <CommandPalette

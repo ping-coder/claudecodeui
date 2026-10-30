@@ -154,6 +154,10 @@ const setLayout = (layout: WorkspaceLayout) => {
     setSidebarOpen: vi.fn(),
     renameSession: vi.fn(async () => true),
     refreshProjectsSilently: vi.fn(async () => undefined),
+    getPaneRefreshToken: () => 0,
+    refreshTab: vi.fn(),
+    refreshWorkspace: vi.fn(async () => undefined),
+    isRefreshingWorkspace: false,
   };
 };
 

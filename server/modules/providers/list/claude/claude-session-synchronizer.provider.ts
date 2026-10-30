@@ -3,6 +3,7 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { isControlLastPrompt } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import {
   buildLookupMap,
   extractFirstValidJsonlData,
@@ -213,7 +214,9 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
           }
         } else if (eventType === 'last-prompt') {
           const prompt = typeof data.lastPrompt === 'string' ? data.lastPrompt : undefined;
-          if (prompt?.trim()) {
+          // A prompt CloudCLI sent on its own, such as the stop of a loop, names
+          // nothing, whole or cut down by the CLI.
+          if (prompt?.trim() && !isControlLastPrompt(prompt)) {
             foundLastPrompt = prompt;
           }
         }

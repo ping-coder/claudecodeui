@@ -6,6 +6,7 @@ import type {
   LLMProvider,
   McpScope,
   NormalizedMessage,
+  PausedScheduledWork,
   ProviderSkill,
   ProviderSkillListOptions,
   ProviderAuthStatus,
@@ -23,6 +24,7 @@ import type {
   ProviderRuntimeContext,
   ProviderRuntimePermissionGateway,
   ProviderRuntimeWriter,
+  RevivedCronJob,
   ScheduledWorkStopOptions,
   ScheduledWorkStopResult,
   ScheduledWorkSummary,
@@ -60,7 +62,17 @@ export interface IProviderRuntime {
    * included), and the CLI has answered the switches back: for each one the
    * turn was to switch, what the process runs with then, null for the others;
    * it is not called when the process lets go after the turn, nor for a turn
-   * that started a process of its own.
+   * that started a process of its own. A turn the held process cannot take
+   * while it is held for cron jobs alone that a resumed CLI brings back (see
+   * `ProviderHandOverPlan.replaceKeepsWork`) starts a process of its own that
+   * takes the jobs over, what the turn leaves out taken from the held process
+   * when its options set `inheritUnset: true`; it waits for a turn the CLI
+   * runs on its own first, and fails (HAND_OVER_FAILED, reason
+   * `work-started`) rather than stop work that turn started when its options
+   * set `keepBackgroundWork: true`. Options may carry `ownSettings`, the
+   * settings a scheduled-messages dispatcher turn left out for the held
+   * process to lend (only the dispatcher sets it; `buildTurnRunOptions` drops
+   * a client's): a turn that starts a plain process of its own runs with them.
    */
   run(
     command: string,
@@ -92,21 +104,25 @@ export interface IProviderRuntime {
   stopBackgroundTask?(sessionId: string, taskId: string): Promise<boolean>;
   /**
    * Sessions whose live process holds scheduled work (see
-   * `ScheduledWorkSummary`), each session's oldest first. Listed apart from
-   * `listBackgroundWork`, which this leaves as it is: a session with only
-   * scheduled work has no task. Only a process that owns its session and has
-   * not let go of its input reports any. Only a runtime that keeps its
-   * process past a turn for such work implements it (Claude).
+   * `ScheduledWorkSummary`), each session's oldest first: what it made, and
+   * the jobs it brought back from the transcript as it resumed the session.
+   * Listed apart from `listBackgroundWork`, which this leaves as it is: a
+   * session with only scheduled work has no task. Only a process that owns
+   * its session and has not let go of its input reports any; paused work
+   * (`PausedScheduledWork`) never is. Only a runtime that keeps its process
+   * past a turn for such work implements it (Claude).
    */
   listScheduledWork?(): Array<{ sessionId: string; scheduled: ScheduledWorkSummary[] }>;
   /**
    * Works out how to stop one piece of the session's scheduled work, or all
    * of it (`options.all`), and lets go of the process when that alone stops
-   * it (see `ScheduledWorkStopResult`). A wake-up's id stops it only while
-   * its process is up; a job's id (`cron:` and the CLI's eight-digit hex id)
-   * also asks for a turn when no process holds the session, as the CLI
-   * revives the job from the transcript when the session next runs. An id of
-   * any other shape is `not_found`.
+   * it (see `ScheduledWorkStopResult`). When no process holds the session, a
+   * stop of its paused work (`options.paused`) asks for a turn in a new
+   * process, whatever kind: the CLI brings its jobs back from the transcript,
+   * and the model ends a self-paced loop by a ScheduleWakeup with `stop: true`
+   * there, which the transcript then keeps. Without paused work a job's id
+   * (`cron:` and the CLI's eight-digit hex id) still asks for that turn. An id
+   * of any other shape is `not_found`.
    */
   stopScheduledWork?(
     sessionId: string,
@@ -174,7 +190,10 @@ export interface IProviderRuntime {
    * `inheritUnset: true` in `options`; `acceptProcessSettings`, in either,
    * lets a process held only for scheduled work take a turn whose effort or
    * ultracode differ, or whose tool rules differ without being stricter
-   * than the process's. Only a runtime that runs a new turn in a held
+   * than the process's. The plan says what exactly keeps a turn out
+   * (`details`), and whether a process of the turn's own keeps the work
+   * (`replaceKeepsWork`), once a turn the CLI runs on its own is over
+   * (`afterCliTurn`). Only a runtime that runs a new turn in a held
    * process implements it (Claude); the gateway answers for the others that
    * nothing is held.
    */
@@ -183,6 +202,13 @@ export interface IProviderRuntime {
     options: AnyRecord,
     planOptions?: ProviderHandOverPlanOptions,
   ): Promise<ProviderHandOverPlan>;
+  /**
+   * The server is shutting down: the processes this runtime holds are about
+   * to die with it, so the records of the ones held for scheduled work stay
+   * for the next start to resume (see `ScheduleHoldRecord`). Only a runtime
+   * that records them implements it.
+   */
+  prepareForShutdown?(): void;
 }
 
 /**
@@ -354,6 +380,26 @@ export interface IProviderSessions {
     sessionId: string,
     anchorId: string,
   ): Promise<{ found: boolean; resumeThroughId: string | null }>;
+
+  /**
+   * The cron jobs the provider's CLI brings back from the session's
+   * transcript when it resumes the session, with nothing on its stream to
+   * say so (see `RevivedCronJob`); `anchorId` is the row a resume at a row
+   * replays up to. The runtime holds the resumed process for them. Only a
+   * provider whose CLI does so implements it (Claude).
+   */
+  readRevivedCronJobs?(
+    sessionId: string,
+    options?: { anchorId?: string | null; now?: number },
+  ): Promise<RevivedCronJob[]>;
+
+  /**
+   * The session's loops that no process runs (see `PausedScheduledWork`),
+   * read off its transcript; the caller has checked that no process of this
+   * server holds the session. Only a provider whose CLI brings loops back on
+   * resume implements it (Claude).
+   */
+  readPausedScheduledWork?(sessionId: string, options?: { now?: number }): Promise<PausedScheduledWork>;
 
   /**
    * Rewinds the session so `keepThroughId` is the last row of its

@@ -17,8 +17,8 @@ import { api, ApiRequestError, readApiJson } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { stripBidiIsolates } from '@/shared/direction';
 import { readUserPreference } from '@/shared/userSettings';
-import { buildModelRunOptions, describeBackgroundTask, describeScheduledWork, ownBackgroundTasks } from '@/shared/utils';
-import type { AddChatMessageOptions, BackgroundSendChoice, BackgroundSendPrompt, BackgroundTaskSummary, BusySubmitMode, CommandModalPayload, CostCommandData, HelpCommandData, InsertUnavailableReason, MarkSessionBackground, MarkSessionProcessing, ModelCommandData, OwnInsert, OwnInsertOutcome, QueuedDraft, ScheduledWorkSummary, SendRefusedEvent, SessionActivity, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import { buildModelRunOptions, describeBackgroundTask, describeScheduledWork, ownBackgroundTasks, parseHandOverDetails } from '@/shared/utils';
+import type { AddChatMessageOptions, BackgroundSendChoice, BackgroundSendPrompt, BackgroundTaskSummary, BusySubmitMode, HandOverBlockDetail, CommandModalPayload, CostCommandData, HelpCommandData, InsertUnavailableReason, MarkSessionBackground, MarkSessionProcessing, ModelCommandData, OwnInsert, OwnInsertOutcome, QueuedDraft, ScheduledWorkSummary, SendRefusedEvent, SessionActivity, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   appendQueuedMessage,
@@ -259,13 +259,18 @@ const HAND_OVER_PLAN_TIMEOUT_MS = 5_000;
 /**
  * The server's word on whether a send with given options would run in the
  * process the session holds open for its background work: `heldWork` (such a
- * process holds work), `canHandOver` (the send would go in) and `changes`
- * (what keeps it out otherwise; see BackgroundSendPrompt).
+ * process holds work), `canHandOver` (the send would go in), `changes` (what
+ * keeps it out otherwise; see BackgroundSendPrompt) and `details` (what
+ * exactly), and `replaceKeepsWork` (it cannot go in, but a process of its own
+ * keeps the work: cron jobs alone hold the process, which the new one brings
+ * back).
  */
 type HandOverPlan = {
   heldWork: boolean;
   canHandOver: boolean;
   changes: string[];
+  details?: HandOverBlockDetail;
+  replaceKeepsWork?: boolean;
 };
 
 /**
@@ -282,12 +287,15 @@ const readHandOverPlan = async (sessionId: string, options: QueuedSendOptions): 
     if (!data || typeof data.heldWork !== 'boolean' || typeof data.canHandOver !== 'boolean') {
       return null;
     }
+    const details = parseHandOverDetails(data.details);
     return {
       heldWork: data.heldWork,
       canHandOver: data.canHandOver,
       changes: Array.isArray(data.changes)
         ? data.changes.filter((change): change is string => typeof change === 'string')
         : [],
+      ...(details ? { details } : {}),
+      ...(data.replaceKeepsWork === true ? { replaceKeepsWork: true } : {}),
     };
   } catch {
     return null;
@@ -1079,10 +1087,12 @@ export function useChatComposerState({
   // work runs: `send` (with keepBackgroundWork when the work is to keep
   // running), `queue` behind the work, or `cancel`. A provider whose runtime
   // runs the turn in the process the work runs in asks the server first. When
-  // the turn can go there, or the server cannot say, it is sent with
-  // keepBackgroundWork, so the server refuses it rather than stop the work;
-  // when it cannot, the user is asked, told what only a new process can
-  // apply. Elsewhere, and for an edit, every new turn replaces that process,
+  // the turn can go there, a process of its own keeps the work (even once the
+  // loop's run under way is over), or the server cannot say, it is sent with
+  // keepBackgroundWork, so the server refuses or fails it rather than stop
+  // the work (a failure shows in the transcript as HAND_OVER_FAILED); when it
+  // cannot, the user is asked, told what only a new process can apply.
+  // Elsewhere, and for an edit, every new turn replaces that process,
   // so the user is asked. The prompt lists the session's tasks and scheduled
   // work, and offers no Queue for scheduled work alone (see
   // buildBackgroundSendPrompt). Only while the composer shows the session,
@@ -1096,10 +1106,11 @@ export function useChatComposerState({
     let prompt = buildBackgroundSendPrompt(processingSessionsRef.current?.get(sessionId), t);
     if (supportsMidRunInsert && !isEdit) {
       const plan = await readHandOverPlan(sessionId, options);
-      if (!plan || !plan.heldWork || plan.canHandOver) {
+      // A process of the send's own that brings the cron jobs back stops nothing.
+      if (!plan || !plan.heldWork || plan.canHandOver || plan.replaceKeepsWork) {
         return { choice: 'send', keepBackgroundWork: true };
       }
-      prompt = { ...prompt, changes: plan.changes };
+      prompt = { ...prompt, changes: plan.changes, ...(plan.details ? { details: plan.details } : {}) };
     }
     // The plan, or the upload a submit waits on before it, can come back
     // after the user has opened another session. A prompt there would ask
@@ -1567,6 +1578,7 @@ export function useChatComposerState({
       const choice = await askBeforeSendingOverBackgroundWork({
         ...buildBackgroundSendPrompt(refused, t),
         changes: event.changes,
+        ...(event.details ? { details: event.details } : {}),
       });
       if (choice === 'cancel') {
         return;

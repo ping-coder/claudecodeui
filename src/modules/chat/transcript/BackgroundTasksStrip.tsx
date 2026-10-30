@@ -31,6 +31,16 @@ type BackgroundTasksStripProps = {
    * as the activity map has it from the server; listed after the tasks.
    */
   scheduled?: ScheduledWorkSummary[];
+  /**
+   * The session's paused loops (a restart of the server left them with no
+   * process), read while no process holds the session; listed with the
+   * scheduled work, with Resume.
+   */
+  paused?: ScheduledWorkSummary[];
+  /** Reads the paused loops again (see ScheduledWorkChips). */
+  onPausedChange?: () => Promise<void> | void;
+  /** The composer's settings, for a resume of the paused loops (see ScheduledWorkChips). */
+  buildResumeOptions?: () => Record<string, unknown>;
   /** The session the tasks belong to, which `chat.stop-task` names; null before one exists. */
   sessionId: string | null;
   /**
@@ -120,10 +130,24 @@ function describeTask(message: ChatMessage, t: TFunction) {
  * scrolling to its card when clicked. A task CloudCLI's runtime tracks is
  * stoppable from its ✕; one a Claude CLI outside CloudCLI runs is listed
  * without one, as only that CLI can stop it. The session's scheduled work
- * follows the tasks (see ScheduledWorkChips). Renders nothing while nothing
- * runs or waits, which is most of the time.
+ * follows the tasks, or its paused loops when no process holds it (see
+ * ScheduledWorkChips). Renders nothing while nothing runs or waits, which is
+ * most of the time.
  */
-export const BackgroundTasksStrip = memo(({ messages, tasks, scheduled, sessionId, canStopTasks, isTurnRunning = false, sendMessage, onReveal, onLoadAll }: BackgroundTasksStripProps) => {
+export const BackgroundTasksStrip = memo(({
+  messages,
+  tasks,
+  scheduled,
+  paused,
+  onPausedChange,
+  buildResumeOptions,
+  sessionId,
+  canStopTasks,
+  isTurnRunning = false,
+  sendMessage,
+  onReveal,
+  onLoadAll,
+}: BackgroundTasksStripProps) => {
   const { t } = useTranslation();
   const running = listRunningBackgroundLaunches(messages);
   // A loaded row that has a word on its task — settled or not — is the word;
@@ -135,7 +159,8 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, scheduled, sessionI
   );
   const fromMap = ownBackgroundTasks(tasks ?? []).filter((task) => !settledToolIds.has(task.toolUseId));
 
-  const scheduledWork = scheduled ?? [];
+  // A process holds the session, or none does and what it held is paused: one of the two is empty.
+  const scheduledWork = [...(scheduled ?? []), ...(paused ?? [])];
 
   if (running.length === 0 && fromMap.length === 0 && scheduledWork.length === 0) {
     return null;
@@ -243,6 +268,8 @@ export const BackgroundTasksStrip = memo(({ messages, tasks, scheduled, sessionI
           sendMessage={sendMessage}
           onReveal={onReveal}
           onLoadAll={onLoadAll}
+          onPausedChange={onPausedChange}
+          buildResumeOptions={buildResumeOptions}
         />
       )}
     </div>

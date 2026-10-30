@@ -38,6 +38,8 @@ type SidebarProps = {
   isLoading: boolean;
   loadingProgress: LoadingProgress | null;
   onRefresh: () => Promise<void> | void;
+  /** Moves with the workspace's Refresh all: the archived and recent lists reload (the project list already did). */
+  refreshEpoch?: number;
   onShowSettings: () => void;
   showSettings: boolean;
   settingsInitialTab: string;
@@ -64,6 +66,7 @@ function Sidebar({
   isLoading,
   loadingProgress,
   onRefresh,
+  refreshEpoch,
   onShowSettings,
   showSettings,
   settingsInitialTab,
@@ -168,6 +171,7 @@ function Sidebar({
     isMobile,
     t,
     onRefresh,
+    refreshEpoch,
     onProjectSelect,
     onSessionSelect,
     onSessionDelete,

@@ -109,6 +109,23 @@ export const scheduledMessagesDb = {
     return result.changes > 0;
   },
 
+  /**
+   * Puts a claimed message back to pending, for a turn that did not go and
+   * is to be tried again (see the scheduled-messages dispatcher). Returns
+   * false when it is no longer marked sent.
+   */
+  unclaim(id: string): boolean {
+    const result = getConnection()
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'sent'`
+      )
+      .run(id);
+
+    return result.changes > 0;
+  },
+
   markFailed(id: string, reason: string): void {
     getConnection()
       .prepare(
@@ -117,6 +134,39 @@ export const scheduledMessagesDb = {
          WHERE id = ?`
       )
       .run(reason.slice(0, 500), id);
+  },
+
+  /**
+   * Has a pending message of the user's go with the settings of the process
+   * held for its session's scheduled work (`useProcessSettings: true` in its
+   * options, see the scheduled-messages dispatcher). Returns false when the
+   * message is not the user's, or no longer pending.
+   */
+  useProcessSettings(userId: number, id: string): boolean {
+    const db = getConnection();
+    return db.transaction(() => {
+      const row = db
+        .prepare(`SELECT options FROM scheduled_messages WHERE id = ? AND user_id = ? AND status = 'pending'`)
+        .get(id, userId) as { options: string } | undefined;
+      if (!row) {
+        return false;
+      }
+      let options: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = JSON.parse(row.options);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          options = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Options that no longer parse go as the defaults would, which is what the flag asks for anyway.
+      }
+      db.prepare(
+        `UPDATE scheduled_messages
+         SET options = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'pending'`
+      ).run(JSON.stringify({ ...options, useProcessSettings: true }), id);
+      return true;
+    })();
   },
 
   /**

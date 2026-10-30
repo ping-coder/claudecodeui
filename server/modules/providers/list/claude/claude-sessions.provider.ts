@@ -11,6 +11,8 @@ import type {
   FetchHistoryResult,
   LiveClaudeRun,
   NormalizedMessage,
+  PausedScheduledWork,
+  RevivedCronJob,
   SubagentActivity,
   SubagentInfo,
   TaskUsage,
@@ -36,7 +38,20 @@ import {
   CLOUDCLI_CLAUDE_ENTRYPOINT,
   getClaudeSDKSessionStartTime,
 } from '@/modules/providers/list/claude/claude-runtime.provider.js';
-import { listLiveClaudeCliRuns } from '@/modules/providers/services/claude-cli-liveness.service.js';
+import {
+  buildLoopsResumeMessage,
+  describePausedScheduledWork,
+  findPendingWakeup,
+  findRevivedCronJobs,
+  readControlNote,
+  resolveScheduleHoldMax,
+  resumedWakeupDelaySeconds,
+  scanTranscriptScheduling,
+} from '@/modules/providers/list/claude/claude-scheduled-work.js';
+import {
+  hasLiveClaudeCliProcess,
+  listLiveClaudeCliRuns,
+} from '@/modules/providers/services/claude-cli-liveness.service.js';
 import {
   getReportedClaudeContextWindow,
   summarizeClaudeTokenUsage,
@@ -576,9 +591,11 @@ function isUserPromptRow(row: AnyRecord): boolean {
  * newest conversation row only takes over when it descends from the stamped
  * leaf (the stamping process kept going), or when the file carries no stamp.
  * A compact boundary clears the stamp, and `progress` rows are skipped over
- * when linking a row to its parent, as the CLI does.
+ * when linking a row to its parent, as the CLI does. `leafOverride`, when it
+ * names a row, is the leaf instead: a resume at a row (`resumeSessionAt`)
+ * replays the chain up to it.
  */
-function resolveResumePath(rows: AnyRecord[]): Set<string> {
+function resolveResumePath(rows: AnyRecord[], leafOverride?: string | null): Set<string> {
   const conversation = new Map<string, AnyRecord>();
   const progressParents = new Map<string, string | null>();
   const parentOf = (row: AnyRecord): string | undefined => {
@@ -626,6 +643,10 @@ function resolveResumePath(rows: AnyRecord[]): Set<string> {
     }
     return chain;
   };
+
+  if (leafOverride && conversation.has(leafOverride)) {
+    return new Set(chainFrom(leafOverride));
+  }
 
   let leaf = stampedLeaf && conversation.has(stampedLeaf) ? stampedLeaf : undefined;
   if (leaf && !stampIsExplicit && newestRow && newestRow !== leaf && chainFrom(newestRow).includes(leaf)) {
@@ -1136,6 +1157,30 @@ function isLocalCommandRecord(raw: AnyRecord, content: string): boolean {
 }
 
 /**
+ * The note for a prompt CloudCLI sent the model on its own, such as the turn
+ * that has Claude stop loops (readControlNote), when the row is that prompt:
+ * a main-thread user row whose content is its text alone, a string or a
+ * single text block. The CLI writes it as it writes the user's own prompts,
+ * and its live echo has the same shape. Null for any other row.
+ */
+function readControlNoteRow(raw: AnyRecord): ReturnType<typeof readControlNote> {
+  if (
+    raw.type !== 'user'
+    || raw.message?.role !== 'user'
+    || raw.parent_tool_use_id
+    || raw.toolUseResult !== undefined
+    || raw.tool_use_result !== undefined
+  ) {
+    return null;
+  }
+  const content = raw.message.content;
+  const text = Array.isArray(content)
+    ? content.length === 1 && content[0]?.type === 'text' ? content[0].text : null
+    : content;
+  return readControlNote(text);
+}
+
+/**
  * Produces the short user-visible command string that should appear in chat.
  *
  * We prefer the slash-prefixed command name because that most closely matches
@@ -1400,6 +1445,219 @@ function readInsertedMessage(
   });
 }
 
+/**
+ * Text that every transcript row bearing on scheduled work carries: a
+ * CronCreate or ScheduleWakeup call (`"name"` then `"input"`, as the CLI
+ * writes a tool_use block, which the tool definitions some rows record do
+ * not match), and the row that carries cron jobs across a compaction. A file
+ * with none of it has no scheduled work, and is not parsed for it.
+ */
+const SCHEDULING_ROW_MARKERS = ['"name":"CronCreate","input"', '"name":"ScheduleWakeup","input"', '"session_cron_carry"'];
+
+/** The tools whose calls scanTranscriptScheduling reads. */
+const SCHEDULING_TOOLS = new Set(['CronCreate', 'CronDelete', 'ScheduleWakeup']);
+
+/** The rows a scheduling scan reads: those resolveResumePath links the chain with, and its stamps. */
+const SCHEDULE_SCAN_ROW_TYPES = new Set(['user', 'assistant', 'attachment', 'system', 'progress', 'last-prompt']);
+
+/** The fields of a row resolveResumePath and scanTranscriptScheduling read beside its content. */
+const SCHEDULE_SCAN_ROW_FIELDS = ['uuid', 'parentUuid', 'timestamp', 'isSidechain', 'subtype', 'taskKind', 'leafUuid', 'explicit'];
+
+/**
+ * One transcript line cut down to what a scheduling scan reads, or null for a
+ * line it does not read: another session's, a row of no turn, or one that
+ * does not parse (a row can be half-written). Kept are the fields
+ * resolveResumePath links the chain by, and of the content only what
+ * scanTranscriptScheduling reads: the calls of a scheduling tool (their ids
+ * go into `schedulingCallIds`), the results of those calls, and a cron carry
+ * row. A large transcript keeps a small part of itself so.
+ */
+function readScheduleScanRow(line: string, providerSessionId: string, schedulingCallIds: Set<string>): AnyRecord | null {
+  if (!line.trim()) {
+    return null;
+  }
+  let entry: AnyRecord;
+  try {
+    entry = JSON.parse(line) as AnyRecord;
+  } catch {
+    return null;
+  }
+  if (
+    !entry
+    || entry.sessionId !== providerSessionId
+    || isClaudeNonTurnMessageRow(entry)
+    || !SCHEDULE_SCAN_ROW_TYPES.has(entry.type)
+  ) {
+    return null;
+  }
+  const row: AnyRecord = { type: entry.type };
+  for (const field of SCHEDULE_SCAN_ROW_FIELDS) {
+    if (entry[field] !== undefined) {
+      row[field] = entry[field];
+    }
+  }
+  const content = entry.message?.content;
+  if (entry.type === 'assistant' && Array.isArray(content)) {
+    const calls = content
+      .filter((block: AnyRecord) => block?.type === 'tool_use' && SCHEDULING_TOOLS.has(block.name))
+      .map((block: AnyRecord) => ({ type: 'tool_use', id: block.id, name: block.name, input: block.input }));
+    for (const call of calls) {
+      if (typeof call.id === 'string') {
+        schedulingCallIds.add(call.id);
+      }
+    }
+    if (calls.length > 0) {
+      row.message = { content: calls };
+    }
+  } else if (entry.type === 'user' && Array.isArray(content)) {
+    const results = content
+      .filter((block: AnyRecord) => block?.type === 'tool_result' && schedulingCallIds.has(block.tool_use_id))
+      .map((block: AnyRecord) => ({ type: 'tool_result', tool_use_id: block.tool_use_id, is_error: block.is_error }));
+    if (results.length > 0) {
+      row.message = { content: results };
+      row.toolUseResult = entry.toolUseResult;
+    }
+  } else if (entry.type === 'attachment' && entry.attachment?.type === 'session_cron_carry') {
+    row.attachment = entry.attachment;
+  }
+  return row;
+}
+
+/**
+ * Reads the whole lines of a file from byte `start` to byte `end`, each to
+ * `onLine`, which stops the read by returning false. Resolves where the last
+ * whole line ends and the text after it (a line still being written), or
+ * null once `onLine` stopped the read.
+ */
+async function readLinesBetween(
+  filePath: string,
+  start: number,
+  end: number,
+  onLine: (line: string) => boolean | void,
+): Promise<{ end: number; rest: string } | null> {
+  if (end <= start) {
+    return { end: start, rest: '' };
+  }
+  const stream = fs.createReadStream(filePath, { start, end: end - 1 });
+  let pending: Buffer[] = [];
+  let chunkStart = start;
+  let lineEnd = start;
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      let from = 0;
+      let newline = chunk.indexOf(0x0a, from);
+      while (newline !== -1) {
+        const piece = chunk.subarray(from, newline);
+        const line = pending.length > 0 ? Buffer.concat([...pending, piece]) : piece;
+        pending = [];
+        from = newline + 1;
+        lineEnd = chunkStart + from;
+        if (onLine(line.toString('utf8')) === false) {
+          return null;
+        }
+        newline = chunk.indexOf(0x0a, from);
+      }
+      if (from < chunk.length) {
+        pending.push(chunk.subarray(from));
+      }
+      chunkStart += chunk.length;
+    }
+  } finally {
+    stream.destroy();
+  }
+  return { end: lineEnd, rest: Buffer.concat(pending).toString('utf8') };
+}
+
+type ScheduleScan = ReturnType<typeof scanTranscriptScheduling>;
+
+/**
+ * What the scheduling scans of one session's transcript have read so far
+ * (see readScheduleScan). The file only grows, so a scan reads only what was
+ * written since the one before.
+ */
+type ScheduleScanState = {
+  jsonlPath: string;
+  providerSessionId: string;
+  /** The file's inode: a file put in its place is read from its start. */
+  inode: number;
+  /** Where the last whole line read ends. */
+  offset: number;
+  /**
+   * The rows read so far (readScheduleScanRow), or null while the file holds
+   * no scheduling row (SCHEDULING_ROW_MARKERS): its lines are then searched
+   * for one, not parsed.
+   */
+  rows: AnyRecord[] | null;
+  /** The ids of the scheduling calls among the rows. */
+  schedulingCallIds: Set<string>;
+  /** The row of a last line still being written, when it parses already: read again once whole. */
+  partialRow: AnyRecord | null;
+  /** The last scan, by the size of the file it read and its anchor. */
+  scan: { size: number; anchorId: string | null; result: ScheduleScan | null } | null;
+};
+
+/**
+ * Reads what was written to a transcript since the scan before (`state`), up
+ * to byte `size`. Until a scheduling row shows up the new lines are only
+ * searched for one; once one has, the file is parsed from its start, and
+ * from then on only the lines added since. `state` changes only once the
+ * read is done.
+ */
+async function readScheduleRowsUpTo(state: ScheduleScanState, size: number): Promise<void> {
+  if (state.rows === null) {
+    const searched = await readLinesBetween(
+      state.jsonlPath,
+      state.offset,
+      size,
+      (line) => !SCHEDULING_ROW_MARKERS.some((marker) => line.includes(marker)),
+    );
+    if (searched) {
+      state.offset = searched.end;
+      return;
+    }
+  }
+  const fromStart = state.rows === null;
+  const schedulingCallIds = fromStart ? new Set<string>() : state.schedulingCallIds;
+  const added: AnyRecord[] = [];
+  const read = await readLinesBetween(state.jsonlPath, fromStart ? 0 : state.offset, size, (line) => {
+    const row = readScheduleScanRow(line, state.providerSessionId, schedulingCallIds);
+    if (row) {
+      added.push(row);
+    }
+  });
+  if (!read) {
+    return;
+  }
+  if (state.rows === null) {
+    state.rows = added;
+  } else {
+    for (const row of added) {
+      state.rows.push(row);
+    }
+  }
+  state.schedulingCallIds = schedulingCallIds;
+  state.offset = read.end;
+  state.partialRow = read.rest
+    ? readScheduleScanRow(read.rest, state.providerSessionId, new Set(schedulingCallIds))
+    : null;
+}
+
+/** How many transcripts' scheduling scans are kept (see readScheduleScan). */
+const SCHEDULE_SCAN_CACHE_SIZE = 50;
+
+/**
+ * How long a paused loop is held once resumed, for the times its listing
+ * shows (see describePausedScheduledWork): the runtime's limit for
+ * scheduled work.
+ */
+const SCHEDULE_HOLD_MAX_MS = resolveScheduleHoldMax(process.env);
+
+/**
+ * Whether a live Claude CLI process is registered for a provider session,
+ * at rest or not (see `hasLiveClaudeCliProcess`).
+ */
+type LiveCliProcessProbe = (providerSessionId: string) => Promise<boolean>;
+
 type ClaudeSessionsProviderOptions = {
   /**
    * When CloudCLI's own SDK run behind a session started, or null when none
@@ -1413,18 +1671,30 @@ type ClaudeSessionsProviderOptions = {
    * drive itself. Injected so history tests never read the real `~/.claude`.
    */
   listLiveCliRuns?: LiveCliRunsProbe;
+  /**
+   * Whether a live Claude CLI process holds a provider session, at rest or
+   * not. Injected so paused-loop tests never read the real `~/.claude`.
+   */
+  hasLiveCliProcess?: LiveCliProcessProbe;
 };
 
 export class ClaudeSessionsProvider implements IProviderSessions {
   private readonly getLiveRunStartTime: LiveRunStartTimeProbe;
   private readonly listLiveCliRuns: LiveCliRunsProbe;
+  private readonly hasLiveCliProcess: LiveCliProcessProbe;
+  // What the scheduling scans of each session's transcript have read (see readScheduleScan).
+  private readonly scheduleScans = new Map<string, ScheduleScanState>();
+  // The scheduling scan under way of each session, which the next one waits for.
+  private readonly scheduleScanTurns = new Map<string, Promise<void>>();
 
   constructor({
     getLiveRunStartTime = getClaudeSDKSessionStartTime,
     listLiveCliRuns = listLiveClaudeCliRuns,
+    hasLiveCliProcess = hasLiveClaudeCliProcess,
   }: ClaudeSessionsProviderOptions = {}) {
     this.getLiveRunStartTime = getLiveRunStartTime;
     this.listLiveCliRuns = listLiveCliRuns;
+    this.hasLiveCliProcess = hasLiveCliProcess;
   }
 
   /**
@@ -1593,6 +1863,24 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     if (raw.type === 'attachment') {
       const inserted = readInsertedMessage(raw, sessionId, ts, baseId);
       return inserted ? [inserted] : [];
+    }
+
+    // A prompt CloudCLI sent the model on its own (readControlNoteRow), meta
+    // row or not: the user never typed it, so it is an assistant note, which
+    // opens no turn and offers no edit or fork. Its live echo becomes the
+    // same row, under the same id, the prompt's uuid.
+    const control = readControlNoteRow(raw);
+    if (control) {
+      return [createNormalizedMessage({
+        id: baseId,
+        sessionId,
+        timestamp: ts,
+        provider: PROVIDER,
+        kind: 'text',
+        role: 'assistant',
+        content: control.content,
+        controlNote: control.controlNote,
+      })];
     }
 
     if (raw.message?.role === 'user' && raw.message?.content && raw.isMeta !== true) {
@@ -1933,6 +2221,145 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     }
 
     return { found: true, resumeThroughId: null };
+  }
+
+  /**
+   * What the transcript says about the session's scheduled work
+   * (scanTranscriptScheduling), read off the chain a resume of the session
+   * replays (resolveResumePath; from `anchorId` for a resume at a row), or
+   * null when the file has no row bearing on it (SCHEDULING_ROW_MARKERS) or
+   * cannot be read. The rows read are kept, cut down (readScheduleScanRow),
+   * so a scan parses only what was written since the one before
+   * (readScheduleRowsUpTo); a session's scans run one at a time.
+   */
+  private readScheduleScan(sessionId: string, anchorId: string | null): Promise<ScheduleScan | null> {
+    const previous = this.scheduleScanTurns.get(sessionId) ?? Promise.resolve();
+    const scan = previous.then(() => this.scanSchedule(sessionId, anchorId));
+    const turn = scan.then(() => {}, () => {});
+    this.scheduleScanTurns.set(sessionId, turn);
+    void turn.then(() => {
+      if (this.scheduleScanTurns.get(sessionId) === turn) {
+        this.scheduleScanTurns.delete(sessionId);
+      }
+    });
+    return scan;
+  }
+
+  /** One scheduling scan of the session's transcript (see readScheduleScan). */
+  private async scanSchedule(sessionId: string, anchorId: string | null): Promise<ScheduleScan | null> {
+    const session = sessionsDb.getSessionById(sessionId);
+    const jsonlPath = session?.jsonl_path;
+    const providerSessionId = session?.provider_session_id;
+    if (!jsonlPath || !providerSessionId) {
+      return null;
+    }
+    let stats: fs.Stats;
+    try {
+      stats = await fsp.stat(jsonlPath);
+    } catch {
+      return null;
+    }
+    let state = this.scheduleScans.get(sessionId);
+    if (
+      !state
+      || state.jsonlPath !== jsonlPath
+      || state.providerSessionId !== providerSessionId
+      || state.inode !== stats.ino
+      || stats.size < state.offset
+    ) {
+      state = {
+        jsonlPath,
+        providerSessionId,
+        inode: stats.ino,
+        offset: 0,
+        rows: null,
+        schedulingCallIds: new Set(),
+        partialRow: null,
+        scan: null,
+      };
+    }
+    this.scheduleScans.delete(sessionId);
+    this.scheduleScans.set(sessionId, state);
+    if (this.scheduleScans.size > SCHEDULE_SCAN_CACHE_SIZE) {
+      const [oldest] = this.scheduleScans.keys();
+      this.scheduleScans.delete(oldest);
+    }
+    if (state.scan?.size === stats.size && state.scan.anchorId === anchorId) {
+      return state.scan.result;
+    }
+    try {
+      await readScheduleRowsUpTo(state, stats.size);
+    } catch {
+      this.scheduleScans.delete(sessionId);
+      return null;
+    }
+    let result: ScheduleScan | null = null;
+    if (state.rows) {
+      const rows = state.partialRow ? [...state.rows, state.partialRow] : state.rows;
+      const chain = resolveResumePath(rows, anchorId);
+      result = scanTranscriptScheduling(rows.filter((row) => typeof row.uuid === 'string' && chain.has(row.uuid)));
+    }
+    state.scan = { size: stats.size, anchorId, result };
+    return result;
+  }
+
+  /**
+   * The cron jobs a CLI that resumes the session now brings back from its
+   * transcript (findRevivedCronJobs), with nothing on its stream to say so:
+   * the Claude runtime holds its process for them. `anchorId` is the row a
+   * resume at a row (`resumeSessionAt`) replays up to. Empty when there are
+   * none, or the transcript cannot be read.
+   */
+  async readRevivedCronJobs(
+    sessionId: string,
+    { anchorId = null, now = Date.now() }: { anchorId?: string | null; now?: number } = {},
+  ): Promise<RevivedCronJob[]> {
+    const scan = await this.readScheduleScan(sessionId, anchorId);
+    return scan ? findRevivedCronJobs(scan, now) : [];
+  }
+
+  /**
+   * The session's loops that no process runs, as no process holds the
+   * session (the caller has checked its own): the cron jobs a resume would
+   * bring back and a self-paced loop's wake-up that was still to come (see
+   * describePausedScheduledWork), with the message of the turn that resumes
+   * them (buildLoopsResumeMessage). A restart of the server leaves a session
+   * so, and so do an abort and a CLI that ended on its own.
+   * None, with `heldElsewhere`, when a live Claude CLI process outside this
+   * server holds the session (a Shell tab, a terminal, another CloudCLI
+   * instance): its loops run there.
+   */
+  async readPausedScheduledWork(
+    sessionId: string,
+    { now = Date.now() }: { now?: number } = {},
+  ): Promise<PausedScheduledWork> {
+    const none: PausedScheduledWork = { items: [], resumeContent: null, heldElsewhere: false };
+    const scan = await this.readScheduleScan(sessionId, null);
+    if (!scan) {
+      return none;
+    }
+    const cronJobs = findRevivedCronJobs(scan, now);
+    const wakeup = findPendingWakeup(scan, now);
+    if (cronJobs.length === 0 && !wakeup) {
+      return none;
+    }
+    const providerSessionId = sessionsDb.getSessionById(sessionId)?.provider_session_id ?? '';
+    if (await this.hasLiveCliProcess(providerSessionId)) {
+      return { ...none, heldElsewhere: true };
+    }
+    return {
+      items: describePausedScheduledWork({ cronJobs, wakeup }, now, {
+        holdMaxMs: SCHEDULE_HOLD_MAX_MS,
+        scheduleHoldMaxMs: SCHEDULE_HOLD_MAX_MS,
+      }),
+      resumeContent: buildLoopsResumeMessage({
+        jobIds: cronJobs.map((job) => job.jobId).filter((jobId) => /^[0-9a-f]{8}$/.test(jobId)),
+        wakeup: wakeup
+          ? { delaySeconds: resumedWakeupDelaySeconds(wakeup.scheduledFor, now), prompt: wakeup.prompt, reason: wakeup.reason }
+          : null,
+      }),
+      heldElsewhere: false,
+    };
   }
 
   /**

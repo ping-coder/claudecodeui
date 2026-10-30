@@ -1,9 +1,19 @@
 import { scheduledMessagesDb, sessionDraftsDb, sessionsDb } from '@/modules/database/index.js';
 import type { QueuedSessionMessageRecord, ScheduledMessageRow } from '@/modules/database/index.js';
 import type { HandOverFailureCode } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
-import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
+import { broadcastGatewayEvent, chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import type { HandOverFailure, ProviderRuntimeGateway } from '@/modules/websocket/index.js';
-import type { AnyRecord, HandOverChange, LLMProvider, ProviderHandOverPlan } from '@/shared/types.js';
+import type {
+  AnyRecord,
+  DispatchWait,
+  DispatchWaitAction,
+  DispatchWaitReason,
+  DispatchWaitTarget,
+  HandOverChange,
+  LLMProvider,
+  ProviderHandOverPlan,
+  ScheduledWorkSummary,
+} from '@/shared/types.js';
 import { buildTurnRunOptions, readQueuedChatMessage } from '@/shared/utils.js';
 
 /**
@@ -16,6 +26,8 @@ import { buildTurnRunOptions, readQueuedChatMessage } from '@/shared/utils.js';
 const POLL_INTERVAL_MS = 30_000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+// The runtime the poll sends with, for a pass asked for between polls (requestDispatchPass).
+let pollRuntime: ProviderRuntimeGateway | null = null;
 
 /**
  * How long a queued message the held process turned away at the hand-over
@@ -37,7 +49,7 @@ const HAND_OVER_RETRY_SLACK_MS = 1_000;
  * again (`retryAt`), and the stored value it was (`claimToken`, see
  * `QueuedSessionMessageRecord`). It waits only while the session's process
  * is still held for scheduled work, the only hold such a turn goes into
- * (`acceptsProcessSettings`), and only as it was: one that has changed since
+ * (`heldForLoopsAlone`), and only as it was: one that has changed since
  * (more was queued onto it, or it was replaced) goes as any would. A queued
  * turn that goes through, or fails otherwise, clears the session.
  */
@@ -50,13 +62,18 @@ const handOverRetries = new Map<string, { failures: number; retryAt: number; cla
  */
 function noteHandOverFailure(candidate: QueuedSessionMessageRecord, now: Date): number {
   const failures = (handOverRetries.get(candidate.sessionId)?.failures ?? 0) + 1;
-  const delay = Math.min(HAND_OVER_RETRY_FIRST_MS * 2 ** (failures - 1), HAND_OVER_RETRY_MAX_MS);
+  const delay = handOverRetryDelay(failures);
   handOverRetries.set(candidate.sessionId, {
     failures,
     retryAt: now.getTime() + delay - HAND_OVER_RETRY_SLACK_MS,
     claimToken: candidate.claimToken,
   });
   return delay;
+}
+
+/** How long a message turned away `failures` times in a row waits before it is tried again (see `HAND_OVER_RETRY_FIRST_MS`). */
+function handOverRetryDelay(failures: number): number {
+  return Math.min(HAND_OVER_RETRY_FIRST_MS * 2 ** (failures - 1), HAND_OVER_RETRY_MAX_MS);
 }
 
 /** Whether `candidate` is a turned-away queued message still waiting to be tried again (see `handOverRetries`). */
@@ -70,6 +87,199 @@ function waitsToRetryHandOver(
     && retry.claimToken === candidate.claimToken
     && now.getTime() < retry.retryAt
     && runtime.hasScheduledWork(candidate.sessionId);
+}
+
+/**
+ * The hand-over failures (HAND_OVER_FAILED, see `HandOverFailure`) a due
+ * message is tried again after rather than marked failed: the CLI's own
+ * turn, which the message's turn waited for, started work a process of the
+ * turn's own would stop (`work-started`). Nothing is wrong with the message,
+ * which goes once that work lets it.
+ */
+const RETRIED_HAND_OVER_REASONS: ReadonlySet<string> = new Set(['work-started']);
+
+/**
+ * Per due message, by its row id, a hand-over failure it is tried again
+ * after (`RETRIED_HAND_OVER_REASONS`): how many times in a row, and when it
+ * may be tried again. The message is pending again meanwhile, and waits, as
+ * a turned-away queued message does (`handOverRetries`), only while the
+ * session's process is still held for scheduled work. Dropped once the
+ * message is no longer due and pending, and once its turn goes through or
+ * fails otherwise.
+ */
+const dueHandOverRetries = new Map<string, { failures: number; retryAt: number }>();
+
+/** Records that a due message's turn was turned away to be tried again, in the pass that started at `now`; returns how long it waits. */
+function noteDueHandOverFailure(rowId: string, now: Date): number {
+  const failures = (dueHandOverRetries.get(rowId)?.failures ?? 0) + 1;
+  const delay = handOverRetryDelay(failures);
+  dueHandOverRetries.set(rowId, { failures, retryAt: now.getTime() + delay - HAND_OVER_RETRY_SLACK_MS });
+  return delay;
+}
+
+/** When a due message waits to be tried again (see `dueHandOverRetries`), or null when it may go. */
+function dueRetryAt(row: ScheduledMessageRow, now: Date, runtime: ProviderRuntimeGateway): number | null {
+  const retry = dueHandOverRetries.get(row.id);
+  return retry !== undefined && now.getTime() < retry.retryAt && runtime.hasScheduledWork(row.session_id)
+    ? retry.retryAt
+    : null;
+}
+
+/**
+ * The messages that wait, and why (see `DispatchWait`), by `queued:<sessionId>`
+ * or `scheduled:<rowId>`, with the user the message belongs to and what the
+ * wait said when it was last sent on (`signature`). Noted as a pass holds a
+ * message back, removed once the message is claimed, and dropped as a pass
+ * starts for a message that is no longer there (sent, cancelled, edited
+ * away). In memory only: a restarted server works them out again on its
+ * first pass.
+ */
+const waits = new Map<string, DispatchWait & { userId: number; signature: string }>();
+
+const waitKey = (sessionId: string, target: DispatchWaitTarget): string => (
+  target.kind === 'queued' ? `queued:${sessionId}` : `scheduled:${target.id}`
+);
+
+/**
+ * The changes a message may take from the held process instead of naming
+ * them (`useProcessSettings`, see `lendingTurn`): a wait kept by these
+ * alone offers it. A working directory, or a plan the runtime could not make,
+ * are no setting the process could lend.
+ */
+const LENDABLE_CHANGES: ReadonlySet<HandOverChange> = new Set<HandOverChange>([
+  'tools',
+  'permissionMode',
+  'model',
+  'effort',
+  'ultracode',
+]);
+
+/** The ids of scheduled work a `chat.stop-task` can name (see `isStoppableScheduledWorkId` in the Claude runtime). */
+const STOPPABLE_WORK_ID = /^(?:cron:[0-9a-f]{8}|wakeup:[\w-]{1,128})$/;
+
+/**
+ * The latest the session's process is held for a piece of its scheduled
+ * work: its hold limit, or its expiry when that comes first. Null with none.
+ */
+function latestHoldOf(scheduled: ScheduledWorkSummary[]): number | null {
+  const ends = scheduled.map((item) => Math.min(item.holdUntil, item.expiresAt ?? item.holdUntil));
+  return ends.length > 0 ? Math.max(...ends) : null;
+}
+
+function readScheduledWork(sessionId: string, runtime: ProviderRuntimeGateway): ScheduledWorkSummary[] {
+  try {
+    return runtime.listScheduledWork(sessionId);
+  } catch {
+    return [];
+  }
+}
+
+/** Sends a change of a message's wait on to the chat sockets (see `DispatchWaitingEvent`). */
+function announceWait(sessionId: string, target: DispatchWaitTarget, wait: DispatchWait | null): void {
+  try {
+    broadcastGatewayEvent({ kind: 'dispatch_waiting', sessionId, target, wait, timestamp: new Date().toISOString() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[ScheduledMessages] Could not announce why a message waits', { sessionId, error: message });
+  }
+}
+
+/**
+ * Notes that a message waits, and why (see `DispatchWaitReason`): `plan` is
+ * the hand-over plan that kept it out, for `held_settings`. What the user can
+ * do follows from it: stop the session's loops when the process is held for
+ * them alone (with the item the stop names), lend the process's settings
+ * when only settings it has keep the message out. `heldFor` says whether
+ * loops alone hold the process, so the client words the wait as one for a
+ * loop only then. Sent on only when the wait says something new; logged
+ * once, when the message starts waiting.
+ *
+ * A reason that holds only while a turn runs (`transient`: the CLI's own
+ * turn, the user's turn in the held process) does not replace one already
+ * noted, which says why the message waits once the turn is over.
+ */
+function noteWait(
+  input: {
+    sessionId: string;
+    userId: number;
+    target: DispatchWaitTarget;
+    reason: DispatchWaitReason;
+    plan?: ProviderHandOverPlan | null;
+    retryAt?: number;
+    transient?: boolean;
+  },
+  runtime: ProviderRuntimeGateway,
+): void {
+  const { sessionId, userId, target, reason, plan } = input;
+  const key = waitKey(sessionId, target);
+  const previous = waits.get(key);
+  if (previous && input.transient) {
+    return;
+  }
+  const session = sessionsDb.getSessionById(sessionId);
+  const scheduled = readScheduledWork(sessionId, runtime);
+  const changes = reason === 'held_settings' && plan ? [...plan.changes] : [];
+  const heldForLoopsAlone = runtime.hasScheduledWork(sessionId) && !runtime.hasBackgroundWork(sessionId);
+  const stopTaskId = heldForLoopsAlone && reason !== 'behind'
+    ? scheduled.find((item) => STOPPABLE_WORK_ID.test(item.id))?.id
+    : undefined;
+  const actions: DispatchWaitAction[] = [
+    ...(stopTaskId ? ['stop_work_and_send' as const] : []),
+    ...(changes.length > 0 && changes.every((change) => LENDABLE_CHANGES.has(change)) ? ['use_process_settings' as const] : []),
+    'keep_waiting',
+    'cancel',
+  ];
+  const body = {
+    target,
+    sessionId,
+    provider: (session?.provider ?? 'claude') as LLMProvider,
+    reason,
+    heldFor: heldForLoopsAlone ? 'loops' as const : 'work' as const,
+    changes,
+    ...(reason === 'held_settings' && plan?.details ? { details: plan.details } : {}),
+    holdUntil: latestHoldOf(scheduled),
+    ...(input.retryAt !== undefined ? { retryAt: input.retryAt } : {}),
+    ...(stopTaskId ? { stopTaskId } : {}),
+    actions,
+  };
+  const signature = JSON.stringify(body);
+  if (previous?.signature === signature) {
+    return;
+  }
+  const wait: DispatchWait = { ...body, since: previous?.since ?? new Date().toISOString() };
+  waits.set(key, { ...wait, userId, signature });
+  if (!previous) {
+    console.log('[ScheduledMessages] A message waits', { sessionId, target: key, reason, changes });
+  }
+  announceWait(sessionId, target, wait);
+}
+
+/** The message no longer waits: it was claimed, or it is gone. */
+function clearWait(sessionId: string, target: DispatchWaitTarget): void {
+  if (waits.delete(waitKey(sessionId, target))) {
+    announceWait(sessionId, target, null);
+  }
+}
+
+/** Drops the waits of one kind whose message a pass did not find any more (`present` holds their keys). */
+function dropGoneWaits(kind: DispatchWaitTarget['kind'], present: ReadonlySet<string>): void {
+  for (const [key, wait] of [...waits]) {
+    if (wait.target.kind === kind && !present.has(key)) {
+      clearWait(wait.sessionId, wait.target);
+    }
+  }
+}
+
+/**
+ * The messages of one session that wait, and why, for the user they belong
+ * to (GET /api/scheduled-messages/waiting): the queued one first, then the
+ * scheduled ones in the order they started waiting.
+ */
+export function listDispatchWaits(userId: number, sessionId: string): DispatchWait[] {
+  return [...waits.values()]
+    .filter((wait) => wait.sessionId === sessionId && String(wait.userId) === String(userId))
+    .sort((first, second) => Number(second.target.kind === 'queued') - Number(first.target.kind === 'queued'))
+    .map(({ userId: _userId, signature: _signature, ...wait }) => wait);
 }
 
 /**
@@ -112,38 +322,80 @@ const sessionsInFlight = new Map<string, DueCheck | null>();
 
 /**
  * A message as the dispatcher sends it: its content, and the options its
- * turn runs with, as `runDetachedChatTurn` takes them (`dispatchedOptions`,
+ * turn runs with, as `runDetachedChatTurn` takes them (`dispatchedTurn`,
  * with `acceptProcessSettings: true` added by `planTurn` when the turn takes
  * the held process's settings, which `runDetachedChatTurn` alone passes on
- * to the run). Read once per message, so the hand-over plan and the turn see
- * the same options.
+ * to the run). `useProcessSettings`: the user chose to send it with the held
+ * process's settings (stored on the message), which `planTurn` applies only
+ * when a held process takes the turn (`lendingTurn`). Read once per message,
+ * so the hand-over plan and the turn see the same options.
  */
-type DispatchedTurn = { content: string; options: AnyRecord };
+type DispatchedTurn = { content: string; options: AnyRecord; useProcessSettings?: true };
 
 /** How a message's run settled (see `runDetachedChatTurn`). */
 type DispatchedTurnResult = Awaited<ReturnType<typeof runDetachedChatTurn>>;
 
+/** The run options a message sent with the held process's settings drops (see `lendingTurn`). */
+const PROCESS_SETTING_OPTIONS = ['permissionMode', 'toolsSettings', 'skipPermissions', 'model', 'effort', 'ultracode'] as const;
+
 /**
- * The options a message's turn runs with: the ones its client sent with it,
- * `inheritUnset: true` and `restoreSwitchesAfterTurn: true`. The dispatcher
- * plans the turn with unset settings taken as the held process's own
- * (`planMessageTurn`), and a run with `inheritUnset` hands its turn to that
- * process the same way (see `ProviderHandOverPlanOptions`). Without it, the
- * run would read what the message leaves out as a new process would (no tool
- * rules, permissions not skipped): it would switch a /loop's process out of
- * bypassPermissions, or replace the process and stop the work the plan said
- * it would keep. A turn handed to the held process with another model or
- * permission mode switches the process to them for that turn only:
- * `restoreSwitchesAfterTurn` has the provider switch it back once the turn is
- * over, so the work the process is held for runs on as it did (see
- * `wouldDisturbHeldWork`), and the chat gateway then puts back the model the
- * session had recorded before the turn. An `acceptProcessSettings` the
- * client stored is dropped: only `planTurn` decides that a turn takes the
- * held process's settings.
+ * A message's turn: its content, and the options it runs with: the ones its
+ * client sent with it, `inheritUnset: true` and `restoreSwitchesAfterTurn:
+ * true`. The dispatcher plans the turn with unset settings taken as the held
+ * process's own (`planMessageTurn`), and a run with `inheritUnset` hands its
+ * turn to that process the same way (see `ProviderHandOverPlanOptions`).
+ * Without it, the run would read what the message leaves out as a new
+ * process would (no tool rules, permissions not skipped): it would switch a
+ * /loop's process out of bypassPermissions, or replace the process and stop
+ * the work the plan said it would keep. A turn handed to the held process
+ * with another model or permission mode switches the process to them for
+ * that turn only: `restoreSwitchesAfterTurn` has the provider switch it back
+ * once the turn is over, so the work the process is held for runs on as it
+ * did (see `wouldDisturbHeldWork`), and the chat gateway then puts back the
+ * model the session had recorded before the turn. `keepBackgroundWork: true`
+ * has the run fail rather than stop the work, should a turn the CLI runs on
+ * its own leave work a process of the turn's own would stop while the turn
+ * waits for it (see `RETRIED_HAND_OVER_REASONS`). An `acceptProcessSettings`
+ * or `ownSettings` the client stored is dropped: only `planTurn` decides
+ * that a turn takes the held process's settings, and what it runs with when
+ * no process lends them (`lendingTurn`). A stored `useProcessSettings: true`
+ * comes out of the options onto the turn (see `DispatchedTurn`).
  */
-function dispatchedOptions(clientOptions: AnyRecord): AnyRecord {
-  const { acceptProcessSettings: _acceptProcessSettings, ...options } = clientOptions;
-  return { ...options, inheritUnset: true, restoreSwitchesAfterTurn: true };
+function dispatchedTurn(content: string, clientOptions: AnyRecord): DispatchedTurn {
+  const {
+    acceptProcessSettings: _acceptProcessSettings,
+    ownSettings: _ownSettings,
+    useProcessSettings,
+    ...options
+  } = clientOptions;
+  return {
+    content,
+    options: { ...options, inheritUnset: true, restoreSwitchesAfterTurn: true, keepBackgroundWork: true },
+    ...(useProcessSettings === true ? { useProcessSettings: true as const } : {}),
+  };
+}
+
+/**
+ * The turn of a message the user chose to send with the held process's
+ * settings (`useProcessSettings`): it names none of the settings that
+ * process can lend (PROCESS_SETTING_OPTIONS), so with `inheritUnset` it
+ * takes them all from the process, a /loop's plan mode and tool rules
+ * included. Its working directory still counts. The settings it leaves out
+ * go in `ownSettings`, which the runtime runs the turn with should the
+ * process let go before the hand-over (see `IProviderRuntime.run`): with no
+ * process to lend them, the message runs as it was saved, not on the
+ * defaults.
+ */
+function lendingTurn(turn: DispatchedTurn): DispatchedTurn {
+  const options = { ...turn.options };
+  const ownSettings: AnyRecord = {};
+  for (const key of PROCESS_SETTING_OPTIONS) {
+    if (key in options) {
+      ownSettings[key] = options[key];
+      delete options[key];
+    }
+  }
+  return { ...turn, options: { ...options, ownSettings } };
 }
 
 function readOptions(raw: string): Record<string, unknown> {
@@ -259,7 +511,7 @@ async function runMessageTurn(
 function readQueuedTurn(candidate: QueuedSessionMessageRecord): DispatchedTurn | null {
   const message = readQueuedChatMessage(candidate.queuedMessage);
   return message
-    ? { content: message.content, options: dispatchedOptions({ ...message.options, attachments: message.attachments }) }
+    ? dispatchedTurn(message.content, { ...message.options, attachments: message.attachments })
     : null;
 }
 
@@ -343,7 +595,7 @@ function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): bool
  * session's runtime holds for background work of its own.
  *
  * Asked with the run options `runDetachedChatTurn` gives the message's run
- * (`buildTurnRunOptions` over `dispatchedOptions`), so it judges the turn
+ * (`buildTurnRunOptions` over `dispatchedTurn`), so it judges the turn
  * that would run, and with unset settings taken as the live process's own
  * (`inheritUnset`, which those options set for the run too): a scheduled
  * message carries only the model, effort and permission mode it was
@@ -398,66 +650,50 @@ async function planMessageTurn(
  * cannot go into that process (`canHandOver`): it changes something only a
  * new process can apply, and starting one stops the work. The chat gateway
  * refuses such a send from the composer, whose dialog then offers to queue
- * it until the work is done.
+ * it until the work is done. Not when a process of the turn's own keeps the
+ * work (`replaceKeepsWork`: cron jobs alone hold the process, which the new
+ * CLI brings back from the transcript): the turn then goes, with its own
+ * settings, and the jobs go on in its process.
  *
  * A turn the process takes goes on time, as its next turn, and the work
  * keeps running; waiting for the hold itself to end would keep it back for
  * as long as a self-paced /loop runs. So does a turn that switches the live
  * process's model or permission mode (`switches`): it runs with its own, and
  * the process switches back once it is over (`restoreSwitchesAfterTurn`, see
- * `dispatchedOptions`), so a /loop allowed to edit is still allowed after it.
+ * `dispatchedTurn`), so a /loop allowed to edit is still allowed after it.
  * One kept out only by its effort, ultracode or tool rules goes in on the
  * process's own while the process is held for scheduled work alone, unless
  * its tool rules are stricter (`planTurn`).
  */
 function wouldDisturbHeldWork(plan: ProviderHandOverPlan | null): boolean {
-  return plan !== null && plan.heldWork && !plan.canHandOver;
+  return plan !== null && plan.heldWork && !plan.canHandOver && plan.replaceKeepsWork !== true;
 }
 
 /**
- * The settings a held process took at launch and cannot switch for a turn
- * (see `HandOverChange`), which a turn of a process held for scheduled work
- * alone may take from the process instead (`acceptsProcessSettings`). Tool
- * rules only when the turn's are no stricter than the process's: the runtime
- * still keeps out a turn whose rules allow fewer tools or deny others, and
- * its plan with `acceptProcessSettings` says so (`planTurn`).
+ * Whether the session's process is held for scheduled work alone, a /loop's
+ * next wake-up or a CronCreate job (`hasScheduledWork`, with no task the
+ * tracker reports: `hasBackgroundWork`). Scheduled work could keep a message
+ * waiting for days, as long as the process is held for a loop, where tasks
+ * end by themselves: such a message is planned again on the process's own
+ * settings (`planTurn`).
  */
-const PROCESS_ONLY_SETTINGS: ReadonlySet<HandOverChange> = new Set<HandOverChange>(['effort', 'ultracode', 'tools']);
-
-/**
- * Whether a message whose turn would disturb held work, as planned in `plan`
- * (`wouldDisturbHeldWork`), is worth planning again on the process's own
- * effort, ultracode and tool rules (`planTurn`): the process is held for
- * scheduled work alone, a /loop's next wake-up or a CronCreate job
- * (`hasScheduledWork`, with no task the tracker reports: `hasBackgroundWork`),
- * and only those settings keep the turn out. Scheduled work could keep the
- * message waiting for days, as long as the process is held for a loop, where
- * tasks end by themselves. A working directory, or a plan the runtime could
- * not work out (`lookup`), still keeps the turn out, and so does a model or
- * permission mode the process cannot switch to. Tool rules stricter than the
- * process's keep it out too, which only the runtime can tell.
- */
-function acceptsProcessSettings(
-  sessionId: string,
-  plan: ProviderHandOverPlan,
-  runtime: ProviderRuntimeGateway,
-): boolean {
-  return plan.changes.length > 0
-    && plan.changes.every((change) => PROCESS_ONLY_SETTINGS.has(change))
-    && !runtime.hasBackgroundWork(sessionId)
-    && runtime.hasScheduledWork(sessionId);
+function heldForLoopsAlone(sessionId: string, runtime: ProviderRuntimeGateway): boolean {
+  return !runtime.hasBackgroundWork(sessionId) && runtime.hasScheduledWork(sessionId);
 }
 
 /**
  * Plans a message's turn (`planMessageTurn`) and returns the turn as it
- * would go, with its plan. When the turn would disturb held work only
- * through settings a process held for scheduled work alone cannot switch
- * (`acceptsProcessSettings`), the turn takes the process's own instead: its
+ * would go, with its plan. When the turn would disturb held work and the
+ * process is held for scheduled work alone (`heldForLoopsAlone`), the turn
+ * takes the process's own effort, ultracode and tool rules instead: its
  * options set `acceptProcessSettings: true`, and the runtime, which has the
- * last word on what it takes, is asked again; tool rules stricter than the
- * process's still keep the turn out. The turn goes so only when that plan
- * lets it in; otherwise, or when the runtime fails to plan it, it stays as
- * first planned, and waits.
+ * last word on what it takes, is asked again. The turn goes so when that
+ * plan lets it in. Otherwise it goes as it is when a process of its own
+ * keeps the work (`replaceKeepsWork`), and waits when not: then with the
+ * plan that took the process's settings, whose changes are what really keeps
+ * the turn out (a working directory, tool rules stricter than the
+ * process's, a model or permission mode the process cannot switch to), or
+ * with the first plan when the runtime failed to make that one.
  *
  * Its run is handed over as that plan said, even if the CLI's own turn has
  * started a task since. A process that does not take it after all fails the
@@ -465,26 +701,65 @@ function acceptsProcessSettings(
  * the work goes on: a queued message goes back in the queue, and waits
  * before it is tried again (`sendClaimedQueuedMessage`), and a due one is
  * marked failed with why (`recordDueMessageOutcome`).
+ *
+ * A message the user chose to send with the held process's settings
+ * (`useProcessSettings`) is planned without them first (`lendingTurn`), and
+ * goes or waits so while a process is held for work of the session's own.
+ * With none held (the loop ended, the server restarted), there is nothing to
+ * lend: it is planned and sent with its own settings. One whose process lets
+ * go between the plan and the hand-over runs with them too (`ownSettings`).
+ *
+ * A turn the held process cannot take, but a process of its own keeps the
+ * work, goes as it is (`replaceKeepsWork`), also while the CLI runs a turn
+ * of its own (`afterCliTurn`): its run waits for that turn to be over. Should
+ * that turn leave work the new process would stop, the run fails instead
+ * (`keepBackgroundWork`, see `dispatchedTurn`), and the message is tried
+ * again (`RETRIED_HAND_OVER_REASONS`).
  */
 async function planTurn(
   sessionId: string,
   turn: DispatchedTurn,
   runtime: ProviderRuntimeGateway,
 ): Promise<{ turn: DispatchedTurn; plan: ProviderHandOverPlan | null }> {
+  if (turn.useProcessSettings === true) {
+    const lending = lendingTurn(turn);
+    const lendingPlan = await planMessageTurn(sessionId, lending.options, runtime);
+    if (lendingPlan?.heldWork === true) {
+      return { turn: lending, plan: lendingPlan };
+    }
+  }
   const plan = await planMessageTurn(sessionId, turn.options, runtime);
-  if (!plan || !wouldDisturbHeldWork(plan) || !acceptsProcessSettings(sessionId, plan, runtime)) {
+  if (!plan || !plan.heldWork || plan.canHandOver || !heldForLoopsAlone(sessionId, runtime)) {
     return { turn, plan };
   }
   const accepting: DispatchedTurn = { ...turn, options: { ...turn.options, acceptProcessSettings: true } };
   const acceptingPlan = await planMessageTurn(sessionId, accepting.options, runtime);
-  return acceptingPlan && !wouldDisturbHeldWork(acceptingPlan)
-    ? { turn: accepting, plan: acceptingPlan }
-    : { turn, plan };
+  // Taken only on the process's word that it takes the turn: a turn that
+  // accepts its settings never starts a process of its own.
+  if (acceptingPlan && (!acceptingPlan.heldWork || acceptingPlan.canHandOver)) {
+    return { turn: accepting, plan: acceptingPlan };
+  }
+  if (plan.replaceKeepsWork === true) {
+    return { turn, plan };
+  }
+  return { turn, plan: acceptingPlan ?? plan };
+}
+
+/**
+ * Why a message planned as `plan` waits (see `DispatchWaitReason`):
+ * `held_settings` when the plan names what keeps it out of the held process,
+ * else `held_work`, which holds only while a turn runs (a process in a turn
+ * takes no other).
+ */
+function waitReasonOf(plan: ProviderHandOverPlan | null): { reason: DispatchWaitReason; transient: boolean } {
+  return plan && plan.changes.length > 0
+    ? { reason: 'held_settings', transient: false }
+    : { reason: 'held_work', transient: true };
 }
 
 /**
  * The turn a due message sends now (see `planTurn`), or null when it has to
- * wait.
+ * wait, with the plan it was judged by.
  *
  * A due message interrupts a turn under way (see `sendClaimedMessage`), and
  * the interrupt stops whatever the session's process holds with the turn.
@@ -501,15 +776,16 @@ async function dueTurnToSend(
   sessionId: string,
   turn: DispatchedTurn,
   runtime: ProviderRuntimeGateway,
-): Promise<DispatchedTurn | null> {
+): Promise<{ turn: DispatchedTurn | null; plan: ProviderHandOverPlan | null; inTurn: boolean }> {
   const planned = await planTurn(sessionId, turn, runtime);
   // Read once the plan is in: a turn may have started or ended while the
   // runtime planned, and the claim and the send follow without waiting on
   // anything else, so the send finds the turn this read found.
   if (chatRunRegistry.isProcessing(sessionId)) {
-    return planned.plan?.heldWork === true || runtime.hasBackgroundWork(sessionId) ? null : planned.turn;
+    const holdsBack = planned.plan?.heldWork === true || runtime.hasBackgroundWork(sessionId);
+    return { turn: holdsBack ? null : planned.turn, plan: planned.plan, inTurn: true };
   }
-  return wouldDisturbHeldWork(planned.plan) ? null : planned.turn;
+  return { turn: wouldDisturbHeldWork(planned.plan) ? null : planned.turn, plan: planned.plan, inTurn: false };
 }
 
 /**
@@ -522,7 +798,7 @@ async function dueTurnToSend(
  * has to wait keeps the queued turn back no more than if it were not there.
  * A queued message the held process turned away at the hand-over waits
  * before it is tried again (`handOverRetries`), counted from `now`, when the
- * pass starts.
+ * pass starts. Each message held back is noted with why (`noteWait`).
  *
  * Resolves with how many it claimed once the runs of the turns it started
  * have settled. The poll in this file does not wait for that; the tests do,
@@ -536,18 +812,29 @@ export async function dispatchQueuedMessages(
   const sends: Promise<void>[] = [];
   const outcomes: Promise<void>[] = [];
 
+  const queued: DispatchWaitTarget = { kind: 'queued' };
   const sendWhenFree = (candidate: QueuedSessionMessageRecord): Promise<void> | null => {
-    if (waitsToRetryHandOver(candidate, now, runtime) || isSessionBusy(candidate.sessionId, runtime)) {
+    const { sessionId, userId } = candidate;
+    if (waitsToRetryHandOver(candidate, now, runtime)) {
+      noteWait({ sessionId, userId, target: queued, reason: 'retry', retryAt: handOverRetries.get(sessionId)?.retryAt }, runtime);
       return null;
     }
-    return sendUnlessInFlight(candidate.sessionId, async () => {
+    if (isSessionBusy(sessionId, runtime)) {
+      // A turn under way is what the card says it waits for; tasks are work.
+      if (runtime.hasBackgroundWork(sessionId)) {
+        noteWait({ sessionId, userId, target: queued, reason: 'held_work' }, runtime);
+      }
+      return null;
+    }
+    return sendUnlessInFlight(sessionId, async () => {
       let turn = readQueuedTurn(candidate);
       // Asked once the session is marked: the runtime answers asynchronously,
       // and a pass that starts meanwhile has to skip the session. The claim
       // below succeeds only for the message as listed, the one planned for.
       if (turn) {
-        const planned = await planTurn(candidate.sessionId, turn, runtime);
+        const planned = await planTurn(sessionId, turn, runtime);
         if (wouldDisturbHeldWork(planned.plan)) {
+          noteWait({ sessionId, userId, target: queued, plan: planned.plan, ...waitReasonOf(planned.plan) }, runtime);
           return;
         }
         turn = planned.turn;
@@ -555,12 +842,16 @@ export async function dispatchQueuedMessages(
       if (!sessionDraftsDb.claimQueuedMessage(candidate)) {
         return;
       }
+      clearWait(sessionId, queued);
       claimed += 1;
       await sendClaimedQueuedMessage(candidate, turn, runtime, outcomes, now);
     });
   };
 
-  for (const candidate of sessionDraftsDb.listQueuedMessages()) {
+  const candidates = sessionDraftsDb.listQueuedMessages();
+  // A queued message that is gone (sent, edited back, deleted) waits no more.
+  dropGoneWaits('queued', new Set(candidates.map((candidate) => waitKey(candidate.sessionId, queued))));
+  for (const candidate of candidates) {
     const send = sessionsInFlight.get(candidate.sessionId)
       ? (async () => {
           await waitForDueChecks(candidate.sessionId);
@@ -604,16 +895,31 @@ function handOverFailureReason(failure: HandOverFailure): string {
  * recorded whether the run never started (deleted session, unavailable
  * provider) or started and then failed, the held process turning its turn
  * away at the hand-over included (`handOverFailure`). Silently dropping a
- * message the user scheduled is worse than telling them it did not go.
+ * message the user scheduled is worse than telling them it did not go. A
+ * hand-over failure that says nothing is wrong with the message
+ * (`RETRIED_HAND_OVER_REASONS`) puts it back to pending instead, to be tried
+ * again once it has waited (`dueHandOverRetries`), counted from `now`, when
+ * the pass that sent it started.
  */
 async function recordDueMessageOutcome(
   row: ScheduledMessageRow,
   settled: Promise<DispatchedTurnResult>,
   handOverFailure: () => HandOverFailure | null,
+  now: Date,
 ): Promise<void> {
   try {
     const result = await settled;
     const failure = handOverFailure();
+    if (failure?.reason && RETRIED_HAND_OVER_REASONS.has(failure.reason) && scheduledMessagesDb.unclaim(row.id)) {
+      const retryInMs = noteDueHandOverFailure(row.id, now);
+      console.warn('[ScheduledMessages] The held process turned a due message away; it is tried again', {
+        sessionId: row.session_id,
+        reason: failure.reason,
+        retryInMs,
+      });
+      return;
+    }
+    dueHandOverRetries.delete(row.id);
     if (failure) {
       console.warn('[ScheduledMessages] The held process turned a due message away', {
         sessionId: row.session_id,
@@ -627,6 +933,7 @@ async function recordDueMessageOutcome(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    dueHandOverRetries.delete(row.id);
     scheduledMessagesDb.markFailed(row.id, message);
   }
 }
@@ -641,6 +948,7 @@ async function sendClaimedMessage(
   turn: DispatchedTurn,
   runtime: ProviderRuntimeGateway,
   outcomes: Promise<void>[],
+  now: Date,
 ): Promise<void> {
   let handOverFailure: HandOverFailure | null = null;
   const turnOver = runMessageTurn(
@@ -661,7 +969,7 @@ async function sendClaimedMessage(
   );
   closeDueCheck(row.session_id);
   const { settled } = await turnOver;
-  outcomes.push(recordDueMessageOutcome(row, settled, () => handOverFailure));
+  outcomes.push(recordDueMessageOutcome(row, settled, () => handOverFailure, now));
 }
 
 /**
@@ -679,8 +987,11 @@ async function sendClaimedMessage(
  * background work the session's process is held for (`wouldDisturbHeldWork`).
  * A waiting message stays pending, and so do the session's later ones, until
  * it can go; the session's queued turn does not wait behind it (see
- * `dispatchQueuedMessages`). One the held process can take goes into it when
- * due, the process of a turn the dispatcher started included.
+ * `dispatchQueuedMessages`). Each is noted with why (`noteWait`), the later
+ * ones as waiting behind it. One the held process can take goes into it when
+ * due, the process of a turn the dispatcher started included. One whose turn
+ * was turned away to be tried again waits until then (`dueHandOverRetries`),
+ * counted from `now`, when the pass starts.
  *
  * Resolves with how many it claimed once the runs of the turns it started
  * have settled and their outcomes are recorded. The poll in this file does
@@ -691,12 +1002,21 @@ export async function dispatchDueScheduledMessages(
   now: Date = new Date(),
 ): Promise<number> {
   const dueBySession = new Map<string, ScheduledMessageRow[]>();
-  for (const row of scheduledMessagesDb.listDue(now)) {
+  const due = scheduledMessagesDb.listDue(now);
+  for (const row of due) {
     const rows = dueBySession.get(row.session_id);
     if (rows) {
       rows.push(row);
     } else {
       dueBySession.set(row.session_id, [row]);
+    }
+  }
+  // A message no longer due and pending (sent, failed, cancelled) waits no more.
+  dropGoneWaits('scheduled', new Set(due.map((row) => waitKey(row.session_id, { kind: 'scheduled', id: row.id }))));
+  const dueIds = new Set(due.map((row) => row.id));
+  for (const id of dueHandOverRetries.keys()) {
+    if (!dueIds.has(id)) {
+      dueHandOverRetries.delete(id);
     }
   }
 
@@ -706,15 +1026,31 @@ export async function dispatchDueScheduledMessages(
 
   for (const [sessionId, rows] of dueBySession) {
     const send = sendUnlessInFlight(sessionId, async () => {
-      for (const row of rows) {
-        const message: DispatchedTurn = { content: row.content, options: dispatchedOptions(readOptions(row.options)) };
+      for (const [index, row] of rows.entries()) {
+        const message = dispatchedTurn(row.content, readOptions(row.options));
+        const target: DispatchWaitTarget = { kind: 'scheduled', id: row.id };
+        const noteLaterBehind = () => {
+          for (const later of rows.slice(index + 1)) {
+            noteWait({ sessionId, userId: later.user_id, target: { kind: 'scheduled', id: later.id }, reason: 'behind' }, runtime);
+          }
+        };
+        const retryAt = dueRetryAt(row, now, runtime);
+        if (retryAt !== null) {
+          noteWait({ sessionId, userId: row.user_id, target, reason: 'retry', retryAt }, runtime);
+          noteLaterBehind();
+          return;
+        }
         // Asked before each message, for its own options, not once per
         // session: whether the held process takes a turn depends on what the
         // turn changes, and the previous message's turn, or the user's, may
         // have left the process held, or still be running in it.
         openDueCheck(sessionId);
-        const turn = await dueTurnToSend(sessionId, message, runtime);
+        const decided = await dueTurnToSend(sessionId, message, runtime);
+        const turn = decided.turn;
         if (!turn) {
+          const why = decided.inTurn ? { reason: 'held_work' as const, transient: true } : waitReasonOf(decided.plan);
+          noteWait({ sessionId, userId: row.user_id, target, plan: decided.plan, ...why }, runtime);
+          noteLaterBehind();
           return;
         }
         // Claimed right before it goes, not when listed, so a message waiting
@@ -723,11 +1059,13 @@ export async function dispatchDueScheduledMessages(
         // check stays open, for the session's next message to take over or
         // for the session's release to answer: a queued pass waiting on it
         // must not read the session as held for a turn.
-        if (!scheduledMessagesDb.claim(row.id)) {
+        const won = scheduledMessagesDb.claim(row.id);
+        clearWait(sessionId, target);
+        if (!won) {
           continue;
         }
         claimed += 1;
-        await sendClaimedMessage(row, turn, runtime, outcomes);
+        await sendClaimedMessage(row, turn, runtime, outcomes, now);
       }
     });
     if (send) {
@@ -752,21 +1090,38 @@ function logPassFailure(error: unknown): void {
  * restart and one that came due while the server was down is sent on the first
  * poll after it comes back, rather than being skipped.
  */
+/**
+ * Runs both passes once, neither awaited: a turn's run can take hours to
+ * settle, and the passes themselves skip the sessions an earlier pass still
+ * holds for a turn. The scheduled pass marks the sessions it asks about
+ * before it returns, and the queued pass waits for each answer: a due
+ * message that goes goes before a turn queued for the same session, and one
+ * that has to wait keeps none back.
+ */
+function runPasses(runtime: ProviderRuntimeGateway): void {
+  void dispatchDueScheduledMessages(runtime).catch(logPassFailure);
+  void dispatchQueuedMessages(runtime).catch(logPassFailure);
+}
+
+/**
+ * Runs a pass now rather than at the next poll, for something that may let
+ * waiting messages go: a stop that ended a session's loops, a message the
+ * user chose to send with the held process's settings. Nothing before the
+ * dispatcher has started.
+ */
+export function requestDispatchPass(): void {
+  if (pollRuntime) {
+    runPasses(pollRuntime);
+  }
+}
+
 export function initializeScheduledMessageDispatcher(runtime: ProviderRuntimeGateway): void {
   if (pollTimer) {
     return;
   }
 
-  const poll = () => {
-    // Neither pass is awaited: a turn's run can take hours to settle, and the
-    // passes themselves skip the sessions an earlier poll still holds for a
-    // turn. The scheduled pass marks the sessions it asks about before it
-    // returns, and the queued pass waits for each answer: a due message that
-    // goes goes before a turn queued for the same session, and one that has
-    // to wait keeps none back.
-    void dispatchDueScheduledMessages(runtime).catch(logPassFailure);
-    void dispatchQueuedMessages(runtime).catch(logPassFailure);
-  };
+  pollRuntime = runtime;
+  const poll = () => runPasses(runtime);
 
   pollTimer = setInterval(poll, POLL_INTERVAL_MS);
   // Never keep the process alive just to poll for scheduled messages.
@@ -777,13 +1132,17 @@ export function initializeScheduledMessageDispatcher(runtime: ProviderRuntimeGat
 }
 
 /**
- * Stops the poll, and forgets how long turned-away queued messages wait
- * (`handOverRetries`): a dispatcher started again tries them at once.
+ * Stops the poll, and forgets how long turned-away queued and due messages
+ * wait (`handOverRetries`, `dueHandOverRetries`), and why messages wait
+ * (`waits`): a dispatcher started again tries them at once.
  */
 export function closeScheduledMessageDispatcher(): void {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  pollRuntime = null;
   handOverRetries.clear();
+  dueHandOverRetries.clear();
+  waits.clear();
 }

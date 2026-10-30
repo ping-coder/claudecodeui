@@ -365,6 +365,43 @@ test('search finds the split and full screen commands by split, 分屏, fullscre
   }
 });
 
+test('Refresh tab and Refresh all come before full screen, are found by refresh, reload, 刷新 and 重新加载, and run', () => {
+  const workspace = createWorkspace({ isSplit: false, onRefreshTab: vi.fn(), canRefreshTab: true, onRefreshAll: vi.fn() });
+  const { rerender } = renderPalette(workspace);
+  openPalette();
+
+  assert.deepEqual(groupOptionNames('Workspace').slice(-3), ['Refresh tab', 'Refresh all', 'Full screenCtrl+Shift+Enter']);
+  const workspaceOptions = () => within(screen.getByRole('group', { name: 'Workspace' })).queryAllByRole('option').map((option) => option.textContent ?? '');
+  for (const query of ['refresh', 'reload', '刷新', '重新加载']) {
+    search(query);
+    assert.deepEqual(workspaceOptions().filter((name) => name.startsWith('Refresh')), ['Refresh tab', 'Refresh all'], `"${query}"`);
+  }
+
+  clickOption(within(screen.getByRole('group', { name: 'Workspace' })).getByRole('option', { name: /^Refresh tab/ }));
+  assert.equal(vi.mocked(workspace.onRefreshTab as () => void).mock.calls.length, 1);
+  openPalette();
+  clickOption(within(screen.getByRole('group', { name: 'Workspace' })).getByRole('option', { name: /^Refresh all/ }));
+  assert.equal(vi.mocked(workspace.onRefreshAll as () => void).mock.calls.length, 1);
+
+  // Nothing on screen to refresh, and a refresh of everything already running.
+  const busy = createWorkspace({ isSplit: false, onRefreshTab: vi.fn(), canRefreshTab: false, onRefreshAll: vi.fn(), isRefreshingWorkspace: true });
+  rerender(
+    <CommandPalette
+      selectedProject={project}
+      onStartNewChat={() => undefined}
+      onOpenSettings={() => undefined}
+      onOpenSession={onOpenSession}
+      workspace={busy}
+    />,
+  );
+  openPalette();
+  assert.deepEqual(groupOptionNames('Workspace').filter((name) => name.startsWith('Refresh')), ['Refresh allRefreshing…']);
+  const refreshAll = within(screen.getByRole('group', { name: 'Workspace' })).getByRole('option', { name: /^Refresh all/ });
+  assert.equal(refreshAll.getAttribute('aria-disabled'), 'true');
+  clickOption(refreshAll);
+  assert.equal(vi.mocked(busy.onRefreshAll as () => void).mock.calls.length, 0);
+});
+
 test('Open tabs lists the tabs of both panes and activates the picked one in its pane', () => {
   const workspace = createWorkspace();
   renderPalette(workspace);

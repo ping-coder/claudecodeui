@@ -18,8 +18,9 @@ import type {
  * Phones show one pane and no tab bar. The header's Tabs button (once there is more than one tab
  * or a right pane) opens a bottom sheet listing the tabs, grouped left/right while a right pane
  * exists: previews in italics, running sessions spin, ones needing attention get an amber dot. A
- * row switches to its tab and side, × closes a tab, and the footer starts a new chat or closes
- * every tab. The header's full-screen button sits next to it.
+ * row switches to its tab and side, × closes a tab, and the footer starts a new chat, closes
+ * every tab or refreshes everything. The header's full-screen button sits next to it, after the one
+ * refresh button a phone has, which refreshes everything too.
  */
 
 type MainProps = { side: 'left' | 'right'; headerActions: ReactNode; hideHeader: boolean };
@@ -143,6 +144,10 @@ const setLayout = (layout: WorkspaceLayout) => {
     setSidebarOpen: vi.fn(),
     renameSession: vi.fn(async () => true),
     refreshProjectsSilently: vi.fn(async () => undefined),
+    getPaneRefreshToken: () => 0,
+    refreshTab: vi.fn(),
+    refreshWorkspace: vi.fn(async () => undefined),
+    isRefreshingWorkspace: false,
   };
 };
 
@@ -293,4 +298,44 @@ test('the sheet reads the server\'s placeholder names in the interface language'
     });
     vi.unstubAllGlobals();
   }
+});
+
+test('the footer refreshes everything and closes the sheet; while a refresh runs it spins and stays disabled', () => {
+  const onRefreshAll = vi.fn();
+  const onOpenChange = renderSheet({ onRefreshAll });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh all' }));
+  assert.equal(onRefreshAll.mock.calls.length, 1);
+  assert.deepEqual(onOpenChange.mock.calls, [[false]]);
+  cleanup();
+
+  renderSheet({ onRefreshAll, isRefreshingWorkspace: true });
+  const refreshButton = screen.getByRole('button', { name: 'Refresh all' }) as HTMLButtonElement;
+  assert.equal(refreshButton.disabled, true);
+  assert.equal(refreshButton.getAttribute('aria-busy'), 'true');
+});
+
+test('on a phone the header\'s one refresh button refreshes everything, an empty pane\'s header too, and so does the sheet', () => {
+  setLayout({ left: makePane([makeTab('a1'), makeTab('a2')]), right: null, focusedSide: 'left', splitRatio: 0.5 });
+  const refreshWorkspace = panes.state.refreshWorkspace as ReturnType<typeof vi.fn>;
+  const view = render(phoneRegion());
+
+  // Before the Tabs and full-screen buttons.
+  const headerLabels = Array.from((screen.getByRole('button', { name: 'Full screen' }).parentElement as HTMLElement).querySelectorAll('button'))
+    .map((button) => button.getAttribute('aria-label'));
+  assert.deepEqual(headerLabels, ['Refresh all', 'Tabs (2)', 'Full screen']);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh all' }));
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Tabs (2)' }));
+  fireEvent.click(within(screen.getByRole('dialog', { name: 'All tabs' })).getByRole('button', { name: 'Refresh all' }));
+  assert.equal(refreshWorkspace.mock.calls.length, 2);
+  assert.equal(screen.queryByRole('dialog') === null, true);
+
+  setLayout({ left: makePane([makeTab('a1')]), right: makePane([]), focusedSide: 'right', splitRatio: 0.5 });
+  const emptyPaneRefresh = panes.state.refreshWorkspace as ReturnType<typeof vi.fn>;
+  view.rerender(phoneRegion());
+  assert.ok(screen.getByRole('heading', { name: 'This side is empty' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh all' }));
+  assert.equal(emptyPaneRefresh.mock.calls.length, 1);
 });

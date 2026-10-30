@@ -244,7 +244,7 @@ test('a detached turn the runtime turns away at the hand-over (HAND_OVER_FAILED)
         onHandOverFailed: (failure) => { failures.push(failure); },
       },
       createDependencies(async (writer) => {
-        // As Claude's runtime fails such a turn (failAcceptingTurn).
+        // As Claude's runtime fails such a turn (failHandOver).
         writer.send({ kind: 'error', code: 'HAND_OVER_FAILED', reason: 'stale-plan', content, sessionId: 'native', provider: 'claude' });
         throw Object.assign(new Error(content), { code: 'HAND_OVER_FAILED', reason: 'stale-plan' });
       }),

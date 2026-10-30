@@ -978,6 +978,19 @@ router.get(
   }),
 );
 
+// The session's loops that no process runs, such as a restart of the server
+// leaves them (see `describePausedScheduledWork`), each `paused`: nothing
+// while a process of this server, or a Claude CLI elsewhere, holds the
+// session. Read when a chat opens a session with no live scheduled work.
+router.get(
+  '/sessions/:sessionId/paused-scheduled-work',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const { items } = await providerRuntimeService.describePausedScheduledWork(sessionId);
+    res.json(createApiSuccessResponse({ scheduled: items }));
+  }),
+);
+
 // Runs that ended in the last 10 minutes, oldest first, for a tab catching up
 // on the `run_ended` frames it missed while its socket was down.
 router.get(
@@ -1079,8 +1092,14 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
     const options = parseHandOverPlanOptions(req.body);
-    const { heldWork, canHandOver, changes } = await providerRuntimeService.planSessionHandOver(sessionId, options);
-    res.json(createApiSuccessResponse({ heldWork, canHandOver, changes }));
+    const { heldWork, canHandOver, changes, details, replaceKeepsWork } = await providerRuntimeService.planSessionHandOver(sessionId, options);
+    res.json(createApiSuccessResponse({
+      heldWork,
+      canHandOver,
+      changes,
+      ...(details ? { details } : {}),
+      ...(replaceKeepsWork ? { replaceKeepsWork } : {}),
+    }));
   }),
 );
 

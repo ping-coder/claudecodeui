@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { buildScheduledStopMessage } from '@/modules/providers/list/claude/claude-scheduled-work.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
@@ -930,6 +931,89 @@ test('a local command such as a model switch opens no turn, while a slash comman
       assert.equal(await questionBefore('Reviewing src/chat'), '/review src/chat');
       assert.equal(await questionBefore('Still reviewing'), '/review src/chat', 'the model switch opens no turn');
       assert.equal(await questionBefore('Working toward the goal'), '/goal ship it');
+    }));
+  } finally {
+    await rm(transcriptDirectory, { recursive: true, force: true });
+  }
+});
+
+test('the prompt CloudCLI sends to stop loops reads back as one assistant note, which opens no turn, meta row or not', { concurrency: false }, async () => {
+  const transcriptDirectory = await mkdtemp(path.join(os.tmpdir(), 'sessions-service-control-note-'));
+  const sessionId = 'claude-control-note-session';
+  const transcriptPath = path.join(transcriptDirectory, `${sessionId}.jsonl`);
+  let second = 0;
+  const row = (uuid: string, fields: Record<string, unknown>) => JSON.stringify({
+    uuid,
+    timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, second++)).toISOString(),
+    sessionId,
+    ...fields,
+  });
+  const userRow = (uuid: string, content: unknown, extra: Record<string, unknown> = {}) =>
+    row(uuid, { type: 'user', message: { role: 'user', content }, ...extra });
+  const assistantRow = (uuid: string, text: string) =>
+    row(uuid, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  const stopOne = buildScheduledStopMessage({ jobIds: ['b2148320'], wakeup: false });
+  const stopAll = buildScheduledStopMessage({ jobIds: ['7b7cd8fc', '0a1b2c3d'], wakeup: true });
+
+  try {
+    await withClaudeCliRegistry([], async () => await withIsolatedDatabase(async () => {
+      const rows = [
+        userRow('question', 'Watch the deploy every five minutes'),
+        assistantRow('answer', 'Started a loop'),
+        userRow('stop-one', stopOne),
+        assistantRow('stopped-one', 'Cancelled the loop.'),
+        // A meta row with the text in a block reads the same.
+        userRow('stop-all', [{ type: 'text', text: stopAll }], { isMeta: true }),
+        assistantRow('stopped-all', 'All loops are stopped.'),
+      ];
+      await writeFile(transcriptPath, `${rows.join('\n')}\n`, 'utf8');
+      sessionsDb.createSession(
+        sessionId,
+        'claude',
+        '/tmp/control-note-project',
+        'Control note conversation',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:05.000Z',
+        transcriptPath,
+      );
+
+      const { messages } = await sessionsService.fetchHistory(sessionId);
+      assert.deepEqual(
+        messages.filter((message) => message.role === 'user').map((message) => message.content),
+        ['Watch the deploy every five minutes'],
+      );
+      const notes = messages.filter((message) => message.controlNote);
+      assert.deepEqual(notes.map((message) => ({
+        id: message.id,
+        kind: message.kind,
+        role: message.role,
+        content: message.content,
+        controlNote: message.controlNote,
+        anchored: message.transcriptAnchorId !== undefined,
+      })), [
+        {
+          id: 'stop-one',
+          kind: 'text',
+          role: 'assistant',
+          content: 'Asked Claude to stop 1 loop',
+          controlNote: { kind: 'scheduled-stop', count: 1, jobIds: ['b2148320'] },
+          anchored: false,
+        },
+        {
+          id: 'stop-all',
+          kind: 'text',
+          role: 'assistant',
+          content: 'Asked Claude to stop 3 loops',
+          controlNote: { kind: 'scheduled-stop', count: 3, jobIds: ['7b7cd8fc', '0a1b2c3d'], wakeup: true },
+          anchored: false,
+        },
+      ]);
+
+      const questionBefore = async (content: string) => (await sessionsService.findTurnQuestion(sessionId, {
+        beforeId: messages.find((message) => message.content === content)?.id ?? '',
+      }))?.content ?? null;
+      assert.equal(await questionBefore('Cancelled the loop.'), 'Watch the deploy every five minutes');
+      assert.equal(await questionBefore('All loops are stopped.'), 'Watch the deploy every five minutes');
     }));
   } finally {
     await rm(transcriptDirectory, { recursive: true, force: true });

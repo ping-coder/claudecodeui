@@ -17,7 +17,8 @@ import { Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 /**
  * The workspace shortcuts have one registration point: a window keydown listener in the capture
  * phase, so the terminal (xterm stops propagation of the keys it handles) and the editors cannot
- * swallow them first. Mod is Ctrl here unless a test switches the platform to Apple (Command).
+ * swallow them first. Mod is Ctrl here unless a test switches the platform to Apple (Command). In
+ * the browser's full screen the reload keys refresh the workspace instead of reloading the page.
  */
 
 type HarnessProps = {
@@ -34,6 +35,7 @@ const actions = {
 };
 const toggleImmersive = vi.fn<() => void>();
 const closeSidebarPeek = vi.fn<() => void>();
+const refreshWorkspace = vi.fn<() => Promise<void>>(async () => undefined);
 // Animation frames requested by the hook, run by hand to move DOM focus after a pane change.
 const frames: FrameRequestCallback[] = [];
 
@@ -73,7 +75,7 @@ const splitLayout = (rightView: AppTab | null, focusedSide: 'left' | 'right' = '
 
 // Pane roots as WorkspacePane renders them: not focusable until a shortcut lends them a tabindex.
 function ShortcutsHarness({ isMobile = false, canSplit = true, layout, hiddenRightComposer = false }: HarnessProps) {
-  useWorkspaceShortcuts({ isMobile, canSplit, layout, actions, toggleImmersive, closeSidebarPeek });
+  useWorkspaceShortcuts({ isMobile, canSplit, layout, actions, toggleImmersive, closeSidebarPeek, refreshWorkspace });
   return (
     <div>
       <div data-workspace-pane="left" role="group">
@@ -153,6 +155,7 @@ beforeEach(() => {
   actions.toggleSplit.mockReset();
   toggleImmersive.mockReset();
   closeSidebarPeek.mockReset();
+  refreshWorkspace.mockClear();
   frames.length = 0;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     frames.push(callback);
@@ -164,7 +167,23 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, 'platform');
+  Reflect.deleteProperty(document, 'fullscreenElement');
+  Reflect.deleteProperty(document, 'webkitFullscreenElement');
 });
+
+/** The browser's full screen, as document.fullscreenElement reports it. */
+const enterBrowserFullscreen = () => {
+  Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => document.documentElement });
+};
+
+/** The same, in a Safari before 16.4, which has only the prefixed Fullscreen API. */
+const enterPrefixedBrowserFullscreen = () => {
+  Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => undefined });
+  Object.defineProperty(document, 'webkitFullscreenElement', { configurable: true, get: () => document.documentElement });
+};
+
+const F5: KeyboardEventInit = { code: 'F5', key: 'F5' };
+const MOD_R: KeyboardEventInit = { code: 'KeyR', key: 'r', ctrlKey: true };
 
 test('Mod+\\ splits when the main column has room, and merges once split', () => {
   const { rerenderWith } = renderShortcuts({ layout: UNSPLIT, canSplit: true });
@@ -536,4 +555,81 @@ test('the immersive sidebar drawer (a non-modal dialog) owns Escape only: the wo
   } finally {
     drawer.remove();
   }
+});
+
+test('in browser full screen F5 and Mod+R refresh the workspace instead of reloading the page; a held key refreshes once', () => {
+  enterBrowserFullscreen();
+  renderShortcuts({ layout: UNSPLIT });
+
+  const f5 = press(F5);
+  assert.equal(f5.defaultPrevented, true, 'the reload is cancelled');
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
+  const modR = press(MOD_R, composer('left'));
+  assert.equal(modR.defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 2, 'from the composer too');
+
+  const repeat = press({ ...F5, repeat: true });
+  assert.equal(repeat.defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 2);
+  assert.deepEqual(actionCalls(), NO_CALLS);
+});
+
+test('outside browser full screen, and for a hard reload (Shift, Ctrl+F5), the browser keeps its reload', () => {
+  renderShortcuts({ layout: UNSPLIT });
+  assert.equal(press(F5).defaultPrevented, false);
+  assert.equal(press(MOD_R).defaultPrevented, false);
+
+  enterBrowserFullscreen();
+  for (const hardReload of [
+    { ...F5, shiftKey: true },
+    { ...F5, ctrlKey: true },
+    { ...MOD_R, shiftKey: true, key: 'R' },
+    { ...MOD_R, altKey: true },
+  ]) {
+    assert.equal(press(hardReload).defaultPrevented, false, JSON.stringify(hardReload));
+  }
+  assert.equal(refreshWorkspace.mock.calls.length, 0);
+});
+
+test('R is read from the layout: Dvorak\'s R key (P) prints, a Cyrillic layout\'s R key still refreshes', () => {
+  enterBrowserFullscreen();
+  renderShortcuts({ layout: UNSPLIT });
+
+  assert.equal(press({ code: 'KeyO', key: 'r', ctrlKey: true }).defaultPrevented, true, 'Dvorak R');
+  assert.equal(press({ code: 'KeyR', key: 'p', ctrlKey: true }).defaultPrevented, false, 'Dvorak P stays print');
+  assert.equal(press({ code: 'KeyR', key: 'к', ctrlKey: true }).defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 2);
+});
+
+test('in a terminal F5 and Ctrl+R stay with the shell (reverse search); Command+R still refreshes on Apple platforms', () => {
+  enterBrowserFullscreen();
+  const view = renderShortcuts({ layout: UNSPLIT });
+  assert.equal(press(F5, terminalInput()).defaultPrevented, false);
+  assert.equal(press(MOD_R, terminalInput()).defaultPrevented, false);
+  assert.equal(refreshWorkspace.mock.calls.length, 0);
+  view.unmount();
+
+  useApplePlatform();
+  renderShortcuts({ layout: UNSPLIT });
+  assert.equal(press(MOD_R).defaultPrevented, false, 'Control+R is no reload on Apple platforms');
+  assert.equal(press({ code: 'KeyR', key: 'r', metaKey: true }, terminalInput()).defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
+});
+
+test('in a Safari with only the prefixed Fullscreen API, Command+R in full screen refreshes too', () => {
+  useApplePlatform();
+  enterPrefixedBrowserFullscreen();
+  renderShortcuts({ layout: UNSPLIT });
+
+  assert.equal(press({ code: 'KeyR', key: 'r', metaKey: true }).defaultPrevented, true, 'the reload is cancelled');
+  assert.equal(press(F5).defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 2);
+});
+
+test('a phone or tablet keyboard refreshes in full screen too', () => {
+  enterBrowserFullscreen();
+  renderShortcuts({ layout: UNSPLIT, isMobile: true });
+
+  assert.equal(press(F5).defaultPrevented, true);
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
 });

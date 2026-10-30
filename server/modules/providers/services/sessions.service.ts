@@ -152,9 +152,11 @@ function resolveProjectDisplayName(
  * question bar shows for every row up to the next one: user text with
  * something to show, other than a message inserted into a running turn, a
  * local command (`isLocalCommand`: `/model`, `/cost`, which Claude Code runs
- * without asking the model), a compaction row or its summary, or a
- * `<task-notification>` the CLI injected. A slash command that hands the model
- * a turn, such as `/review` or a custom command, opens one like any message.
+ * without asking the model), a compaction row or its summary, a
+ * `<task-notification>` the CLI injected, or a prompt CloudCLI sent on its
+ * own (`controlNote`: the turn that stops or resumes loops, an assistant row already).
+ * A slash command that hands the model a turn, such as `/review` or a custom
+ * command, opens one like any message.
  *
  * Mirrors the client, where a row opens a turn when `normalizedToChatMessages`
  * (src/modules/chat/hooks/useChatMessages.ts) draws it as a user row and
@@ -167,7 +169,7 @@ function isTurnQuestion(message: NormalizedMessage): boolean {
   if (message.kind !== 'text' || message.role !== 'user' || message.inserted || message.isLocalCommand) {
     return false;
   }
-  if (message.compact || message.isCompactSummary) {
+  if (message.compact || message.isCompactSummary || message.controlNote) {
     return false;
   }
 

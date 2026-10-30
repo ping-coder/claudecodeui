@@ -127,6 +127,18 @@ test('sessions on screen in either pane never get the attention mark; background
   assert.deepEqual([...result.current.attentionSessionIds], ['a2']);
 });
 
+test('a wait reason or a resume step for a background session adds no attention mark', async () => {
+  const { result } = await renderProjectsState();
+  openBothPanes(result);
+
+  act(() => {
+    emit({ kind: 'dispatch_waiting', sessionId: 'a2', target: { kind: 'queued' }, wait: null });
+    emit({ kind: 'resume_loops_status', sessionId: 'a2', status: 'started' });
+  });
+
+  assert.equal(result.current.attentionSessionIds.size, 0);
+});
+
 test('an external change reloads only the pane showing the session', async () => {
   const { result } = await renderProjectsState(new Set(['a1']));
   openBothPanes(result);

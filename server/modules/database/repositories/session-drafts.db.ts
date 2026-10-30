@@ -227,6 +227,28 @@ export const sessionDraftsDb = {
     return row !== undefined;
   },
 
+  /**
+   * Has the scope's queued message go with the settings of the process held
+   * for its session's scheduled work (`useProcessSettings: true` in its
+   * options, see the scheduled-messages dispatcher). The stored value
+   * changes, so a pass that listed the message before cannot claim it as it
+   * was. Returns false when nothing sendable is queued there.
+   */
+  useProcessSettings(userId: number, scope: string): boolean {
+    const db = getConnection();
+    return db.transaction(() => {
+      const waiting = readStoredQueuedMessage(userId, scope);
+      if (!waiting) {
+        return false;
+      }
+      writeStoredQueuedMessage(userId, scope, JSON.stringify({
+        ...waiting,
+        options: { ...waiting.options, useProcessSettings: true },
+      }));
+      return true;
+    })();
+  },
+
   /** Removes a scope's queued message (edited back into the composer or deleted), keeping its text. */
   clearQueuedMessage(userId: number, scope: string): void {
     const db = getConnection();

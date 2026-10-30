@@ -37,6 +37,12 @@ type WebSocketContextType = {
    * one opens, never `disconnected`.
    */
   connectionStatus: ConnectionStatus;
+  /**
+   * Connects at once when the socket is down and waiting for its next retry; does nothing while a
+   * socket is open or still connecting. The workspace's Refresh all uses it, so a refresh does not wait
+   * out the retry delay. The reconnect announces itself like any other (websocket_reconnected).
+   */
+  reconnectNow: () => void;
 };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -194,6 +200,18 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     }
   }, []);
 
+  const reconnectNow = useCallback(() => {
+    const socket = wsRef.current;
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    connect();
+  }, [connect]);
+
   const subscribe = useCallback((listener: ServerEventListener) => {
     listenersRef.current.add(listener);
     return () => {
@@ -208,7 +226,8 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     subscribe,
     isConnected: connectionStatus === 'connected',
     connectionStatus,
-  }), [sendMessage, subscribe, connectionStatus]);
+    reconnectNow,
+  }), [sendMessage, subscribe, connectionStatus, reconnectNow]);
 
   return value;
 };

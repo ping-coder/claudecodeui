@@ -103,7 +103,9 @@ export function removeOptimisticUserEchoes(
   const claimedServerIds = new Set<string>();
 
   return realtimeMessages.filter((message) => {
-    if (!message.id.startsWith('local_')) {
+    // A live row without a string id is no echo of ours; reading it must not
+    // throw, or every later merge of the session would throw on it too.
+    if (typeof message.id !== 'string' || !message.id.startsWith('local_')) {
       return true;
     }
 

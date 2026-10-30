@@ -1,4 +1,4 @@
-import { Loader2, MessageSquarePlus, X } from 'lucide-react';
+import { Loader2, MessageSquarePlus, RefreshCw, X } from 'lucide-react';
 import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -24,6 +24,10 @@ type PaneTabsSheetProps = {
   /** Project "New chat" starts in: the focused pane's, else the workspace default. */
   newChatProject: Project | null;
   actions: WorkspaceLayoutActions;
+  /** Refreshes the whole workspace in place; without it the sheet offers no refresh. */
+  onRefreshAll?: () => unknown;
+  /** A refresh is on its way: the button spins and stays disabled. */
+  isRefreshingWorkspace?: boolean;
 };
 
 type SheetActivityMarkProps = {
@@ -56,7 +60,7 @@ function SheetActivityMark({ activity }: SheetActivityMarkProps) {
  * Rendered by ProjectMainRegion on phones, opened from the header's Tabs button: a bottom sheet
  * (the same Dialog form as the sidebar's session sheet) listing the focused pane's tabs, grouped
  * left/right while a right pane exists. A row switches to its tab (and its side), × closes it,
- * and the footer starts a new chat or closes every listed tab.
+ * and the footer starts a new chat, closes every listed tab or refreshes everything.
  */
 export default function PaneTabsSheet({
   open,
@@ -65,6 +69,8 @@ export default function PaneTabsSheet({
   tabDisplay,
   newChatProject,
   actions,
+  onRefreshAll,
+  isRefreshingWorkspace = false,
 }: PaneTabsSheetProps) {
   const { t } = useTranslation();
   const titleId = useId();
@@ -87,6 +93,11 @@ export default function PaneTabsSheet({
     if (newChatProject) {
       actions.openNewSession(newChatProject, { target: 'focused' });
     }
+    close();
+  };
+
+  const refreshAll = () => {
+    void onRefreshAll?.();
     close();
   };
 
@@ -183,6 +194,18 @@ export default function PaneTabsSheet({
             {t('workspace.closeAllTabs', { defaultValue: 'Close all tabs' })}
           </button>
         </div>
+        {onRefreshAll && (
+          <button
+            type="button"
+            onClick={refreshAll}
+            disabled={isRefreshingWorkspace}
+            aria-busy={isRefreshingWorkspace || undefined}
+            className="mb-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors active:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw className={cn('h-4 w-4', isRefreshingWorkspace && 'animate-spin')} aria-hidden="true" />
+            {t('workspace.refreshAll', { defaultValue: 'Refresh all' })}
+          </button>
+        )}
       </DialogContent>
     </Dialog>
   );

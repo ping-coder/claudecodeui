@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Menu, Minimize2 } from 'lucide-react';
+import { Menu, Minimize2, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useMobileMenuHandlers } from '@/modules/project-workspace/hooks/useMobileMenuHandlers';
@@ -11,16 +11,20 @@ const FADE_DELAY_MS = 3000;
 type ImmersiveExitControlProps = {
   /** Opens the sidebar drawer, as the hidden header's menu button does. */
   onOpenMenu: () => void;
+  /** Refreshes the whole workspace in place: a page reload would leave full screen. */
+  onRefresh: () => void;
+  /** A refresh is on its way: the button spins and does nothing. */
+  isRefreshing: boolean;
   /** Leaves immersive mode, and the browser fullscreen with it. */
   onExit: () => void;
 };
 
 /**
  * Rendered by ProjectWorkspaceShell on phones in immersive mode, where the header is hidden: a
- * floating [menu][exit] capsule in the top-right corner, clear of the safe area. It fades after a
- * few seconds so it does not cover the conversation, and a touch brings it back.
+ * floating [menu][refresh][exit] capsule in the top-right corner, clear of the safe area. It fades
+ * after a few seconds so it does not cover the conversation, and a touch brings it back.
  */
-function ImmersiveExitControl({ onOpenMenu, onExit }: ImmersiveExitControlProps) {
+function ImmersiveExitControl({ onOpenMenu, onRefresh, isRefreshing, onExit }: ImmersiveExitControlProps) {
   const { t } = useTranslation('common');
   const { handleMobileMenuClick, handleMobileMenuTouchEnd } = useMobileMenuHandlers(onOpenMenu);
   // Whether the capsule has been left alone long enough to fade; it stays findable at 40% opacity
@@ -73,6 +77,20 @@ function ImmersiveExitControl({ onOpenMenu, onExit }: ImmersiveExitControlProps)
         className="flex h-9 w-9 touch-manipulation items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
         <Menu className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          if (!isRefreshing) {
+            onRefresh();
+          }
+        }}
+        aria-label={t('workspace.refreshAll', { defaultValue: 'Refresh all' })}
+        aria-disabled={isRefreshing || undefined}
+        aria-busy={isRefreshing || undefined}
+        className="flex h-9 w-9 touch-manipulation items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
       </button>
       <button
         type="button"

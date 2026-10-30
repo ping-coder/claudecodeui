@@ -386,6 +386,8 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       // offered for editing or forking.
       inserted: msg.inserted,
       compact: msg.compact,
+      // A prompt CloudCLI sent on its own, drawn as a note on an assistant row.
+      controlNote: msg.controlNote,
       // Set by the provider only on an assistant reply, and only when it knows
       // which model produced it, so every other row simply carries undefined.
       model: msg.model,

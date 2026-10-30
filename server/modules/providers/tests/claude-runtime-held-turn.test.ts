@@ -745,7 +745,17 @@ test('planning a turn says whether it would go into the held process, and sends 
     assert.deepEqual(await plan({ model: 'opus', effort: 'max' }), { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] });
     assert.deepEqual(
       await plan({ model: 'opus', effort: 'max', ultracode: true, cwd: '/elsewhere', permissionMode: 'bypassPermissions', toolsSettings: { allowedTools: [], disallowedTools: ['Bash'] } }),
-      { heldWork: true, canHandOver: false, changes: ['cwd', 'effort', 'ultracode', 'tools', 'permissionMode'], switches: [] },
+      {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['cwd', 'effort', 'ultracode', 'tools', 'permissionMode'],
+        switches: [],
+        details: {
+          tools: { notAllowed: [], alsoDenied: ['Bash'] },
+          permissionMode: { process: 'default', message: 'bypassPermissions', reason: 'bypass_not_allowed' },
+        },
+      },
+      'the tool rules and the permission mode say what exactly keeps the turn out',
     );
     assert.deepEqual(await plan({ model: 'opus', effort: 'high', resumeAnchorId: 'anchor-1' }), { heldWork: true, canHandOver: false, changes: [], switches: [] }, 'an edit resumes partway, which only a new process can');
     assert.deepEqual(await plan({ model: 'default' }), { heldWork: true, canHandOver: false, changes: ['effort'], switches: ['model'] }, 'a model switch that drops the effort level is not plain');
@@ -777,7 +787,16 @@ test('planning a turn names a model switch the SDK cannot make, and a failed loo
   try {
     assert.deepEqual(
       await claudeRuntime.planHandOver(unswitchable.sessionId, { cwd: unswitchable.cwd, model: 'opus', permissionMode: 'plan' }),
-      { heldWork: true, canHandOver: false, changes: ['model', 'permissionMode'], switches: [] },
+      {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['model', 'permissionMode'],
+        switches: [],
+        details: {
+          model: { process: 'default', message: 'opus' },
+          permissionMode: { process: 'default', message: 'plan', reason: 'cannot_switch' },
+        },
+      },
     );
   } finally {
     await finish(unswitchable);
@@ -886,7 +905,11 @@ test('a plan that inherits unset settings takes the tool rules and skipped permi
       planOptions,
     );
     assert.deepEqual(await plan(INHERIT_UNSET), { heldWork: true, canHandOver: true, changes: [], switches: [] });
-    assert.deepEqual(await plan(), { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] }, 'read as it is, the message allows fewer tools');
+    assert.deepEqual(
+      await plan(),
+      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], details: { tools: { notAllowed: ['Bash(git status:*)'], alsoDenied: [] } } },
+      'read as it is, the message allows fewer tools',
+    );
     assert.deepEqual(ruled.script.calls, [`prompt:${promptUuid(ruled, 0)}`], 'nothing was written or switched');
   } finally {
     await finish(ruled);
@@ -925,7 +948,7 @@ test('a plan that inherits unset settings still weighs what the message names, a
     assert.deepEqual(await plan({ effort: 'max' }, INHERIT_UNSET), { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] });
     assert.deepEqual(
       await plan({ toolsSettings: { disallowedTools: ['Bash'] } }, INHERIT_UNSET),
-      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] },
+      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], details: { tools: { notAllowed: [], alsoDenied: ['Bash'] } } },
       'a tool rule the message carries is its own',
     );
   } finally {
@@ -2380,17 +2403,17 @@ function fireLoopWakeup(script: Scripted, scheduledFor: number, turn: () => void
 function createCronJob(
   script: Scripted,
   jobId: string,
-  { recurring = true, omitRecurring = false, output = true, nextFireAt = Date.now() + 5 * MINUTE, cron = '*/5 * * * *' }: { recurring?: boolean; omitRecurring?: boolean; output?: boolean; nextFireAt?: number; cron?: string } = {},
+  { recurring = true, omitRecurring = false, output = true, nextFireAt = Date.now() + 5 * MINUTE, cron = '*/5 * * * *', durable = false }: { recurring?: boolean; omitRecurring?: boolean; output?: boolean; nextFireAt?: number; cron?: string; durable?: boolean } = {},
 ): void {
   const id = `toolu_cron_${jobId}`;
   const recurs = omitRecurring || recurring;
-  script.emit(toolUse(id, 'CronCreate', { cron, prompt: 'check the deploy', ...(omitRecurring ? {} : { recurring }) }));
+  script.emit(toolUse(id, 'CronCreate', { cron, prompt: 'check the deploy', ...(omitRecurring ? {} : { recurring }), ...(durable ? { durable } : {}) }));
   const text = recurs
     ? `Scheduled recurring job ${jobId} (Every 5 minutes). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.`
     : `Scheduled one-shot task ${jobId} (at 2:30pm). Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete.`;
   script.emit({
     ...toolResult(id, text),
-    ...(output ? { tool_use_result: { id: jobId, humanSchedule: 'Every 5 minutes', recurring: recurs, durable: false, nextFireAt } } : {}),
+    ...(output ? { tool_use_result: { id: jobId, humanSchedule: 'Every 5 minutes', recurring: recurs, durable, nextFireAt } } : {}),
   });
 }
 
@@ -3360,13 +3383,24 @@ test('a plan that accepts the process\'s own settings lets in a turn that change
       planOptions,
     );
     const goesIn = { heldWork: true, canHandOver: true, changes: [], switches: [] };
-    assert.deepEqual(await plan({ effort: 'max' }, INHERIT_UNSET), { heldWork: true, canHandOver: false, changes: ['effort'], switches: [] });
+    assert.deepEqual(
+      await plan({ effort: 'max' }, INHERIT_UNSET),
+      { heldWork: true, canHandOver: false, changes: ['effort'], switches: [], replaceKeepsWork: true },
+      'without accepting, a process of its own brings the cron job back',
+    );
     assert.deepEqual(await plan({ effort: 'max' }, ACCEPT_PROCESS_SETTINGS), goesIn);
     assert.deepEqual(await plan({ effort: 'max', acceptProcessSettings: true }, INHERIT_UNSET), goesIn, 'set in the options, as its run will be');
     assert.deepEqual(await plan({ ultracode: true }, ACCEPT_PROCESS_SETTINGS), goesIn);
     assert.deepEqual(
       await plan({ ultracode: true, toolsSettings: { disallowedTools: ['Bash'] } }, ACCEPT_PROCESS_SETTINGS),
-      { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] },
+      {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['tools'],
+        switches: [],
+        details: { tools: { notAllowed: [], alsoDenied: ['Bash'] } },
+        replaceKeepsWork: true,
+      },
       'tool rules that deny what the process allows need a process of their own',
     );
     assert.deepEqual(await plan({ effort: 'max', model: 'sonnet' }, ACCEPT_PROCESS_SETTINGS), { ...goesIn, switches: ['model'] }, 'what it can switch is still switched');
@@ -3427,17 +3461,27 @@ test('a plan that accepts the process\'s own settings lets in tool rules no stri
       { sessionId: held.sessionId, cwd: held.cwd, model: 'opus', effort: 'high', ...toolsSettings(allowedTools, disallowedTools, false) },
       planOptions,
     );
-    const keptOut = { heldWork: true, canHandOver: false, changes: ['tools'], switches: [] };
+    const keptOut = { heldWork: true, canHandOver: false, changes: ['tools'], switches: [], replaceKeepsWork: true };
     assert.deepEqual(await plan(['Bash(git status:*)', 'Read'], []), { heldWork: true, canHandOver: true, changes: [], switches: [] }, 'allows more, and denies less: the process denies WebFetch all the same');
     assert.deepEqual(await plan(['Bash(git status:*)', 'Read'], [], INHERIT_UNSET), keptOut, 'without accepting, any other rules need a process of their own');
-    assert.deepEqual(await plan([], ['WebFetch']), keptOut, 'allows fewer tools than the process');
-    assert.deepEqual(await plan(['Bash(git status:*)'], ['WebFetch', 'Bash(git push:*)']), keptOut, 'denies a tool the process does not');
+    assert.deepEqual(
+      await plan([], ['WebFetch']),
+      { ...keptOut, details: { tools: { notAllowed: ['Bash(git status:*)'], alsoDenied: [] } } },
+      'allows fewer tools than the process',
+    );
+    assert.deepEqual(
+      await plan(['Bash(git status:*)'], ['WebFetch', 'Bash(git push:*)']),
+      { ...keptOut, details: { tools: { notAllowed: [], alsoDenied: ['Bash(git push:*)'] } } },
+      'denies a tool the process does not',
+    );
   } finally {
     await finish(held);
   }
 
-  // A loop started in plan mode allows what plan mode allows; a message from
-  // the default mode with no rules of its own allows none of it.
+  // A loop started in plan mode was launched with no rules for what plan mode
+  // allows (canUseTool grants those while it is in plan mode): a message from
+  // the default mode with no rules of its own only switches it out of plan
+  // mode for its turn.
   const planned = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high', permissionMode: 'plan', ...toolsSettings([], [], false) });
   try {
     assert.deepEqual(
@@ -3446,14 +3490,14 @@ test('a plan that accepts the process\'s own settings lets in tool rules no stri
         { sessionId: planned.sessionId, cwd: planned.cwd, model: 'opus', effort: 'max', permissionMode: 'default', ...toolsSettings([], [], false) },
         ACCEPT_PROCESS_SETTINGS,
       ),
-      { heldWork: true, canHandOver: false, changes: ['tools'], switches: ['permissionMode'] },
+      { heldWork: true, canHandOver: true, changes: [], switches: ['permissionMode'] },
     );
   } finally {
     await finish(planned);
   }
 });
 
-test('a turn that accepts the process\'s own settings goes into a process held only for a loop on the process\'s deny rules; without accepting, the loop is stopped', async () => {
+test('a turn that accepts the process\'s own settings goes into a process held only for a loop on the process\'s deny rules; without accepting, a durable loop is stopped', async () => {
   const launch = { model: 'opus', effort: 'high', ...toolsSettings(['Bash(git status:*)'], ['WebFetch'], false) };
   const turn = { model: 'opus', effort: 'max', ...toolsSettings(['Bash(git status:*)', 'Read'], [], false) };
   const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), launch);
@@ -3477,7 +3521,9 @@ test('a turn that accepts the process\'s own settings goes into a process held o
     await finish(held, [next.run]);
   }
 
-  const plain = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), launch);
+  // Without accepting, a durable job, which no resume has been seen to bring
+  // back, is stopped with the process.
+  const plain = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320', { durable: true })), launch);
   const replaced = sendNext(plain, 'Post a summary', turn);
   try {
     await waitUntil(() => plain.script.released());
@@ -4160,3 +4206,455 @@ for (const variant of ['a later turn queued behind the relay', 'every later turn
     });
   });
 }
+
+/** A record store like the database's for the runtime's holds for scheduled work: one row per session. */
+function createHoldRecords() {
+  const rows = new Map<string, { runId: string }>();
+  const removed: string[] = [];
+  const scheduleHolds: NonNullable<ProviderRuntimeContext['scheduleHolds']> = {
+    save: (record) => { rows.set(record.sessionId, { runId: record.runId }); },
+    remove: (sessionId, runId) => {
+      removed.push(runId);
+      if (rows.get(sessionId)?.runId === runId) {
+        rows.delete(sessionId);
+      }
+    },
+  };
+  return { rows, removed, scheduleHolds };
+}
+
+test('a turn a process held for cron jobs alone cannot take starts a process of its own without a notice, takes what it leaves out from the held process, and takes the record of the hold over', async () => {
+  const records = createHoldRecords();
+  // The new CLI resumes the session and brings the job back from the transcript.
+  let revives = false;
+  const context = createContext({
+    resolveProviderSessionId: () => NATIVE_ID,
+    scheduleHolds: records.scheduleHolds,
+    readRevivedCronJobs: async () => (revives
+      ? [{ jobId: 'b2148320', toolUseId: 'toolu_cron_b2148320', cron: '*/5 * * * *', prompt: 'check the deploy', recurring: true, createdAt: Date.now() - MINUTE, humanSchedule: 'Every 5 minutes', predictable: true }]
+      : []),
+  });
+  const launch = { model: 'opus', effort: 'high', permissionMode: 'acceptEdits', ...toolsSettings(['Bash(git status:*)', 'WebFetch'], [], false) };
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), launch, { context });
+  // The user has stopped allowing WebFetch since the loop started.
+  const turn = { model: 'opus', effort: 'high', ...toolsSettings(['Bash(git status:*)'], [], false) };
+  const heldRunId = records.rows.get(held.sessionId)?.runId;
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    assert.equal(typeof heldRunId, 'string', 'the hold is recorded');
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...turn }, INHERIT_UNSET),
+      {
+        heldWork: true,
+        canHandOver: false,
+        changes: ['tools'],
+        switches: [],
+        details: { tools: { notAllowed: ['WebFetch'], alsoDenied: [] } },
+        replaceKeepsWork: true,
+      },
+    );
+
+    revives = true;
+    next = sendNext(held, 'Check the deploy again', { ...turn, inheritUnset: true });
+    await waitUntil(() => held.script.released());
+    assert.deepEqual(workStoppedNotices(next.writer.sent), [], 'nothing is said to have stopped');
+    assert.equal(held.script.prompts.length, 1, 'nothing goes into the held process');
+    assert.equal(records.rows.get(held.sessionId)?.runId, heldRunId, 'the record outlives the process it was written for');
+
+    held.script.end();
+    await waitUntil(() => Boolean(next?.later.script.created()));
+    const options = next.later.script.options();
+    assert.deepEqual(options?.allowedTools, ['Bash(git status:*)'], 'the turn\'s own tool rules');
+    assert.equal(options?.permissionMode, 'acceptEdits', 'the mode it leaves out is the held process\'s');
+    assert.equal(options?.resume, NATIVE_ID);
+
+    await waitUntil(() => Boolean(next?.later.script.prompts.length));
+    next.later.script.emit(init());
+    next.later.script.emit(result());
+    await waitUntil(() => completes(next!.writer.sent) === 1);
+    assert.equal(next.later.script.released(), false, 'the new process is held for the job it brought back');
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+    const newRunId = records.rows.get(held.sessionId)?.runId;
+    assert.equal(typeof newRunId === 'string' && newRunId !== heldRunId, true, 'the new run wrote the record over');
+  } finally {
+    await finish(held, next ? [next.run] : []);
+  }
+});
+
+test('a process of its own that brings no job back removes the record of the hold it took over', async () => {
+  const records = createHoldRecords();
+  const context = createContext({ scheduleHolds: records.scheduleHolds });
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' }, { context });
+  const next = sendNext(held, 'Think harder', { model: 'opus', effort: 'max' });
+  try {
+    await waitUntil(() => held.script.released());
+    assert.equal(records.rows.size, 1);
+    held.script.end();
+    await waitUntil(() => next.later.script.prompts.length === 1);
+    next.later.script.emit(init());
+    next.later.script.emit(result());
+    await waitUntil(() => completes(next.writer.sent) === 1);
+    assert.equal(records.rows.size, 0, 'its process let go, and the record went with it');
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+/** A cron job's fire as CLI 2.1.312 starts it, its `result` still to come. */
+function startCronFire(script: Scripted): void {
+  script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+  script.emit(init());
+  script.emit(assistantText('Running the tests.'));
+}
+
+/** Starts a job's fire (startCronFire) and settles once the held run has read it: the CLI is in a turn of its own. */
+async function cronFireUnderWay(held: HeldRun): Promise<void> {
+  const seen = assistantTexts(held.first.sent).length;
+  startCronFire(held.script);
+  await waitUntil(() => assistantTexts(held.first.sent).length === seen + 1);
+}
+
+/**
+ * Counts the turns that start waiting for the turn the CLI runs on its own
+ * to be over (handTurnToHeldProcess logs each as it starts to wait), so a
+ * test acts once a send waits, not while it still makes its lookups.
+ */
+function countCliTurnWaits(t: import('node:test').TestContext): () => number {
+  let count = 0;
+  const log = console.log.bind(console);
+  t.mock.method(console, 'log', (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('it waits for the turn the CLI runs on its own to be over')) {
+      count += 1;
+    }
+    log(...args);
+  });
+  return () => count;
+}
+
+test('while a job of a process held for cron jobs alone fires, a plan offers a process of the turn\'s own once the fire is over, and a turn sent then waits for the fire\'s end before replacing that process', async (t) => {
+  const waits = countCliTurnWaits(t);
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  const turn = { model: 'opus', effort: 'max' };
+  const plan = () => claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...turn });
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    assert.deepEqual(
+      await plan(),
+      { heldWork: true, canHandOver: false, changes: ['effort'], switches: [], replaceKeepsWork: true },
+      'between fires',
+    );
+    await cronFireUnderWay(held);
+    // The send goes, and nothing asks: its run waits for the fire's end.
+    assert.deepEqual(
+      await plan(),
+      { heldWork: true, canHandOver: false, changes: ['effort'], switches: [], replaceKeepsWork: true, afterCliTurn: true },
+    );
+
+    next = sendNext(held, 'Think harder', turn);
+    await waitUntil(() => waits() === 1);
+    assert.equal(held.script.calls.includes('interrupt'), false, 'the fire is not interrupted');
+    assert.equal(held.script.released(), false);
+    assert.equal(next.later.script.created(), false, 'no process of its own yet');
+
+    held.script.emit(result());
+    await waitUntil(() => held.script.released());
+    assert.deepEqual(workStoppedNotices(next.writer.sent), [], 'nothing is said to have stopped');
+    assert.equal(held.script.prompts.length, 1, 'nothing goes into the held process');
+    held.script.end();
+    await waitUntil(() => Boolean(next?.later.script.created()));
+    assert.equal(next.later.script.options()?.effort, 'max');
+    assert.equal(waits(), 1, 'it waited once');
+  } finally {
+    await finish(held, next ? [next.run] : []);
+  }
+});
+
+test('a turn waiting for a fire\'s end is stopped alone by an abort, and starts a plain process of its own when the fire ends the last job', async (t) => {
+  const waits = countCliTurnWaits(t);
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    await cronFireUnderWay(held);
+    const stopped = sendNext(held, 'Think harder', { model: 'opus', effort: 'max' });
+    runs.push(stopped.run);
+    await waitUntil(() => waits() === 1);
+    assert.equal(await abortClaudeSDKSession(held.sessionId), true);
+    await waitUntil(() => stopped.settled());
+    assert.equal(stopped.later.script.created(), false, 'it starts no process of its own');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'the held process and its fire are left alone');
+
+    const next = sendNext(held, 'Think harder', { model: 'opus', effort: 'max', keepBackgroundWork: true });
+    runs.push(next.run);
+    await waitUntil(() => waits() === 2);
+    deleteCronJob(held.script, 'b2148320');
+    held.script.emit(result());
+    await waitUntil(() => held.script.released());
+    held.script.end();
+    await waitUntil(() => next.later.script.created());
+    assert.equal(held.script.calls.includes('interrupt'), false, 'a process that let go is sent nothing');
+    assert.deepEqual(workStoppedNotices(next.writer.sent), [], 'no work was left to stop, nor a turn to fail');
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a turn sent on the word that its process keeps the work fails, rather than stop the work the fire it waited for started, and leaves that work and the loop alone', async (t) => {
+  const waits = countCliTurnWaits(t);
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  const switchedBack: unknown[] = [];
+  const writer = createWriter(2);
+  const later = createScriptedQuery();
+  held.laterQueries.push(later);
+  const options = {
+    sessionId: held.sessionId,
+    cwd: held.cwd,
+    model: 'opus',
+    effort: 'max',
+    keepBackgroundWork: true,
+    restoreSwitchesAfterTurn: true,
+    onSwitchesRestored: (restored: unknown) => { switchedBack.push(restored); },
+  };
+  try {
+    await cronFireUnderWay(held);
+    const thrown = queryClaudeSDK('Think harder', options, writer.writer as never, { ...held.context, createQuery: later.createQuery })
+      .then(() => null, (error: Error & { code?: unknown; reason?: unknown }) => error);
+    await waitUntil(() => waits() === 1);
+    // The fire backgrounds a command before its turn ends.
+    launchBackgroundCommand(held.script);
+    held.script.emit(result());
+
+    const error = await thrown;
+    const content = 'Not sent: this message changes the reasoning effort, which only a new Claude process can apply, and the turn Claude ran on its own meanwhile started work a new process would stop.';
+    assert.deepEqual([error?.message, error?.code, error?.reason], [content, 'HAND_OVER_FAILED', 'work-started']);
+    assert.deepEqual(
+      writer.sent.filter((message) => message.kind === 'error').map((message) => [message.code, message.reason, message.changes, message.content]),
+      [['HAND_OVER_FAILED', 'work-started', ['effort'], content]],
+      'the turn\'s run hears why, and nothing is said to have stopped',
+    );
+    await flush();
+    assert.deepEqual(switchedBack, [{ model: null, permissionMode: null }], 'the gateway hears that nothing was switched');
+    assert.equal(later.script.created(), false, 'no new CLI');
+    assert.equal(held.script.prompts.length, 1, 'nothing goes into the held process');
+    assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], 'nothing is interrupted, stopped or released');
+    assert.deepEqual(listedTaskIds(held.sessionId), ['bg1']);
+    assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320']);
+  } finally {
+    await finish(held);
+  }
+});
+
+test('a turn sent on the word that its process keeps the work fails, rather than stop it, when the fire under way starts work while the turn makes its lookups', async () => {
+  for (const fireEnds of [false, true]) {
+    const label = fireEnds ? 'the fire over by the hand-over' : 'the fire still under way at the hand-over';
+    const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+    // Holds the turn's lookups until the fire has started a task.
+    let lookUp = () => {};
+    const lookedUp = new Promise<void>((resolve) => { lookUp = resolve; });
+    let lookups = 0;
+    const context = createContext({
+      getProviderModels: async () => {
+        lookups += 1;
+        await lookedUp;
+        return CLAUDE_PREDEFINED_MODELS as never;
+      },
+    });
+    const turn = { model: 'opus', effort: 'max' };
+    const writer = createWriter(2);
+    const later = createScriptedQuery();
+    held.laterQueries.push(later);
+    let thrown: Promise<(Error & { code?: unknown; reason?: unknown }) | null> | null = null;
+    try {
+      await cronFireUnderWay(held);
+      assert.deepEqual(
+        await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, ...turn }),
+        { heldWork: true, canHandOver: false, changes: ['effort'], switches: [], replaceKeepsWork: true, afterCliTurn: true },
+        label,
+      );
+      thrown = queryClaudeSDK(
+        'Think harder',
+        { sessionId: held.sessionId, cwd: held.cwd, ...turn, keepBackgroundWork: true },
+        writer.writer as never,
+        { ...context, createQuery: later.createQuery },
+      ).then(() => null, (error: Error & { code?: unknown; reason?: unknown }) => error);
+      const settled = track(thrown);
+      await waitUntil(() => lookups === 1);
+      // The fire backgrounds a command before the turn is handed over.
+      launchBackgroundCommand(held.script);
+      if (fireEnds) {
+        held.script.emit(result());
+      }
+      await flush();
+      lookUp();
+      await waitUntil(() => settled() || held.script.calls.includes('interrupt'));
+
+      assert.deepEqual(held.script.calls.filter((call) => !call.startsWith('prompt:')), [], `${label}: nothing is interrupted, stopped or released`);
+      const error = await thrown;
+      assert.deepEqual([error?.code, error?.reason], ['HAND_OVER_FAILED', 'work-started'], label);
+      assert.deepEqual(
+        writer.sent.filter((message) => message.kind === 'error').map((message) => [message.code, message.reason, message.changes]),
+        [['HAND_OVER_FAILED', 'work-started', ['effort']]],
+        `${label}: the turn's run hears why, and nothing is said to have stopped`,
+      );
+      assert.equal(later.script.created(), false, `${label}: no new CLI`);
+      assert.equal(held.script.prompts.length, 1, `${label}: nothing goes into the held process`);
+      assert.deepEqual(listedTaskIds(held.sessionId), ['bg1'], label);
+      assert.deepEqual(scheduledOf(held.sessionId).map((item) => item.id), ['cron:b2148320'], label);
+    } finally {
+      lookUp();
+      await finish(held, thrown ? [thrown] : []);
+    }
+  }
+});
+
+test('a turn sent without that word still replaces the process once the fire it waited for is over, and says the work the fire started stopped', async (t) => {
+  const waits = countCliTurnWaits(t);
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { model: 'opus', effort: 'high' });
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    await cronFireUnderWay(held);
+    next = sendNext(held, 'Think harder', { model: 'opus', effort: 'max' });
+    await waitUntil(() => waits() === 1);
+    launchBackgroundCommand(held.script);
+    held.script.emit(result());
+    await waitUntil(() => held.script.released());
+    held.script.end();
+    await waitUntil(() => Boolean(next?.later.script.created()));
+    assert.deepEqual(workStoppedNotices(next.writer.sent).map(([code, changes]) => [code, changes]), [['BACKGROUND_WORK_STOPPED', ['effort']]]);
+  } finally {
+    await finish(held, next ? [next.run] : []);
+  }
+});
+
+test('a turn that was to take its settings from the held process runs with its own when that process lets go before the hand-over', async () => {
+  const held = await startHeldRun(
+    announcingPrompt((script) => createCronJob(script, 'b2148320')),
+    { model: 'opus', effort: 'high', permissionMode: 'plan', ...toolsSettings(['Read'], [], false) },
+  );
+  // Holds the turn's lookups until the process has let go.
+  let lookUp = () => {};
+  const lookedUp = new Promise<void>((resolve) => { lookUp = resolve; });
+  let lookups = 0;
+  const context = createContext({
+    getProviderModels: async () => {
+      lookups += 1;
+      await lookedUp;
+      return CLAUDE_PREDEFINED_MODELS as never;
+    },
+  });
+  const own = { model: 'sonnet', effort: 'low', permissionMode: 'acceptEdits', toolsSettings: { allowedTools: ['Bash(git status:*)'], disallowedTools: [], skipPermissions: false } };
+  // A message sent with the held process's settings, as the scheduled-messages dispatcher sends it.
+  const next = sendNext(held, 'Post the summary', { inheritUnset: true, restoreSwitchesAfterTurn: true, keepBackgroundWork: true, ownSettings: own }, createWriter(2), context);
+  try {
+    await waitUntil(() => lookups === 1);
+    // The loop's last fire deletes its job, and the process lets go.
+    startCronFire(held.script);
+    deleteCronJob(held.script, 'b2148320');
+    held.script.emit(result());
+    await waitUntil(() => held.script.released());
+    held.script.end();
+    lookUp();
+
+    await waitUntil(() => next.later.script.created());
+    const options = next.later.script.options();
+    assert.deepEqual(
+      [options?.model, options?.effort, options?.permissionMode, options?.allowedTools],
+      ['sonnet', 'low', 'acceptEdits', ['Bash(git status:*)']],
+      'the message\'s own settings, not the defaults',
+    );
+    assert.equal(held.script.prompts.length, 1, 'nothing went into the process that let go');
+  } finally {
+    lookUp();
+    await finish(held, [next.run]);
+  }
+});
+
+test('a process held for a wake-up, a durable job, a task or a Monitor as well, or a turn in another working directory, gets no process of the turn\'s own that keeps the work', async () => {
+  const cases: Array<[string, (script: Scripted) => void, Record<string, unknown>]> = [
+    ['a wake-up', (script) => { createCronJob(script, 'b2148320'); scheduleWakeup(script); }, {}],
+    ['a durable job', (script) => createCronJob(script, 'b2148320', { durable: true }), {}],
+    ['a task', (script) => { createCronJob(script, 'b2148320'); launchWorkflow(script); }, {}],
+    ['a Monitor', (script) => { createCronJob(script, 'b2148320'); launchUntrackedMonitor(script); }, {}],
+    ['another working directory', (script) => createCronJob(script, 'b2148320'), { cwd: '/elsewhere' }],
+  ];
+  for (const [label, launch, extra] of cases) {
+    const held = await startHeldRun(announcingPrompt(launch), { model: 'opus', effort: 'high' });
+    try {
+      const plan = await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, model: 'opus', effort: 'max', ...extra });
+      assert.equal(plan.canHandOver, false, label);
+      assert.equal(plan.replaceKeepsWork, undefined, label);
+    } finally {
+      await finish(held);
+    }
+  }
+});
+
+test('a process launched in plan mode has canUseTool allow what plan mode allows, and only while it is in plan mode', async () => {
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), { permissionMode: 'plan', ...toolsSettings([], [], false) });
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  try {
+    assert.deepEqual(held.script.options()?.allowedTools, [], 'no launch rule is added for plan mode');
+    for (const tool of ['WebFetch', 'WebSearch', 'Read']) {
+      assert.equal((await canUseTool(tool, {}, {})).behavior, 'allow', tool);
+    }
+    // A write in plan mode is the user's to allow: the CLI does not stop it.
+    void canUseTool('Bash', { command: 'touch x' }, {});
+    await flush();
+    const asked = held.first.sent.filter((message) => message.kind === 'permission_request');
+    assert.deepEqual(asked.map((message) => message.toolName), ['Bash']);
+    claudeRuntime.permissions.resolve(String(asked[0]?.requestId), { allow: false });
+
+    // Out of plan mode for a turn, the same tools are asked about.
+    const next = sendNext(held, 'Go ahead', { permissionMode: 'default', ...toolsSettings([], [], false) });
+    await waitUntil(() => held.script.prompts.length === 2);
+    assert.equal(next.later.script.created(), false, 'the turn goes into the held process');
+    assert.equal(held.script.calls.includes('setPermissionMode:default'), true);
+    await flush();
+    void canUseTool('WebFetch', { url: 'https://example.com' }, {});
+    await flush();
+    const askedNow = next.writer.sent.filter((message) => message.kind === 'permission_request');
+    assert.deepEqual(askedNow.map((message) => message.toolName), ['WebFetch']);
+    claudeRuntime.permissions.resolve(String(askedNow[0]?.requestId), { allow: false });
+    await finish(held, [next.run]);
+  } catch (error) {
+    await finish(held);
+    throw error;
+  }
+});
+
+test('a process launched skipping permissions may switch to bypassPermissions for a turn; one the CLI refuses that switch tells the turn, and no plan counts on it again', async () => {
+  const plain = await startHeldRun(announcingPrompt(scheduleWakeup), { permissionMode: 'default' });
+  try {
+    assert.equal(plain.script.options()?.allowDangerouslySkipPermissions, undefined, 'only when the user skips permissions');
+  } finally {
+    await finish(plain);
+  }
+
+  const held = await startHeldRun(announcingPrompt(scheduleWakeup), { permissionMode: 'plan', ...toolsSettings([], [], true) });
+  const plan = () => claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, permissionMode: 'default', ...toolsSettings([], [], true) });
+  let next: ReturnType<typeof sendNext> | null = null;
+  try {
+    assert.equal(held.script.options()?.permissionMode, 'plan', 'it runs in the mode it was launched in');
+    assert.equal(held.script.options()?.allowDangerouslySkipPermissions, true);
+    assert.deepEqual(await plan(), { heldWork: true, canHandOver: true, changes: [], switches: ['permissionMode'] });
+
+    held.script.setSwitchAnswer('refuse');
+    next = sendNext(held, 'Fix it', { permissionMode: 'default', ...toolsSettings([], [], true) });
+    await waitUntil(() => held.script.prompts.length === 2);
+    await flush();
+    assert.equal(held.script.calls.includes('setPermissionMode:bypassPermissions'), true);
+    const notices = next.writer.sent.filter((message) => message.kind === 'error');
+    assert.deepEqual(notices.map((message) => [message.code, message.reason]), [['PERMISSION_MODE_NOT_SWITCHED', 'plan']]);
+    held.script.emit(echo(promptUuid(held, 1), 'Fix it'));
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => Boolean(next?.settled()));
+    assert.deepEqual(await plan(), {
+      heldWork: true,
+      canHandOver: false,
+      changes: ['permissionMode'],
+      switches: [],
+      details: { permissionMode: { process: 'plan', message: 'bypassPermissions', reason: 'bypass_not_allowed' } },
+    });
+  } finally {
+    await finish(held, next ? [next.run] : []);
+  }
+});

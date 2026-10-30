@@ -15,7 +15,14 @@ import {
     initializeSessionsWatcher,
     providerRuntimeService,
 } from '@/modules/providers/index.js';
-import { chatRunRegistry, createWebSocketServer, holdsWorkPastTurn } from '@/modules/websocket/index.js';
+import {
+    chatRunRegistry,
+    createWebSocketServer,
+    holdsWorkPastTurn,
+    RESUME_LOOPS_START_DELAY_MS,
+    resumeHeldLoopsOnStart,
+    runDetachedChatTurn,
+} from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -45,6 +52,7 @@ import { voiceRoutes } from './modules/voice/index.js';
 import {
     closeScheduledMessageDispatcher,
     initializeScheduledMessageDispatcher,
+    requestDispatchPass,
     scheduledMessagesRoutes,
 } from './modules/scheduled-messages/index.js';
 import browserUseRoutes from './modules/browser-use/browser-use.routes.js';
@@ -53,7 +61,7 @@ import { fileTreeRoutes } from './modules/file-tree/index.js';
 import { worktreesRoutes } from './modules/worktrees/index.js';
 import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js';
 import { browserUseService } from './modules/browser-use/browser-use.service.js';
-import { initializeDatabase, sessionDraftsDb, sessionsDb } from './modules/database/index.js';
+import { initializeDatabase, scheduleHoldsDb, sessionDraftsDb, sessionsDb } from './modules/database/index.js';
 import { configureWebPush, setNotificationRunLookup } from './modules/notifications/index.js';
 
 const __dirname = getModuleDirectory(import.meta.url);
@@ -112,6 +120,7 @@ createWebSocketServer(server, {
     },
     chat: {
         runtime: providerRuntimeService,
+        onScheduledWorkReleased: () => requestDispatchPass(),
     },
     shell: {
         resolveProviderSessionId: (sessionId, provider) => {
@@ -341,6 +350,9 @@ async function startServer() {
     try {
         // Initialize authentication database
         await initializeDatabase();
+        // The sessions the last server held for scheduled work when it went
+        // down, read before this one can start a run that writes its own.
+        const scheduleHoldsAtBoot = scheduleHoldsDb.list();
 
         // Configure Web Push (VAPID keys)
         configureWebPush();
@@ -380,6 +392,18 @@ async function startServer() {
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService);
+            // Resumes the loops of the sessions this server held for scheduled
+            // work when it went down (CLOUDCLI_RESUME_LOOPS_ON_START,
+            // CLOUDCLI_RESUME_LOOPS_MAX), once the transcripts are indexed.
+            setTimeout(() => {
+                resumeHeldLoopsOnStart({
+                    records: scheduleHoldsAtBoot,
+                    runtime: providerRuntimeService,
+                    runTurn: (input) => runDetachedChatTurn(input, { runtime: providerRuntimeService }),
+                }).catch((error) => {
+                    console.error('[Loops] Error resuming loops on start:', getErrorMessage(error));
+                });
+            }, RESUME_LOOPS_START_DELAY_MS).unref();
 
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {
@@ -391,6 +415,9 @@ async function startServer() {
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            // The CLI processes die with the server: the records of those held
+            // for scheduled work stay, for the next start to resume.
+            providerRuntimeService.prepareForShutdown();
             try {
                 await browserUseService.stopAllSessions();
             } catch (err) {

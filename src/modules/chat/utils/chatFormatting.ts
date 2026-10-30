@@ -1,5 +1,7 @@
 import type { TFunction } from 'i18next';
 
+import type { ControlNote } from '@/shared/types';
+
 export function normalizeInlineCodeFences(text: string) {
   if (!text || typeof text !== 'string') return text;
   try {
@@ -112,4 +114,22 @@ export function formatDateTime(value: string | number | Date, language: string |
  */
 export function describeTaskNotificationFallback(status: string | undefined, t: TFunction): string {
   return status === 'completed' ? t('chat:misc.backgroundTaskFinished') : t('chat:misc.backgroundTaskUpdate');
+}
+
+/**
+ * What the note for a prompt CloudCLI sent the model on its own reads, in the interface language:
+ * how many loops Claude was asked to stop, or the dynamic loop when that is all; how many loops
+ * no process ran that CloudCLI resumed. `fallback` (the row's English content) for a
+ * kind this client does not know. Drawn by MessageComponent and written by buildTranscriptMarkdown.
+ */
+export function describeControlNote(note: ControlNote, fallback: string, t: TFunction): string {
+  if (note.kind === 'scheduled-stop') {
+    return !note.jobIds?.length && note.wakeup
+      ? t('chat:scheduledWork.stopNoteWakeup')
+      : t('chat:scheduledWork.stopNote', { count: note.count });
+  }
+  if (note.kind === 'loops-resume') {
+    return t('chat:scheduledWork.resumeNote', { count: note.count });
+  }
+  return fallback;
 }

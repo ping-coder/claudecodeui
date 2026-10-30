@@ -15,7 +15,7 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
-import type { ActivityDetails, ActivityProgress, BackgroundSendChoice, BackgroundSendPrompt, BusySubmitMode, InsertUnavailableReason, PendingInsert, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { ActivityDetails, ActivityProgress, BackgroundSendChoice, BackgroundSendPrompt, BusySubmitMode, DispatchWait, InsertUnavailableReason, PendingInsert, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -38,6 +38,8 @@ import BusySendMenu from '@/modules/chat/composer/BusySendMenu';
 import BackgroundSendDialog from '@/modules/chat/composer/BackgroundSendDialog';
 import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessagePopover';
 import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
+import DispatchWaitNotice from '@/modules/chat/composer/DispatchWaitNotice';
+import type { useDispatchWaits } from '@/modules/chat/composer/useDispatchWaits';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
 import { holdsOnlyScheduledWork } from '@/modules/chat/utils/scheduledWork';
@@ -114,6 +116,8 @@ type ChatComposerProps = {
   onCancelScheduledMessage: (id: string) => void;
   onEditQueuedDraft: () => void;
   onDeleteQueuedDraft: () => void;
+  /** Why the server holds the queued and scheduled messages back, and the user's ways out (useDispatchWaits). */
+  dispatchWaits?: ReturnType<typeof useDispatchWaits>;
   /** Messages inserted into this session's running turn that the model has not read yet. */
   pendingInserts?: PendingInsert[];
   onWithdrawInsert?: (insertId: string) => void;
@@ -217,6 +221,7 @@ export default function ChatComposer({
   onCancelScheduledMessage,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
+  dispatchWaits,
   pendingInserts = [],
   onWithdrawInsert,
   insertUnavailableReason = 'provider',
@@ -256,6 +261,24 @@ export default function ChatComposer({
   sendByCtrlEnter,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
+  // A waiting message's notice; `cancel` takes the message off as its ✕ does.
+  const renderWait = (wait: DispatchWait, cancel: () => void) => dispatchWaits && (
+    <DispatchWaitNotice
+      wait={wait}
+      folded={dispatchWaits.isFolded(wait)}
+      busy={dispatchWaits.busyOf(wait)}
+      notice={dispatchWaits.noticeOf(wait)}
+      onStopAndSend={() => dispatchWaits.stopAndSend(wait)}
+      onUseProcessSettings={() => void dispatchWaits.sendWithProcessSettings(wait)}
+      onKeepWaiting={() => dispatchWaits.keepWaiting(wait)}
+      onShowActions={() => dispatchWaits.showActions(wait)}
+      onCancel={() => {
+        cancel();
+        dispatchWaits.forget(wait.target);
+      }}
+    />
+  );
+  const queuedWait = queuedDraft ? dispatchWaits?.waitFor({ kind: 'queued' }) ?? null : null;
   const fileDropdownRef = useRef<HTMLDivElement | null>(null);
   const selectedFileRef = useRef<HTMLDivElement | null>(null);
   const commandMenuPosition = useMemo(() => {
@@ -435,6 +458,12 @@ export default function ChatComposer({
       <ScheduledMessageList
         scheduledMessages={scheduledMessages}
         onCancel={onCancelScheduledMessage}
+        waitFor={(id) => dispatchWaits?.waitFor({ kind: 'scheduled', id }) ?? null}
+        renderWait={(wait) => renderWait(wait, () => {
+          if (wait.target.kind === 'scheduled') {
+            onCancelScheduledMessage(wait.target.id);
+          }
+        })}
       />
 
       {isEditingSentMessage && (
@@ -488,6 +517,7 @@ export default function ChatComposer({
           }
           onEdit={onEditQueuedDraft}
           onDelete={onDeleteQueuedDraft}
+          waitNotice={queuedWait ? renderWait(queuedWait, onDeleteQueuedDraft) : undefined}
         />
       )}
 

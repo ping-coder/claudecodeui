@@ -11,9 +11,10 @@ import type { NormalizedMessage } from '@/shared/types';
 
 /**
  * A queued or scheduled message that was to go into the process the session holds for its loops
- * (acceptProcessSettings) and did not is not sent, and the runtime says so in an `error` row with
- * code HAND_OVER_FAILED and a `reason`. The transcript words it by the code, in the interface
- * language; the row's English text is only the server's fallback.
+ * (acceptProcessSettings) and did not, or a send that waited for the loop's run, which started
+ * work a new process would stop (`work-started`), is not sent, and the runtime says so in an
+ * `error` row with code HAND_OVER_FAILED and a `reason`. The transcript words it by the code, in
+ * the interface language; the row's English text is only the server's fallback.
  */
 
 const failedRow = (reason: string | undefined): NormalizedMessage => ({
@@ -59,6 +60,10 @@ describe('the notice that a message did not go into the held process', () => {
     assert.equal(pageText().includes('Not sent: the message could not be handed to the process that runs this session\'s loops and reminders.'), true);
     lookup.unmount();
 
+    const workStarted = renderRow(failedRow('work-started'));
+    assert.equal(pageText().includes('Not sent: the loop\'s process started work in the meantime, and a new process would stop it.'), true);
+    workStarted.unmount();
+
     renderRow(failedRow('something-new'));
     assert.equal(pageText().includes('Not sent: the message could not go into the process that runs this session\'s loops and reminders, and a new process would stop them.'), true);
     assert.equal(pageText().includes('the runtime\'s own English'), false);
@@ -73,6 +78,10 @@ describe('the notice that a message did not go into the held process', () => {
     const lookup = renderRow(failedRow('lookup'));
     assert.equal(pageText().includes('没有发送：无法把这条消息交给运行这个会话循环和定时的进程。'), true);
     lookup.unmount();
+
+    const workStarted = renderRow(failedRow('work-started'));
+    assert.equal(pageText().includes('没有发送：循环的进程这时又起了新的工作，换新进程会停掉它。'), true);
+    workStarted.unmount();
 
     renderRow(failedRow(undefined));
     assert.equal(pageText().includes('没有发送：这条消息进不了运行这个会话循环和定时的进程，换新进程会停掉它们。'), true);

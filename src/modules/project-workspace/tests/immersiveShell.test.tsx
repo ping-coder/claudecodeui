@@ -34,11 +34,14 @@ const toggleSplit = vi.fn<() => void>();
 const setSidebarOpen = vi.fn<(open: boolean) => void>();
 // What the shell reports to the pane state about the room for two panes.
 const setCanShowBothPanes = vi.fn<(canShowBothPanes: boolean) => void>();
+const refreshWorkspace = vi.fn<() => Promise<void>>(async () => undefined);
 const PANES_STATE = {
   layout: UNSPLIT as WorkspaceLayout,
   actions: { toggleSplit, focusPane: vi.fn(), split: vi.fn() } as unknown as WorkspaceLayoutActions,
   setSidebarOpen,
   setCanShowBothPanes,
+  refreshWorkspace,
+  isRefreshingWorkspace: false,
   projects: [],
   paneProjects: { left: null, right: null },
 };
@@ -188,6 +191,8 @@ const pressModBackslash = () => fireEvent.keyDown(document.body, { code: 'Backsl
 
 beforeEach(() => {
   PANES_STATE.layout = UNSPLIT;
+  PANES_STATE.isRefreshingWorkspace = false;
+  refreshWorkspace.mockClear();
   mainColumnWidth = 1200;
   resizeObserverCallbacks.length = 0;
   sidebarRegionLifecycle.mounts = 0;
@@ -341,6 +346,39 @@ test('phones in immersive mode get the floating menu and exit capsule', () => {
   clickButton('Exit full screen');
   assert.equal(isImmersive(), 'false');
   assert.equal(hasButton('Exit full screen'), false);
+});
+
+test('the phone capsule reads menu, refresh, exit; refresh refreshes everything in place and waits while one runs', () => {
+  const view = renderShell({ isMobile: true });
+  clickButton('Toggle full screen');
+  const capsuleLabels = () => Array.from(
+    (screen.getByRole('button', { name: 'Exit full screen' }).parentElement as HTMLElement).querySelectorAll('button'),
+  ).map((button) => button.getAttribute('aria-label'));
+  assert.deepEqual(capsuleLabels(), ['Show sidebar', 'Refresh all', 'Exit full screen']);
+
+  clickButton('Refresh all');
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
+  assert.equal(isImmersive(), 'true', 'still full screen');
+
+  PANES_STATE.isRefreshingWorkspace = true;
+  view.rerender(
+    <ProjectWorkspaceShell isMobile ws={null} sendMessage={() => undefined} navigate={(() => undefined) as unknown as NavigateFunction} />,
+  );
+  assert.equal(screen.getByRole('button', { name: 'Refresh all' }).getAttribute('aria-busy'), 'true');
+  clickButton('Refresh all');
+  assert.equal(refreshWorkspace.mock.calls.length, 1, 'a press while one runs does nothing');
+});
+
+test('in browser full screen F5 refreshes the workspace instead of reloading the page', () => {
+  renderShell();
+  const pressF5 = () => fireEvent.keyDown(document.body, { key: 'F5', code: 'F5' });
+
+  assert.equal(pressF5(), true, 'outside full screen the browser reloads');
+  assert.equal(refreshWorkspace.mock.calls.length, 0);
+
+  Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => document.documentElement });
+  assert.equal(pressF5(), false, 'the reload is cancelled');
+  assert.equal(refreshWorkspace.mock.calls.length, 1);
 });
 
 test('desktop immersive mode has no capsule: the pane tab bar carries the exit button', () => {

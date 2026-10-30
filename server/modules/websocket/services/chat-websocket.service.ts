@@ -2,9 +2,10 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { scheduleHoldsDb, sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import { planLoopsResume, readResumeOptions, type LoopsResumePlan } from '@/modules/websocket/services/loops-resume.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   getGlobalImageAssetsDir,
@@ -16,10 +17,12 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   GatewayEventKind,
+  HandOverBlockDetail,
   HandOverChange,
   InsertStatus,
   LLMProvider,
   MessageKind,
+  PausedScheduledWork,
   ProviderCancelInsertGatewayResult,
   ProviderHandOverPlan,
   ProviderHandOverPlanOptions,
@@ -27,6 +30,7 @@ import type {
   ProviderInsertInput,
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
+  RunEndOutcome,
   ScheduledWorkStopOptions,
   ScheduledWorkStopResult,
   ScheduledWorkSummary,
@@ -114,6 +118,13 @@ export type ProviderRuntimeGateway = {
     id: string,
     options: ScheduledWorkStopOptions,
   ): Promise<ScheduledWorkStopResult>;
+  /**
+   * The session's loops that no process runs (see `PausedScheduledWork`),
+   * which `chat.resume-loops` resumes and `chat.stop-task` stops; nothing,
+   * with `heldHere`, while a process of this server holds the session.
+   * Absent for a gateway that reads none.
+   */
+  describePausedScheduledWork?(sessionId: string): Promise<PausedScheduledWork & { heldHere: boolean }>;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
   /**
@@ -164,6 +175,11 @@ export function holdsWorkPastTurn(
 type ChatWebSocketDependencies = {
   /** Central dispatcher for every provider SDK/CLI runtime. */
   runtime: ProviderRuntimeGateway;
+  /**
+   * Called once a `chat.stop-task` has ended a session's scheduled work, so
+   * the messages that waited for it go without waiting for the next poll.
+   */
+  onScheduledWorkReleased?: (sessionId: string) => void;
 };
 
 /**
@@ -265,7 +281,8 @@ type ResolvedSendTarget = {
  * would stop the session's background work, sent to the asking socket alone
  * in the envelope of the insert refusals: no `seq`, and never a
  * `protocol_error`, which the client takes as the session's run failing.
- * `changes` says why the turn cannot go into the held process; `content` is
+ * `changes` says why the turn cannot go into the held process, and `details`
+ * what exactly (see `HandOverBlockDetail`); `content` is
  * the message as sent, for the composer to put back. `clientRequestId` is the
  * send's own (see `readClientRequestId`), left out when it had none: every
  * pane on a page shares the socket, and the id tells them which send this
@@ -278,6 +295,7 @@ type SendRefusedFrame = {
   provider: LLMProvider;
   reason: 'BACKGROUND_WORK_WOULD_STOP';
   changes: HandOverChange[];
+  details?: HandOverBlockDetail;
   content: string;
   clientRequestId?: string;
   timestamp: string;
@@ -338,7 +356,8 @@ async function refuseSendThatStopsBackgroundWork(
     });
     plan = { heldWork: true, canHandOver: false, changes: ['lookup'], switches: [] };
   }
-  if (!plan.heldWork || plan.canHandOver) {
+  // A process of the turn's own that brings the held work back stops nothing.
+  if (!plan.heldWork || plan.canHandOver || plan.replaceKeepsWork) {
     return false;
   }
 
@@ -350,6 +369,7 @@ async function refuseSendThatStopsBackgroundWork(
     provider: target.provider,
     reason: 'BACKGROUND_WORK_WOULD_STOP',
     changes: plan.changes,
+    ...(plan.details ? { details: plan.details } : {}),
     content: typeof data.content === 'string' ? data.content : '',
     ...(clientRequestId ? { clientRequestId } : {}),
     timestamp: new Date().toISOString(),
@@ -545,11 +565,13 @@ function recordForTurnAlone<T>(
  * Why a provider runtime turned a turn away at the hand-over, as its run's
  * `error` with code HAND_OVER_FAILED says: a turn the scheduled-messages
  * dispatcher sent on the held process's own settings
- * (`acceptProcessSettings`), which that process did not take after all. The
- * runtime fails such a turn rather than start a process of its own, which
- * would stop the session's scheduled work. `reason` is the runtime's word
- * for it (Claude's: `stale-plan`, `lookup`), `content` its English text;
- * null when the error left either out.
+ * (`acceptProcessSettings`), which that process did not take after all, or
+ * a turn sent on the word that a process of its own keeps the work
+ * (`keepBackgroundWork`), which the CLI's own turn started more of while it
+ * waited. The runtime fails such a turn rather than start a process of its
+ * own, which would stop the session's work. `reason` is the runtime's word
+ * for it (Claude's: `stale-plan`, `lookup`, `work-started`), `content` its
+ * English text; null when the error left either out.
  */
 export type HandOverFailure = { reason: string | null; content: string | null };
 
@@ -567,6 +589,31 @@ function readHandOverFailure(run: ChatRun): HandOverFailure | null {
   };
 }
 
+/** How a turn `runDetachedChatTurn` ran ended. */
+export type DetachedTurnOutcome = Extract<RunEndOutcome, 'done' | 'failed' | 'aborted'>;
+
+/**
+ * How a run's turn ended, read off its terminal `complete` as the run's end
+ * is (see `RunEndOutcome`). `failed` includes a CLI that could not start,
+ * which a runtime reports so rather than by throwing.
+ */
+function readTurnOutcome(run: ChatRun): DetachedTurnOutcome {
+  for (let index = run.events.length - 1; index >= 0; index -= 1) {
+    const event = run.events[index];
+    if (event.kind !== 'complete') {
+      continue;
+    }
+    if (event.aborted === true) {
+      return 'aborted';
+    }
+    if (typeof event.success === 'boolean') {
+      return event.success ? 'done' : 'failed';
+    }
+    return typeof event.exitCode !== 'number' || event.exitCode === 0 ? 'done' : 'failed';
+  }
+  return 'failed';
+}
+
 /**
  * Registers the run and hands the turn to the provider runtime. Resolves once
  * the runtime's run settles, with whether the run started, how it failed,
@@ -575,8 +622,8 @@ function readHandOverFailure(run: ChatRun): HandOverFailure | null {
  * `extraRuntimeOptions` go over the client's options (see
  * `buildTurnRunOptions`): how an edited message asks the provider to resume
  * partway instead of continuing from the tip, or the
- * `acceptProcessSettings` of a turn `runDetachedChatTurn` runs; a normal
- * send passes nothing.
+ * `acceptProcessSettings` and `ownSettings` of a turn `runDetachedChatTurn`
+ * runs; a normal send passes nothing.
  */
 async function dispatchRun(
   ws: WebSocket | null,
@@ -894,8 +941,12 @@ function namesScheduledWork(taskId: string): boolean {
  * started when it would need a process of its own while that process is held
  * for background work, which the new process would stop. A session whose
  * process has gone starts one, which resumes the conversation, so the model
- * can cancel a CronCreate job the CLI brings back from the transcript. Once
- * the turn is over, the session's scheduled work tells whether the model did.
+ * can cancel a CronCreate job the CLI brings back from the transcript; so
+ * does a stop of paused work (the loops of the session no process runs,
+ * `describePausedScheduledWork`), which the runtime then names, run with the
+ * settings the session's last hold ran with, as a resume is. Once the
+ * turn is over, the session's scheduled work tells whether the model did: a
+ * self-paced loop's wake-up is never there, as no process brings it back.
  */
 async function stopScheduledWork(
   ws: WebSocket,
@@ -934,8 +985,15 @@ async function stopScheduledWork(
   }
 
   let stop: ScheduledWorkStopResult;
+  let paused: ScheduledWorkSummary[] = [];
   try {
-    stop = await dependencies.runtime.stopScheduledWork(provider, sessionId, taskId, { all });
+    // With no process of this server holding the session, the stop names
+    // its paused work (the loops no process runs).
+    paused = (await dependencies.runtime.describePausedScheduledWork?.(sessionId))?.items ?? [];
+    stop = await dependencies.runtime.stopScheduledWork(provider, sessionId, taskId, {
+      all,
+      ...(paused.length > 0 ? { paused } : {}),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed to stop scheduled work`, { sessionId, taskId, error: message });
@@ -944,8 +1002,19 @@ async function stopScheduledWork(
   }
   if (stop.status !== 'turn') {
     reply(stop.status);
+    if (stop.status === 'stopped') {
+      dependencies.onScheduledWorkReleased?.(sessionId);
+    }
     return;
   }
+
+  // A stop of paused work starts a process that brings back every job the
+  // transcript holds, those it leaves alone included, and is held for them:
+  // it runs with what the session's last hold ran with, as a resume does
+  // (readResumeOptions), the stop's own options over those.
+  const turnOptions = paused.length > 0
+    ? { ...(readResumeOptions(scheduleHoldsDb.get(sessionId)) ?? {}), ...stop.options }
+    : stop.options;
 
   let plan: ProviderHandOverPlan;
   try {
@@ -954,7 +1023,7 @@ async function stopScheduledWork(
       sessionId,
       // The options the turn's run gets (see dispatchRun), so the plan judges
       // the very turn that would run.
-      buildTurnRunOptions({ sessionId, projectPath: session.project_path, clientOptions: stop.options }),
+      buildTurnRunOptions({ sessionId, projectPath: session.project_path, clientOptions: turnOptions }),
       { inheritUnset: true },
     );
   } catch (error) {
@@ -977,7 +1046,7 @@ async function stopScheduledWork(
       sessionId,
       userId,
       content: stop.content,
-      options: stop.options,
+      options: turnOptions,
       onStarted: () => {
         // The asking socket follows the turn from its first frame. A turn
         // handed to the held process brings along whoever watched it (see
@@ -996,6 +1065,9 @@ async function stopScheduledWork(
           console.error('[Chat] Could not list scheduled work after the turn that cancels it', { sessionId, error: message });
         }
         reply('finished', stillHeld);
+        if (!stillHeld) {
+          dependencies.onScheduledWorkReleased?.(sessionId);
+        }
       },
     },
     dependencies,
@@ -1063,6 +1135,120 @@ async function handleChatStopTask(
       `Session "${sessionId}" has no running background task "${taskId}".`,
       sessionId,
     );
+  }
+}
+
+/**
+ * The gateway's answers to a `chat.resume-loops` (see handleChatResumeLoops),
+ * sent to the asking socket alone, without `seq`, in the envelope of
+ * `stop_task_status`. `clientRequestId` is the request's own, left out when
+ * it had none.
+ *
+ * - `started`: the turn that resumes the loops has started; `finished`
+ *   follows once it is over;
+ * - `busy`: a turn is under way in the session, or the resuming turn could
+ *   not start: the resume can be asked again once it is over;
+ * - `held_elsewhere`: a Claude CLI outside this server holds the session,
+ *   and runs its loops;
+ * - `not_found`: the session has no paused loop, or a process of this
+ *   server holds it;
+ * - `failed`: the paused loops could not be read.
+ */
+type ResumeLoopsStatusFrame = {
+  kind: Extract<GatewayEventKind, 'resume_loops_status'>;
+  sessionId: string;
+  status: 'started' | 'finished' | 'busy' | 'held_elsewhere' | 'not_found' | 'failed';
+  clientRequestId?: string;
+  timestamp: string;
+};
+
+/**
+ * Handles `chat.resume-loops`: resumes the session's paused loops, those no
+ * process runs (see `PausedScheduledWork`), in a turn that runs as
+ * `chat.stop-task` runs its cancelling turn, with no client attached and the
+ * asking socket following it once it starts. The turn's message and run
+ * options come from `planLoopsResume`: the settings the session's last hold
+ * ran with, else the settings among the request's `options` (the
+ * composer's). Its process brings the cron jobs back from the transcript and
+ * is held for them; the model sets the self-paced loop's wake-up again. The
+ * resumed process records its own hold in place of the last one's; that
+ * record is removed once the turn has finished if nothing replaced it, and
+ * kept when the turn failed (its CLI could not start, say) or was aborted,
+ * for the next resume. Each step is answered with `resume_loops_status` (see
+ * `ResumeLoopsStatusFrame`).
+ */
+async function handleChatResumeLoops(
+  ws: WebSocket,
+  userId: string | number | null,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): Promise<void> {
+  const sessionId = readRequiredSessionId(data);
+  if (!sessionId) {
+    sendProtocolError(ws, 'SESSION_ID_REQUIRED', 'chat.resume-loops requires a sessionId.');
+    return;
+  }
+  const clientRequestId = readClientRequestId(data);
+  const reply = (status: ResumeLoopsStatusFrame['status']) => {
+    const frame: ResumeLoopsStatusFrame = {
+      kind: 'resume_loops_status',
+      sessionId,
+      status,
+      ...(clientRequestId ? { clientRequestId } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    sendJson(ws, frame);
+  };
+
+  const session = sessionsDb.getSessionById(sessionId);
+  const provider = session?.provider as LLMProvider | undefined;
+  if (!session || !provider || !dependencies.runtime.hasRuntime(provider)) {
+    reply('not_found');
+    return;
+  }
+  if (chatRunRegistry.isProcessing(sessionId)) {
+    reply('busy');
+    return;
+  }
+
+  let plan: LoopsResumePlan;
+  try {
+    plan = await planLoopsResume(sessionId, dependencies.runtime, data.options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Chat] Could not read the paused loops of a session', { sessionId, error: message });
+    reply('failed');
+    return;
+  }
+  if (plan.status !== 'turn') {
+    reply(plan.status === 'held_elsewhere' ? 'held_elsewhere' : 'not_found');
+    return;
+  }
+
+  const { content, options, itemIds } = plan;
+  const stored = scheduleHoldsDb.get(sessionId);
+  const result = await runDetachedChatTurn(
+    {
+      sessionId,
+      userId,
+      content,
+      options,
+      onStarted: () => {
+        console.log(`[Chat] Session ${sessionId}: resuming ${itemIds.length} paused loop(s): ${itemIds.join(', ')}`);
+        chatRunRegistry.attachConnection(sessionId, ws);
+        reply('started');
+      },
+      onTurnEnded: ({ outcome }) => {
+        if (stored && outcome === 'done') {
+          scheduleHoldsDb.removeForRun(sessionId, stored.runId);
+        }
+        reply('finished');
+      },
+    },
+    dependencies,
+  );
+  if (!result.started) {
+    reply('busy');
   }
 }
 
@@ -1400,9 +1586,11 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * `interruptActiveRun`, which the caller reports on the schedule.
  *
  * `options` are the server's own, never a client's: an
- * `acceptProcessSettings: true` among them reaches the run, which
- * `buildTurnRunOptions` drops from a `chat.send`. Only the scheduled-messages
- * dispatcher sets it, once its plan said the held process takes the turn.
+ * `acceptProcessSettings: true` or an `ownSettings` among them reaches the
+ * run, which `buildTurnRunOptions` drops from a `chat.send`. Only the
+ * scheduled-messages dispatcher sets them: the first once its plan said the
+ * held process takes the turn, the second for a turn that borrows the held
+ * process's settings (see `IProviderRuntime.run`).
  */
 export async function runDetachedChatTurn(
   input: {
@@ -1420,13 +1608,14 @@ export async function runDetachedChatTurn(
     interruptActiveRun?: boolean;
     /**
      * Called once the turn is over: its run's terminal `complete` has gone
-     * out, however the turn ended. Never called for a run that did not start,
-     * which the result reports. The scheduled-messages dispatcher holds the
-     * session until then: the run can stay open for hours after, holding its
-     * process for work the turn left going, and the session's next messages
-     * may go into that process meanwhile.
+     * out, however the turn ended (`outcome`, see readTurnOutcome). Never
+     * called for a run that did not start, which the result reports. The
+     * scheduled-messages dispatcher holds the session until then: the run can
+     * stay open for hours after, holding its process for work the turn left
+     * going, and the session's next messages may go into that process
+     * meanwhile.
      */
-    onTurnEnded?: () => void;
+    onTurnEnded?: (ended: { outcome: DetachedTurnOutcome }) => void;
     /**
      * Called once the turn's run has started: the session is reserved for
      * it, and the provider runtime is about to get the turn. Never called
@@ -1437,9 +1626,10 @@ export async function runDetachedChatTurn(
     /**
      * Called before the result settles when the provider runtime turned the
      * turn away at the hand-over (see `HandOverFailure`), which only a turn
-     * whose options set `acceptProcessSettings: true` can be. The
-     * scheduled-messages dispatcher puts a queued message back in the queue
-     * then, and records why a due one failed.
+     * whose options set `acceptProcessSettings: true` or
+     * `keepBackgroundWork: true` can be. The scheduled-messages dispatcher
+     * puts a queued message back in the queue then, and records why a due
+     * one failed, or tries it again.
      */
     onHandOverFailed?: (failure: HandOverFailure) => void;
   },
@@ -1485,11 +1675,14 @@ export async function runDetachedChatTurn(
     session,
     { sessionId: input.sessionId, content: input.content, options: input.options ?? {} },
     dependencies,
-    input.options?.acceptProcessSettings === true ? { acceptProcessSettings: true } : {},
+    {
+      ...(input.options?.acceptProcessSettings === true ? { acceptProcessSettings: true } : {}),
+      ...(input.options?.ownSettings !== undefined ? { ownSettings: input.options.ownSettings } : {}),
+    },
     (run) => {
       void chatRunRegistry.whenHandedOver(run).then(() => settleOnHandOver({ started: true, error: null }));
       if (onTurnEnded) {
-        void chatRunRegistry.whenCompleted(run).then(() => onTurnEnded());
+        void chatRunRegistry.whenCompleted(run).then(() => onTurnEnded({ outcome: readTurnOutcome(run) }));
       }
       onStarted?.();
     },
@@ -1517,19 +1710,22 @@ export async function runDetachedChatTurn(
  * - `chat.stop-task`           { sessionId, taskId, allScheduled?, clientRequestId? } (a `cron:` or `wakeup:`
  *                              taskId names scheduled work; `allScheduled` stops all of the session's; its
  *                              `stop_task_status` answers carry the stop's `clientRequestId`)
+ * - `chat.resume-loops`        { sessionId, options?, clientRequestId? } (resumes the loops a restart left
+ *                              paused; answered with `resume_loops_status`)
  * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
  * a provider `NormalizedMessage` (with `seq`) or a gateway event
  * (`chat_subscribed`, `session_upserted`, `run_ended`, `loading_progress`,
- * `protocol_error`, `send_refused`, `stop_task_status`). `insert_status`
+ * `protocol_error`, `send_refused`, `stop_task_status`, `resume_loops_status`). `insert_status`
  * comes both ways: a runtime's go out through the run's writer with `seq`,
  * while the gateway answers a refused insert or a failed cancel to the
  * asking socket alone, without one. `send_refused` goes the same way, for a
  * `chat.send` with `keepBackgroundWork` that would have stopped the session's
  * background work, and so does `stop_task_status`, for a `chat.stop-task`
- * that names scheduled work.
+ * that names scheduled work, and `resume_loops_status`, for a
+ * `chat.resume-loops`.
  */
 export function handleChatConnection(
   ws: WebSocket,
@@ -1569,6 +1765,9 @@ export function handleChatConnection(
           return;
         case 'chat.stop-task':
           await handleChatStopTask(ws, userId, data, dependencies);
+          return;
+        case 'chat.resume-loops':
+          await handleChatResumeLoops(ws, userId, data, dependencies);
           return;
         case 'chat.subscribe':
           handleChatSubscribe(ws, data, dependencies);

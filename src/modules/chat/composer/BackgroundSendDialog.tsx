@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button, Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 import type { BackgroundSendChoice, BackgroundSendPrompt } from '@/shared/types';
-import { describeHandOverChanges } from '@/shared/utils';
+import { describeHandOverChanges, describeHandOverDetails } from '@/shared/utils';
 
 type BackgroundSendDialogProps = {
   prompt: BackgroundSendPrompt | null;
@@ -39,6 +39,9 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
   // The settings named; `lookup`, the server failing to prepare the turn for
   // the process at all, gets a sentence of its own.
   const changedSettings = describeHandOverChanges(changes ?? [], t);
+  // What exactly those settings are, when the server said: the mode the loop was started in, the
+  // tools no longer allowed. The process is the loop's only when loops alone hold it (no Queue).
+  const detailLines = describeHandOverDetails(prompt?.details, t, canQueue ? 'work' : 'loops');
   const lookupFailed = Boolean(changes?.includes('lookup'));
   // What keeps the message out of the work's process is read out with the description.
   const describedBy = changedSettings.count > 0 || lookupFailed ? `${reasonId} ${descriptionId}` : descriptionId;
@@ -77,6 +80,13 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
                   defaultValue: 'This message changes {{changes}}, which only a new process can apply. Change them back to send it without stopping the work.',
                 })}
               </p>
+            )}
+            {detailLines.length > 0 && (
+              <ul className="mt-1 list-disc space-y-0.5 ps-5 text-sm text-muted-foreground">
+                {detailLines.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
             )}
             {lookupFailed && (
               <p className="mt-3 text-sm text-foreground">

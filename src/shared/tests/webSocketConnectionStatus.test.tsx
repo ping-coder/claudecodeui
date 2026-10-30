@@ -204,3 +204,29 @@ test('signing out while connected stops reporting a live connection', () => {
   assert.equal(lastStatus(), 'connecting');
   assert.equal(isConnected, false, 'isConnected no longer reports the closed socket as live');
 });
+
+test('reconnectNow connects a dropped socket at once instead of after its retry delay, and leaves a live or handshaking one alone', () => {
+  const provided: { reconnectNow: () => void } = { reconnectNow: () => undefined };
+  function CaptureReconnect() {
+    const { reconnectNow } = useWebSocket();
+    useEffect(() => {
+      provided.reconnectNow = reconnectNow;
+    });
+    return null;
+  }
+  render(<WebSocketProvider><RecordStatus /><CaptureReconnect /></WebSocketProvider>);
+
+  act(() => provided.reconnectNow());
+  assert.equal(FakeWebSocket.instances.length, 1, 'the first handshake is still on its way');
+  act(() => socket(0).serverOpens());
+  act(() => provided.reconnectNow());
+  assert.equal(FakeWebSocket.instances.length, 1, 'an open socket stays');
+
+  act(() => socket(0).serverDrops());
+  act(() => provided.reconnectNow());
+  assert.equal(FakeWebSocket.instances.length, 2, 'connects at once');
+  act(() => { vi.advanceTimersByTime(3000); });
+  assert.equal(FakeWebSocket.instances.length, 2, 'the retry it replaced does not fire as well');
+  act(() => socket(1).serverOpens());
+  assert.equal(lastStatus(), 'connected');
+});

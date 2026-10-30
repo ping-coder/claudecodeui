@@ -10,7 +10,7 @@ import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { clearQueuedMessage, readDraftText, readQueuedMessage, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
 import type * as ChatDrafts from '@/shared/chatDrafts';
 import { useSessionProtection } from '@/shared/hooks/useSessionProtection';
-import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, ScheduledWorkSummary, ServerEvent, SessionActivityMap } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, PermissionMode, Project, ProjectSession, ScheduledWorkSummary, ServerEvent, SessionActivityMap } from '@/shared/types';
 
 /**
  * A session whose turn has ended with background work still running keeps
@@ -65,7 +65,7 @@ const backgroundOnly: SessionActivityMap = new Map([[
 const uploads = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/assets/files'));
 
 /** What the server answers about running the next turn in the held process; null answers 404, as an older server does. */
-let handOverPlan: { heldWork: boolean; canHandOver: boolean; changes: string[] } | null = null;
+let handOverPlan: { heldWork: boolean; canHandOver: boolean; changes: string[]; details?: unknown; replaceKeepsWork?: boolean } | null = null;
 /** Held open by a test to keep the hand-over plan request in flight, as a slow connection would. */
 let planGate: Promise<void> | null = null;
 /** Held open by a test to keep a file upload in flight, as a slow connection would. */
@@ -356,6 +356,28 @@ describe('a provider whose runtime runs the message beside the work', () => {
     assert.equal(appendQueuedMessage.mock.calls.length, 1);
     assert.equal(appendQueuedMessage.mock.calls[0]?.[1]?.content, 'in bypass mode');
     assert.equal(view.result.current.input, '');
+  });
+
+  test('sends with keepBackgroundWork, without asking, when a process of its own keeps the work; otherwise names what exactly keeps it out', async () => {
+    handOverPlan = { heldWork: true, canHandOver: false, changes: ['tools'], replaceKeepsWork: true };
+    const { view, sends } = render(backgroundOnly, takesInserts);
+    await act(async () => { view.result.current.setInput('with stricter tools'); });
+    await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+    assert.equal(view.result.current.backgroundSendPrompt, null, 'cron jobs alone hold the process, and its own brings them back');
+    assert.deepEqual(sends().map((frame) => [frame.content, frame.options?.keepBackgroundWork]), [['with stricter tools', true]]);
+
+    const details = { tools: { notAllowed: ['WebFetch'], alsoDenied: [] }, permissionMode: { process: 'plan', message: 'bypassPermissions', reason: 'bypass_not_allowed' } };
+    handOverPlan = { heldWork: true, canHandOver: false, changes: ['tools', 'permissionMode'], details };
+    await act(async () => { view.result.current.setInput('in bypass mode'); });
+    const pending = startSubmit(view);
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+    // Read afresh: the assertion above narrowed the prompt to null.
+    const prompt = view.result.current.backgroundSendPrompt as BackgroundSendPrompt | null;
+    assert.deepEqual(prompt?.details, details);
+    await act(async () => {
+      view.result.current.resolveBackgroundSendPrompt('cancel');
+      await pending;
+    });
   });
 
   test('sends with keepBackgroundWork, without asking, when the server cannot say or holds no work', async () => {

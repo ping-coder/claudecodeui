@@ -549,8 +549,10 @@
     "handOverFailed": {
       "stalePlan": "Not sent: the process that runs this session's loops and reminders no longer takes this message as planned, and a new process would stop them.",
       "lookup": "Not sent: the message could not be handed to the process that runs this session's loops and reminders.",
-      "other": "Not sent: the message could not go into the process that runs this session's loops and reminders, and a new process would stop them."
-    }
+      "other": "Not sent: the message could not go into the process that runs this session's loops and reminders, and a new process would stop them.",
+      "workStarted": "Not sent: the loop's process started work in the meantime, and a new process would stop it."
+    },
+    "permissionModeNotSwitched": "Claude Code refused to skip permissions: this turn runs in {{mode}} mode, and asks before it uses tools."
   },
   "runProgress": {
     "agents_one": "{{done}}/{{count}} agent",
@@ -639,7 +641,19 @@
       "sameReminders_other": "{{count}} other reminders in this session have the same prompt."
     },
     "stopping": "Stopping…",
-    "stopFailed": "It was not cancelled. Try again, or ask Claude in the message box to cancel it."
+    "stopFailed": "It was not cancelled. Try again, or ask Claude in the message box to cancel it.",
+    "stopNote_one": "Asked Claude to stop {{count}} loop",
+    "stopNote_other": "Asked Claude to stop {{count}} loops",
+    "stopNoteWakeup": "Asked Claude to stop the dynamic loop",
+    "resumeNote_one": "Resumed {{count}} loop",
+    "resumeNote_other": "Resumed {{count}} loops",
+    "paused": "Paused (no process running)",
+    "resume": "Resume",
+    "resumeTitle": "Resume the paused loops: CloudCLI runs one turn to start them again",
+    "resuming": "Resuming…",
+    "resumeAfterTurn": "Resume them after this turn ends",
+    "resumeFailed": "The loops were not resumed. Try again.",
+    "resumeHeldElsewhere": "Another Claude CLI holds this session and runs its loops."
   },
   "projectSelection": {
     "startChatWithProvider": "Select a project to start chatting with {{provider}}"
@@ -716,7 +730,52 @@
     "failureReason": {
       "stalePlan": "the process that runs this session's loops and reminders no longer takes this message as planned, and a new process would stop them.",
       "lookup": "the message could not be handed to the process that runs this session's loops and reminders."
-    }
+    },
+    "dueWaiting": "Due {{when}}, still waiting"
+  },
+  "dispatchWait": {
+    "heldSettings": "Waiting for the loop to end (by {{time}}): this message changes {{changes}}",
+    "heldSettingsUntimed": "Waiting for the loop to end: this message changes {{changes}}",
+    "heldLoop": "Waiting for the loop to end (by {{time}})",
+    "heldLoopUntimed": "Waiting for the loop to end",
+    "heldWork": "Waiting for the background work to finish",
+    "heldSettingsWork": "Waiting for the background work to finish: this message changes {{changes}}",
+    "retry": "The loop's process turned this message away; it is tried again at {{time}}",
+    "retryUntimed": "The loop's process turned this message away; it is tried again soon",
+    "behind": "Waiting for an earlier scheduled message to go",
+    "detail": {
+      "bypass": "The loop was started without skipping permissions, and cannot skip them now",
+      "bypassPlan": "The loop was started in plan mode, without skipping permissions",
+      "cannotSwitch": "The loop's process cannot switch from {{mode}} mode",
+      "notAllowed": "Your tool permissions no longer allow {{tools}}",
+      "alsoDenied": "Your tool permissions now deny {{tools}}",
+      "model": "The loop's process cannot switch to {{model}}",
+      "bypassWork": "The background process was started without skipping permissions, and cannot skip them now",
+      "bypassPlanWork": "The background process was started in plan mode, without skipping permissions",
+      "cannotSwitchWork": "The background process cannot switch from {{mode}} mode",
+      "modelWork": "The background process cannot switch to {{model}}"
+    },
+    "action": {
+      "stopAndSend": "Stop the loop and send",
+      "useProcessSettings": "Send with the loop's settings",
+      "useProcessSettingsWork": "Send with the background process's settings",
+      "keepWaiting": "Keep waiting",
+      "cancel": "Cancel"
+    },
+    "consequence": {
+      "plan": "With the loop's settings it runs in plan mode, like the loop: Claude only makes a plan.",
+      "tools": "With the loop's settings it uses the loop's tool permissions, which allow {{tools}}.",
+      "settings": "With the loop's settings it runs on the loop's model, effort and permissions.",
+      "planWork": "With the background process's settings it runs in plan mode: Claude only makes a plan.",
+      "toolsWork": "With the background process's settings it uses that process's tool permissions, which allow {{tools}}.",
+      "settingsWork": "With the background process's settings it runs on that process's model, effort and permissions."
+    },
+    "showActions": "Options",
+    "stopping": "Stopping the loop…",
+    "using": "Sending with the loop's settings…",
+    "usingWork": "Sending with the background process's settings…",
+    "stopFailed": "The loop was not stopped. Try again, or stop it from the task strip.",
+    "useFailed": "That did not work. The message may have gone already."
   },
   "misc": {
     "copyToClipboard": "Copy to clipboard",

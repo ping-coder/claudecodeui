@@ -10,6 +10,8 @@ type CodeEditorMediaPreviewProps = {
   // DB projectId used to build the raw-content URL; falls back to projectPath
   // for older callers, mirroring useCodeEditorDocument.
   projectId?: string;
+  /** The workspace's refresh token: when it moves, the file's bytes are fetched again. */
+  reloadToken?: number;
   isSidebar: boolean;
   isFullscreen: boolean;
   onClose: () => void;
@@ -39,6 +41,7 @@ export default function CodeEditorMediaPreview({
   file,
   kind,
   projectId,
+  reloadToken,
   isSidebar,
   isFullscreen,
   onClose,
@@ -136,7 +139,7 @@ export default function CodeEditorMediaPreview({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [file.path, file.name, projectId, kind, sourceKey, labels.error]);
+  }, [file.path, file.name, projectId, kind, sourceKey, labels.error, reloadToken]);
 
   // Only expose the blob once it matches the file currently being shown, so a
   // stale URL from the previous file is never rendered during a switch.

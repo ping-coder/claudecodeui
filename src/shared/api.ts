@@ -281,6 +281,11 @@ export const api = {
   // /loop, a reminder) and each session's `scheduled`; a server without it
   // ignores the parameter.
   runningSessions: () => get('/api/providers/sessions/running?scheduled=1'),
+  // The session's loops that no process runs, such as a restart of the server
+  // leaves them, each `paused`: { data: { scheduled } }. Empty while a process
+  // holds the session.
+  pausedScheduledWork: (sessionId: string) =>
+    get(`/api/providers/sessions/${encodeURIComponent(sessionId)}/paused-scheduled-work`),
   // Runs that ended in the last 10 minutes (at most 200, oldest first), as the
   // `run_ended` frames the server broadcast: { data: { ends } }. run-notifications
   // reads it on mount as a baseline and after a reconnect to catch up on missed ends.
@@ -308,6 +313,14 @@ export const api = {
     create: (body: { sessionId: string; content: string; scheduledFor: string; options?: unknown }) =>
       post('/api/scheduled-messages', body),
     cancel: (id: string) => del(`/api/scheduled-messages/${encodeURIComponent(id)}`),
+    // Why the session's queued and scheduled messages wait: { data: { waits } }.
+    waiting: (sessionId: string, options: ApiRequestOptions = {}) =>
+      get(`/api/scheduled-messages/waiting${query({ sessionId })}`, options),
+    // Send a waiting message with the settings of the process held for the session's loops.
+    useProcessSettings: (id: string) =>
+      patch(`/api/scheduled-messages/${encodeURIComponent(id)}`, { useProcessSettings: true }),
+    useProcessSettingsForQueued: (sessionId: string) =>
+      post('/api/scheduled-messages/queued/use-process-settings', { sessionId }),
   },
 
   // Workspace file tree
