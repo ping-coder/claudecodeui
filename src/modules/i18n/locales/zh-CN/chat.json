@@ -414,12 +414,16 @@
       "toolUses_other": "{{count}} 次工具调用",
       "stopped": "后台工作已停止：这条消息改了{{changes}}，只有新的 Claude 进程才能生效。",
       "stoppedLookupFailed": "后台工作已停止：无法把这条消息交给后台工作所在的进程。",
+      "stoppedMounts": "后台工作已停止：项目挂载的文件夹在进程启动后变了，只有新的 Claude 进程才能用上。",
+      "stoppedMountsAndSettings": "后台工作已停止：项目挂载的文件夹变了，这条消息还改了{{changes}}，只有新的 Claude 进程才能生效。",
       "prompt": {
         "title": "这个会话还有后台工作在运行",
         "description": "新消息会开始新的一轮，并停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
         "descriptionNewProcess": "仍然发送会启动新进程，停掉这些工作，它们还没回报的结果会丢失。排队可以等工作结束后再发送。",
         "descriptionScheduled": "这条消息要在新进程里运行，这些循环会停掉。",
         "changes_other": "这条消息改了{{changes}}，只有新进程才能生效。改回原来的设置再发送，后台工作就不会停。",
+        "mountsChanged": "项目挂载的文件夹在这个进程启动后变了，只有新进程才能用上。",
+        "changesToo": "这条消息还改了{{changes}}，也只有新进程才能生效。",
         "changeSeparator": "、",
         "changeLastSeparator": "和",
         "change": {
@@ -722,7 +726,9 @@
       "bypassWork": "后台进程启动时没有跳过权限，现在也跳不了",
       "bypassPlanWork": "后台进程是在 plan 模式下启动的，没有跳过权限",
       "cannotSwitchWork": "后台进程切换不了 {{mode}} 模式",
-      "modelWork": "后台进程切换不到 {{model}}"
+      "modelWork": "后台进程切换不到 {{model}}",
+      "mounts": "循环的进程启动后，项目挂载的文件夹变了",
+      "mountsWork": "后台进程启动后，项目挂载的文件夹变了"
     },
     "action": {
       "stopAndSend": "停掉循环再发",

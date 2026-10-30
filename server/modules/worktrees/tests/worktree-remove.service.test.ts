@@ -22,6 +22,7 @@ function createFakeRunner(options: {
   dirty?: boolean;
   branchDeleteFails?: boolean;
   statusFails?: boolean;
+  removeFails?: boolean;
 } = {}) {
   const calls: RecordedCall[] = [];
   const runner = async (args: string[], cwd: string): Promise<GitCommandResult> => {
@@ -42,6 +43,11 @@ function createFakeRunner(options: {
       throw new AppError('branch delete failed', { code: 'GIT_COMMAND_FAILED' });
     }
 
+    if (args[0] === 'worktree' && args[1] === 'remove' && options.removeFails) {
+      // What git says for a locked worktree, `remove --force` included.
+      throw new AppError('fatal: cannot remove a locked working tree, lock reason: busy', { code: 'GIT_COMMAND_FAILED' });
+    }
+
     return { stdout: '', stderr: '' };
   };
 
@@ -52,11 +58,18 @@ function createDependencies(
   runner: ReturnType<typeof createFakeRunner>['runner'],
   linkedProject: ProjectRepositoryRow | null = null,
   archiveError: Error | null = null,
+  mountOptions: { calls?: RecordedCall[]; detachError?: Error } = {},
 ) {
   const archivedProjectIds: string[] = [];
+  // Each worktree whose mount links were taken out, and whether git had already been asked to remove it then.
+  const detachedMounts: Array<{ worktreePath: string; afterGitRemove: boolean }> = [];
+  // Each time the links taken out were put back, and how many git calls had been made by then.
+  const reattachedMounts: Array<{ worktreePath: string; gitCallsBefore: number }> = [];
 
   return {
     archivedProjectIds,
+    detachedMounts,
+    reattachedMounts,
     dependencies: {
       runGit: runner,
       projects: {
@@ -66,6 +79,25 @@ function createDependencies(
             throw archiveError;
           }
           archivedProjectIds.push(projectId);
+        },
+      },
+      mounts: {
+        detachMountLinks: async (worktreePath: string) => {
+          detachedMounts.push({
+            worktreePath: worktreePath.replace(/\\/g, '/'),
+            afterGitRemove: (mountOptions.calls ?? []).some((call) => call.args[0] === 'worktree' && call.args[1] === 'remove'),
+          });
+          if (mountOptions.detachError) {
+            throw mountOptions.detachError;
+          }
+          return {
+            reattach: async () => {
+              reattachedMounts.push({
+                worktreePath: worktreePath.replace(/\\/g, '/'),
+                gitCallsBefore: (mountOptions.calls ?? []).length,
+              });
+            },
+          };
         },
       },
     },
@@ -224,4 +256,95 @@ test('removeWorktree never removes the main worktree', async () => {
       && error.code === 'WORKTREE_MAIN_NOT_REMOVABLE'
       && error.statusCode === 400,
   );
+});
+
+test('removeWorktree takes the worktree\'s mount links out before git deletes it', async () => {
+  for (const force of [false, true]) {
+    const { calls, runner } = createFakeRunner();
+    const { dependencies, detachedMounts } = createDependencies(runner, null, null, { calls });
+
+    await removeWorktree({
+      projectPath: '/home/user/repo',
+      worktreePath: '/home/user/repo-worktrees/feature-login',
+      force,
+    }, dependencies);
+
+    assert.deepEqual(detachedMounts, [
+      { worktreePath: '/home/user/repo-worktrees/feature-login', afterGitRemove: false },
+    ], `force ${force}`);
+    assert.equal(calls.some((call) => call.args[0] === 'worktree' && call.args[1] === 'remove'), true);
+  }
+});
+
+test('removeWorktree leaves the worktree alone when a mount link cannot be taken out', async () => {
+  const { calls, runner } = createFakeRunner();
+  const linkedProject: ProjectRepositoryRow = {
+    project_id: 'project-1',
+    project_path: '/home/user/repo-worktrees/feature-login',
+    custom_project_name: 'feature/login',
+    isStarred: 0,
+    isArchived: 0,
+  };
+  const detachError = new AppError('Could not remove the link mounts/data', { code: 'MOUNT_LINK_FAILED', statusCode: 500 });
+  const { archivedProjectIds, dependencies } = createDependencies(runner, linkedProject, null, { calls, detachError });
+
+  await assert.rejects(
+    removeWorktree({
+      projectPath: '/home/user/repo',
+      worktreePath: linkedProject.project_path,
+      deleteBranch: true,
+    }, dependencies),
+    (error: unknown) => error instanceof AppError && error.code === 'MOUNT_LINK_FAILED',
+  );
+
+  assert.equal(calls.some((call) => call.args[0] === 'worktree' && call.args[1] === 'remove'), false);
+  assert.equal(calls.some((call) => call.args[0] === 'branch'), false);
+  assert.deepEqual(archivedProjectIds, []);
+});
+
+test('removeWorktree puts the mount links back when git refuses to remove the worktree', async () => {
+  for (const force of [false, true]) {
+    const { calls, runner } = createFakeRunner({ removeFails: true });
+    const linkedProject: ProjectRepositoryRow = {
+      project_id: 'project-1',
+      project_path: '/home/user/repo-worktrees/feature-login',
+      custom_project_name: 'feature/login',
+      isStarred: 0,
+      isArchived: 0,
+    };
+    const { archivedProjectIds, dependencies, detachedMounts, reattachedMounts } = createDependencies(
+      runner,
+      linkedProject,
+      null,
+      { calls },
+    );
+
+    await assert.rejects(
+      removeWorktree({
+        projectPath: '/home/user/repo',
+        worktreePath: linkedProject.project_path,
+        deleteBranch: true,
+        force,
+      }, dependencies),
+      (error: unknown) => error instanceof AppError && /locked working tree/.test(error.message),
+      `force ${force}`,
+    );
+
+    assert.equal(detachedMounts.length, 1, `force ${force}`);
+    const removeCallCount = calls.findIndex((call) => call.args[0] === 'worktree' && call.args[1] === 'remove') + 1;
+    assert.deepEqual(reattachedMounts, [
+      { worktreePath: '/home/user/repo-worktrees/feature-login', gitCallsBefore: removeCallCount },
+    ], `force ${force}: the links are back right after git refused`);
+    assert.equal(calls.some((call) => call.args[0] === 'branch'), false);
+    assert.deepEqual(archivedProjectIds, []);
+  }
+
+  // A removal git carries out leaves the links out.
+  const { runner } = createFakeRunner();
+  const { dependencies, reattachedMounts } = createDependencies(runner);
+  await removeWorktree({
+    projectPath: '/home/user/repo',
+    worktreePath: '/home/user/repo-worktrees/feature-login',
+  }, dependencies);
+  assert.deepEqual(reattachedMounts, []);
 });

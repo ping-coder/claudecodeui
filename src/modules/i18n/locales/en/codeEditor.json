@@ -53,5 +53,10 @@
     "indicator": "Unsaved changes"
   },
   "resizeFileTree": "Resize file tree",
-  "resizeEditor": "Drag to resize"
+  "resizeEditor": "Drag to resize",
+  "tooLarge": {
+    "title": "File too large",
+    "message": "\"{{fileName}}\" is {{size}}; the editor opens files up to {{limit}}. Download it or open it in a terminal instead.",
+    "messageNoSize": "\"{{fileName}}\" is too large to open in the editor."
+  }
 }

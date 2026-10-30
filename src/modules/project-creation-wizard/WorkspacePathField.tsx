@@ -2,11 +2,19 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FolderOpen } from 'lucide-react';
 
-import { Button, Input } from '@/shared/ui';
-import { browseFilesystemFolders } from '@/modules/project-creation-wizard/utils/workspaceApi';
-import { getSuggestionRootPath } from '@/modules/project-creation-wizard/utils/pathUtils';
-import type { FolderSuggestion } from '@/shared/types';
-import FolderBrowserModal from '@/modules/project-creation-wizard/FolderBrowserModal';
+import { Button, FolderBrowserModal, Input } from '@/shared/ui';
+import { browseFilesystemFolders, createFolderInFilesystem } from '@/modules/project-creation-wizard/utils/workspaceApi';
+import { getSuggestionRootPath, joinFolderPath } from '@/modules/project-creation-wizard/utils/pathUtils';
+import type { FolderBrowseResult, FolderSuggestion } from '@/shared/types';
+
+// The folder browser lists folders under the workspace rules, starting from the home folder.
+const browseWorkspaceFolders = async (folderPath: string | null): Promise<FolderBrowseResult> => {
+  const result = await browseFilesystemFolders(folderPath ?? '~');
+  return { path: result.path, folders: result.suggestions };
+};
+
+const createWorkspaceFolder = (parentPath: string, name: string) =>
+  createFolderInFilesystem(joinFolderPath(parentPath, name));
 
 type WorkspacePathFieldProps = {
   value: string;
@@ -128,6 +136,8 @@ export default function WorkspacePathField({
         autoAdvanceOnSelect={false}
         onClose={() => setShowFolderBrowser(false)}
         onFolderSelected={handleFolderSelected}
+        browse={browseWorkspaceFolders}
+        createFolder={createWorkspaceFolder}
       />
     </>
   );

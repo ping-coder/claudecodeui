@@ -247,6 +247,28 @@ export const api = {
     post('/api/projects/migrate-legacy-stars', { projectIds }),
   toggleProjectStar: (projectId: string) =>
     post(`/api/projects/${encodeURIComponent(projectId)}/toggle-star`),
+  // Folders outside a project linked into it at mounts/<name>, for large files that never go into
+  // git. Every answer is the { success, data } envelope, read with readApiJson.
+  mounts: {
+    // { data: { mounts, adoptable } }: the registered mounts as they stand on disk, and the links
+    // already in mounts/ that nothing registers.
+    list: (projectId: string) => get(`/api/projects/${encodeURIComponent(projectId)}/mounts`),
+    create: (projectId: string, body: { name: string; targetPath: string }) =>
+      post(`/api/projects/${encodeURIComponent(projectId)}/mounts`, body),
+    // Registers a link already in mounts/: { data: { mount } }.
+    adopt: (projectId: string, name: string) =>
+      post(`/api/projects/${encodeURIComponent(projectId)}/mounts/adopt`, { name }),
+    // Removes the link, never the folder it points to: { data: { removed, linkRemoved } }.
+    remove: (projectId: string, mountId: string) =>
+      del(`/api/projects/${encodeURIComponent(projectId)}/mounts/${encodeURIComponent(mountId)}`),
+    // Recreates the link and the mounts/.gitignore sentinel: { data: { mount } }.
+    repair: (projectId: string, mountId: string) =>
+      post(`/api/projects/${encodeURIComponent(projectId)}/mounts/${encodeURIComponent(mountId)}/repair`),
+    // The subfolders a mount may point at, under the mount rules rather than the workspace's:
+    // { data: { path, parent, directories } }. Without a path it lists the home folder.
+    browse: (dirPath: string | null = null) =>
+      get(`/api/projects/mount-browse${query({ path: dirPath })}`),
+  },
   // A clone is two requests: the details (GitHub token included) go in this
   // POST body, and the returned `cloneId` is all the progress stream's URL
   // carries — URLs land in access logs, proxy logs and browser history.

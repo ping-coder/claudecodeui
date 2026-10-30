@@ -6,7 +6,7 @@ import { GitBranchIcon, PencilIcon } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, LLMProvider,DiffLine,Project } from '@/shared/types';
 import { useWorkspacePane } from '@/shared/context/WorkspacePaneContext';
-import { describeHandOverChanges, getPaneScopedDomId } from '@/shared/utils';
+import { describeHandOverChanges, getPaneScopedDomId, handOverMountsChanged } from '@/shared/utils';
 import { describeControlNote, describeTaskNotificationFallback, formatTimeOfDay, formatUsageLimitText, stripProposedPlanEnvelope } from '@/modules/chat/utils/chatFormatting';
 import { ToolRenderer, ToolErrorDisplay, SubagentPanel, WorkflowPanel, shouldHideToolResult } from '@/modules/chat/tools';
 import { LLMProviderLogo } from '@/shared/ui';
@@ -84,6 +84,17 @@ const describeBackgroundWorkStopped = (changes: string[], fallback: string, t: T
     });
   }
   const changedSettings = describeHandOverChanges(changes, t);
+  // The project's mounts changing is no change of the message: it is said as what it is.
+  if (handOverMountsChanged(changes)) {
+    return changedSettings.count > 0
+      ? t('claudeStatus.backgroundTask.stoppedMountsAndSettings', {
+          changes: changedSettings.text,
+          defaultValue: 'Background work stopped: the project\'s mounted folders changed and this message changes {{changes}}, which only a new Claude process can apply.',
+        })
+      : t('claudeStatus.backgroundTask.stoppedMounts', {
+          defaultValue: 'Background work stopped: the project\'s mounted folders changed after the process started, and only a new Claude process can pick them up.',
+        });
+  }
   return changedSettings.count > 0
     ? t('claudeStatus.backgroundTask.stopped', {
         changes: changedSettings.text,

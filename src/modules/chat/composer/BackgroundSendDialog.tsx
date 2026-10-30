@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button, Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 import type { BackgroundSendChoice, BackgroundSendPrompt } from '@/shared/types';
-import { describeHandOverChanges, describeHandOverDetails } from '@/shared/utils';
+import { describeHandOverChanges, describeHandOverDetails, handOverMountsChanged } from '@/shared/utils';
 
 type BackgroundSendDialogProps = {
   prompt: BackgroundSendPrompt | null;
@@ -16,8 +16,9 @@ type BackgroundSendDialogProps = {
  * would stop that work: the provider starts a new process for every turn, or
  * the message replaces an already-sent one, or (Claude, which runs a new turn
  * in the process the work runs in) the message needs a new process, which the
- * dialog names: a setting changed since that process started, from the
- * server's hand-over plan or its refusal of the send. The choices are to send
+ * dialog names: a setting changed since that process started, or the
+ * project's mounted folders did, from the server's hand-over plan or its
+ * refusal of the send. The choices are to send
  * anyway, queue the message until the work finishes, or cancel. When the
  * work is only scheduled work (loops, reminders), a queued message would wait
  * for it to end, days for a loop, so there is no Queue (the prompt's `queue`
@@ -39,12 +40,16 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
   // The settings named; `lookup`, the server failing to prepare the turn for
   // the process at all, gets a sentence of its own.
   const changedSettings = describeHandOverChanges(changes ?? [], t);
+  // The project's mounts changed since the process started: no setting of the message, so it is
+  // said on its own, and changing the message back would not help.
+  const mountsChanged = handOverMountsChanged(changes ?? []);
   // What exactly those settings are, when the server said: the mode the loop was started in, the
   // tools no longer allowed. The process is the loop's only when loops alone hold it (no Queue).
   const detailLines = describeHandOverDetails(prompt?.details, t, canQueue ? 'work' : 'loops');
   const lookupFailed = Boolean(changes?.includes('lookup'));
+  const hasReason = changedSettings.count > 0 || mountsChanged || lookupFailed;
   // What keeps the message out of the work's process is read out with the description.
-  const describedBy = changedSettings.count > 0 || lookupFailed ? `${reasonId} ${descriptionId}` : descriptionId;
+  const describedBy = hasReason ? `${reasonId} ${descriptionId}` : descriptionId;
 
   return (
     <Dialog
@@ -70,15 +75,27 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
           </ul>
         )}
 
-        {(changedSettings.count > 0 || lookupFailed) && (
+        {hasReason && (
           <div id={reasonId}>
+            {mountsChanged && (
+              <p className="mt-3 text-sm text-foreground">
+                {t('claudeStatus.backgroundTask.prompt.mountsChanged', {
+                  defaultValue: 'The project\'s mounted folders changed after this process started, and only a new process can pick them up.',
+                })}
+              </p>
+            )}
             {changedSettings.count > 0 && (
               <p className="mt-3 text-sm text-foreground">
-                {t('claudeStatus.backgroundTask.prompt.changes', {
-                  count: changedSettings.count,
-                  changes: changedSettings.text,
-                  defaultValue: 'This message changes {{changes}}, which only a new process can apply. Change them back to send it without stopping the work.',
-                })}
+                {mountsChanged
+                  ? t('claudeStatus.backgroundTask.prompt.changesToo', {
+                      changes: changedSettings.text,
+                      defaultValue: 'This message also changes {{changes}}, which only a new process can apply.',
+                    })
+                  : t('claudeStatus.backgroundTask.prompt.changes', {
+                      count: changedSettings.count,
+                      changes: changedSettings.text,
+                      defaultValue: 'This message changes {{changes}}, which only a new process can apply. Change them back to send it without stopping the work.',
+                    })}
               </p>
             )}
             {detailLines.length > 0 && (

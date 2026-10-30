@@ -516,6 +516,13 @@ export type ServerEvent = {
 /** Progress state of a single queue row, driving the indicator the Queue primitive renders. */
 export type QueueItemStatus = 'completed' | 'in_progress' | 'pending';
 
+/** One folder as the FolderBrowserModal primitive shows it: the path the endpoint resolved, its parent when the endpoint says (null at a root it may not leave; left out, the modal works it out from the path) and its subfolders. Each caller adapts its own browse endpoint to this shape. */
+export type FolderBrowseResult = {
+  path: string;
+  parent?: string | null;
+  folders: FolderSuggestion[];
+};
+
 // ---------------------------
 
 //----------------- AUTH ------------
@@ -1511,8 +1518,23 @@ export type FileTreeNode = {
   // listing was requested with `markIgnored`. Such a directory is never
   // walked, so it has no `children` and cannot be expanded.
   isIgnored?: boolean;
+  isSymlink?: boolean;
+  // Set on the root of a registered mount (`mounts/<name>`), listed as a directory.
+  mount?: FileTreeMountInfo;
+  // Set on every entry below a mount root: it lives in the folder outside the project.
+  inMount?: boolean;
+  // The server stopped listing this folder's children at the mounts' shared entry budget.
+  truncated?: boolean;
   children?: FileTreeNode[];
   [key: string]: unknown;
+};
+
+/** What the file tree listing says about a registered mount root: which mount it is, the folder it links to and how the link stands on disk. */
+export type FileTreeMountInfo = {
+  mountId: string;
+  name: string;
+  targetPath: string;
+  status: ProjectMountStatus;
 };
 
 /** One file as the command palette lists and searches it, collected from the project's listing or, for a project too large to list, returned by the server's file search; `isIgnored` files are found by searching but not listed before anything is typed. */
@@ -1538,6 +1560,30 @@ export type FileTreeImageSelection = {
 
 /** Whether a file tree entry is a file or a directory; use it instead of repeating the string union wherever `FileTreeNode`-shaped data is handled. */
 type FileTreeItemType = 'file' | 'directory';
+
+// ---------------------------
+
+//----------------- PROJECT MOUNTS ------------
+
+/** How a mount stands on disk, as the server reconciles it on every listing. Repair recreates the link and the mounts/.gitignore sentinel, so it fixes 'missing-link', 'link-mismatch' and 'not-ignored'; a target folder that is gone ('missing-target') or became a file ('not-directory') it cannot bring back. */
+export type ProjectMountStatus = 'ok' | 'missing-link' | 'link-mismatch' | 'missing-target' | 'not-directory' | 'not-ignored';
+
+/** One registered mount as GET /api/projects/:projectId/mounts lists it: a folder outside the project linked in at `linkPath` ('mounts/<name>'), with the target as registered, its realpath (null when it no longer resolves) and its status. Rendered by the file tree's mount dialog. */
+export type ProjectMount = {
+  mountId: string;
+  name: string;
+  linkPath: string;
+  targetPath: string;
+  realTargetPath: string | null;
+  status: ProjectMountStatus;
+  createdAt: string;
+};
+
+/** A link already in the project's mounts/ folder that no mount registers (made in a terminal, or left from before the project was re-added); the mount dialog offers to register it. */
+export type AdoptableProjectMount = {
+  name: string;
+  targetPath: string;
+};
 
 // ---------------------------
 

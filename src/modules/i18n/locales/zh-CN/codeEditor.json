@@ -53,5 +53,10 @@
     "indicator": "未保存的更改"
   },
   "resizeFileTree": "调整文件树宽度",
-  "resizeEditor": "拖动调整宽度"
+  "resizeEditor": "拖动调整宽度",
+  "tooLarge": {
+    "title": "文件太大",
+    "message": "文件 \"{{fileName}}\" 有 {{size}}，编辑器只能打开 {{limit}} 以内的文件。可以下载，或在终端里打开。",
+    "messageNoSize": "文件 \"{{fileName}}\" 太大，编辑器打不开。"
+  }
 }

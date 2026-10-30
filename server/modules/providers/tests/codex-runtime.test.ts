@@ -60,6 +60,59 @@ for (const resumed of [false, true]) {
   }
 }
 
+test('Codex gets the realpaths of the project\'s mounts as additional directories, and nothing extra without mounts', async (t) => {
+  const captured: Array<ThreadOptions | undefined> = [];
+  const thread = {
+    id: 'native-thread',
+    async runStreamed() {
+      return { events: (async function* () {
+        yield { type: 'thread.started', thread_id: 'native-thread' };
+      })() };
+    },
+  } as unknown as Thread;
+  t.mock.method(Codex.prototype, 'startThread', (options?: ThreadOptions) => {
+    captured.push(options);
+    return thread;
+  });
+  const asked: string[] = [];
+  const baseContext: ProviderRuntimeContext = {
+    resolveProviderSessionId: () => null,
+    resolveResumeModel: async () => 'test-model',
+    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
+    normalizeMessage: () => [],
+    isProviderInstalled: async () => true,
+  };
+  const withMounts = (mounts: Array<{ name: string; realTargetPath: string | null }>): ProviderRuntimeContext => ({
+    ...baseContext,
+    listProjectMountDirectories: async (projectPath) => {
+      asked.push(projectPath);
+      return mounts.map((mount) => ({ ...mount, mountId: `mount-${mount.name}`, linkPath: `mounts/${mount.name}` }));
+    },
+  });
+  const run = (options: AnyRecord, context: ProviderRuntimeContext) => codexRuntime.run('hey there', options, { isWebSocketWriter: true, send: () => {} }, context);
+
+  await run({ cwd: process.cwd(), projectPath: '/projects/app' }, withMounts([
+    { name: 'big', realTargetPath: '/data/big' },
+    { name: 'scans', realTargetPath: '/mnt/scans' },
+  ]));
+  assert.deepEqual(captured[0]?.additionalDirectories, ['/data/big', '/mnt/scans']);
+  assert.deepEqual(asked, ['/projects/app']);
+
+  await run({ cwd: process.cwd() }, withMounts([]));
+  await run({ cwd: process.cwd() }, baseContext);
+  await run({ cwd: process.cwd() }, { ...baseContext, listProjectMountDirectories: async () => { throw new Error('database is locked'); } });
+  assert.deepEqual(asked, ['/projects/app', process.cwd()], 'without a project path, by the working directory');
+  assert.equal(captured.length, 4);
+  assert.equal(captured.slice(1).every((options) => options !== undefined && !('additionalDirectories' in options)), true);
+
+  // A mount whose target did not answer in time is left out of the turn.
+  await run({ cwd: process.cwd(), projectPath: '/projects/app' }, withMounts([
+    { name: 'big', realTargetPath: '/data/big' },
+    { name: 'nas', realTargetPath: null },
+  ]));
+  assert.deepEqual(captured[4]?.additionalDirectories, ['/data/big']);
+});
+
 for (const command of ['', '  \n\t']) {
   test(`Codex supplies a prompt for an image-only turn (${JSON.stringify(command)})`, async (t) => {
     let capturedPrompt: unknown;

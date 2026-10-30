@@ -516,6 +516,8 @@
       "toolUses_other": "{{count}} tools",
       "stopped": "Background work stopped: this message changes {{changes}}, which only a new Claude process can apply.",
       "stoppedLookupFailed": "Background work stopped: the message could not be handed to the process the work ran in.",
+      "stoppedMounts": "Background work stopped: the project's mounted folders changed after the process started, and only a new Claude process can pick them up.",
+      "stoppedMountsAndSettings": "Background work stopped: the project's mounted folders changed and this message changes {{changes}}, which only a new Claude process can apply.",
       "prompt": {
         "title": "This session still has background work running",
         "description": "A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.",
@@ -523,6 +525,8 @@
         "descriptionScheduled": "This message has to run in a new process, which stops these loops.",
         "changes_one": "This message changes {{changes}}, which only a new process can apply. Change it back to send it without stopping the work.",
         "changes_other": "This message changes {{changes}}, which only a new process can apply. Change them back to send it without stopping the work.",
+        "mountsChanged": "The project's mounted folders changed after this process started, and only a new process can pick them up.",
+        "changesToo": "This message also changes {{changes}}, which only a new process can apply.",
         "changeSeparator": ", ",
         "changeLastSeparator": " and ",
         "change": {
@@ -753,7 +757,9 @@
       "bypassWork": "The background process was started without skipping permissions, and cannot skip them now",
       "bypassPlanWork": "The background process was started in plan mode, without skipping permissions",
       "cannotSwitchWork": "The background process cannot switch from {{mode}} mode",
-      "modelWork": "The background process cannot switch to {{model}}"
+      "modelWork": "The background process cannot switch to {{model}}",
+      "mounts": "The project's mounted folders changed after the loop's process started",
+      "mountsWork": "The project's mounted folders changed after the background process started"
     },
     "action": {
       "stopAndSend": "Stop the loop and send",

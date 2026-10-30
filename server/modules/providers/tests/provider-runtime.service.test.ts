@@ -116,6 +116,27 @@ test('dispatches runs and aborts through the runtime owned by providerRegistry',
   ]);
 });
 
+test('a run\'s context lists the project\'s mounts through the projects module lookup', async () => {
+  const mounts = [{ mountId: 'mount-big', name: 'big', linkPath: 'mounts/big', realTargetPath: '/data/big' }];
+  const asked: string[] = [];
+  const runtime = createRuntime({
+    async run(_command, _options, _writer, context) {
+      return context.listProjectMountDirectories?.('/projects/app');
+    },
+  });
+  const service = createProviderRuntimeService({
+    listProviders: () => [createProvider('codex', runtime)],
+    resolveProvider: () => createProvider('codex', runtime),
+    async listProjectMountDirectories(projectPath) {
+      asked.push(projectPath);
+      return mounts;
+    },
+  });
+
+  assert.deepEqual(await service.getRunner('codex')('hello', {}, { send() {} }), mounts);
+  assert.deepEqual(asked, ['/projects/app']);
+});
+
 test('routes permission decisions through provider-owned runtime capabilities', () => {
   const decisions: unknown[][] = [];
   const claudeRuntime = createRuntime({

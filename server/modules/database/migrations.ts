@@ -5,6 +5,7 @@ import {
   buildProviderModelsTableSql,
   LAST_SCANNED_AT_SQL,
   NOTIFICATION_CHANNEL_ENDPOINTS_TABLE_SCHEMA_SQL,
+  PROJECT_MOUNTS_TABLE_SCHEMA_SQL,
   PROJECTS_TABLE_SCHEMA_SQL,
   PROVIDER_MODELS_ALLOWED_PROVIDERS,
   PROVIDER_MODELS_TABLE_SCHEMA_SQL,
@@ -772,6 +773,8 @@ export const runMigrations = (db: Database) => {
     migrateLegacyUltracodeEffort(db);
     addForkedFromSessionIdColumn(db);
     ensureProjectsForSessionPaths(db);
+    // After the projects rebuild, so the foreign key finds project_id as its primary key.
+    db.exec(PROJECT_MOUNTS_TABLE_SCHEMA_SQL);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
     db.exec(SCHEDULE_HOLDS_TABLE_SCHEMA_SQL);
     addScheduleHoldLeftPausedColumn(db);

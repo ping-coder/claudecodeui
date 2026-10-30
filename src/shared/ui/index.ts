@@ -26,6 +26,7 @@ export { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 export { DarkModeToggle } from '@/shared/ui/DarkModeToggle';
 export { DeploymentEnvironmentBadge } from '@/shared/ui/DeploymentEnvironmentBadge';
 export { Dialog, DialogTrigger, DialogContent, DialogTitle } from '@/shared/ui/Dialog';
+export { FolderBrowserModal } from '@/shared/ui/FolderBrowserModal';
 export { Input } from '@/shared/ui/Input';
 export { LLMProviderLogo } from '@/shared/ui/LLMProviderLogo';
 export { PaneSideGlyph } from '@/shared/ui/PaneSideGlyph';

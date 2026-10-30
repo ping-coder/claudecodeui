@@ -152,14 +152,20 @@
       "upload": "Upload Files",
       "refresh": "Refresh",
       "menuLabel": "File context menu",
-      "loading": "Loading..."
+      "loading": "Loading...",
+      "unmount": "Unmount",
+      "repairMount": "Repair Mount",
+      "copyTargetPath": "Copy Target Path",
+      "downloadDisabledInMount": "Mounted folders can be very large, so they are not zipped in the browser"
     },
     "delete": {
       "folderWarning": "This folder and all its contents will be permanently deleted.",
       "fileWarning": "This file will be permanently deleted.",
       "confirm": "Delete",
       "titleFolder": "Delete Folder",
-      "titleFile": "Delete File"
+      "titleFile": "Delete File",
+      "inMountWarning": "This is inside the mounted folder {{mount}} (→ {{target}}). Deleting removes the real files on disk outside the project, and the project's history can't bring them back.",
+      "inMountWarningNoTarget": "This is inside a mounted folder. Deleting removes the real files on disk outside the project, and the project's history can't bring them back."
     },
     "toast": {
       "renamed": "Renamed successfully",
@@ -169,7 +175,8 @@
       "folderCreated": "Folder created successfully",
       "pathCopied": "Path copied to clipboard",
       "copyFailed": "Failed to copy path",
-      "folderDownloaded": "Folder downloaded as ZIP"
+      "folderDownloaded": "Folder downloaded as ZIP",
+      "mountProtected": "The mounts folder and the mounts in it can't be renamed or deleted here. Unmount them instead."
     },
     "validation": {
       "emptyName": "Filename cannot be empty",
@@ -190,7 +197,71 @@
     "uploadedAll_one": "Uploaded {{count}} file successfully",
     "uploadedAll_other": "Uploaded {{count}} files successfully",
     "filesCount_one": "{{count}} file",
-    "filesCount_other": "{{count}} files"
+    "filesCount_other": "{{count}} files",
+    "mounts": {
+      "open": "Mount Folder…",
+      "title": "Mount Folder",
+      "description": "Links a folder outside the project into its mounts folder, for large files. The link never goes into git, and the files stay where they are.",
+      "providers": "Fully supported for Claude and Codex. Other agents may ask for permission before they use its files.",
+      "close": "Close",
+      "targetLabel": "Folder to mount",
+      "nameLabel": "Name",
+      "namePlaceholder": "name",
+      "nameHint": "Shows up in the project as mounts/{{name}}",
+      "submit": "Mount",
+      "listTitle": "Mounted folders",
+      "empty": "No folders mounted yet.",
+      "repair": "Repair",
+      "unmount": "Unmount",
+      "unmountTitle": "Unmount {{name}}?",
+      "unmountConfirm": "Only the link mounts/{{name}} is removed. The files in {{target}} stay where they are. A session that is running, or still has background tasks or loops running, can reach the folder until its next message starts a new process.",
+      "adoptableTitle": "Links not registered yet",
+      "adoptableHint": "These links are already in mounts/ (made in a terminal, say). Register one to manage it here.",
+      "adopt": "Register",
+      "truncated": "Not every file is listed: the mounted folder is too large or too slow to list in full.",
+      "nodeTitle": "Mounted folder → {{target}}",
+      "nodeWarningTitle": "Mounted folder → {{target}}. {{status}}: right-click to repair.",
+      "nodeBrokenTitle": "Broken mount → {{target}}. {{status}}: right-click to repair or unmount.",
+      "status": {
+        "ok": "Linked",
+        "missingLink": "Link missing",
+        "linkMismatch": "Link points elsewhere",
+        "missingTarget": "Folder missing",
+        "notDirectory": "Target is not a folder",
+        "notIgnored": "Not ignored by git"
+      },
+      "validation": {
+        "nameRequired": "Enter a name.",
+        "nameInvalid": "The name can't contain slashes or special characters, or be only dots.",
+        "targetRequired": "Choose the folder to mount.",
+        "targetAbsolute": "Enter the folder's full path."
+      },
+      "toast": {
+        "mounted": "Mounted {{name}}",
+        "unmounted": "Unmounted {{name}}",
+        "unmountedRowOnly": "{{name}} is no longer registered. No link made by this app was at mounts/{{name}}, so nothing there was touched.",
+        "repaired": "Repaired {{name}}",
+        "adopted": "Registered {{name}}"
+      },
+      "errors": {
+        "invalidName": "That name can't be used for a mount.",
+        "nameTaken": "A mount with that name already exists.",
+        "alreadyRemoved": "{{name}} was already removed.",
+        "spotTaken": "mounts/{{name}} already holds a file, folder or link that isn't a mount. Move it out of the way, or pick another name.",
+        "spotTakenByLink": "mounts/{{name}} is a link that isn't registered yet. Register it below, or pick another name.",
+        "repairSpotTaken": "mounts/{{name}} is now a real file or folder, not the link. Move it out of the way and repair again, or unmount.",
+        "targetNotFound": "That folder doesn't exist or doesn't answer (an offline network share?).",
+        "browseUnavailable": "This folder can't be opened: it doesn't exist, doesn't answer (an offline network share?), or you aren't allowed to read it.",
+        "targetNotDirectory": "That path is not a folder.",
+        "targetForbidden": "System folders, private folders such as ~/.ssh, and folders that contain them can't be mounted. For your home folder, pick a folder inside it.",
+        "targetLoop": "The folder can't be the project itself, a folder inside it, or a folder that contains it.",
+        "mountsDirInUse": "The project already has a mounts folder of its own. Rename it, then try again.",
+        "mountsDirTracked": "The project's mounts folder is tracked by git, so mounts can't be added there.",
+        "linkFailed": "The link couldn't be created: {{reason}}",
+        "unlinkFailed": "The link couldn't be removed: {{reason}}",
+        "generic": "Something went wrong with the mount."
+      }
+    }
   },
   "projectWizard": {
     "title": "Create New Project",

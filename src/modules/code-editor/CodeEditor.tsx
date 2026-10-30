@@ -26,6 +26,13 @@ import CodeEditorMediaPreview from '@/modules/code-editor/CodeEditorMediaPreview
 // last extension; a file without one (LICENSE, Makefile) counts as code.
 const TEXT_FILE_EXTENSIONS = new Set(['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc']);
 
+// "12.5 MB": the sizes the too-large notice compares, the cap being some megabytes. The file's size is
+// rounded up and the cap down, so a file just over the cap never reads as the same size as the cap.
+const formatMegabytes = (bytes: number, round: 'up' | 'down') => {
+  const tenths = (round === 'up' ? Math.ceil : Math.floor)((bytes / (1024 * 1024)) * 10);
+  return `${(tenths / 10).toFixed(1).replace(/\.0$/, '')} MB`;
+};
+
 type CodeEditorProps = {
   file: CodeEditorFile;
   onClose: () => void;
@@ -82,6 +89,7 @@ export default function CodeEditor({
     saveSuccess,
     saveError,
     isBinary,
+    tooLarge,
     previewKind,
     fileProjectId,
     hasUnsavedChanges,
@@ -304,6 +312,23 @@ export default function CodeEditor({
         onToggleFullscreen={onToggleFullscreen}
         title={t('binaryFile.title', 'Binary File')}
         message={t('binaryFile.message', 'The file "{{fileName}}" cannot be displayed in the text editor because it is a binary file.', { fileName: file.name })}
+      />
+    );
+  }
+
+  // A file over the server's read cap: nothing was loaded, so there is nothing to edit or save.
+  if (tooLarge) {
+    return (
+      <CodeEditorBinaryFile
+        file={file}
+        isSidebar={isSidebar}
+        isFullscreen={isFullscreen}
+        onClose={requestClose}
+        onToggleFullscreen={onToggleFullscreen}
+        title={t('tooLarge.title', 'File too large')}
+        message={tooLarge.size !== null && tooLarge.limit !== null
+          ? t('tooLarge.message', { fileName: file.name, size: formatMegabytes(tooLarge.size, 'up'), limit: formatMegabytes(tooLarge.limit, 'down') })
+          : t('tooLarge.messageNoSize', { fileName: file.name })}
       />
     );
   }

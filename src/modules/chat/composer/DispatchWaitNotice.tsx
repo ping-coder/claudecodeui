@@ -3,7 +3,7 @@ import type { TFunction } from 'i18next';
 import { Loader2 } from 'lucide-react';
 
 import type { DispatchWait } from '@/shared/types';
-import { describeHandOverChanges, describeHandOverDetails } from '@/shared/utils';
+import { describeHandOverChanges, describeHandOverDetails, handOverMountsChanged } from '@/shared/utils';
 import type { DispatchWaitBusy, DispatchWaitNotice as Notice } from '@/modules/chat/composer/useDispatchWaits';
 import { formatDateTime } from '@/modules/chat/utils/chatFormatting';
 
@@ -118,7 +118,17 @@ export default function DispatchWaitNotice({
 }: DispatchWaitNoticeProps) {
   const { t, i18n } = useTranslation('chat');
   const loops = heldForLoops(wait);
-  const details = describeHandOverDetails(wait.details, t, loops ? 'loops' : 'work');
+  // The project's mounts changing is no change of the message, so it is no part of the reason's
+  // "this message changes …": it is a line of its own among what keeps the message out.
+  const mountsLine = wait.reason === 'held_settings' && handOverMountsChanged(wait.changes)
+    ? loops
+      ? t('dispatchWait.detail.mounts', { defaultValue: 'The project\'s mounted folders changed after the loop\'s process started' })
+      : t('dispatchWait.detail.mountsWork', { defaultValue: 'The project\'s mounted folders changed after the background process started' })
+    : null;
+  const details = [
+    ...(mountsLine ? [mountsLine] : []),
+    ...describeHandOverDetails(wait.details, t, loops ? 'loops' : 'work'),
+  ];
   const can = (action: DispatchWait['actions'][number]) => wait.actions.includes(action);
   const offersMore = can('stop_work_and_send') || can('use_process_settings');
   const quietButton = 'rounded px-2 py-0.5 font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';

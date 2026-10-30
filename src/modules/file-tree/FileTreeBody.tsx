@@ -28,6 +28,13 @@ type FileTreeBodyProps = {
   onDownload?: (item: FileTreeNode) => void;
   onUpload?: (path: string) => void;
   onRefresh?: () => void;
+  // Mount roots' own actions
+  onUnmount?: (item: FileTreeNode) => void;
+  onRepairMount?: (item: FileTreeNode) => void;
+  onCopyTargetPath?: (item: FileTreeNode) => void;
+  // The mounts/ folder's own action, and its path while the project has mounts (findMountsFolderPath)
+  onMountFolder?: () => void;
+  mountsFolderPath?: string | null;
   // Drag-and-drop upload targeting
   dropTarget?: string | null;
   onItemDragOver?: (event: DragEvent<HTMLDivElement>, targetPath: string) => void;
@@ -63,6 +70,11 @@ export default function FileTreeBody({
   onDownload,
   onUpload,
   onRefresh,
+  onUnmount,
+  onRepairMount,
+  onCopyTargetPath,
+  onMountFolder,
+  mountsFolderPath,
   dropTarget,
   onItemDragOver,
   renamingItem,
@@ -114,6 +126,11 @@ export default function FileTreeBody({
           onDownload={onDownload}
           onUpload={onUpload}
           onRefresh={onRefresh}
+          onUnmount={onUnmount}
+          onRepairMount={onRepairMount}
+          onCopyTargetPath={onCopyTargetPath}
+          onMountFolder={onMountFolder}
+          mountsFolderPath={mountsFolderPath}
           dropTarget={dropTarget}
           onItemDragOver={onItemDragOver}
           renamingItem={renamingItem}

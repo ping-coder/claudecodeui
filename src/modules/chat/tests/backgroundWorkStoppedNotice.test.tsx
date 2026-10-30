@@ -62,6 +62,23 @@ describe('the notice that a send stopped the background work', () => {
     assert.equal(screen.queryAllByText('后台工作已停止：这条消息改了权限模式和工具权限，只有新的 Claude 进程才能生效。').length, 1);
   });
 
+  it('says the project\'s mounted folders changed, not that the message changed them', async () => {
+    const english = renderRow(stopRow(['directories']));
+    assert.equal(screen.queryAllByText('Background work stopped: the project\'s mounted folders changed after the process started, and only a new Claude process can pick them up.').length, 1);
+    assert.equal(screen.queryAllByText(/this message changes/).length, 0);
+    english.unmount();
+
+    // With a setting of the message besides, each is said as what it is.
+    const both = renderRow(stopRow(['directories', 'model']));
+    assert.equal(screen.queryAllByText('Background work stopped: the project\'s mounted folders changed and this message changes the model, which only a new Claude process can apply.').length, 1);
+    both.unmount();
+
+    await showLanguage('zh-CN');
+    renderRow(stopRow(['directories']));
+    assert.equal(screen.queryAllByText('后台工作已停止：项目挂载的文件夹在进程启动后变了，只有新的 Claude 进程才能用上。').length, 1);
+    assert.equal(screen.queryAllByText(/这条消息改了/).length, 0);
+  });
+
   it('says the message could not be handed over when the lookup failed', async () => {
     await showLanguage('zh-CN');
     renderRow(stopRow(['lookup']));

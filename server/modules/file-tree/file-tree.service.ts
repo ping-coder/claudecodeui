@@ -9,7 +9,10 @@ import type {
   FileTreeSearchMatch,
   FileTreeServiceDependencies,
   FileTreeServices,
+  FileTreeStats,
   FileTreeUploadedFile,
+  MountCallOutcome,
+  ProjectMount,
 } from '@/shared/types.js';
 import {
   AppError,
@@ -72,6 +75,44 @@ const FILE_SEARCH_SLICE_MS = 10;
 // Most matches one search returns; the command palette renders at most 100.
 const MAXIMUM_FILE_SEARCH_RESULTS = 200;
 
+// The contents of all mounts of one listing share this many entries. Past it
+// a mount is cut short and flagged `truncated`: a big mount never makes the
+// project too large to open.
+const MAXIMUM_MOUNT_TREE_ENTRIES = 2_000;
+
+// A listing lists what is in its mounts for at most this long, then flags
+// the mounts not done `truncated`: a slow network share never holds up the
+// explorer, not even with a folder read that runs on past it. Every call in
+// a mount goes through the projects module's mount gate besides, so a share
+// that hangs costs a call its time limit, not a request that never answers
+// and a thread for each entry.
+const MOUNT_WALK_TIME_LIMIT_MS = 5_000;
+
+// The largest file readTextFile reads into memory; the editor reports bigger
+// ones as too large to open.
+const MAXIMUM_TEXT_FILE_BYTES = 10 * 1024 * 1024;
+
+// The `.gitignore` the projects module keeps in the mounts folder so git
+// never sees the links. Hidden from listings and protected like the links.
+const MOUNTS_SENTINEL_FILE_NAME = '.gitignore';
+
+// How many entries of a directory in a mount have their lstat asked for at
+// once. A directory read there comes as names alone, and its entries' types
+// come from these calls, so a huge directory costs no more of them than the
+// mounts' budget has room for, give or take one turn.
+const MOUNT_ENTRY_LSTAT_BATCH = 64;
+
+// Whether this platform's disks usually match file names case-insensitively
+// (Windows, and macOS's default APFS), so `MOUNTS` names the mounts folder.
+const FOLDS_FILE_NAME_CASE = process.platform === 'win32' || process.platform === 'darwin';
+
+// A mount's contents are listed only while its target is a reachable folder.
+const WALKABLE_MOUNT_STATUSES = new Set<ProjectMount['status']>(['ok', 'not-ignored']);
+
+// A file can be read by its path in a mount's target while the target
+// resolves to a folder, even when the link itself needs repair.
+const READABLE_MOUNT_STATUSES = new Set<ProjectMount['status']>(['ok', 'not-ignored', 'missing-link', 'link-mismatch']);
+
 // `visible` entries are listed and walked, `ignored` ones are listed but never
 // walked, `hidden` ones are left out of the tree entirely.
 type FileTreeEntryVisibility = 'visible' | 'ignored' | 'hidden';
@@ -81,6 +122,50 @@ type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => FileTree
 // What is left of each budget. One object is shared by every branch of a walk,
 // so the caps apply to the whole tree rather than per directory.
 type FileTreeEntryBudget = { visible: number; ignored: number };
+
+// An entry of a directory a listing walks, and whether it is listed as
+// gitignored. Inside a mount it comes with its lstat, read through the mount
+// gate along with it (null when that failed).
+type FileTreeListedEntry = {
+  entry: FileTreeDirectoryEntry;
+  isIgnored: boolean;
+  stats?: FileTreeStats | null;
+};
+
+// The project's registered mounts as one request sees them: the mounts
+// folder, its sentinel, and each mount by the absolute path of its link.
+type FileTreeMountListing = {
+  mountsDirectory: string;
+  sentinelPath: string;
+  mountsByLinkPath: Map<string, ProjectMount>;
+};
+
+// The mount a walk is in: its link, where its target really is (every call
+// in it goes through the mount gate by that path), and the flag to raise
+// when not all of it gets listed.
+type FileTreeMountPlace = {
+  linkPath: string;
+  realTargetPath: string;
+  truncated: boolean;
+};
+
+// How a listing treats the mounts while it walks: whether it lists their
+// contents at all, the budget all of them share, the signal that ends their
+// walk when its time is up, and the mount the walk is in, if any.
+type FileTreeMountWalk = {
+  listing: FileTreeMountListing;
+  walkContents: boolean;
+  remainingEntries: FileTreeEntryBudget;
+  timeLimit: AbortSignal;
+  insideMount: FileTreeMountPlace | null;
+};
+
+// Where a path the File Tree reads or writes lies in a mount whose link
+// leads into its target: the mount, and the path as it really is there.
+type FileTreeMountLocation = {
+  mount: ProjectMount;
+  realPath: string;
+};
 
 // One project file search in progress, shared by all of its directory reads:
 // what is left of its entry budget, when it has to stop, whether it has
@@ -172,6 +257,70 @@ function permissionBitsToRwx(permissionBits: number): string {
   const write = permissionBits & 2 ? 'w' : '-';
   const execute = permissionBits & 1 ? 'x' : '-';
   return read + write + execute;
+}
+
+function applyEntryStats(item: FileTreeNode, stats: FileTreeStats): void {
+  const ownerPermissions = (stats.mode >> 6) & 7;
+  const groupPermissions = (stats.mode >> 3) & 7;
+  const otherPermissions = stats.mode & 7;
+
+  item.size = stats.size;
+  item.modified = stats.mtime.toISOString();
+  item.permissions = `${ownerPermissions}${groupPermissions}${otherPermissions}`;
+  item.permissionsRwx = permissionBitsToRwx(ownerPermissions)
+    + permissionBitsToRwx(groupPermissions)
+    + permissionBitsToRwx(otherPermissions);
+  if (stats.isSymbolicLink()) {
+    item.isSymlink = true;
+  }
+}
+
+/** A path inside a mount, as it really is: the same place below the target's realpath. */
+function realPathInMount(place: FileTreeMountPlace, linkedPath: string): string {
+  const relativePath = path.relative(place.linkPath, linkedPath);
+  return relativePath ? path.join(place.realTargetPath, relativePath) : place.realTargetPath;
+}
+
+/** The names of a directory's entries, as it streams them. */
+async function* streamEntryNames(entries: AsyncIterable<FileTreeDirectoryEntry>): AsyncGenerator<string> {
+  for await (const entry of entries) {
+    yield entry.name;
+  }
+}
+
+/**
+ * The outcome of `call`, or busy once `signal` aborts first. For a slow
+ * call in a mount, which the walk stops waiting for at its time limit; the
+ * call runs on, and keeps its share's turn until it answers.
+ */
+function stopWaitingOnAbort<T>(call: Promise<MountCallOutcome<T>>, signal: AbortSignal): Promise<MountCallOutcome<T>> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve({ kind: 'busy' });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    void call.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/** A file name or path as this platform's disks usually compare them (see FOLDS_FILE_NAME_CASE). */
+function comparableName(name: string): string {
+  return FOLDS_FILE_NAME_CASE ? name.toLowerCase() : name;
+}
+
+function isSameOrInsidePath(candidatePath: string, parentPath: string): boolean {
+  return candidatePath === parentPath
+    || candidatePath.startsWith(parentPath.endsWith(path.sep) ? parentPath : `${parentPath}${path.sep}`);
+}
+
+function createMountUnreachableError(mount: ProjectMount): AppError {
+  return createFileTreeError(
+    `The mounted folder "${mount.name}" does not answer or is gone (an offline network share or an unplugged disk?)`,
+    503,
+    'MOUNT_UNREACHABLE',
+  );
 }
 
 function validateFilename(name: string): void {
@@ -287,6 +436,38 @@ function createGitignoreEntryFilter(
 }
 
 /**
+ * Lists the mounts folder and every registered mount's link whatever the
+ * project's `.gitignore` says (a root rule matching `mounts/` must not hide
+ * them), and hides the sentinel. Everything else is left to `includeEntry`.
+ */
+function createMountAwareEntryFilter(
+  listing: FileTreeMountListing,
+  includeEntry: FileTreeEntryFilter,
+): FileTreeEntryFilter {
+  return (entryPath, isDirectory) => {
+    if (entryPath === listing.sentinelPath) return 'hidden';
+    if (entryPath === listing.mountsDirectory || listing.mountsByLinkPath.has(entryPath)) return 'visible';
+    return includeEntry(entryPath, isDirectory);
+  };
+}
+
+/**
+ * Hides the registered mounts' links and the sentinel from the project file
+ * search: a link would come back as a file the palette cannot open, and the
+ * search never walks into what a link points to.
+ */
+function createMountHidingEntryFilter(
+  listing: FileTreeMountListing,
+  includeEntry: FileTreeEntryFilter,
+): FileTreeEntryFilter {
+  return (entryPath, isDirectory) => (
+    entryPath === listing.sentinelPath || listing.mountsByLinkPath.has(entryPath)
+      ? 'hidden'
+      : includeEntry(entryPath, isDirectory)
+  );
+}
+
+/**
  * Creates File Tree workflows for the module composition root and route tests.
  * Every filesystem, project, workspace, environment, and logging dependency is
  * required explicitly so this service has no machine-wide production defaults.
@@ -313,14 +494,15 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
    *
    * Entries are filtered and charged against the shared budget one at a time,
    * so a pathologically large directory stops the walk at the cap instead of
-   * being read into memory in full first.
+   * being read into memory in full first. Running out of the visible budget
+   * fails with a 413.
    */
   async function collectListedEntries(
     directoryPath: string,
     includeEntry: FileTreeEntryFilter,
     remainingEntries: FileTreeEntryBudget,
-  ): Promise<Array<{ entry: FileTreeDirectoryEntry; isIgnored: boolean }>> {
-    const listedEntries: Array<{ entry: FileTreeDirectoryEntry; isIgnored: boolean }> = [];
+  ): Promise<FileTreeListedEntry[]> {
+    const listedEntries: FileTreeListedEntry[] = [];
 
     await acquire();
     try {
@@ -369,6 +551,140 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     return listedEntries;
   }
 
+  /**
+   * Reads one directory inside a mount, under the hard exclusions only and
+   * on the mounts' budget: like collectListedEntries, but every call goes
+   * through the mount gate (by where the directory really is) instead of the
+   * listing's own limiter, so a share that hangs costs this read its time
+   * limit, and running out of the budget flags the mount `truncated` rather
+   * than failing the request. So does a call that does not answer in time,
+   * the walk's time limit, and a directory the budget has no room left for,
+   * which is not read at all; the entries read by then are kept.
+   *
+   * On a local disk the directory is streamed (openDirectory) and read only
+   * as far as the budget goes. On a network share its names come in one
+   * slow call (readDirectoryNames, never opendir, see `FileTreeFileSystem`),
+   * which the walk stops waiting for at its time limit. Either way each
+   * entry's type and metadata come from its lstat, MOUNT_ENTRY_LSTAT_BATCH
+   * entries at a time.
+   */
+  async function collectMountEntries(
+    directoryPath: string,
+    remainingEntries: FileTreeEntryBudget,
+    place: FileTreeMountPlace,
+    timeLimit: AbortSignal,
+  ): Promise<FileTreeListedEntry[]> {
+    if (remainingEntries.visible <= 0 || timeLimit.aborted) {
+      place.truncated = true;
+      return [];
+    }
+    const read = await stopWaitingOnAbort(
+      dependencies.mounts.runInMountTarget(
+        realPathInMount(place, directoryPath),
+        async (call): Promise<Iterable<string> | AsyncIterable<string> | null> => {
+          // Other folders may have used up the budget while this one waited for its turn.
+          if (remainingEntries.visible <= 0) {
+            return null;
+          }
+          return call.gated
+            ? fileSystem.readDirectoryNames(directoryPath)
+            : streamEntryNames(fileSystem.openDirectory(directoryPath));
+        },
+        { signal: timeLimit, slow: true },
+      ),
+      timeLimit,
+    );
+    if (read.kind === 'failed') {
+      logUnreadableDirectory(directoryPath, read.error);
+      return [];
+    }
+    if (read.kind !== 'done' || read.value === null) {
+      place.truncated = true;
+      return [];
+    }
+
+    const listedEntries: FileTreeListedEntry[] = [];
+    let names: string[] = [];
+    try {
+      for await (const name of read.value) {
+        if (remainingEntries.visible <= 0 || timeLimit.aborted) {
+          place.truncated = true;
+          return listedEntries;
+        }
+        names.push(name);
+        if (names.length >= Math.min(remainingEntries.visible, MOUNT_ENTRY_LSTAT_BATCH)) {
+          const complete = await listMountEntries(directoryPath, names, remainingEntries, place, timeLimit, listedEntries);
+          names = [];
+          if (!complete) {
+            place.truncated = true;
+            return listedEntries;
+          }
+        }
+      }
+    } catch (error) {
+      // Only a directory streamed on a local disk is read here.
+      logUnreadableDirectory(directoryPath, error);
+      return listedEntries;
+    }
+    if (names.length > 0 && !(await listMountEntries(directoryPath, names, remainingEntries, place, timeLimit, listedEntries))) {
+      place.truncated = true;
+    }
+    return listedEntries;
+  }
+
+  /**
+   * Adds `names`, entries of `directoryPath` in a mount, to `listedEntries`,
+   * each with its lstat through the mount gate, as far as the mounts' budget
+   * goes. False when not all of them could be listed: the budget ran out
+   * (the walks of other folders share it), or an lstat did not answer.
+   */
+  async function listMountEntries(
+    directoryPath: string,
+    names: string[],
+    remainingEntries: FileTreeEntryBudget,
+    place: FileTreeMountPlace,
+    timeLimit: AbortSignal,
+    listedEntries: FileTreeListedEntry[],
+  ): Promise<boolean> {
+    const lstats = await Promise.all(names.map((name) => {
+      const entryPath = path.join(directoryPath, name);
+      return dependencies.mounts.runInMountTarget(
+        realPathInMount(place, entryPath),
+        () => fileSystem.lstat(entryPath),
+        { signal: timeLimit },
+      );
+    }));
+    let complete = true;
+    for (const [index, name] of names.entries()) {
+      const lstat = lstats[index];
+      if (lstat.kind === 'unreachable' || lstat.kind === 'busy') {
+        // Its type is not known, so it is left out, and the rest with it.
+        complete = false;
+        continue;
+      }
+      // An entry whose lstat failed is still listed, as a file without metadata.
+      const stats = lstat.kind === 'done' ? lstat.value : null;
+      const isDirectory = stats?.isDirectory() === true;
+      if (includeEntryByHardExclusions(path.join(directoryPath, name), isDirectory) === 'hidden') {
+        continue;
+      }
+      if (remainingEntries.visible <= 0) {
+        return false;
+      }
+      remainingEntries.visible -= 1;
+      listedEntries.push({ entry: { name, isDirectory: () => isDirectory }, isIgnored: false, stats });
+    }
+    return complete;
+  }
+
+  /** Logs a directory that could not be read, unless only permission was refused. */
+  function logUnreadableDirectory(directoryPath: string, error: unknown): void {
+    const errorCode = readErrorCode(error);
+    if (errorCode !== 'EACCES' && errorCode !== 'EPERM') {
+      dependencies.logger.error(`Error reading directory "${directoryPath}"`, error);
+    }
+  }
+
   async function buildFileTree(
     directoryPath: string,
     maximumDepth: number,
@@ -378,15 +694,21 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       visible: MAXIMUM_FILE_TREE_ENTRIES,
       ignored: MAXIMUM_IGNORED_FILE_TREE_ENTRIES,
     },
+    mountWalk: FileTreeMountWalk | null = null,
   ): Promise<FileTreeNode[]> {
-    const listedEntries = await collectListedEntries(directoryPath, includeEntry, remainingEntries);
+    const insideMount = mountWalk?.insideMount ?? null;
+    const listedEntries = insideMount && mountWalk
+      ? await collectMountEntries(directoryPath, remainingEntries, insideMount, mountWalk.timeLimit)
+      : await collectListedEntries(directoryPath, includeEntry, remainingEntries);
 
-    const items = await Promise.all(listedEntries.map(async ({ entry, isIgnored }): Promise<FileTreeNode> => {
+    const items = await Promise.all(listedEntries.map(async ({ entry, isIgnored, stats }): Promise<FileTreeNode> => {
       const itemPath = path.join(directoryPath, entry.name);
+      // Mount links sit in the project's mounts folder, never inside another mount.
+      const mount = insideMount ? undefined : mountWalk?.listing.mountsByLinkPath.get(itemPath);
       const item: FileTreeNode = {
         name: entry.name,
         path: itemPath,
-        type: entry.isDirectory() ? 'directory' : 'file',
+        type: entry.isDirectory() || mount ? 'directory' : 'file',
         size: 0,
         modified: null,
         permissions: '000',
@@ -395,29 +717,62 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       if (isIgnored) {
         item.isIgnored = true;
       }
-
-      try {
-        await acquire();
-        try {
-          const stats = await fileSystem.lstat(itemPath);
-          const ownerPermissions = (stats.mode >> 6) & 7;
-          const groupPermissions = (stats.mode >> 3) & 7;
-          const otherPermissions = stats.mode & 7;
-
-          item.size = stats.size;
-          item.modified = stats.mtime.toISOString();
-          item.permissions = `${ownerPermissions}${groupPermissions}${otherPermissions}`;
-          item.permissionsRwx = permissionBitsToRwx(ownerPermissions)
-            + permissionBitsToRwx(groupPermissions)
-            + permissionBitsToRwx(otherPermissions);
-          if (stats.isSymbolicLink()) {
-            item.isSymlink = true;
-          }
-        } finally {
-          release();
+      if (mount) {
+        item.isSymlink = true;
+        item.mount = {
+          mountId: mount.mountId,
+          name: mount.name,
+          targetPath: mount.targetPath,
+          status: mount.status,
+        };
+      }
+      if (insideMount) {
+        item.inMount = true;
+        // Read with the entry, through the mount gate (collectMountEntries).
+        if (stats) {
+          applyEntryStats(item, stats);
         }
-      } catch {
-        // Metadata failures should not hide an otherwise readable tree entry.
+      } else {
+        try {
+          await acquire();
+          try {
+            applyEntryStats(item, await fileSystem.lstat(itemPath));
+          } finally {
+            release();
+          }
+        } catch {
+          // Metadata failures should not hide an otherwise readable tree entry.
+        }
+      }
+
+      if (mount && mountWalk) {
+        // Walked through the link, so every path stays under the project, on
+        // the mounts' own budget and with only the hard exclusions: the
+        // project's .gitignore says nothing about a folder outside it.
+        if (
+          mountWalk.walkContents
+          && WALKABLE_MOUNT_STATUSES.has(mount.status)
+          && mount.realTargetPath !== null
+          && currentDepth < maximumDepth
+        ) {
+          const mountState: FileTreeMountPlace = {
+            linkPath: itemPath,
+            realTargetPath: mount.realTargetPath,
+            truncated: false,
+          };
+          item.children = await buildFileTree(
+            itemPath,
+            maximumDepth,
+            currentDepth + 1,
+            includeEntryByHardExclusions,
+            mountWalk.remainingEntries,
+            { ...mountWalk, insideMount: mountState },
+          );
+          if (mountState.truncated) {
+            item.truncated = true;
+          }
+        }
+        return item;
       }
 
       // An ignored directory is listed but never walked: its contents would
@@ -429,6 +784,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           currentDepth + 1,
           includeEntry,
           remainingEntries,
+          mountWalk,
         );
       }
 
@@ -541,6 +897,148 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     }
   }
 
+  /** The project's registered mounts for one request, or null when it has none. */
+  async function readMountListing(projectId: string, projectRoot: string): Promise<FileTreeMountListing | null> {
+    const mounts = await dependencies.mounts.listProjectMounts(projectId);
+    if (mounts.length === 0) {
+      return null;
+    }
+    const mountsDirectory = path.join(projectRoot, dependencies.mounts.directoryName);
+    return {
+      mountsDirectory,
+      sentinelPath: path.join(mountsDirectory, MOUNTS_SENTINEL_FILE_NAME),
+      mountsByLinkPath: new Map(mounts.map((mount) => [path.join(mountsDirectory, mount.name), mount])),
+    };
+  }
+
+  /**
+   * Like readMountListing for the read paths, where mounts are an extra: a
+   * failed lookup is logged and the request goes on as if there were none.
+   */
+  async function readMountListingOrNone(projectId: string, projectRoot: string): Promise<FileTreeMountListing | null> {
+    try {
+      return await readMountListing(projectId, projectRoot);
+    } catch (error) {
+      dependencies.logger.error(`Error reading the mounts of project "${projectId}"`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Where `resolvedPath`, a path under the project, lies in one of its
+   * mounts: null for a path outside the mounts folder, outside every mount,
+   * or in a mount whose link does not lead into its target (a link that is
+   * missing or points elsewhere), which is then used as it is. A path in a
+   * mount whose target is gone or does not answer is refused with a 503
+   * (`MOUNT_UNREACHABLE`) before anything touches it. Only paths in the
+   * mounts folder are looked up, so other paths cost nothing.
+   */
+  async function locateInMountLink(
+    projectId: string,
+    projectRoot: string,
+    resolvedPath: string,
+  ): Promise<FileTreeMountLocation | null> {
+    const mountsDirectory = path.join(path.resolve(projectRoot), dependencies.mounts.directoryName);
+    if (!resolvedPath.startsWith(`${mountsDirectory}${path.sep}`)) {
+      return null;
+    }
+    const [name, ...rest] = path.relative(mountsDirectory, resolvedPath).split(path.sep);
+    const listing = await readMountListingOrNone(projectId, projectRoot);
+    const mount = listing ? [...listing.mountsByLinkPath.values()].find((candidate) => candidate.name === name) : undefined;
+    if (!mount) {
+      return null;
+    }
+    if (mount.status === 'missing-target') {
+      throw createMountUnreachableError(mount);
+    }
+    if (!WALKABLE_MOUNT_STATUSES.has(mount.status) || mount.realTargetPath === null) {
+      return null;
+    }
+    return { mount, realPath: path.join(mount.realTargetPath, ...rest) };
+  }
+
+  /**
+   * Runs `operation`, a filesystem call on a path the File Tree reads or
+   * writes, through the mount gate when the path lies in a mount
+   * (`location`), so a share that hangs costs the request a 503
+   * (`MOUNT_UNREACHABLE`) instead of an answer that never comes and a thread
+   * kept for good. The links in the path below the target are followed
+   * first, so a link in the target into another share counts against that
+   * share, not the target's. The call's own error is thrown as it is.
+   */
+  async function callOnPath<T>(location: FileTreeMountLocation | null, operation: () => Promise<T>): Promise<T> {
+    if (!location) {
+      return operation();
+    }
+    const outcome = await dependencies.mounts.runInMountTarget(location.realPath, operation, {
+      followLinksBelow: location.mount.realTargetPath ?? undefined,
+    });
+    if (outcome.kind === 'done') {
+      return outcome.value;
+    }
+    if (outcome.kind === 'failed') {
+      throw outcome.error;
+    }
+    throw createMountUnreachableError(location.mount);
+  }
+
+  /** A path as the disk resolves it, case-folded where names are (FOLDS_FILE_NAME_CASE); null when it does not resolve. */
+  async function readRealIdentity(candidatePath: string): Promise<string | null> {
+    try {
+      return comparableName(normalizeProjectPath(await fileSystem.realpath(candidatePath)));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Refuses to rename or delete the mounts folder, the sentinel or a mount's
+   * link while the project has mounts: those are changed by unmounting.
+   * Judged by what the path is on disk, not by how it is written: the folder
+   * that holds it, resolved, against the mounts folder (or the project root),
+   * resolved, and its name case-folded where the disk folds case, so
+   * `MOUNTS/data` on macOS, or `self/mounts/data` through a link
+   * `self -> .`, is refused too. A path inside a mount's link belongs to the
+   * mount and is let through without resolving it, which would reach into
+   * its target outside the mount gate.
+   */
+  async function assertNotMountProtected(projectId: string, projectRoot: string, resolvedPath: string): Promise<void> {
+    const root = path.resolve(projectRoot);
+    const mountsDirectory = path.join(root, dependencies.mounts.directoryName);
+    const parentPath = path.dirname(resolvedPath);
+    if (resolvedPath.startsWith(`${mountsDirectory}${path.sep}`) && parentPath !== mountsDirectory) {
+      return;
+    }
+    const realMountsDirectory = await readRealIdentity(mountsDirectory);
+    if (realMountsDirectory === null) {
+      return;
+    }
+    const [realParent, realRoot] = await Promise.all([
+      readRealIdentity(parentPath).then((identity) => identity ?? comparableName(normalizeProjectPath(parentPath))),
+      readRealIdentity(root).then((identity) => identity ?? comparableName(normalizeProjectPath(root))),
+    ]);
+    const name = comparableName(path.basename(resolvedPath));
+    const isMountsDirectory = realParent === realRoot && name === comparableName(dependencies.mounts.directoryName);
+    if (!isMountsDirectory && realParent !== realMountsDirectory) {
+      return;
+    }
+    const listing = await readMountListing(projectId, root);
+    if (!listing) {
+      return;
+    }
+    if (
+      isMountsDirectory
+      || name === comparableName(MOUNTS_SENTINEL_FILE_NAME)
+      || [...listing.mountsByLinkPath.values()].some((mount) => comparableName(mount.name) === name)
+    ) {
+      throw createFileTreeError(
+        'Mounted folders cannot be renamed or deleted here; unmount them instead',
+        403,
+        'MOUNT_PROTECTED',
+      );
+    }
+  }
+
   async function resolveExistingProjectRoot(projectId: string): Promise<string> {
     const projectRoot = await resolveProjectRoot(projectId);
     try {
@@ -585,24 +1083,80 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
    *
    * The agent may also point at a file in another folder of the workspace, the
    * same tree `browseWorkspace` lists, so anything under the workspace root is
-   * readable too. Symlinks are resolved before that comparison. The writing
-   * endpoints keep using `resolvePathInsideProject` alone, so nothing outside
-   * the project can be changed.
+   * readable too. So is anything in the target of one of the project's
+   * mounts, which the agent quotes by its real path. Symlinks are resolved
+   * before those comparisons. The writing endpoints keep using
+   * `resolvePathInsideProject` alone, so nothing outside the project can be
+   * changed, except through a link inside it (a mount's, for one).
+   *
+   * Resolving a path is a call into the share it is on, which may hang, so
+   * an absolute path inside the project is taken as it is written, exactly
+   * like a relative one (a path in the mounts folder then goes through the
+   * mount gate, see locateInMountLink). An absolute path outside it that
+   * lies in a mount's target is checked first and resolved through the
+   * mount gate; any other on a filesystem the gate knows to hang is refused
+   * with a 503. Only a project with mounts pays for those lookups. The path
+   * comes back with where it lies in a mount, if it does.
    */
-  async function resolveReadablePath(projectRoot: string, targetPath: string): Promise<string> {
-    if (path.isAbsolute(targetPath)) {
+  async function resolveReadablePath(
+    projectId: string,
+    projectRoot: string,
+    targetPath: string,
+  ): Promise<{ resolvedPath: string; location: FileTreeMountLocation | null }> {
+    if (path.isAbsolute(targetPath) && !path.resolve(targetPath).startsWith(`${path.resolve(projectRoot)}${path.sep}`)) {
+      const mountListing = await readMountListingOrNone(projectId, projectRoot);
+      const normalizedTarget = normalizeProjectPath(path.resolve(targetPath));
+      const mount = mountListing
+        ? [...mountListing.mountsByLinkPath.values()].find((candidate) => (
+          isSameOrInsidePath(normalizedTarget, candidate.realTargetPath ?? normalizeProjectPath(candidate.targetPath))
+        ))
+        : undefined;
+      if (mount?.status === 'missing-target') {
+        throw createMountUnreachableError(mount);
+      }
+      if (mount && mount.realTargetPath !== null && READABLE_MOUNT_STATUSES.has(mount.status)) {
+        const mountTarget = mount.realTargetPath;
+        const resolved = await dependencies.mounts.runInMountTarget(
+          normalizedTarget,
+          () => resolvePathUnderRoots(targetPath, [mountTarget]),
+          { followLinksBelow: mountTarget },
+        );
+        if (resolved.kind === 'unreachable' || resolved.kind === 'busy') {
+          throw createMountUnreachableError(mount);
+        }
+        if (resolved.kind === 'done' && resolved.value) {
+          return { resolvedPath: resolved.value, location: { mount, realPath: resolved.value } };
+        }
+        // A path that resolves elsewhere through a link in the target goes by
+        // the other rules.
+      }
+
+      // The rules below resolve the path without the mount gate, which
+      // would hang on a filesystem that does not answer. A mount's target
+      // reached through a link (~/nas -> /mnt/nas) matches no mount by its
+      // real path while it does not answer, but its probe taught the gate
+      // that its filesystem hangs.
+      if (mountListing && await dependencies.mounts.isShareUnreachable(normalizedTarget)) {
+        throw createFileTreeError(
+          'The folder of this file does not answer (an offline network share or an unplugged disk?)',
+          503,
+          'MOUNT_UNREACHABLE',
+        );
+      }
+
       const readOnlyPath = await dependencies.workspace.resolveReadOnlyRootPath(targetPath);
       if (readOnlyPath) {
-        return readOnlyPath;
+        return { resolvedPath: readOnlyPath, location: null };
       }
 
       const workspacePath = await resolvePathUnderRoots(targetPath, [dependencies.workspace.rootPath]);
       if (workspacePath) {
-        return workspacePath;
+        return { resolvedPath: workspacePath, location: null };
       }
     }
 
-    return resolvePathInsideProject(projectRoot, targetPath);
+    const resolvedPath = resolvePathInsideProject(projectRoot, targetPath);
+    return { resolvedPath, location: await locateInMountLink(projectId, projectRoot, resolvedPath) };
   }
 
   async function cleanupTemporaryFiles(files: FileTreeUploadedFile[]): Promise<void> {
@@ -698,11 +1252,22 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async readTextFile(projectId, filePath) {
       const projectRoot = await resolveProjectRoot(projectId);
-      const resolvedPath = await resolveReadablePath(projectRoot, filePath);
+      const { resolvedPath, location } = await resolveReadablePath(projectId, projectRoot, filePath);
       try {
+        // In a mount, through the mount gate: a file that answers this goes on to be read.
+        const stats = await callOnPath(location, () => fileSystem.stat(resolvedPath));
+        // A directory goes on to the read, which reports it as one.
+        if (!stats.isDirectory() && stats.size > MAXIMUM_TEXT_FILE_BYTES) {
+          throw new AppError('File is too large to open', {
+            code: 'FILE_TOO_LARGE',
+            statusCode: 413,
+            details: { size: stats.size, limit: MAXIMUM_TEXT_FILE_BYTES },
+          });
+        }
         const content = await fileSystem.readTextFile(resolvedPath);
         return { content, path: resolvedPath };
       } catch (error) {
+        if (error instanceof AppError) throw error;
         mapFileSystemError(error, {
           ENOENT: { message: 'File not found', statusCode: 404 },
           EACCES: { message: 'Permission denied', statusCode: 403 },
@@ -713,10 +1278,11 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async openFile(projectId, filePath) {
       const projectRoot = await resolveProjectRoot(projectId);
-      const resolvedPath = await resolveReadablePath(projectRoot, filePath);
+      const { resolvedPath, location } = await resolveReadablePath(projectId, projectRoot, filePath);
       try {
-        await fileSystem.access(resolvedPath);
-      } catch {
+        await callOnPath(location, () => fileSystem.access(resolvedPath));
+      } catch (error) {
+        if (error instanceof AppError) throw error;
         throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
       }
 
@@ -729,6 +1295,18 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     async saveTextFile(projectId, filePath, content) {
       const projectRoot = await resolveProjectRoot(projectId);
       const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
+      const location = await locateInMountLink(projectId, projectRoot, resolvedPath);
+      if (location) {
+        // The folder the file goes in answers, through the mount gate,
+        // before the write that could otherwise hang.
+        await callOnPath(location, async () => {
+          try {
+            await fileSystem.access(path.dirname(resolvedPath));
+          } catch {
+            // The write reports what is wrong with the folder.
+          }
+        });
+      }
       try {
         await fileSystem.writeTextFile(resolvedPath, content);
       } catch (error) {
@@ -747,14 +1325,43 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         ? await readGitignoreEntryFilter(projectRoot, options.markIgnored === true)
         : undefined;
 
-      return buildFileTree(projectRoot, MAXIMUM_PROJECT_TREE_DEPTH, 0, includeEntry);
+      const mountListing = await readMountListingOrNone(projectId, projectRoot);
+      if (!mountListing) {
+        return buildFileTree(projectRoot, MAXIMUM_PROJECT_TREE_DEPTH, 0, includeEntry);
+      }
+      const mountWalkTimeLimit = new AbortController();
+      const timer = setTimeout(() => mountWalkTimeLimit.abort(), MOUNT_WALK_TIME_LIMIT_MS);
+      try {
+        return await buildFileTree(
+          projectRoot,
+          MAXIMUM_PROJECT_TREE_DEPTH,
+          0,
+          createMountAwareEntryFilter(mountListing, includeEntry ?? includeEntryByFallbackDirectoryNames),
+          undefined,
+          {
+            listing: mountListing,
+            // Only the explorer's listing (which the palette shares) lists what
+            // is in a mount; the @ mention list sees the mount as a folder.
+            walkContents: options?.markIgnored === true,
+            remainingEntries: { visible: MAXIMUM_MOUNT_TREE_ENTRIES, ignored: 0 },
+            timeLimit: mountWalkTimeLimit.signal,
+            insideMount: null,
+          },
+        );
+      } finally {
+        clearTimeout(timer);
+      }
     },
 
     async searchProjectFiles(projectId, input) {
       const projectRoot = await resolveExistingProjectRoot(projectId);
       // The command palette's listing: gitignored entries marked, not hidden.
-      const includeEntry = await readGitignoreEntryFilter(projectRoot, true)
+      const listingEntryFilter = await readGitignoreEntryFilter(projectRoot, true)
         ?? includeEntryByFallbackDirectoryNames;
+      const mountListing = await readMountListingOrNone(projectId, projectRoot);
+      const includeEntry = mountListing
+        ? createMountHidingEntryFilter(mountListing, listingEntryFilter)
+        : listingEntryFilter;
       const limit = Number.isFinite(input.limit)
         ? Math.min(Math.max(Math.floor(input.limit), 1), MAXIMUM_FILE_SEARCH_RESULTS)
         : MAXIMUM_FILE_SEARCH_RESULTS;
@@ -844,9 +1451,10 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         ? path.join(input.parentPath, input.name)
         : input.name;
       const resolvedPath = resolvePathInsideProject(projectRoot, targetPath);
+      const location = await locateInMountLink(input.projectId, projectRoot, resolvedPath);
 
       try {
-        await fileSystem.access(resolvedPath);
+        await callOnPath(location, () => fileSystem.access(resolvedPath));
         throw createFileTreeError(
           `${input.type === 'file' ? 'File' : 'Directory'} already exists`,
           409,
@@ -888,10 +1496,13 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       validateFilename(input.newName);
       const projectRoot = await resolveProjectRoot(input.projectId);
       const resolvedOldPath = resolvePathInsideProject(projectRoot, input.oldPath);
+      await assertNotMountProtected(input.projectId, projectRoot, resolvedOldPath);
+      const location = await locateInMountLink(input.projectId, projectRoot, resolvedOldPath);
 
       try {
-        await fileSystem.access(resolvedOldPath);
-      } catch {
+        await callOnPath(location, () => fileSystem.access(resolvedOldPath));
+      } catch (error) {
+        if (error instanceof AppError) throw error;
         throw createFileTreeError('File or directory not found', 404, 'FILE_TREE_ENTRY_NOT_FOUND');
       }
 
@@ -930,10 +1541,14 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     async deleteEntry(input) {
       const projectRoot = await resolveProjectRoot(input.projectId);
       const resolvedPath = resolvePathInsideProject(projectRoot, input.targetPath);
+      // A mount's link goes only by unmounting, which checks it still points at the target.
+      await assertNotMountProtected(input.projectId, projectRoot, resolvedPath);
+      const location = await locateInMountLink(input.projectId, projectRoot, resolvedPath);
       let stats;
       try {
-        stats = await fileSystem.stat(resolvedPath);
-      } catch {
+        stats = await callOnPath(location, () => fileSystem.stat(resolvedPath));
+      } catch (error) {
+        if (error instanceof AppError) throw error;
         throw createFileTreeError('File or directory not found', 404, 'FILE_TREE_ENTRY_NOT_FOUND');
       }
 
@@ -978,10 +1593,12 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         const resolvedTargetDirectory = path.resolve(normalizedProjectRoot, input.targetPath) === normalizedProjectRoot
           ? normalizedProjectRoot
           : resolvePathInsideProject(projectRoot, input.targetPath);
+        const location = await locateInMountLink(input.projectId, projectRoot, resolvedTargetDirectory);
 
         try {
-          await fileSystem.access(resolvedTargetDirectory);
-        } catch {
+          await callOnPath(location, () => fileSystem.access(resolvedTargetDirectory));
+        } catch (error) {
+          if (error instanceof AppError) throw error;
           await fileSystem.makeDirectory(resolvedTargetDirectory, true);
         }
 

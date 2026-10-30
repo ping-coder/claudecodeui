@@ -11,10 +11,12 @@ import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js'
 import type {
   FileTreeDirectoryEntry,
   FileTreeFileSystem,
+  FileTreeMountsGateway,
   FileTreeNode,
   FileTreeServiceDependencies,
   FileTreeServices,
   FileTreeStats,
+  ProjectMount,
 } from '@/shared/types.js';
 import { AppError, resolveReadOnlyRootPath, validateWorkspacePath } from '@/shared/utils.js';
 
@@ -56,13 +58,21 @@ function createFakeFileSystem(
     throw new Error('Unexpected File Tree filesystem operation');
   };
 
-  return {
+  const fileSystem: FileTreeFileSystem = {
     access: unexpectedOperation,
     stat: unexpectedOperation,
     lstat: unexpectedOperation,
     openDirectory: () => ({
       [Symbol.asyncIterator]: () => ({ next: unexpectedOperation }),
     }),
+    // The names the directory stream lists, unless a test reads them its own way.
+    readDirectoryNames: async (directoryPath) => {
+      const names: string[] = [];
+      for await (const entry of fileSystem.openDirectory(directoryPath)) {
+        names.push(entry.name);
+      }
+      return names;
+    },
     realpath: unexpectedOperation,
     readTextFile: unexpectedOperation,
     writeTextFile: unexpectedOperation,
@@ -74,7 +84,40 @@ function createFakeFileSystem(
     createReadStream: () => Readable.from([]),
     ...overrides,
   };
+  return fileSystem;
 }
+
+/**
+ * Runs a call in a mount at once, as the projects module's mount gate does
+ * for a network share that answers.
+ */
+const runMountCallsDirectly: FileTreeMountsGateway['runInMountTarget'] = async (_realPath, operation) => {
+  try {
+    return { kind: 'done', value: await operation({ gated: true }) };
+  } catch (error) {
+    return { kind: 'failed', error };
+  }
+};
+
+/** Runs a call in a mount at once, as the mount gate does for a local disk, which it does not time. */
+const runMountCallsOnLocalDisk: FileTreeMountsGateway['runInMountTarget'] = async (_realPath, operation) => {
+  try {
+    return { kind: 'done', value: await operation({ gated: false }) };
+  } catch (error) {
+    return { kind: 'failed', error };
+  }
+};
+
+// Every filesystem answers, as far as the mount gate knows.
+const noShareHangs: FileTreeMountsGateway['isShareUnreachable'] = async () => false;
+
+// A project without mounts, which is what every test that does not set any up runs with.
+const noMounts: FileTreeMountsGateway = {
+  directoryName: 'mounts',
+  listProjectMounts: async () => [],
+  runInMountTarget: runMountCallsDirectly,
+  isShareUnreachable: noShareHangs,
+};
 
 function createDependencies(
   fileSystem: FileTreeFileSystem,
@@ -85,6 +128,7 @@ function createDependencies(
     projects: {
       getProjectPathById: async () => projectRoot,
     },
+    mounts: noMounts,
     workspace: {
       rootPath: projectRoot,
       validatePath: async (candidatePath) => ({ valid: true, resolvedPath: candidatePath }),
@@ -459,6 +503,7 @@ test('readTextFile rejects traversal before invoking the filesystem adapter', as
 test('readTextFile reports a directory as a client error, not a 500', async () => {
   const projectRoot = path.resolve('file-tree-test-project');
   const fileSystem = createFakeFileSystem({
+    stat: async () => createStats(true, 0o40755),
     readTextFile: async () => {
       const error = new Error('EISDIR: illegal operation on a directory, read');
       (error as NodeJS.ErrnoException).code = 'EISDIR';
@@ -551,7 +596,11 @@ test('storeUploadedFiles takes the project root itself as a target, however it i
  * which is the only way to exercise the read-only roots: the whole guarantee
  * rests on `realpath` resolving symlinks before the comparison.
  */
-function createRealFileSystemService(projectRoot: string, workspaceRoot = projectRoot): FileTreeServices {
+function createRealFileSystemService(
+  projectRoot: string,
+  workspaceRoot = projectRoot,
+  mounts: FileTreeMountsGateway = noMounts,
+): FileTreeServices {
   return createFileTreeService({
     fileSystem: {
       access: (candidatePath) => fsPromises.access(candidatePath),
@@ -560,6 +609,7 @@ function createRealFileSystemService(projectRoot: string, workspaceRoot = projec
       openDirectory: async function* (directoryPath) {
         yield* await fsPromises.opendir(directoryPath);
       },
+      readDirectoryNames: (directoryPath) => fsPromises.readdir(directoryPath),
       realpath: (candidatePath) => fsPromises.realpath(candidatePath),
       readTextFile: (filePath) => fsPromises.readFile(filePath, 'utf8'),
       writeTextFile: (filePath, content) => fsPromises.writeFile(filePath, content, 'utf8'),
@@ -575,6 +625,7 @@ function createRealFileSystemService(projectRoot: string, workspaceRoot = projec
       createReadStream: (filePath) => createReadStream(filePath),
     },
     projects: { getProjectPathById: async () => projectRoot },
+    mounts,
     workspace: {
       rootPath: workspaceRoot,
       validatePath: (candidatePath) => validateWorkspacePath(candidatePath),
@@ -1287,4 +1338,868 @@ test('searchProjectFiles stays inside the project and does not follow a symlink 
     await fsPromises.rm(projectRoot, { recursive: true, force: true });
     await fsPromises.rm(outsideDirectory, { recursive: true, force: true });
   }
+});
+
+/**
+ * A project beside this file with one registered mount, `mounts/data`, linked
+ * the way the projects module links it (sentinel included) to a folder that
+ * is outside the project, the workspace root and every read-only root.
+ */
+async function withMountedProject(
+  run: (fixture: {
+    projectRoot: string;
+    targetRoot: string;
+    linkPath: string;
+    mount: ProjectMount;
+    mountsGateway: FileTreeMountsGateway;
+  }) => Promise<void>,
+): Promise<void> {
+  const projectRoot = await fsPromises.mkdtemp(path.join(testDirectory, 'file-tree-mount-project-'));
+  const targetRoot = await fsPromises.mkdtemp(path.join(testDirectory, 'file-tree-mount-target-'));
+  try {
+    await fsPromises.mkdir(path.join(projectRoot, 'mounts'));
+    await fsPromises.writeFile(path.join(projectRoot, 'mounts', '.gitignore'), '# CloudCLI mounts: never committed\n*\n');
+    const linkPath = path.join(projectRoot, 'mounts', 'data');
+    await fsPromises.symlink(targetRoot, linkPath, 'dir');
+    const mount: ProjectMount = {
+      mountId: 'mount-1',
+      name: 'data',
+      linkPath: 'mounts/data',
+      targetPath: targetRoot,
+      realTargetPath: await fsPromises.realpath(targetRoot),
+      status: 'ok',
+      createdAt: '2026-10-30T00:00:00.000Z',
+    };
+    const mountsGateway: FileTreeMountsGateway = {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+    };
+    await run({ projectRoot, targetRoot, linkPath, mount, mountsGateway });
+  } finally {
+    await fsPromises.rm(projectRoot, { recursive: true, force: true });
+    await fsPromises.rm(targetRoot, { recursive: true, force: true });
+  }
+}
+
+function findNode(nodes: FileTreeNode[], name: string): FileTreeNode | undefined {
+  return nodes.find((node) => node.name === name);
+}
+
+test('listProjectFiles lists a mount as a directory with its contents, past a .gitignore rule for mounts/', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mountsGateway }) => {
+    await fsPromises.mkdir(path.join(targetRoot, 'videos'));
+    await fsPromises.writeFile(path.join(targetRoot, 'videos', 'clip.mp4'), 'clip');
+    await fsPromises.writeFile(path.join(targetRoot, 'readme.txt'), 'big files');
+    await fsPromises.writeFile(path.join(projectRoot, '.gitignore'), 'mounts/\n');
+    await fsPromises.writeFile(path.join(projectRoot, 'index.ts'), 'export {};');
+
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
+
+    const mountsFolder = findNode(tree, 'mounts');
+    assert.equal(mountsFolder?.type, 'directory');
+    assert.equal(mountsFolder?.isIgnored, undefined);
+    // The sentinel is not shown; the link is a folder.
+    assert.deepEqual(mountsFolder?.children?.map((node) => node.name), ['data']);
+    const dataNode = mountsFolder?.children?.[0];
+    assert.equal(dataNode?.path, linkPath);
+    assert.equal(dataNode?.type, 'directory');
+    assert.equal(dataNode?.isSymlink, true);
+    assert.deepEqual(dataNode?.mount, { mountId: 'mount-1', name: 'data', targetPath: targetRoot, status: 'ok' });
+    assert.equal(dataNode?.inMount, undefined);
+    assert.equal(dataNode?.truncated, undefined);
+    assert.deepEqual(dataNode?.children?.map((node) => [node.name, node.type, node.inMount]), [
+      ['videos', 'directory', true],
+      ['readme.txt', 'file', true],
+    ]);
+    const clip = findNode(dataNode?.children ?? [], 'videos')?.children?.[0];
+    assert.equal(clip?.path, path.join(linkPath, 'videos', 'clip.mp4'));
+    assert.equal(clip?.inMount, true);
+  });
+});
+
+test('listProjectFiles shows a mount to the @ mention list as a folder without its contents', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'readme.txt'), 'big files');
+
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const tree = await service.listProjectFiles('project-1', { respectGitignore: true });
+
+    const dataNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+    assert.equal(dataNode?.type, 'directory');
+    assert.equal(dataNode?.mount?.status, 'ok');
+    assert.equal(dataNode?.children, undefined);
+  });
+});
+
+test('listProjectFiles cuts a big mount short on its own budget instead of failing with a 413', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'big');
+  const sourceDirectory = path.join(projectRoot, 'src');
+  const mount: ProjectMount = {
+    mountId: 'mount-big',
+    name: 'big',
+    linkPath: 'mounts/big',
+    targetPath: '/data/big',
+    realTargetPath: '/data/big',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(candidatePath === sourceDirectory || candidatePath === mountsDirectory, 0o644),
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        yield createDirectoryEntry('src', true);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('.gitignore', false);
+        // A symlink is not a directory entry, as opendir reports it.
+        yield createDirectoryEntry('big', false);
+        return;
+      }
+      if (directoryPath === linkPath) {
+        // More than the whole project's entry limit.
+        for (let index = 0; index < 12_000; index += 1) {
+          yield createDirectoryEntry(`frame-${index}.png`, false);
+        }
+        return;
+      }
+      if (directoryPath === sourceDirectory) {
+        yield createDirectoryEntry('main.ts', false);
+      }
+    },
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+
+  const mountsFolder = findNode(tree, 'mounts');
+  assert.deepEqual(mountsFolder?.children?.map((node) => node.name), ['big']);
+  const bigNode = mountsFolder?.children?.[0];
+  assert.equal(bigNode?.type, 'directory');
+  assert.equal(bigNode?.truncated, true);
+  assert.equal(bigNode?.children?.length, 2_000);
+  assert.equal(bigNode?.children?.every((node) => node.inMount === true), true);
+  // The rest of the project is listed as usual.
+  assert.deepEqual(findNode(tree, 'src')?.children?.map((node) => node.name), ['main.ts']);
+});
+
+test('listProjectFiles shows a mount whose target is gone as a broken folder without contents', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, mount }) => {
+    await fsPromises.rm(targetRoot, { recursive: true, force: true });
+    const brokenMount: ProjectMount = { ...mount, realTargetPath: null, status: 'missing-target' };
+
+    const service = createRealFileSystemService(projectRoot, projectRoot, {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [brokenMount],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+    });
+    const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
+
+    const dataNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+    assert.equal(dataNode?.type, 'directory');
+    assert.equal(dataNode?.mount?.status, 'missing-target');
+    assert.equal(dataNode?.children, undefined);
+  });
+});
+
+test('a mount\'s link, the mounts folder and the sentinel cannot be renamed or deleted, and nothing is touched', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'keep.bin'), 'precious');
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const isProtected = (error: unknown) => error instanceof AppError
+      && error.code === 'MOUNT_PROTECTED'
+      && error.statusCode === 403;
+
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: linkPath }), isProtected);
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'mounts/data' }), isProtected);
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'mounts' }), isProtected);
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'mounts/.gitignore' }), isProtected);
+    await assert.rejects(
+      service.renameEntry({ projectId: 'project-1', oldPath: linkPath, newName: 'renamed' }),
+      isProtected,
+    );
+    await assert.rejects(
+      service.renameEntry({ projectId: 'project-1', oldPath: path.join(projectRoot, 'mounts'), newName: 'other' }),
+      isProtected,
+    );
+
+    assert.equal((await fsPromises.lstat(linkPath)).isSymbolicLink(), true);
+    assert.equal(await fsPromises.readFile(path.join(targetRoot, 'keep.bin'), 'utf8'), 'precious');
+    assert.deepEqual((await fsPromises.readdir(path.join(projectRoot, 'mounts'))).sort(), ['.gitignore', 'data']);
+  });
+});
+
+test('a mount\'s link and the mounts folder stay protected when their path is spelled through another link', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'keep.bin'), 'precious');
+    // A link in the project to the project itself.
+    await fsPromises.symlink('.', path.join(projectRoot, 'self'), 'dir');
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const isProtected = (error: unknown) => error instanceof AppError
+      && error.code === 'MOUNT_PROTECTED'
+      && error.statusCode === 403;
+
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'self/mounts/data' }), isProtected);
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'self/mounts/.gitignore' }), isProtected);
+    await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: 'self/mounts' }), isProtected);
+    await assert.rejects(
+      service.renameEntry({ projectId: 'project-1', oldPath: 'self/mounts/data', newName: 'moved' }),
+      isProtected,
+    );
+    await assert.rejects(
+      service.renameEntry({ projectId: 'project-1', oldPath: path.join(projectRoot, 'self', 'mounts'), newName: 'other' }),
+      isProtected,
+    );
+
+    assert.equal((await fsPromises.lstat(linkPath)).isSymbolicLink(), true);
+    assert.equal(await fsPromises.readFile(path.join(targetRoot, 'keep.bin'), 'utf8'), 'precious');
+    assert.deepEqual((await fsPromises.readdir(path.join(projectRoot, 'mounts'))).sort(), ['.gitignore', 'data']);
+    // What is inside the mount is still the user's to change, by any spelling.
+    await fsPromises.writeFile(path.join(targetRoot, 'old.log'), 'old');
+    await service.deleteEntry({ projectId: 'project-1', targetPath: 'self/mounts/data/old.log' });
+    assert.deepEqual(await fsPromises.readdir(targetRoot), ['keep.bin']);
+  });
+});
+
+test('a file inside the project opens by its absolute path while the disk it shares with a mount does not answer', async () => {
+  await withMountedProject(async ({ projectRoot, mount }) => {
+    await fsPromises.mkdir(path.join(projectRoot, 'src'));
+    await fsPromises.writeFile(path.join(projectRoot, 'src', 'index.ts'), 'export {};');
+    let asked = 0;
+    const service = createRealFileSystemService(projectRoot, projectRoot, {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: runMountCallsDirectly,
+      // A call on that disk timed out a moment ago.
+      isShareUnreachable: async () => {
+        asked += 1;
+        return true;
+      },
+    });
+    const absolutePath = path.join(projectRoot, 'src', 'index.ts');
+
+    assert.equal((await service.readTextFile('project-1', absolutePath)).content, 'export {};');
+    const opened = await service.openFile('project-1', absolutePath);
+    opened.stream.destroy();
+    assert.equal(asked, 0);
+  });
+});
+
+test('deleting a file inside a mount deletes the real file in the target', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'old.log'), 'old');
+    await fsPromises.writeFile(path.join(targetRoot, 'keep.log'), 'keep');
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+
+    const result = await service.deleteEntry({ projectId: 'project-1', targetPath: path.join(linkPath, 'old.log') });
+
+    assert.equal(result.type, 'file');
+    assert.deepEqual(await fsPromises.readdir(targetRoot), ['keep.log']);
+  });
+});
+
+test('a file in a mount\'s target can be read by its real path', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'notes.md'), 'from the big disk');
+    const realFilePath = path.join(await fsPromises.realpath(targetRoot), 'notes.md');
+    assert.equal(await resolveReadOnlyRootPath(realFilePath), null);
+
+    // Without the mount the real path is outside everything readable.
+    const withoutMount = createRealFileSystemService(projectRoot);
+    await assert.rejects(
+      withoutMount.readTextFile('project-1', realFilePath),
+      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+    );
+
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const opened = await service.readTextFile('project-1', realFilePath);
+    assert.equal(opened.content, 'from the big disk');
+    // Writing by the real path stays refused: only the link's path writes into a mount.
+    await assert.rejects(
+      service.saveTextFile('project-1', realFilePath, 'overwritten'),
+      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+    );
+    assert.equal(await fsPromises.readFile(realFilePath, 'utf8'), 'from the big disk');
+  });
+});
+
+test('searchProjectFiles leaves out mount links and the sentinel', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'data-notes.md'), 'outside');
+    await fsPromises.writeFile(path.join(projectRoot, 'data-model.ts'), 'inside');
+
+    const service = createRealFileSystemService(projectRoot, projectRoot, mountsGateway);
+    const found = await service.searchProjectFiles('project-1', { query: 'data', limit: 10 });
+
+    assert.deepEqual(found.files.map((file) => file.relativePath), ['data-model.ts']);
+    const gitignoreSearch = await service.searchProjectFiles('project-1', { query: 'gitignore', limit: 10 });
+    assert.deepEqual(gitignoreSearch.files.map((file) => file.relativePath), []);
+  });
+});
+
+/**
+ * Runs each call in a mount as the projects module's mount gate does, with
+ * a short time limit: a call that has not answered by then comes back
+ * `unreachable`, and its share (the longest of `shares` its real path lies
+ * in) takes no new call. Notes the real paths it was given.
+ */
+function createTimeLimitedMountCalls(timeLimitMs: number, shares: string[]) {
+  const realPaths: string[] = [];
+  const hungShares = new Set<string>();
+  const shareOf = (realPath: string) => shares
+    .filter((share) => realPath === share || realPath.startsWith(`${share}${path.sep}`))
+    .sort((left, right) => right.length - left.length)[0];
+  const runInMountTarget: FileTreeMountsGateway['runInMountTarget'] = async (realPath, operation) => {
+    realPaths.push(realPath);
+    const share = shareOf(realPath);
+    if (hungShares.has(share)) {
+      return { kind: 'unreachable' };
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<'timed out'>((resolve) => {
+      timer = setTimeout(() => resolve('timed out'), timeLimitMs);
+    });
+    try {
+      const outcome = await Promise.race([
+        operation({ gated: true }).then((value) => ({ kind: 'done' as const, value }), (error: unknown) => ({ kind: 'failed' as const, error })),
+        timedOut,
+      ]);
+      if (outcome === 'timed out') {
+        hungShares.add(share);
+        return { kind: 'unreachable' };
+      }
+      return outcome;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return { runInMountTarget, realPaths };
+}
+
+test('listProjectFiles answers in time when a share inside a mount hangs, and lists the rest', { timeout: 5_000 }, async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'data');
+  const nasPath = path.join(linkPath, 'nas');
+  const mount: ProjectMount = {
+    mountId: 'mount-data',
+    name: 'data',
+    linkPath: 'mounts/data',
+    targetPath: '/data',
+    realTargetPath: '/data',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const hangs = () => new Promise<never>(() => {});
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    // A hard-mounted NFS share at /data/nas whose server is gone: anything
+    // that touches it never answers.
+    lstat: async (candidatePath) => (candidatePath === nasPath
+      ? hangs()
+      : createStats(candidatePath === mountsDirectory || candidatePath === path.join(linkPath, 'local'), 0o755)),
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        yield createDirectoryEntry('index.ts', false);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('data', false);
+        return;
+      }
+      if (directoryPath === linkPath) {
+        yield createDirectoryEntry('nas', true);
+        yield createDirectoryEntry('local', true);
+        yield createDirectoryEntry('readme.txt', false);
+        return;
+      }
+      if (directoryPath === nasPath) {
+        await hangs();
+      }
+      if (directoryPath === path.join(linkPath, 'local')) {
+        yield createDirectoryEntry('notes.md', false);
+      }
+    },
+  });
+  const mountCalls = createTimeLimitedMountCalls(50, ['/data', path.join('/data', 'nas')]);
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: mountCalls.runInMountTarget,
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+
+  const dataNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+  assert.equal(dataNode?.truncated, true);
+  // The share's own folder, whose type its lstat never told, is left out.
+  assert.deepEqual(dataNode?.children?.map((node) => node.name), ['local', 'readme.txt']);
+  assert.deepEqual(findNode(dataNode?.children ?? [], 'local')?.children?.map((node) => node.name), ['notes.md']);
+  assert.equal(findNode(tree, 'index.ts')?.type, 'file');
+  // Every call in the mount went through the gate, by where it really is.
+  assert.equal(mountCalls.realPaths.includes('/data'), true);
+  assert.equal(mountCalls.realPaths.includes(path.join('/data', 'nas')), true);
+  assert.equal(mountCalls.realPaths.every((realPath) => realPath === '/data' || realPath.startsWith(`/data${path.sep}`)), true);
+});
+
+test('reads and changes in a mount whose target does not answer are refused with 503 before anything touches it', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const linkPath = path.join(projectRoot, 'mounts', 'data');
+  const offline: ProjectMount = {
+    mountId: 'mount-data',
+    name: 'data',
+    linkPath: 'mounts/data',
+    targetPath: '/mnt/nas/data',
+    realTargetPath: null,
+    status: 'missing-target',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const touched: string[] = [];
+  const note = (operation: string) => async (candidatePath: string) => {
+    touched.push(`${operation} ${candidatePath}`);
+    throw new Error('the share would hang here');
+  };
+  const fileSystem = createFakeFileSystem({
+    access: note('access'),
+    stat: note('stat'),
+    lstat: note('lstat'),
+    realpath: note('realpath'),
+    readTextFile: note('readTextFile'),
+    writeTextFile: note('writeTextFile'),
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [offline],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+    },
+  });
+  const unreachable = (error: unknown) => error instanceof AppError
+    && error.code === 'MOUNT_UNREACHABLE'
+    && error.statusCode === 503;
+
+  await assert.rejects(service.readTextFile('project-1', 'mounts/data/notes.md'), unreachable);
+  await assert.rejects(service.readTextFile('project-1', path.join(linkPath, 'notes.md')), unreachable);
+  await assert.rejects(service.readTextFile('project-1', '/mnt/nas/data/notes.md'), unreachable);
+  await assert.rejects(service.openFile('project-1', path.join(linkPath, 'clip.mp4')), unreachable);
+  await assert.rejects(service.saveTextFile('project-1', path.join(linkPath, 'notes.md'), 'text'), unreachable);
+  await assert.rejects(service.deleteEntry({ projectId: 'project-1', targetPath: path.join(linkPath, 'old.log') }), unreachable);
+  await assert.rejects(
+    service.renameEntry({ projectId: 'project-1', oldPath: path.join(linkPath, 'a.txt'), newName: 'b.txt' }),
+    unreachable,
+  );
+  await assert.rejects(
+    service.createEntry({ projectId: 'project-1', parentPath: linkPath, name: 'new.txt', type: 'file' }),
+    unreachable,
+  );
+  assert.deepEqual(touched, []);
+});
+
+test('a read in a mount whose share stops answering comes back 503 in time', { timeout: 5_000 }, async () => {
+  await withMountedProject(async ({ projectRoot, linkPath, mount }) => {
+    let calls = 0;
+    const service = createRealFileSystemService(projectRoot, projectRoot, {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: async () => {
+        calls += 1;
+        return { kind: 'unreachable' };
+      },
+      isShareUnreachable: noShareHangs,
+    });
+
+    await assert.rejects(
+      service.readTextFile('project-1', path.join(linkPath, 'notes.md')),
+      (error: unknown) => error instanceof AppError && error.code === 'MOUNT_UNREACHABLE' && error.statusCode === 503,
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+test('readTextFile refuses a file over 10 MB with 413 and both sizes, and reads one at the limit', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const limit = 10 * 1024 * 1024;
+  const readPaths: string[] = [];
+  const fileSystem = createFakeFileSystem({
+    stat: async (candidatePath) => ({
+      ...createStats(false, 0o644),
+      size: candidatePath.endsWith('huge.log') ? limit + 1 : limit,
+    }),
+    readTextFile: async (filePath) => {
+      readPaths.push(filePath);
+      return 'content';
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  await assert.rejects(
+    service.readTextFile('project-1', 'huge.log'),
+    (error: unknown) => error instanceof AppError
+      && error.code === 'FILE_TOO_LARGE'
+      && error.statusCode === 413
+      && JSON.stringify(error.details) === JSON.stringify({ size: limit + 1, limit }),
+  );
+  assert.deepEqual(readPaths, []);
+
+  const atLimit = await service.readTextFile('project-1', 'exact.log');
+  assert.equal(atLimit.content, 'content');
+});
+
+test('a read by the real path of a mount reached through a link is refused with 503 while that filesystem hangs', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  // Registered by a link in the home folder (~/nas -> /mnt/nas), so the
+  // target's realpath, which the agent quotes, is not its registered path.
+  const offline: ProjectMount = {
+    mountId: 'mount-nas',
+    name: 'nas',
+    linkPath: 'mounts/nas',
+    targetPath: '/home/u/nas',
+    realTargetPath: null,
+    status: 'missing-target',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const touched: string[] = [];
+  const fileSystem = createFakeFileSystem({
+    realpath: async (candidatePath) => {
+      touched.push(`realpath ${candidatePath}`);
+      throw new Error('the share would hang here');
+    },
+    readTextFile: async (candidatePath) => {
+      touched.push(`readTextFile ${candidatePath}`);
+      return 'text';
+    },
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [offline],
+      runInMountTarget: runMountCallsDirectly,
+      // The mount's probe hung on /mnt/nas.
+      isShareUnreachable: async (absolutePath) => absolutePath === '/mnt/nas' || absolutePath.startsWith('/mnt/nas/'),
+    },
+    workspace: {
+      rootPath: projectRoot,
+      validatePath: async (candidatePath) => ({ valid: true, resolvedPath: candidatePath }),
+      resolveReadOnlyRootPath: async (candidatePath) => {
+        touched.push(`resolveReadOnlyRootPath ${candidatePath}`);
+        return null;
+      },
+    },
+  });
+  const unreachable = (error: unknown) => error instanceof AppError
+    && error.code === 'MOUNT_UNREACHABLE'
+    && error.statusCode === 503;
+
+  await assert.rejects(service.readTextFile('project-1', '/mnt/nas/data/a.csv'), unreachable);
+  await assert.rejects(service.openFile('project-1', '/mnt/nas/scans/page.png'), unreachable);
+  assert.deepEqual(touched, []);
+
+  // A path whose filesystem answers goes on to the other rules.
+  await assert.rejects(
+    service.readTextFile('project-1', '/srv/elsewhere/b.txt'),
+    (error: unknown) => error instanceof AppError && error.code !== 'MOUNT_UNREACHABLE',
+  );
+  assert.deepEqual(touched, ['resolveReadOnlyRootPath /srv/elsewhere/b.txt']);
+});
+
+test('a folder in a mount on a network share is read as names in one slow call, never through opendir, and its entries take their types from lstat', { timeout: 5_000 }, async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'data');
+  const clipsPath = path.join(linkPath, 'clips');
+  const mount: ProjectMount = {
+    mountId: 'mount-data',
+    name: 'data',
+    linkPath: 'mounts/data',
+    targetPath: '/data',
+    realTargetPath: '/data',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const opened: string[] = [];
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(
+      [mountsDirectory, clipsPath, path.join(linkPath, 'node_modules')].includes(candidatePath),
+      0o755,
+    ),
+    // opendir reads a share that reports no entry types with a synchronous
+    // lstat on the event loop, so it is for the project's own folders only.
+    openDirectory: async function* (directoryPath) {
+      opened.push(directoryPath);
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('data', false);
+        return;
+      }
+      throw new Error(`opendir in a mount: ${directoryPath}`);
+    },
+    readDirectoryNames: async (directoryPath) => {
+      if (directoryPath === linkPath) {
+        return ['clips', 'node_modules', 'notes.md'];
+      }
+      if (directoryPath === clipsPath) {
+        return ['a.mp4'];
+      }
+      throw new Error(`unexpected read of ${directoryPath}`);
+    },
+  });
+  const slowCalls: string[] = [];
+  let otherCalls = 0;
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: async (realPath, operation, options) => {
+        if (options?.slow === true) {
+          slowCalls.push(realPath);
+        } else {
+          otherCalls += 1;
+        }
+        return runMountCallsDirectly(realPath, operation, options);
+      },
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+
+  const dataNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+  // node_modules is a folder by its lstat, so the hard exclusions hide it.
+  assert.deepEqual(dataNode?.children?.map((node) => [node.name, node.type]), [['clips', 'directory'], ['notes.md', 'file']]);
+  assert.deepEqual(findNode(dataNode?.children ?? [], 'clips')?.children?.map((node) => node.name), ['a.mp4']);
+  assert.equal(findNode(dataNode?.children ?? [], 'notes.md')?.permissions, '755');
+  assert.equal(dataNode?.truncated, undefined);
+  assert.deepEqual(opened, [projectRoot, mountsDirectory]);
+  // Reading every name of a big folder takes long on a share that answers,
+  // so only the folder reads are slow calls; each lstat has the time limit.
+  assert.deepEqual(slowCalls.sort(), ['/data', path.join('/data', 'clips')]);
+  assert.equal(otherCalls, 4);
+});
+
+test('on a local disk a folder in a mount is streamed, and the walk stops reading it at the mounts\' budget', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'frames');
+  const mount: ProjectMount = {
+    mountId: 'mount-frames',
+    name: 'frames',
+    linkPath: 'mounts/frames',
+    targetPath: '/data/frames',
+    realTargetPath: '/data/frames',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  let entriesRead = 0;
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(candidatePath === mountsDirectory, 0o644),
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('frames', false);
+        return;
+      }
+      if (directoryPath === linkPath) {
+        // A local dataset folder of fifty thousand images.
+        for (let index = 0; index < 50_000; index += 1) {
+          entriesRead += 1;
+          yield createDirectoryEntry(`frame-${index}.png`, false);
+        }
+      }
+    },
+    readDirectoryNames: async (directoryPath) => {
+      throw new Error(`a whole folder read on a local disk: ${directoryPath}`);
+    },
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: runMountCallsOnLocalDisk,
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+
+  const framesNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'frames');
+  assert.equal(framesNode?.truncated, true);
+  assert.equal(framesNode?.children?.length, 2_000);
+  // One name past the budget tells there is more; the rest is never read.
+  assert.equal(entriesRead, 2_001);
+});
+
+test('no folder in a mount is read once the mounts\' budget is used up', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'scans');
+  const mount: ProjectMount = {
+    mountId: 'mount-scans',
+    name: 'scans',
+    linkPath: 'mounts/scans',
+    targetPath: '/nas/scans',
+    realTargetPath: '/nas/scans',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const folderNames = Array.from({ length: 2_000 }, (_value, index) => `batch-${index}`);
+  const foldersRead: string[] = [];
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    // Every entry in the mount is a folder.
+    lstat: async (candidatePath) => createStats(candidatePath !== projectRoot, 0o755),
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('scans', false);
+      }
+    },
+    readDirectoryNames: async (directoryPath) => {
+      foldersRead.push(directoryPath);
+      // The mount's own folder fills the budget, so the scans in the folders
+      // in it (a hundred thousand each, on a real NAS) need not be read.
+      return directoryPath === linkPath ? folderNames : ['scan-0.tif', 'scan-1.tif'];
+    },
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+
+  const scansNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'scans');
+  assert.equal(scansNode?.children?.length, 2_000);
+  assert.equal(scansNode?.truncated, true);
+  assert.equal(foldersRead.length, 1);
+  assert.equal(foldersRead[0] === linkPath, true);
+});
+
+test('the walk stops waiting for a slow folder read at its time limit, and lists the mount cut short', { timeout: 5_000 }, async (t) => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const mount: ProjectMount = {
+    mountId: 'mount-nas',
+    name: 'nas',
+    linkPath: 'mounts/nas',
+    targetPath: '/nas',
+    realTargetPath: '/nas',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(candidatePath === mountsDirectory, 0o755),
+    openDirectory: createDirectoryReader((directoryPath) => {
+      if (directoryPath === projectRoot) {
+        return [createDirectoryEntry('mounts', true), createDirectoryEntry('index.ts', false)];
+      }
+      return directoryPath === mountsDirectory ? [createDirectoryEntry('nas', false)] : [];
+    }),
+  });
+  let slowReadStarted = false;
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: async (realPath, operation, options) => {
+        if (options?.slow === true) {
+          // Still reading every name, long past the walk's time limit; the
+          // gate keeps the share's turn for it until it answers.
+          slowReadStarted = true;
+          return new Promise(() => {});
+        }
+        return runMountCallsDirectly(realPath, operation, options);
+      },
+      isShareUnreachable: noShareHangs,
+    },
+  });
+
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const listing = service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true });
+  for (let turn = 0; turn < 1_000 && !slowReadStarted; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(slowReadStarted, true);
+  t.mock.timers.tick(5_000);
+  const tree = await Promise.race([
+    listing,
+    new Promise<null>((resolve) => {
+      realSetTimeout(() => resolve(null), 1_000);
+    }),
+  ]);
+
+  assert.equal(tree === null, false);
+  const nasNode = findNode(findNode(tree ?? [], 'mounts')?.children ?? [], 'nas');
+  assert.equal(nasNode?.truncated, true);
+  assert.deepEqual(nasNode?.children, []);
+  assert.equal(findNode(tree ?? [], 'index.ts')?.type, 'file');
+});
+
+test('a read or a change in a mount asks the gate to follow the links below the target, so a link into another share counts against that share', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mount }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'notes.md'), 'notes');
+    const asked: Array<{ realPath: string; followLinksBelow: string | undefined }> = [];
+    const service = createRealFileSystemService(projectRoot, projectRoot, {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mount],
+      runInMountTarget: async (realPath, operation, options) => {
+        asked.push({ realPath, followLinksBelow: options?.followLinksBelow });
+        return runMountCallsDirectly(realPath, operation, options);
+      },
+      isShareUnreachable: noShareHangs,
+    });
+    const realTarget = mount.realTargetPath ?? '';
+
+    assert.equal((await service.readTextFile('project-1', 'mounts/data/notes.md')).content, 'notes');
+    await service.deleteEntry({ projectId: 'project-1', targetPath: path.join(linkPath, 'notes.md') });
+    await fsPromises.writeFile(path.join(targetRoot, 'again.md'), 'again');
+    assert.equal((await service.readTextFile('project-1', path.join(realTarget, 'again.md'))).content, 'again');
+
+    assert.equal(asked.length > 0, true);
+    assert.equal(asked.every((call) => call.followLinksBelow === realTarget), true, JSON.stringify(asked));
+  });
 });

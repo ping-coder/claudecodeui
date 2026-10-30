@@ -8,9 +8,16 @@ import multer from 'multer';
 import { projectsDb } from '@/modules/database/index.js';
 import { createFileTreeRouter } from '@/modules/file-tree/file-tree.routes.js';
 import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js';
+import {
+  isMountShareUnreachable,
+  listProjectMounts,
+  PROJECT_MOUNTS_DIRECTORY_NAME,
+  runInMountTarget,
+} from '@/modules/projects/index.js';
 import type {
   FileTreeFileSystem,
   FileTreeLogger,
+  FileTreeMountsGateway,
   FileTreeProjectGateway,
   FileTreeWorkspaceGateway,
 } from '@/shared/types.js';
@@ -41,6 +48,8 @@ const fileTreeFileSystem: FileTreeFileSystem = {
   openDirectory: async function* (directoryPath) {
     yield* await fsPromises.opendir(directoryPath);
   },
+  // Names only: the promise readdir never stats an entry on the event loop.
+  readDirectoryNames: (directoryPath) => fsPromises.readdir(directoryPath),
   realpath: (candidatePath) => fsPromises.realpath(candidatePath),
   readTextFile: (filePath) => fsPromises.readFile(filePath, 'utf8'),
   writeTextFile: (filePath, content) => fsPromises.writeFile(filePath, content, 'utf8'),
@@ -66,6 +75,17 @@ const fileTreeProjects: FileTreeProjectGateway = {
 };
 
 /**
+ * Mounts boundary used only by File Tree production composition: the
+ * Projects module's registered mounts, consumed through its barrel.
+ */
+const fileTreeMounts: FileTreeMountsGateway = {
+  directoryName: PROJECT_MOUNTS_DIRECTORY_NAME,
+  listProjectMounts: (projectId) => listProjectMounts(projectId),
+  runInMountTarget: (realPath, operation, options) => runInMountTarget(realPath, operation, options),
+  isShareUnreachable: (absolutePath) => isMountShareUnreachable(absolutePath),
+};
+
+/**
  * Workspace-policy boundary used only by File Tree production composition.
  * Keeping both the configured root and symlink-aware validator together makes
  * the path policy explicit for every service instance.
@@ -83,6 +103,7 @@ const fileTreeLogger: FileTreeLogger = {
 const fileTreeServices = createFileTreeService({
   fileSystem: fileTreeFileSystem,
   projects: fileTreeProjects,
+  mounts: fileTreeMounts,
   workspace: fileTreeWorkspace,
   resolveMimeType: (filePath) => mime.lookup(filePath) || 'application/octet-stream',
   fileSystemConcurrency: readFileSystemConcurrency(),

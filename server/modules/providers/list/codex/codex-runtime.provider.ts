@@ -251,6 +251,29 @@ function mapPermissionModeToCodexOptions(permissionMode: string): Pick<ThreadOpt
 }
 
 /**
+ * The realpaths of the project's mounts (links under mounts/ to folders
+ * outside the project): the workspace-write sandbox lets Codex write a
+ * folder outside its working directory only as an additional directory.
+ * Codex 0.156 takes no AGENTS.md or skills from one (tried with `codex debug
+ * prompt-input`), unlike Claude's --add-dir. A mount whose target did not
+ * answer in time is left out; each turn is a process of its own, so a later
+ * turn has it again. None when the context cannot list them, or the lookup
+ * fails: the turn then runs as it would without mounts.
+ */
+async function loadMountDirectories(projectPath: unknown, context: ProviderRuntimeContext): Promise<string[]> {
+  if (typeof projectPath !== 'string' || !projectPath || !context.listProjectMountDirectories) {
+    return [];
+  }
+  try {
+    const mounts = await context.listProjectMountDirectories(projectPath);
+    return [...new Set(mounts.flatMap((mount) => (mount.realTargetPath ? [mount.realTargetPath] : [])))];
+  } catch (error) {
+    console.warn('[Codex] Could not list the project\'s mounts; the turn runs without them:', error);
+    return [];
+  }
+}
+
+/**
  * Execute a Codex query with streaming
  * @param {string} command - The prompt to send
  * @param {object} options - Options including cwd, sessionId, model, permissionMode
@@ -288,6 +311,7 @@ async function queryCodex(
   const resolvedEffort = typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
     ? effort as ModelReasoningEffort
     : undefined;
+  const additionalDirectories = await loadMountDirectories(projectPath || cwd, context);
 
   let codex: Codex;
   let thread: Thread;
@@ -321,6 +345,7 @@ async function queryCodex(
       approvalPolicy,
       model: resolvedModel,
       modelReasoningEffort: resolvedEffort,
+      ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
     };
 
     if (providerSessionId) {

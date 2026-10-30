@@ -143,8 +143,8 @@ const waitKey = (sessionId: string, target: DispatchWaitTarget): string => (
 /**
  * The changes a message may take from the held process instead of naming
  * them (`useProcessSettings`, see `lendingTurn`): a wait kept by these
- * alone offers it. A working directory, or a plan the runtime could not make,
- * are no setting the process could lend.
+ * alone offers it. A working directory, the project's mounts, or a plan the
+ * runtime could not make, are no setting the process could lend.
  */
 const LENDABLE_CHANGES: ReadonlySet<HandOverChange> = new Set<HandOverChange>([
   'tools',

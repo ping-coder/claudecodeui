@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { projectMountsService } from '@/modules/projects/services/project-mounts.service.js';
 import { AppError } from '@/shared/utils.js';
 
 function uniqueJsonlPathsFromSessions(
@@ -64,8 +65,10 @@ export async function deleteSessionJsonlFilesForProjectPath(projectPath: string)
 
 /**
  * - **Soft delete** (`force` false): set `isArchived` on the `projects` row (hide from the active list; DB only).
+ *   Its mounts stay as they are.
  * - **Force** (`force` true): for each session row for that `project_path`, delete the file at `jsonl_path`
- *   (when set), then remove session rows and the `projects` row.
+ *   (when set), remove the links of its mounts (never the folders they point to), then remove session rows,
+ *   mount rows and the `projects` row.
  */
 export async function deleteOrArchiveProject(projectId: string, force: boolean): Promise<void> {
   const row = projectsDb.getProjectById(projectId);
@@ -82,6 +85,7 @@ export async function deleteOrArchiveProject(projectId: string, force: boolean):
   }
 
   await deleteSessionJsonlFilesForProjectPath(row.project_path);
+  await projectMountsService.releaseProjectMounts(projectId, row.project_path);
   sessionsDb.deleteSessionsByProjectPath(row.project_path);
   projectsDb.deleteProjectById(projectId);
 }

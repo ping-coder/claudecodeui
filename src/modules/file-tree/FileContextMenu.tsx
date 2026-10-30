@@ -1,21 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Copy, Download, FileText, FolderPlus, Pencil, RefreshCw, Trash2, Upload, type LucideIcon } from 'lucide-react';
+import { Copy, Download, FileText, FolderPlus, FolderSymlink, Pencil, RefreshCw, Trash2, Unlink, Upload, Wrench, type LucideIcon } from 'lucide-react';
 
 import { isRtl } from '@/shared/direction';
 import { cn } from '@/shared/utils';
-
-type FileContextItem = {
-  name: string;
-  type: 'file' | 'directory';
-  path: string;
-  size?: number;
-  modified?: string;
-  permissionsRwx?: string;
-  isIgnored?: boolean;
-  children?: FileContextItem[];
-  [key: string]: unknown;
-};
+import type { FileTreeNode } from '@/shared/types';
+import { isBrokenMount, isGitignoredEntry } from '@/modules/file-tree/utils/fileTreeUtils';
 
 type ContextMenuAction = {
   key: string;
@@ -24,6 +14,8 @@ type ContextMenuAction = {
   onSelect?: () => void;
   isDanger?: boolean;
   isDisabled?: boolean;
+  // Says why a disabled item cannot be used.
+  title?: string;
   shortcut?: string;
   showDividerBefore?: boolean;
 };
@@ -59,7 +51,17 @@ function calculateViewportSafePosition(clientX: number, clientY: number): Contex
   return { left: Math.max(VIEWPORT_PADDING, safeX), top };
 }
 
-/** Rendered by FileTreeNode to show the right-click actions available on one file or directory row. */
+// A right-click inside an open menu stays with it. A row's menu sits inside the empty area's menu
+// wrapper, so the event would otherwise open that menu on top of this one.
+const keepContextMenuInMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+  event.preventDefault();
+  event.stopPropagation();
+};
+
+/**
+ * Rendered by FileTreeNode to show the right-click actions available on one file or directory row,
+ * and by FileTree, without an item, for the empty area around the rows.
+ */
 export default function FileContextMenu({
   children,
   item,
@@ -71,19 +73,32 @@ export default function FileContextMenu({
   onRefresh,
   onCopyPath,
   onDownload,
+  onUnmount,
+  onRepairMount,
+  onCopyTargetPath,
+  onMountFolder,
+  holdsMounts = false,
   isLoading = false,
   className = '',
 }: {
   children: ReactNode;
-  item?: FileContextItem | null;
-  onRename?: (item: FileContextItem) => void;
-  onDelete?: (item: FileContextItem) => void;
+  item?: FileTreeNode | null;
+  onRename?: (item: FileTreeNode) => void;
+  onDelete?: (item: FileTreeNode) => void;
   onNewFile?: (path: string) => void;
   onNewFolder?: (path: string) => void;
   onUpload?: (path: string) => void;
   onRefresh?: () => void;
-  onCopyPath?: (item: FileContextItem) => void;
-  onDownload?: (item: FileContextItem) => void;
+  onCopyPath?: (item: FileTreeNode) => void;
+  onDownload?: (item: FileTreeNode) => void;
+  // Mount roots: remove the link, recreate it, copy the folder it links to.
+  onUnmount?: (item: FileTreeNode) => void;
+  onRepairMount?: (item: FileTreeNode) => void;
+  onCopyTargetPath?: (item: FileTreeNode) => void;
+  // The empty area's and the mounts/ folder's menus: open the mount dialog.
+  onMountFolder?: () => void;
+  // The item is mounts/ while the project has mounts (findMountsFolderPath): it holds only the links.
+  holdsMounts?: boolean;
   isLoading?: boolean;
   className?: string;
 }) {
@@ -97,6 +112,10 @@ export default function FileContextMenu({
   }, []);
 
   const openContextMenuAtCursor = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    // A text box (the new item or rename input) keeps the browser's own menu, with paste and spelling.
+    if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
 
@@ -141,49 +160,110 @@ export default function FileContextMenu({
       ];
     }
 
+    const createActions = (folderPath: string): ContextMenuAction[] => [
+      {
+        key: 'newFile',
+        icon: FileText,
+        label: t('fileTree.context.newFile', 'New File'),
+        onSelect: () => onNewFile?.(folderPath),
+      },
+      {
+        key: 'newFolder',
+        icon: FolderPlus,
+        label: t('fileTree.context.newFolder', 'New Folder'),
+        onSelect: () => onNewFolder?.(folderPath),
+      },
+      {
+        key: 'upload',
+        icon: Upload,
+        label: t('fileTree.context.upload', 'Upload Files'),
+        onSelect: () => onUpload?.(folderPath),
+      },
+    ];
+
+    const mountFolderActions: ContextMenuAction[] = onMountFolder
+      ? [
+          {
+            key: 'mountFolder',
+            icon: FolderSymlink,
+            label: t('fileTree.mounts.open'),
+            onSelect: onMountFolder,
+          },
+        ]
+      : [];
+
+    // A mount root is the link, not a folder of the project: it is unmounted rather than renamed or
+    // deleted (the server refuses both), and offers no ZIP of what may be a very large folder.
+    // Anything wrong with it is fixed by Repair, which the row's tooltip points to. A broken one
+    // lists nothing to add to; one that only lost its ignore file still lists and opens.
+    if (item?.type === 'directory' && item.mount) {
+      const broken = isBrokenMount(item);
+      return [
+        ...(item.mount.status !== 'ok'
+          ? [
+              {
+                key: 'repairMount',
+                icon: Wrench,
+                label: t('fileTree.context.repairMount'),
+                onSelect: () => onRepairMount?.(item),
+              },
+            ]
+          : []),
+        ...(broken ? [] : createActions(item.path)),
+        {
+          key: 'unmount',
+          icon: Unlink,
+          label: t('fileTree.context.unmount'),
+          onSelect: () => onUnmount?.(item),
+          isDanger: true,
+          showDividerBefore: true,
+        },
+        {
+          key: 'copyTargetPath',
+          icon: Copy,
+          label: t('fileTree.context.copyTargetPath'),
+          onSelect: () => onCopyTargetPath?.(item),
+          showDividerBefore: true,
+        },
+        {
+          key: 'refresh',
+          icon: RefreshCw,
+          label: t('fileTree.context.refresh', 'Refresh'),
+          onSelect: onRefresh,
+        },
+      ];
+    }
+
     if (item?.type === 'directory') {
       // A gitignored folder is listed but never walked: whatever is created or
       // uploaded in it would not show up, and a download would be an empty
       // archive because its children were never loaded.
-      const listsContents = !item.isIgnored;
+      const listsContents = !isGitignoredEntry(item);
+      // A folder in a mount, or one holding mounts, may be huge: the browser would zip it all in memory.
+      const zipDisabled = item.inMount === true || holdsMounts;
       return [
-        ...(listsContents
-          ? [
+        // mounts/ holds only the links: whatever was made there would sit on the project's own disk,
+        // ignored by git, rather than in a mounted folder. Mounting another folder is what it offers.
+        ...(holdsMounts ? mountFolderActions : listsContents ? createActions(item.path) : []),
+        // The server refuses to rename or delete mounts/ while the project has mounts.
+        ...(holdsMounts
+          ? []
+          : [
               {
-                key: 'newFile',
-                icon: FileText,
-                label: t('fileTree.context.newFile', 'New File'),
-                onSelect: () => onNewFile?.(item.path),
+                key: 'rename',
+                icon: Pencil,
+                label: t('fileTree.context.rename', 'Rename'),
+                onSelect: () => onRename?.(item),
+                showDividerBefore: true,
               },
               {
-                key: 'newFolder',
-                icon: FolderPlus,
-                label: t('fileTree.context.newFolder', 'New Folder'),
-                onSelect: () => onNewFolder?.(item.path),
+                key: 'delete',
+                icon: Trash2,
+                label: t('fileTree.context.delete', 'Delete'),
+                onSelect: () => onDelete?.(item),
+                isDanger: true,
               },
-              {
-                key: 'upload',
-                icon: Upload,
-                label: t('fileTree.context.upload', 'Upload Files'),
-                onSelect: () => onUpload?.(item.path),
-              },
-            ]
-          : []),
-        {
-          key: 'rename',
-          icon: Pencil,
-          label: t('fileTree.context.rename', 'Rename'),
-          onSelect: () => onRename?.(item),
-          // Only a separator between groups, never above the first item.
-          showDividerBefore: listsContents,
-        },
-        {
-          key: 'delete',
-          icon: Trash2,
-          label: t('fileTree.context.delete', 'Delete'),
-          onSelect: () => onDelete?.(item),
-          isDanger: true,
-        },
+            ]),
         {
           key: 'copyPath',
           icon: Copy,
@@ -198,6 +278,8 @@ export default function FileContextMenu({
                 icon: Download,
                 label: t('fileTree.context.download', 'Download'),
                 onSelect: () => onDownload?.(item),
+                isDisabled: zipDisabled,
+                title: zipDisabled ? t('fileTree.context.downloadDisabledInMount') : undefined,
               },
             ]
           : []),
@@ -205,24 +287,8 @@ export default function FileContextMenu({
     }
 
     return [
-      {
-        key: 'newFile',
-        icon: FileText,
-        label: t('fileTree.context.newFile', 'New File'),
-        onSelect: () => onNewFile?.(''),
-      },
-      {
-        key: 'newFolder',
-        icon: FolderPlus,
-        label: t('fileTree.context.newFolder', 'New Folder'),
-        onSelect: () => onNewFolder?.(''),
-      },
-      {
-        key: 'upload',
-        icon: Upload,
-        label: t('fileTree.context.upload', 'Upload Files'),
-        onSelect: () => onUpload?.(''),
-      },
+      ...createActions(''),
+      ...mountFolderActions,
       {
         key: 'refresh',
         icon: RefreshCw,
@@ -231,7 +297,7 @@ export default function FileContextMenu({
         showDividerBefore: true,
       },
     ];
-  }, [item, onCopyPath, onDelete, onDownload, onNewFile, onNewFolder, onRefresh, onRename, onUpload, t]);
+  }, [holdsMounts, item, onCopyPath, onCopyTargetPath, onDelete, onDownload, onMountFolder, onNewFile, onNewFolder, onRefresh, onRename, onRepairMount, onUnmount, onUpload, t]);
 
   useEffect(() => {
     if (!isMenuOpen) {
@@ -310,6 +376,7 @@ export default function FileContextMenu({
           role="menu"
           aria-label={t('fileTree.context.menuLabel', 'File context menu')}
           style={{ position: 'fixed', ...menuPosition, zIndex: 9999 }}
+          onContextMenu={keepContextMenuInMenu}
           className={cn(
             'min-w-[180px] py-1 px-1',
             'bg-popover border border-border rounded-lg shadow-lg',
@@ -323,13 +390,15 @@ export default function FileContextMenu({
               <span className="ms-2 text-sm text-muted-foreground">{t('fileTree.context.loading', 'Loading...')}</span>
             </div>
           ) : (
-            menuActions.map((action) => (
+            menuActions.map((action, index) => (
               <Fragment key={action.key}>
-                {action.showDividerBefore && <div className="mx-2 my-1 h-px bg-border" />}
+                {/* Only a separator between groups, never above the first item. */}
+                {action.showDividerBefore && index > 0 && <div className="mx-2 my-1 h-px bg-border" />}
                 <button
                   role="menuitem"
                   tabIndex={action.isDisabled ? -1 : 0}
                   disabled={isLoading || action.isDisabled}
+                  title={action.title}
                   onClick={() => runMenuActionAndClose(action.onSelect)}
                   className={cn(
                     'w-full flex items-center gap-3 px-3 py-2 text-sm text-start rounded-md transition-colors',

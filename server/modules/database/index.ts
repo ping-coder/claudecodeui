@@ -10,6 +10,8 @@ export { notificationPreferencesDb } from '@/modules/database/repositories/notif
 export { providerModelsDb } from '@/modules/database/repositories/provider-models.js';
 // projectsDb: used by Projects, Worktrees, Git, WebSocket, and notification modules to persist and resolve project records.
 export { projectsDb } from '@/modules/database/repositories/projects.db.js';
+// projectMountsDb: used by the Projects module's mounts service, which owns the external folders linked into a project.
+export { projectMountsDb } from '@/modules/database/repositories/project-mounts.db.js';
 export { pushSubscriptionsDb } from '@/modules/database/repositories/push-subscriptions.js';
 export { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
 // scheduleHoldsDb: written by Providers (the Claude runtime, through its run context) for the sessions it holds for scheduled work; read by WebSocket to resume their loops after a restart.

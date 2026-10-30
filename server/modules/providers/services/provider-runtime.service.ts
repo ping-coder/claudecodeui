@@ -1,4 +1,5 @@
 import { scheduleHoldsDb, sessionsDb } from '@/modules/database/index.js';
+import { listProjectMountDirectories } from '@/modules/projects/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
@@ -40,6 +41,8 @@ type ProviderRuntimeServiceDependencies = {
   getSession(sessionId: string): { provider: string; project_path: string | null } | null;
   /** Where runtimes record the sessions they hold for scheduled work (see `ScheduleHoldRecord`). */
   scheduleHolds: NonNullable<ProviderRuntimeContext['scheduleHolds']>;
+  /** The project's mounts a runtime hands its CLI (see `ProviderRuntimeContext.listProjectMountDirectories`). */
+  listProjectMountDirectories: NonNullable<ProviderRuntimeContext['listProjectMountDirectories']>;
 };
 
 const defaultDependencies: ProviderRuntimeServiceDependencies = {
@@ -54,6 +57,7 @@ const defaultDependencies: ProviderRuntimeServiceDependencies = {
     save: (record) => scheduleHoldsDb.save(record),
     remove: (sessionId, runId) => scheduleHoldsDb.removeForRun(sessionId, runId),
   },
+  listProjectMountDirectories: (projectPath) => listProjectMountDirectories(projectPath),
 };
 
 /**
@@ -125,6 +129,7 @@ export function createProviderRuntimeService(
       }
       : {}),
     scheduleHolds: dependencies.scheduleHolds,
+    listProjectMountDirectories: dependencies.listProjectMountDirectories,
     async isProviderInstalled() {
       try {
         return (await provider.auth.getStatus()).installed;

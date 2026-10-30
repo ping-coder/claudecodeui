@@ -264,7 +264,63 @@ test('file search route answers a service error with its status', async () => {
     const response = await fetch(`${baseUrl}/api/file-tree/projects/missing/files/search?q=readme`);
 
     assert.equal(response.status, 404);
-    assert.deepEqual(await response.json(), { error: 'Project not found' });
+    assert.deepEqual(await response.json(), { error: 'Project not found', code: 'PROJECT_NOT_FOUND' });
+  });
+});
+
+test('file read route answers a file too large to open with 413, its code and the sizes', async () => {
+  const services = createFakeServices({
+    readTextFile: async () => {
+      throw new AppError('File is too large to open', {
+        code: 'FILE_TOO_LARGE',
+        statusCode: 413,
+        details: { size: 20_000_000, limit: 10_485_760 },
+      });
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/file-tree/projects/project-1/file?filePath=big.log`);
+
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), {
+      error: 'File is too large to open',
+      code: 'FILE_TOO_LARGE',
+      details: { size: 20_000_000, limit: 10_485_760 },
+    });
+  });
+});
+
+test('rename and delete routes answer a protected mount with 403 MOUNT_PROTECTED', async () => {
+  const protectedError = () => new AppError('Mounted folders cannot be renamed or deleted here; unmount them instead', {
+    code: 'MOUNT_PROTECTED',
+    statusCode: 403,
+  });
+  const services = createFakeServices({
+    renameEntry: async () => {
+      throw protectedError();
+    },
+    deleteEntry: async () => {
+      throw protectedError();
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const renamed = await fetch(`${baseUrl}/api/file-tree/projects/project-1/files/rename`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: 'mounts/data', newName: 'other' }),
+    });
+    assert.equal(renamed.status, 403);
+    assert.equal((await renamed.json() as { code: string }).code, 'MOUNT_PROTECTED');
+
+    const deleted = await fetch(`${baseUrl}/api/file-tree/projects/project-1/files`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: 'mounts/data' }),
+    });
+    assert.equal(deleted.status, 403);
+    assert.equal((await deleted.json() as { code: string }).code, 'MOUNT_PROTECTED');
   });
 });
 

@@ -98,6 +98,25 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 `;
 
+/**
+ * External folders linked into a project as `<project>/mounts/<name>`. The
+ * disk is the source of truth: the mounts service checks every row against
+ * the link it describes. Deleting the project drops its rows; the links and
+ * the folders they point to are the service's to clean up, never SQLite's.
+ */
+export const PROJECT_MOUNTS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS project_mounts (
+    mount_id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    -- Absolute path the link points to, as registered (not resolved).
+    target_path TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(project_id, name),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+);
+`;
+
 export const SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS scheduled_messages (
     id TEXT PRIMARY KEY,
@@ -367,6 +386,11 @@ CREATE INDEX IF NOT EXISTS idx_notification_channel_endpoints_enabled ON notific
 ${PROJECTS_TABLE_SCHEMA_SQL}
 -- NOTE: These indexes are created in migrations after legacy table-shape repairs.
 -- Creating them here can fail on upgraded installs where projects lacks those columns.
+
+-- On an upgraded install whose projects table predates project_id, the
+-- foreign key only resolves once the migrations have rebuilt projects; the
+-- table holds no rows before then.
+${PROJECT_MOUNTS_TABLE_SCHEMA_SQL}
 
 ${SESSIONS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id);

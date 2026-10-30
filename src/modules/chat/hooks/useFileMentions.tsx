@@ -9,6 +9,8 @@ type ProjectFileNode = {
   name: string;
   type: 'file' | 'directory';
   path?: string;
+  // Set on a mount root; what it links to is outside the project and is not offered here.
+  mount?: unknown;
   children?: ProjectFileNode[];
 };
 
@@ -30,8 +32,10 @@ const flattenFileTree = (files: ProjectFileNode[], basePath = ''): MentionableFi
 
   files.forEach((file) => {
     const fullPath = basePath ? `${basePath}/${file.name}` : file.name;
-    if (file.type === 'directory' && file.children) {
-      flattened = flattened.concat(flattenFileTree(file.children, fullPath));
+    if (file.type === 'directory') {
+      if (file.children && !file.mount) {
+        flattened = flattened.concat(flattenFileTree(file.children, fullPath));
+      }
       return;
     }
 

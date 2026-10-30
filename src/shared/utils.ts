@@ -672,14 +672,24 @@ const HAND_OVER_SETTING_LABELS = {
 } as const;
 
 /**
+ * Whether a Claude hand-over needs a new process because the project's
+ * mounted folders changed since the held process started (the server's
+ * `directories` label). That is no setting of the message, so it is not among
+ * the settings describeHandOverChanges names: each caller says it in a
+ * sentence of its own, without the advice to change the message back.
+ */
+export const handOverMountsChanged = (changes: readonly string[]): boolean => changes.includes('directories');
+
+/**
  * The settings a Claude hand-over names as needing a new process (the
- * server's labels other than `lookup`; see BackgroundSendPrompt's `changes`)
- * in the user's language, joined as a sentence lists them: "the model", "the
- * model and the reasoning effort", "the model, the reasoning effort and
- * Ultracode". Labels it does not know are skipped; `count` is how many it
- * names. Takes a `t` bound to the chat namespace; used by chat's
- * background-send dialog and by its transcript row for the run's notice that
- * a send stopped the background work.
+ * server's labels other than `lookup` and `directories`; see
+ * BackgroundSendPrompt's `changes` and handOverMountsChanged) in the user's
+ * language, joined as a sentence lists them: "the model", "the model and the
+ * reasoning effort", "the model, the reasoning effort and Ultracode". Labels
+ * it does not know are skipped; `count` is how many it names. Takes a `t`
+ * bound to the chat namespace; used by chat's background-send dialog, its
+ * dispatch-wait notice, and its transcript row for the run's notice that a
+ * send stopped the background work.
  */
 export function describeHandOverChanges(changes: string[], t: TFunction): { count: number; text: string } {
   const labels = changes

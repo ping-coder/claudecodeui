@@ -22,6 +22,13 @@ type FileTreeListProps = {
   onDownload?: (item: FileTreeNodeType) => void;
   onUpload?: (path: string) => void;
   onRefresh?: () => void;
+  // Mount roots' own actions
+  onUnmount?: (item: FileTreeNodeType) => void;
+  onRepairMount?: (item: FileTreeNodeType) => void;
+  onCopyTargetPath?: (item: FileTreeNodeType) => void;
+  // The mounts/ folder's own action, and its path while the project has mounts (findMountsFolderPath)
+  onMountFolder?: () => void;
+  mountsFolderPath?: string | null;
   // Drag-and-drop upload targeting
   dropTarget?: string | null;
   onItemDragOver?: (event: DragEvent<HTMLDivElement>, targetPath: string) => void;
@@ -54,6 +61,11 @@ export default function FileTreeList({
   onDownload,
   onUpload,
   onRefresh,
+  onUnmount,
+  onRepairMount,
+  onCopyTargetPath,
+  onMountFolder,
+  mountsFolderPath,
   dropTarget,
   onItemDragOver,
   renamingItem,
@@ -87,6 +99,11 @@ export default function FileTreeList({
           onDownload={onDownload}
           onUpload={onUpload}
           onRefresh={onRefresh}
+          onUnmount={onUnmount}
+          onRepairMount={onRepairMount}
+          onCopyTargetPath={onCopyTargetPath}
+          onMountFolder={onMountFolder}
+          mountsFolderPath={mountsFolderPath}
           dropTarget={dropTarget}
           onItemDragOver={onItemDragOver}
           renamingItem={renamingItem}

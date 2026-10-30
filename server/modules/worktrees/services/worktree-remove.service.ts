@@ -2,6 +2,7 @@ import type {
   GitCommandRunner,
   RemoveWorktreeInput,
   RemoveWorktreeResult,
+  WorktreeMountsGateway,
   WorktreeProjectGateway,
 } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
@@ -21,9 +22,10 @@ export async function removeWorktree(
   dependencies: {
     runGit: GitCommandRunner;
     projects: Pick<WorktreeProjectGateway, 'getProjectByPath' | 'archiveProject'>;
+    mounts: WorktreeMountsGateway;
   },
 ): Promise<RemoveWorktreeResult> {
-  const { projects, runGit } = dependencies;
+  const { mounts, projects, runGit } = dependencies;
   const entries = await listWorktreePorcelainEntries(input.projectPath, runGit);
   const entry = findWorktreeEntryByPath(entries, input.worktreePath);
   const repositoryRoot = entries[0].path;
@@ -48,12 +50,26 @@ export async function removeWorktree(
     }
   }
 
+  // Git deletes everything in the worktree, ignored mount links included,
+  // those of projects registered inside it too. Git for Windows before 2.54
+  // walks into a junction while it does and removes the files in the mount's
+  // target, so the links go first. If one cannot be removed this throws, and
+  // git never runs.
+  const detachedMounts = await mounts.detachMountLinks(entry.path);
+
   const removeArgs = ['worktree', 'remove'];
   if (input.force) {
     removeArgs.push('--force');
   }
   removeArgs.push(entry.path);
-  await runGit(removeArgs, repositoryRoot);
+  try {
+    await runGit(removeArgs, repositoryRoot);
+  } catch (error) {
+    // Git refused (a locked worktree, one with submodules) and the worktree
+    // stays, so its sessions keep their mounted folders.
+    await detachedMounts.reattach();
+    throw error;
+  }
 
   let branchDeleted = false;
   if (input.deleteBranch && entry.branch) {

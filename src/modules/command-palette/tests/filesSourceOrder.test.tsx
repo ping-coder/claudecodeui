@@ -89,3 +89,32 @@ test('a failed response is judged by its status alone, so a 413 whose body is no
   assert.equal(result.current.files.length, 0);
   assert.equal(json.mock.calls.length, 0);
 });
+
+test('a mount\'s files are left out: they live outside the project, often in a large folder', async () => {
+  getFiles.mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => [
+      {
+        type: 'directory',
+        name: 'mounts',
+        path: `${ROOT}/mounts`,
+        children: [
+          {
+            type: 'directory',
+            name: 'videos',
+            path: `${ROOT}/mounts/videos`,
+            mount: { mountId: 'm1', name: 'videos', targetPath: '/mnt/videos', status: 'ok' },
+            children: [{ type: 'file', name: 'take1.mov', path: `${ROOT}/mounts/videos/take1.mov`, inMount: true }],
+          },
+        ],
+      },
+      { type: 'file', name: 'README.md', path: `${ROOT}/README.md` },
+    ],
+  });
+
+  const { result } = renderHook(() => useFilesSource('project-1', true));
+
+  await waitFor(() => assert.equal(result.current.files.length > 0, true));
+  assert.deepEqual(result.current.files.map((file) => file.relativePath), ['README.md']);
+});

@@ -1,11 +1,13 @@
 import type { DragEvent, ReactNode, RefObject } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Folder, FolderOpen, Upload } from 'lucide-react';
+import { ChevronRight, Folder, FolderOpen, FolderSymlink, FolderX, Upload } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
 import type { FileTreeDetailedColumn, FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
 import { Input } from '@/shared/ui';
 import FileContextMenu from '@/modules/file-tree/FileContextMenu';
+import { describeMountStatus, isBrokenMount, isGitignoredEntry } from '@/modules/file-tree/utils/fileTreeUtils';
 
 type FileTreeNodeProps = {
   item: FileTreeNodeType;
@@ -27,6 +29,13 @@ type FileTreeNodeProps = {
   onDownload?: (item: FileTreeNodeType) => void;
   onUpload?: (path: string) => void;
   onRefresh?: () => void;
+  // Mount roots' own actions
+  onUnmount?: (item: FileTreeNodeType) => void;
+  onRepairMount?: (item: FileTreeNodeType) => void;
+  onCopyTargetPath?: (item: FileTreeNodeType) => void;
+  // The mounts/ folder's own action, and its path while the project has mounts (findMountsFolderPath)
+  onMountFolder?: () => void;
+  mountsFolderPath?: string | null;
   // Drag-and-drop upload targeting
   dropTarget?: string | null;
   onItemDragOver?: (event: DragEvent<HTMLDivElement>, targetPath: string) => void;
@@ -53,13 +62,42 @@ function getParentDirectoryPath(itemPath: string) {
   return segments.join('/');
 }
 
+// What hovering a mount root says: the folder it links to, and what is wrong with it if anything is.
+function describeMountRow(item: FileTreeNodeType, t: TFunction): string | undefined {
+  if (!item.mount) {
+    return undefined;
+  }
+  const { status, targetPath } = item.mount;
+  if (status === 'ok') {
+    return t('fileTree.mounts.nodeTitle', { target: targetPath });
+  }
+  return t(isBrokenMount(item) ? 'fileTree.mounts.nodeBrokenTitle' : 'fileTree.mounts.nodeWarningTitle', {
+    target: targetPath,
+    status: describeMountStatus(status, t),
+  });
+}
+
 function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
   if (item.type === 'directory') {
+    const brokenMount = isBrokenMount(item);
+    const ignored = isGitignoredEntry(item);
+    // A mount's own icon says the folder lives elsewhere; a broken one is drawn red and crossed out.
+    const folderIcon = item.mount ? (
+      brokenMount ? (
+        <FolderX className="h-4 w-4 flex-shrink-0 text-red-500" data-mount-icon="broken" />
+      ) : (
+        <FolderSymlink className="h-4 w-4 flex-shrink-0 text-sky-500" data-mount-icon="ok" />
+      )
+    ) : isOpen ? (
+      <FolderOpen className="h-4 w-4 flex-shrink-0 text-blue-500" />
+    ) : (
+      <Folder className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+    );
     return (
-      <span className={cn('flex flex-shrink-0 items-center gap-0.5', item.isIgnored && 'opacity-60')}>
-        {item.isIgnored ? (
-          // A gitignored folder cannot be opened, so it gets no chevron; the
-          // blank keeps its icon aligned with its siblings.
+      <span className={cn('flex flex-shrink-0 items-center gap-0.5', ignored && 'opacity-60')}>
+        {ignored || brokenMount ? (
+          // A gitignored folder or a broken mount cannot be opened, so it gets
+          // no chevron; the blank keeps its icon aligned with its siblings.
           <span className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
         ) : (
           <ChevronRight
@@ -69,17 +107,13 @@ function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
             )}
           />
         )}
-        {isOpen ? (
-          <FolderOpen className="h-4 w-4 flex-shrink-0 text-blue-500" />
-        ) : (
-          <Folder className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-        )}
+        {folderIcon}
       </span>
     );
   }
 
   return (
-    <span className={cn('ms-[18px] flex flex-shrink-0 items-center', item.isIgnored && 'opacity-60')}>
+    <span className={cn('ms-[18px] flex flex-shrink-0 items-center', isGitignoredEntry(item) && 'opacity-60')}>
       {renderFileIcon(item.name)}
     </span>
   );
@@ -105,6 +139,11 @@ export default function FileTreeNode({
   onDownload,
   onUpload,
   onRefresh,
+  onUnmount,
+  onRepairMount,
+  onCopyTargetPath,
+  onMountFolder,
+  mountsFolderPath = null,
   dropTarget,
   onItemDragOver,
   renamingItem,
@@ -117,21 +156,28 @@ export default function FileTreeNode({
 }: FileTreeNodeProps) {
   const { t } = useTranslation();
   const isDirectory = item.type === 'directory';
-  const isIgnored = item.isIgnored === true;
+  const isIgnored = isGitignoredEntry(item);
+  const brokenMount = isBrokenMount(item);
   // A gitignored folder was never walked, so it has nothing to show. Clicks
   // and chat reveals do not record it as expanded; this check also keeps a
-  // folder closed that was opened before a rule started matching it.
-  const isOpen = isDirectory && !isIgnored && expandedDirs.has(item.path);
+  // folder closed that was opened before a rule started matching it. A
+  // broken mount has nothing to list either.
+  const isOpen = isDirectory && !isIgnored && !brokenMount && expandedDirs.has(item.path);
   const hasChildren = Boolean(isDirectory && item.children && item.children.length > 0);
   const isRenaming = renamingItem?.path === item.path;
   // A top-level file's folder is the project root, sent as '' like a drop on
   // empty space: an older server refuses the root's own absolute path (403).
   const dragTargetPath = isDirectory ? item.path : level === 0 ? '' : getParentDirectoryPath(item.path);
   const isDropTarget = isDirectory && dropTarget === item.path;
+  const holdsMounts = isDirectory && mountsFolderPath !== null && item.path === mountsFolderPath;
   // Whatever lands in a gitignored folder would not show up in the tree, so it
   // offers no upload button and does not claim drops: a file dragged over it
-  // goes to the root, as over empty space.
-  const isIgnoredDirectory = isDirectory && isIgnored;
+  // goes to the root, as over empty space. A broken mount has no folder to
+  // write to, and mounts/ holds only the links.
+  const refusesUploads = isDirectory && (isIgnored || brokenMount || holdsMounts);
+  // A file row aims a drop at its folder (joined with '/'), so a file left in mounts/ does not claim it either.
+  const claimsDrops = !refusesUploads
+    && (mountsFolderPath === null || dragTargetPath.replace(/\\/g, '/') !== mountsFolderPath.replace(/\\/g, '/'));
 
   const nameClassName = cn(
     'bidi-auto text-[13px] leading-tight truncate',
@@ -188,7 +234,7 @@ export default function FileTreeNode({
     );
   }
 
-  const uploadHoverButton = isDirectory && !isIgnoredDirectory && onUpload && (
+  const uploadHoverButton = isDirectory && !refusesUploads && onUpload && (
     <button
       type="button"
       onClick={(event) => {
@@ -216,9 +262,9 @@ export default function FileTreeNode({
       }}
       // "Matches a rule" rather than "ignored by git": a tracked file that
       // matches a rule is greyed out too.
-      title={isIgnored ? t('fileTree.ignoredByGitignore', { defaultValue: 'Matches a .gitignore rule' }) : undefined}
+      title={item.mount ? describeMountRow(item, t) : isIgnored ? t('fileTree.ignoredByGitignore', { defaultValue: 'Matches a .gitignore rule' }) : undefined}
       onClick={() => onItemClick(item)}
-      onDragOver={onItemDragOver && !isIgnoredDirectory ? (event) => onItemDragOver(event, dragTargetPath) : undefined}
+      onDragOver={onItemDragOver && claimsDrops ? (event) => onItemDragOver(event, dragTargetPath) : undefined}
     >
       {viewMode === 'detailed' ? (
         <>
@@ -264,7 +310,7 @@ export default function FileTreeNode({
   );
 
   // Check if context menu callbacks are provided
-  const hasContextMenu = onRename || onDelete || onNewFile || onNewFolder || onCopyPath || onDownload || onRefresh;
+  const hasContextMenu = onRename || onDelete || onNewFile || onNewFolder || onCopyPath || onDownload || onRefresh || onUnmount;
 
   return (
     <div className="select-none">
@@ -279,6 +325,11 @@ export default function FileTreeNode({
           onCopyPath={onCopyPath}
           onDownload={onDownload}
           onRefresh={onRefresh}
+          onUnmount={onUnmount}
+          onRepairMount={onRepairMount}
+          onCopyTargetPath={onCopyTargetPath}
+          onMountFolder={holdsMounts ? onMountFolder : undefined}
+          holdsMounts={holdsMounts}
         >
           {rowContent}
         </FileContextMenu>
@@ -286,7 +337,8 @@ export default function FileTreeNode({
         rowContent
       )}
 
-      {isDirectory && isOpen && hasChildren && (
+      {/* A truncated folder says so even when the budget ran out before its first entry. */}
+      {isDirectory && isOpen && (hasChildren || item.truncated) && (
         <div className="relative">
           <span
             className="absolute bottom-0 top-0 border-s border-border/40"
@@ -314,6 +366,11 @@ export default function FileTreeNode({
               onDownload={onDownload}
               onUpload={onUpload}
               onRefresh={onRefresh}
+              onUnmount={onUnmount}
+              onRepairMount={onRepairMount}
+              onCopyTargetPath={onCopyTargetPath}
+              onMountFolder={onMountFolder}
+              mountsFolderPath={mountsFolderPath}
               dropTarget={dropTarget}
               onItemDragOver={onItemDragOver}
               renamingItem={renamingItem}
@@ -325,6 +382,14 @@ export default function FileTreeNode({
               operationLoading={operationLoading}
             />
           ))}
+          {item.truncated && (
+            <div
+              className="py-[3px] pe-2 text-xs text-muted-foreground"
+              style={{ paddingInlineStart: `${(level + 1) * 16 + 22}px` }}
+            >
+              {t('fileTree.mounts.truncated')}
+            </div>
+          )}
         </div>
       )}
     </div>

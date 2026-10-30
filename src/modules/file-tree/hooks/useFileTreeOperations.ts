@@ -97,6 +97,16 @@ export function useFileTreeOperations({
     return null;
   }, [t]);
 
+  // A refused change's message. The server's refusal to change mounts/ or a mount link
+  // (MOUNT_PROTECTED) is said in the UI language; any other keeps the server's own words.
+  const readRefusal = useCallback(async (response: Response, fallback: string): Promise<string> => {
+    const data = (await response.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+    if (data.code === 'MOUNT_PROTECTED') {
+      return t('fileTree.toast.mountProtected');
+    }
+    return typeof data.error === 'string' && data.error ? data.error : fallback;
+  }, [t]);
+
   // Rename operations
   const handleStartRename = useCallback((item: FileTreeNode) => {
     setRenamingItem(item);
@@ -131,8 +141,7 @@ export function useFileTreeOperations({
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to rename');
+        throw new Error(await readRefusal(response, 'Failed to rename'));
       }
 
       showToast(t('fileTree.toast.renamed', 'Renamed successfully'), 'success');
@@ -143,7 +152,7 @@ export function useFileTreeOperations({
     } finally {
       setOperationLoading(false);
     }
-  }, [renamingItem, renameValue, selectedProject, validateFilename, showToast, t, onRefresh, handleCancelRename]);
+  }, [renamingItem, renameValue, selectedProject, validateFilename, readRefusal, showToast, t, onRefresh, handleCancelRename]);
 
   // Delete operations
   const handleStartDelete = useCallback((item: FileTreeNode) => {
@@ -166,8 +175,7 @@ export function useFileTreeOperations({
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to delete');
+        throw new Error(await readRefusal(response, 'Failed to delete'));
       }
 
       showToast(
@@ -183,7 +191,7 @@ export function useFileTreeOperations({
     } finally {
       setOperationLoading(false);
     }
-  }, [deleteConfirmation, selectedProject, showToast, t, onRefresh, handleCancelDelete]);
+  }, [deleteConfirmation, selectedProject, readRefusal, showToast, t, onRefresh, handleCancelDelete]);
 
   // Create operations
   const handleStartCreate = useCallback((parentPath: string, type: 'file' | 'directory') => {
@@ -295,8 +303,9 @@ export function useFileTreeOperations({
         // Store raw bytes in the archive so binary files stay intact.
         const fileBytes = await response.arrayBuffer();
         zip.file(fullPath, fileBytes);
-      } else if (node.type === 'directory' && node.children) {
-        // Recursively process children
+      } else if (node.type === 'directory' && node.children && !node.mount) {
+        // Recursively process children. A mount is left out: its folder lives outside the
+        // project and may be far too large to zip in the browser's memory.
         for (const child of node.children) {
           await collectFiles(child, fullPath);
         }

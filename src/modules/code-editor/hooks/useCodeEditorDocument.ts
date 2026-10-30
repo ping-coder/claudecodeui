@@ -24,6 +24,26 @@ const getErrorMessage = (error: unknown) => {
   return String(error);
 };
 
+/** A file the server would not read for the editor because it is over its size cap; the sizes are in bytes, when the server gives them. */
+type CodeEditorTooLargeFile = {
+  size: number | null;
+  limit: number | null;
+};
+
+// The server refuses a read over its cap with 413 FILE_TOO_LARGE and says, in the error's details,
+// how big the file is and what the cap is. Read off the error readApiJson throws.
+const readTooLargeRefusal = (error: unknown): CodeEditorTooLargeFile | null => {
+  const { code, status, details } = (error ?? {}) as { code?: unknown; status?: unknown; details?: unknown };
+  if (code !== 'FILE_TOO_LARGE' && status !== 413) {
+    return null;
+  }
+  const { size, limit } = (details && typeof details === 'object' ? details : {}) as { size?: unknown; limit?: unknown };
+  return {
+    size: typeof size === 'number' ? size : null,
+    limit: typeof limit === 'number' ? limit : null,
+  };
+};
+
 // CodeMirror reports its document with LF line endings whatever the file used,
 // so a CRLF file would look edited from the first keystroke (and stay "edited"
 // after an undo) unless both sides of the comparison are normalised.
@@ -40,6 +60,9 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isBinary, setIsBinary] = useState(false);
+  // Set when the server refused the file as too large to open: the editor says so instead of
+  // showing an empty buffer, and never saves that empty buffer over the real file.
+  const [tooLarge, setTooLarge] = useState<CodeEditorTooLargeFile | null>(null);
   // Some binaries (images, PDFs, audio, video) can be rendered natively, so the
   // editor shows an inline preview instead of the generic binary placeholder.
   const previewKind = getPreviewKind(file.name);
@@ -77,6 +100,7 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
       try {
         setLoading(true);
         setIsBinary(false);
+        setTooLarge(null);
         // Any save still in flight or failed belongs to the previous file.
         setSaving(false);
         setSaveError(null);
@@ -123,6 +147,12 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
         if (isStaleLoad()) {
           return;
         }
+        const tooLargeRefusal = readTooLargeRefusal(error);
+        if (tooLargeRefusal) {
+          applyLoadedContent('');
+          setTooLarge(tooLargeRefusal);
+          return;
+        }
         const message = getErrorMessage(error);
         console.error('Error loading file:', error);
         applyLoadedContent(`// Error loading file: ${message}\n// File: ${fileName}\n// Path: ${filePath}`);
@@ -138,8 +168,9 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
 
   const handleSave = useCallback(async () => {
     // Preview-only and binary files have no editable text buffer; never write
-    // them back (e.g. via Cmd/Ctrl+S) or we'd corrupt the file on disk.
-    if (previewKind || isBinaryFile(fileName)) {
+    // them back (e.g. via Cmd/Ctrl+S) or we'd corrupt the file on disk. Nor a
+    // file too large to open, whose buffer is empty.
+    if (previewKind || isBinaryFile(fileName) || tooLarge) {
       return;
     }
 
@@ -193,7 +224,7 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
         setSaving(false);
       }
     }
-  }, [content, filePath, fileProjectId, previewKind, fileName]);
+  }, [content, filePath, fileProjectId, previewKind, fileName, tooLarge]);
 
   const handleDownload = useCallback(() => {
     const blob = new Blob([content], { type: 'text/plain' });
@@ -222,10 +253,11 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
       !loading
       && !previewKind
       && !isBinary
+      && !tooLarge
       && content !== savedContent
       && normalizeLineEndings(content) !== normalizedSavedContent
     ),
-    [content, isBinary, loading, normalizedSavedContent, previewKind, savedContent],
+    [content, isBinary, loading, normalizedSavedContent, previewKind, savedContent, tooLarge],
   );
 
   // What a reread checks when its answer arrives: edits typed while it was out keep the buffer.
@@ -237,7 +269,8 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
   // A workspace refresh rereads the file from disk, in place (no loading state, so the editor keeps its
   // scroll and cursor), and only while the buffer is clean: edits are never dropped, the header says the
   // file was left as it is instead. Media previews refetch on their own; binaries and diffs from a chat
-  // message have nothing on disk to reread here.
+  // message have nothing on disk to reread here. A file refused as too large is asked for again: unlike
+  // a binary, told by its extension, its size changes on disk (a log rotated or truncated).
   useRefreshSignal(reloadToken, () => {
     const hasDiffSnapshot = Boolean(file.diffInfo) && fileDiffNewString !== undefined && fileDiffOldString !== undefined;
     if (loading || previewKind || isBinary || hasDiffSnapshot || !fileProjectId) {
@@ -261,9 +294,26 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
           setReloadSkippedPath(filePath);
           return;
         }
+        setTooLarge(null);
         setContent(data.content);
         setSavedContent(data.content);
       } catch (error) {
+        if (isStaleReload()) {
+          return;
+        }
+        // Over the cap now, or still: the notice gives the file's current size, and a clean buffer of a
+        // file that grew past the cap gives way to it, so the editor says why it no longer follows the disk.
+        const tooLargeRefusal = readTooLargeRefusal(error);
+        if (tooLargeRefusal) {
+          if (latestBufferRef.current.hasUnsavedChanges || latestBufferRef.current.saving) {
+            setReloadSkippedPath(filePath);
+            return;
+          }
+          setContent('');
+          setSavedContent('');
+          setTooLarge(tooLargeRefusal);
+          return;
+        }
         // The buffer stays as it was: an error placeholder would replace a file that is fine on screen.
         console.error('Error reloading file:', error);
       }
@@ -288,6 +338,7 @@ export const useCodeEditorDocument = ({ file, projectPath, reloadToken }: UseCod
     saveSuccess,
     saveError,
     isBinary,
+    tooLarge,
     previewKind,
     fileProjectId,
     hasUnsavedChanges,

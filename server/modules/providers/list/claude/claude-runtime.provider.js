@@ -571,7 +571,8 @@ function mapCliOptionsToSDK(options = {}) {
     effort,
     ultracode,
     resumeAnchorId,
-    resumeFromScratch
+    resumeFromScratch,
+    mounts
   } = options;
 
   const sdkOptions = {};
@@ -638,6 +639,37 @@ function mapCliOptionsToSDK(options = {}) {
     type: 'preset',
     preset: 'claude_code'
   };
+
+  // The project's mounts (loadProjectMounts): links under mounts/ to folders
+  // outside the project. The CLI checks a path through a symlink against
+  // where it lands, so each target's realpath has to be a working directory
+  // of its own (the link path does not count). They go in as the flag
+  // settings' permissions.additionalDirectories, never as
+  // additionalDirectories (--add-dir): the CLI also loads the skills in an
+  // --add-dir folder's .claude/skills, watching it for new ones, and the
+  // plugins and marketplaces its .claude/settings*.json name, so anyone who
+  // can write a mounted folder (a shared disk) could instruct Claude and turn
+  // plugins on. A settings directory is a working directory and nothing more
+  // (Claude Code 2.1.312 and the SDK's 2.1.165, tried). Searching from the
+  // project root does not enter a symlink, so the prompt says where each
+  // link leads, the path written as a JSON string so a folder name with a
+  // line break in it cannot pass for lines of its own. A mount whose target
+  // did not answer in time (no realpath) is left out. Without mounts both
+  // are left out, so such a launch is as before.
+  const reachableMounts = Array.isArray(mounts)
+    ? mounts.filter((mount) => namesSetting(mount?.realTargetPath))
+    : [];
+  if (reachableMounts.length > 0) {
+    sdkOptions.settings = {
+      ...(sdkOptions.settings || {}),
+      permissions: {
+        additionalDirectories: [...new Set(reachableMounts.map((mount) => mount.realTargetPath))],
+      },
+    };
+    sdkOptions.systemPrompt.append = reachableMounts
+      .map((mount) => `mounts/${mount.name}/ -> ${JSON.stringify(mount.realTargetPath)}: an external folder linked into the project for large files, not in git; search inside it by its path with a trailing slash (searching from the project root does not enter it)`)
+      .join('\n');
+  }
 
   sdkOptions.settingSources = ['project', 'user', 'local'];
 
@@ -2206,6 +2238,7 @@ async function loadMcpConfig(cwd) {
 // process (planTurnHandOver). The client names them the same way.
 const HAND_OVER_CHANGE_LABELS = {
   cwd: 'the working directory',
+  directories: 'the mounted folders',
   effort: 'the reasoning effort',
   ultracode: 'Ultracode',
   tools: 'the tool permissions',
@@ -2215,10 +2248,10 @@ const HAND_OVER_CHANGE_LABELS = {
 
 // The changes (planTurnHandOver) a turn that accepts the live process's own
 // settings (`acceptProcessSettings`) lets go of: what the CLI takes only at
-// launch, but its working directory, and tool rules stricter than the
-// process's (see processKeptSettings). Such a turn goes into a process held
-// only for scheduled work despite them, and runs with the process's values
-// (see blockingChanges in queryClaudeSDK).
+// launch, but its working directory and mounts, and tool rules stricter than
+// the process's (see processKeptSettings). Such a turn goes into a process
+// held only for scheduled work despite them, and runs with the process's
+// values (see blockingChanges in queryClaudeSDK).
 const PROCESS_SETTINGS = new Set(['effort', 'ultracode', 'tools']);
 
 /**
@@ -2305,9 +2338,10 @@ function createSwitchTracker(initial) {
  * What it takes to run a new turn in a live process rather than a new one:
  * the switches to send first, and what only a new process can apply.
  *
- * The CLI takes its working directory, tool rules, effort and settings
- * (ultracode) at launch. The SDK switches the model (setModel) and the
- * permission mode (setPermissionMode) of a live process with a control
+ * The CLI takes its working directory, the project's mounts (additional
+ * directories, and the prompt lines that name them), tool rules, effort and
+ * settings (ultracode) at launch. The SDK switches the model (setModel) and
+ * the permission mode (setPermissionMode) of a live process with a control
  * request, except into bypassPermissions for a process launched neither in
  * it nor allowed to switch to it (mapCliOptionsToSDK), which the CLI
  * refuses. A turn may allow tools the process was not launched with, as the
@@ -2341,6 +2375,10 @@ function planTurnHandOver(launched, next, instance, nextUltracode) {
   const details = {};
   if ((next.cwd ?? null) !== launched.cwd) {
     changes.push('cwd');
+  }
+  if (!haveSameEntries(mountDirectoriesOf(next), launched.additionalDirectories)
+    || (next.systemPrompt?.append ?? null) !== launched.mountsPrompt) {
+    changes.push('directories');
   }
   if ((next.effort ?? null) !== launched.effort) {
     changes.push('effort');
@@ -2407,7 +2445,7 @@ function detailsOfChanges(details, changes) {
 // may start a process of its own, which brings the jobs back
 // (replacementKeepsWork in queryClaudeSDK). A working directory is not one:
 // the CLI looks the transcript up under it.
-const RESUMABLE_CHANGES = new Set(['tools', 'permissionMode', 'model', 'effort', 'ultracode']);
+const RESUMABLE_CHANGES = new Set(['directories', 'tools', 'permissionMode', 'model', 'effort', 'ultracode']);
 
 /**
  * Whether a run option names a setting: a string with something in it. A
@@ -2472,6 +2510,62 @@ async function loadEffortModels(context) {
     console.warn('[Claude SDK] Unable to load provider models for effort validation:', error);
     return CLAUDE_PREDEFINED_MODELS;
   }
+}
+
+/**
+ * The mounts of the project a turn runs in (`projectPath`, else its working
+ * directory), which mapCliOptionsToSDK hands the CLI: none when the context
+ * cannot list them. A failed lookup throws, as the turn's other lookups do.
+ * A mount whose target did not answer in time comes without a realpath (see
+ * mountsForHandOver).
+ * @param {Object} options - The turn's run options
+ * @param {Object} context - Provider-scoped lookups
+ * @returns {Promise<Array<{ mountId: string, name: string, linkPath: string, realTargetPath: string|null }>>}
+ */
+async function loadProjectMounts(options, context) {
+  const projectPath = namesSetting(options.projectPath) ? options.projectPath : options.cwd;
+  if (!namesSetting(projectPath) || typeof context.listProjectMountDirectories !== 'function') {
+    return [];
+  }
+  const mounts = await context.listProjectMountDirectories(projectPath);
+  return Array.isArray(mounts) ? mounts : [];
+}
+
+/**
+ * The project's mounts (loadProjectMounts) as a turn handed to a live
+ * process reaches them. A mount whose target did not answer in time (a
+ * network share that is asleep, or slow to answer) is not a change of the
+ * mounts: it is taken as the process was launched with it, so the turn does
+ * not need a process of its own for it (planTurnHandOver's 'directories').
+ * One the process was not launched with stays out, as it does at a launch,
+ * and so does one registered under the same name after the process's mount
+ * was removed: matched by its mountId, it is another mount, whose target
+ * the process never had, and the folder the process has is no longer
+ * mounted.
+ * @param {Array<{ mountId: string, name: string, linkPath: string, realTargetPath: string|null }>} mounts
+ * @param {Object|null} launched - The live process's configuration (see `launched` in queryClaudeSDK)
+ * @returns {Array<{ mountId: string, name: string, linkPath: string, realTargetPath: string }>}
+ */
+function mountsForHandOver(mounts, launched) {
+  return mounts.flatMap((mount) => {
+    if (namesSetting(mount?.realTargetPath)) {
+      return [mount];
+    }
+    const kept = namesSetting(mount?.mountId)
+      ? launched?.mounts?.find((entry) => entry.mountId === mount.mountId)
+      : undefined;
+    return kept ? [kept] : [];
+  });
+}
+
+/**
+ * The mount realpaths SDK options hand the CLI as working directories
+ * (mapCliOptionsToSDK): the flag settings' permissions.additionalDirectories.
+ * @param {Object} sdkOptions - SDK options built by mapCliOptionsToSDK
+ * @returns {Array<string>}
+ */
+function mountDirectoriesOf(sdkOptions) {
+  return sdkOptions.settings?.permissions?.additionalDirectories ?? [];
 }
 
 /**
@@ -2578,6 +2672,11 @@ function reportBackgroundWorkStopped(writer, key, sessionId, changes) {
  * session last recorded is the composer's latest pick, not what the process
  * runs. Only for the hand-over: a turn that starts a process of its own runs
  * with its options as they are.
+ *
+ * Options that set `keepProcessMounts: true` (the turn that stops scheduled
+ * work, see `stopScheduledWork` in queryClaudeSDK) go in with the mounts the
+ * process was launched with, whatever the project's are now, in the plan as
+ * at the hand-over. Only for the hand-over, like `inheritUnset`.
  *
  * Options that set `acceptProcessSettings: true` (a message the
  * scheduled-messages dispatcher sends once a plan with it said the process,
@@ -2692,11 +2791,17 @@ async function handTurnToHeldProcess(command, options, writer, context) {
     const resolvedModel = inheritsModel
       ? turnOptions.model
       : await context.resolveResumeModel(key, options.model);
+    const projectMounts = options.keepProcessMounts === true
+      ? getSession(key)?.launchedMounts?.() ?? []
+      : await loadProjectMounts(turnOptions, context);
     const sdkOptions = mapCliOptionsToSDK({
       ...turnOptions,
       providerSessionId,
       model: resolvedModel || turnOptions.model,
       effortModels: await loadEffortModels(context),
+      mounts: options.keepProcessMounts === true
+        ? projectMounts
+        : getSession(key)?.mountsForHandOver?.(projectMounts) ?? projectMounts,
     });
     const ultracode = await resolveEffectiveUltracode(sdkOptions);
     const [promptMessage] = await buildPromptMessages(command, options.images, options.files, turnOptions.cwd, crypto.randomUUID());
@@ -3166,6 +3271,13 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // A later send's run options with what they leave out taken from this
     // process (handTurnToHeldProcess, for options that inherit unset settings).
     inheritUnsetSettings: (turnOptions) => (launched ? inheritUnsetSettings(turnOptions, liveSettings()) : turnOptions),
+    // The project's mounts as a later send's turn reaches them in this
+    // process (handTurnToHeldProcess): a mount whose target did not answer
+    // in time keeps the entry the process was launched with.
+    mountsForHandOver: (mounts) => mountsForHandOver(mounts, launched),
+    // The mounts this process was launched with, for a turn handed to it
+    // that keeps them (`keepProcessMounts`, handTurnToHeldProcess).
+    launchedMounts: () => launched?.mounts ?? [],
     // What a later send's turn would make of this process (planClaudeSDKHandOver).
     planHandOver: (turnOptions, planOptions) => planHandOver(turnOptions, planOptions),
     // Whether a later send's turn this process does not take, kept out by
@@ -3919,9 +4031,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // settings (`acceptProcessSettings`) and the process is held only for
   // scheduled work. Such a turn runs with the process's effort, ultracode and
   // tool rules (processKeptSettings) rather than wait as long as the loop
-  // runs, or stop it; a working directory, tool rules stricter than the
-  // process's, or a model or permission mode the process cannot switch to,
-  // still keep it out. The plan stands at the hand-over (handOverTurn).
+  // runs, or stop it; a working directory, the project's mounts, tool rules
+  // stricter than the process's, or a model or permission mode the process
+  // cannot switch to, still keep it out. The plan stands at the hand-over
+  // (handOverTurn).
   const blockingChanges = (plan, acceptProcessSettings) => {
     const kept = acceptProcessSettings && heldOnlyForScheduledWork() ? processKeptSettings(plan) : [];
     return plan.changes.filter((change) => !kept.includes(change));
@@ -3984,6 +4097,11 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         ...planned,
         model: model || planned.model,
         effortModels: await loadEffortModels(context),
+        // A turn that keeps the process's mounts (the one that stops its
+        // scheduled work) never weighs the project's current ones.
+        mounts: planned.keepProcessMounts === true
+          ? launched?.mounts ?? []
+          : mountsForHandOver(await loadProjectMounts(planned, context), launched),
       });
       nextUltracode = await resolveEffectiveUltracode(next);
     } catch (error) {
@@ -4377,10 +4495,13 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // reported no task for) lets go of the process: the dynamic loop ends with
   // it, at no cost, and no later process revives it. Anything else takes a
   // turn in which the model cancels it (buildScheduledStopMessage), handed to
-  // this process (`inheritUnset`) so its other work keeps running. A process
-  // in plan mode runs that turn in the default mode, with permissions not
-  // skipped (which would ask for bypassPermissions), and is switched back
-  // after it (`restoreSwitchesAfterTurn`). Auto mode is left as it is.
+  // this process (`inheritUnset`) so its other work keeps running, with the
+  // mounts the process has (`keepProcessMounts`): the project's mounts may
+  // have changed since it was launched, which would keep the turn out, and
+  // the cancel prompt touches none. A process in plan mode runs that turn in
+  // the default mode, with permissions not skipped (which would ask for
+  // bypassPermissions), and is switched back after it
+  // (`restoreSwitchesAfterTurn`). Auto mode is left as it is.
   const stopScheduledWork = (id, { all = false } = {}) => {
     if (!takesHandedOverTurn()) {
       return { status: 'busy' };
@@ -4402,7 +4523,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       releaseInput('scheduled-stopped');
       return { status: 'stopped' };
     }
-    const options = { inheritUnset: true };
+    const options = { inheritUnset: true, keepProcessMounts: true };
     if (launched.permissionMode === 'plan') {
       Object.assign(options, {
         permissionMode: 'default',
@@ -4435,11 +4556,20 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }
 
     const resolvedModel = await context.resolveResumeModel(sessionId, options.model);
+    // A failed lookup of the project's mounts starts the process without
+    // them, rather than fail the turn: it asks before it touches one, and a
+    // later turn that finds them starts a process of its own. So does a
+    // mount whose target did not answer in time.
+    const launchMounts = (await loadProjectMounts(options, context).catch((error) => {
+      console.warn(`[Claude SDK] Session ${sessionKey() || 'NEW'}: could not list the project's mounts; the process starts without them:`, error?.message || error);
+      return [];
+    })).filter((mount) => namesSetting(mount?.realTargetPath));
     const sdkOptions = mapCliOptionsToSDK({
       ...options,
       providerSessionId,
       model: resolvedModel || options.model,
       effortModels: await loadEffortModels(context),
+      mounts: launchMounts,
     });
 
     const mcpServers = await loadMcpConfig(options.cwd);
@@ -4677,6 +4807,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // options, but the CLI keeps the lists it was launched with.
     launched = {
       cwd: sdkOptions.cwd ?? null,
+      // The project's mounts it was launched with (mountsForHandOver), the
+      // folders they make working directories, and the prompt lines that
+      // name them (mapCliOptionsToSDK).
+      mounts: launchMounts.map(({ mountId, name, linkPath, realTargetPath }) => ({ mountId, name, linkPath, realTargetPath })),
+      additionalDirectories: [...mountDirectoriesOf(sdkOptions)],
+      mountsPrompt: sdkOptions.systemPrompt?.append ?? null,
       allowedTools: [...sdkOptions.allowedTools],
       disallowedTools: [...sdkOptions.disallowedTools],
       effort: sdkOptions.effort ?? null,

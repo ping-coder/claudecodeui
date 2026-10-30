@@ -792,8 +792,10 @@ export type ScheduleHoldRecord = {
  * - `turn`: the model has to cancel it. The caller runs one turn of the
  *   session with `content` and run options `options` (merged into the run
  *   options it builds), handed to the held process when it is still up, so
- *   other background work keeps running. `targetIds` are the ids the turn
- *   should remove; still listed after it, they were not cancelled.
+ *   other background work keeps running; `keepProcessMounts: true` in them
+ *   lets it go in with the process's own mounts after the project's have
+ *   changed. `targetIds` are the ids the turn should remove; still listed
+ *   after it, they were not cancelled.
  * - `busy`: the session's process is in a turn it has not handed over; try
  *   again once it is over.
  * - `not_found`: no such scheduled work, or it cannot be stopped.
@@ -1059,6 +1061,17 @@ export type ProviderRuntimeContext = {
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
   /**
+   * The mounts of the project at `projectPath` (the projects module's
+   * `listProjectMountDirectories`, see `ProjectMountDirectory`), sorted by
+   * name; none for an unknown path. The Claude and Codex runtimes hand the
+   * realpaths to their CLI as additional directories. A mount whose target
+   * did not answer in time comes with `realTargetPath: null`: a new process
+   * starts without it, and a live one that was launched with it (the same
+   * `mountId`) keeps it.
+   * Absent in tests that do not look at it, which then run with no mounts.
+   */
+  listProjectMountDirectories?(projectPath: string): Promise<ProjectMountDirectory[]>;
+  /**
    * The cron jobs a CLI that resumes the session brings back from its
    * transcript (see `IProviderSessions.readRevivedCronJobs`): the runtime
    * holds a resumed process for them. Absent for a provider that keeps no
@@ -1213,14 +1226,16 @@ export type ProviderCancelInsertGatewayResult =
  * What keeps a turn out of the process a provider runtime holds open for a
  * session's background work, where it would keep that work running. The CLI
  * takes some settings only at launch, so a turn that changes them needs a
- * process of its own, and starting one stops the work: `cwd`, `effort`,
+ * process of its own, and starting one stops the work: `cwd`, `directories`
+ * (the project's mounts are not the ones the process was launched with; see
+ * `ProviderRuntimeContext.listProjectMountDirectories`), `effort`,
  * `ultracode`, and `tools` (allowing fewer tools than the process was
  * launched with, or denying others). `model` and `permissionMode` count only
  * when the live process cannot switch to them (bypassPermissions, for a
  * process not launched with it). `lookup`: the runtime could not resolve the
  * turn's options, so it cannot tell.
  */
-export type HandOverChange = 'model' | 'effort' | 'ultracode' | 'permissionMode' | 'tools' | 'cwd' | 'lookup';
+export type HandOverChange = 'model' | 'effort' | 'ultracode' | 'permissionMode' | 'tools' | 'cwd' | 'directories' | 'lookup';
 
 /**
  * What a turn handed to the held process would switch in that process before
@@ -1749,6 +1764,119 @@ export type WorkspacePathValidationResult = {
 };
 
 // ---------------------------
+//----------------- PROJECT MOUNT TYPES ------------
+/**
+ * How a registered mount looks on disk, from the projects module's mounts
+ * service. `ok`: `mounts/<name>` is a symlink to the registered target, the
+ * target is a directory and git ignores the link. `missing-link`: nothing at
+ * `mounts/<name>` (a `git clean -fdx` removes it); `link-mismatch`: something
+ * else is there, a real folder or a link to another place; `missing-target`:
+ * the target is gone (an unplugged disk), does not answer in time (an
+ * offline network share), or is no longer a place a mount may point to;
+ * `not-directory`: the target is a file; `not-ignored`: the
+ * `mounts/.gitignore` sentinel is missing or git would still commit the link.
+ * When several apply, the first in that order of severity wins: target, link,
+ * ignore.
+ */
+export type ProjectMountStatus =
+  | 'ok'
+  | 'missing-link'
+  | 'link-mismatch'
+  | 'missing-target'
+  | 'not-directory'
+  | 'not-ignored';
+
+/**
+ * One `project_mounts` row as the database repository returns it. Shared by
+ * the repository and the projects module's mounts service, which owns every
+ * write. `targetPath` is the absolute path the link points to, as registered
+ * (not resolved), and `createdAt` an ISO timestamp.
+ */
+export type ProjectMountRecord = {
+  mountId: string;
+  projectId: string;
+  name: string;
+  targetPath: string;
+  createdAt: string;
+};
+
+/**
+ * A registered mount reconciled with the disk: what `GET
+ * /api/projects/:projectId/mounts` lists and what the File Tree reads through
+ * its mounts gateway. `linkPath` is `mounts/<name>`, relative to the project;
+ * `realTargetPath` is the target's realpath, null when it does not resolve to
+ * a place a mount may point to.
+ */
+export type ProjectMount = {
+  mountId: string;
+  name: string;
+  linkPath: string;
+  targetPath: string;
+  realTargetPath: string | null;
+  status: ProjectMountStatus;
+  createdAt: string;
+};
+
+/**
+ * One mount as the projects module hands it to a provider runtime
+ * (`listProjectMountDirectories`, through `ProviderRuntimeContext`): a
+ * registered mount whose link is in place, with `realTargetPath` the realpath
+ * of a target that is an existing folder outside the project. Null when the
+ * target is registered and linked but did not answer in time (a network
+ * share that is asleep or offline), or could not be probed because the
+ * mount gate gave it no turn: that is not a change of the mounts, so a
+ * runtime keeps what a live process was launched with and leaves the mount
+ * out of a new one. A target that is gone, or no longer a place a mount may
+ * point to, is not listed at all. `mountId` is the row's: a runtime keeps a
+ * live process's entry only for the same mount, never for another one
+ * registered later under the same name.
+ */
+export type ProjectMountDirectory = {
+  mountId: string;
+  name: string;
+  linkPath: string;
+  realTargetPath: string | null;
+};
+
+/**
+ * One mount point of the machine, as the projects module's mount gate reads
+ * it from /proc/self/mountinfo (and as tests hand it in): its path, and
+ * whether its filesystem is a local disk's or memory's (ext4, xfs, tmpfs and
+ * the like). Calls there answer or fail in time, so they bypass the gate; a
+ * network share's (nfs, cifs, FUSE) hang while its server is gone, so the
+ * gate times those out and holds them back until they have answered.
+ */
+export type MachineMountPoint = {
+  path: string;
+  local: boolean;
+};
+
+/**
+ * What a filesystem call run in a mount's target through the projects
+ * module's mount gate (`runInMountTarget`) came to. `done` and `failed`: the
+ * call answered in time, with its value or its error. `unreachable`: it did
+ * not answer in time, or the filesystem it is on has a call that never
+ * answered, so it was not started. `busy`: it was not started because it
+ * waited too long for its turn, its signal was aborted, or too many calls
+ * already hang. Calls that hang keep a libuv thread until they answer, so
+ * the gate never starts more of them than the rest of the server can spare.
+ */
+export type MountCallOutcome<T> =
+  | { kind: 'done'; value: T }
+  | { kind: 'failed'; error: unknown }
+  | { kind: 'unreachable' }
+  | { kind: 'busy' };
+
+/**
+ * How the mount gate runs a call, handed to the call: `gated` on a network
+ * share's filesystem (timed, one call at a time), false on a local disk's,
+ * where it runs at once because nothing there hangs. A whole folder read
+ * streams the folder on a local disk and reads its names in one call on a
+ * share (see `FileTreeFileSystem`).
+ */
+export type MountCall = { gated: boolean };
+
+// ---------------------------
 //----------------- PROJECT TEMPLATE TYPES ------------
 /**
  * One file a project template writes.
@@ -2115,6 +2243,24 @@ export type WorktreeProjectGateway = {
 };
 
 /**
+ * Mounts boundary consumed by worktree removal: the projects module's mount
+ * links (`<project>/mounts/<name>`, junctions on Windows). Git for Windows
+ * before 2.54 walks into a junction while it deletes a worktree and removes
+ * the files in its target, so the links go first.
+ */
+export type WorktreeMountsGateway = {
+  /**
+   * Takes every mount link out of the worktree at `worktreePath`, and out of
+   * every project registered inside it, keeping the registrations; rejects
+   * when one cannot be removed (the links it took out by then are put back
+   * first). `reattach` puts the links it took out
+   * back as they were, for when git then refuses to remove the worktree (a
+   * locked one, one with submodules); it never throws.
+   */
+  detachMountLinks(worktreePath: string): Promise<{ reattach(): Promise<void> }>;
+};
+
+/**
  * Complete application-service surface used by the Worktrees HTTP router.
  *
  * Routes parse transport values and call these functions; they do not import
@@ -2155,6 +2301,25 @@ export type FileTreeNode = {
    * are never walked, so they never carry `children`.
    */
   isIgnored?: boolean;
+  /**
+   * Set on the link of a registered mount (`mounts/<name>`), which is listed
+   * as a directory although it is a symlink. Its contents are walked only
+   * while its status is `ok` or `not-ignored`.
+   */
+  mount?: {
+    mountId: string;
+    name: string;
+    targetPath: string;
+    status: ProjectMountStatus;
+  };
+  /** True on every entry below a mount's link: it lives in the mount's target, outside the project. */
+  inMount?: boolean;
+  /**
+   * True on a mount's link when not all of its contents were listed: the
+   * mounts' shared entry budget or time ran out, or part of it did not
+   * answer in time (a network share that hangs).
+   */
+  truncated?: boolean;
   children?: FileTreeNode[];
 };
 
@@ -2198,6 +2363,13 @@ export type FileTreeFileSystem = {
   // Streamed rather than returned as an array so a directory with millions of
   // children is abandoned at the entry limit instead of being materialized.
   openDirectory(directoryPath: string): AsyncIterable<FileTreeDirectoryEntry>;
+  // The names in a directory, without their types, for directories inside a
+  // mount on a network share: Node's opendir runs a synchronous lstat on the
+  // event loop for an entry whose type the filesystem does not report (some
+  // NFS and FUSE shares do not), which no time limit can stop on a share
+  // that hangs. One call for the whole directory, so the mount gate gives it
+  // a slow call's time limit.
+  readDirectoryNames(directoryPath: string): Promise<string[]>;
   realpath(candidatePath: string): Promise<string>;
   readTextFile(filePath: string): Promise<string>;
   writeTextFile(filePath: string, content: string): Promise<void>;
@@ -2262,15 +2434,60 @@ export type FileTreeLogger = {
 };
 
 /**
+ * Mount lookup boundary consumed by File Tree workflows: the projects
+ * module's registered mounts (see `ProjectMount`). The File Tree lists a
+ * mount's link as a directory, refuses to rename or delete it, and reads
+ * files by their path in a mount's target. The status comes without the git
+ * check, so a link git would commit can read `ok` here; the mounts dialog
+ * shows the full status.
+ */
+export type FileTreeMountsGateway = {
+  /** The project-root folder that holds the links (`mounts`). */
+  directoryName: string;
+  /** The project's registered mounts; none for a project without any. */
+  listProjectMounts(projectId: string): Promise<ProjectMount[]>;
+  /**
+   * Runs one filesystem call on a path in a mount's target, `realPath` being
+   * where it really is (the target's realpath and the rest of the path),
+   * through the projects module's mount gate (see `MountCallOutcome`). A
+   * network share that hangs would keep the thread of every call made into
+   * it, so every call the File Tree makes in a mount goes through here.
+   * `followLinksBelow`, the part of `realPath` known to hold no link (the
+   * target's realpath), asks for the links in the rest to be followed first,
+   * so a call through a link into another share runs, and hangs, on that
+   * share; a walk, which never follows a link, leaves it out. `signal` gives
+   * up on a call still waiting for its turn. `slow` marks a call that takes
+   * as long as a folder is big (reading all its names), which may run well
+   * past the time limit on a share that answers without the share counting
+   * as unreachable. The call is told whether the gate times it (`MountCall`).
+   */
+  runInMountTarget<T>(
+    realPath: string,
+    operation: (call: MountCall) => Promise<T>,
+    options?: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean },
+  ): Promise<MountCallOutcome<T>>;
+  /**
+   * Whether the filesystem `absolutePath` is on is known not to answer now
+   * (the mount gate has a call there that never answered, or one that timed
+   * out moments ago). Asked before a read resolves an absolute path outside
+   * the gate, whose realpath would hang on such a filesystem: a mount's
+   * target reached through a link, say, which matches no mount by its path
+   * while the target does not answer.
+   */
+  isShareUnreachable(absolutePath: string): Promise<boolean>;
+};
+
+/**
  * Required production dependencies for the File Tree application service.
  *
- * Filesystem, project lookup, workspace policy, MIME detection, concurrency,
- * and logging are all explicit so service construction has no hidden process,
- * repository, or machine-wide defaults.
+ * Filesystem, project lookup, mounts, workspace policy, MIME detection,
+ * concurrency, and logging are all explicit so service construction has no
+ * hidden process, repository, or machine-wide defaults.
  */
 export type FileTreeServiceDependencies = {
   fileSystem: FileTreeFileSystem;
   projects: FileTreeProjectGateway;
+  mounts: FileTreeMountsGateway;
   workspace: FileTreeWorkspaceGateway;
   resolveMimeType(filePath: string): string;
   fileSystemConcurrency: number;
@@ -2316,6 +2533,14 @@ export type FileTreeServices = {
     suggestions: Array<{ path: string; name: string; type: 'directory' }>;
   }>;
   createWorkspaceFolder(folderPath: string): Promise<{ success: true; path: string }>;
+  /**
+   * Reads a text file by its project path, or by its absolute path under a
+   * read-only root, the workspace root or a mount's target. A file over
+   * 10 MB fails with a 413 (`FILE_TOO_LARGE`, `details: { size, limit }`).
+   * This and every other call on a path in a mount fails with a 503
+   * (`MOUNT_UNREACHABLE`) when the mount's target is gone or does not answer
+   * in time, rather than wait on a network share that hangs.
+   */
   readTextFile(projectId: string, filePath: string): Promise<{ content: string; path: string }>;
   openFile(projectId: string, filePath: string): Promise<{ contentType: string; stream: Readable }>;
   saveTextFile(projectId: string, filePath: string, content: string): Promise<{
@@ -2341,6 +2566,13 @@ export type FileTreeServices = {
    * A tree with more than 10,000 entries, not counting ignored ones, fails
    * with a 413 (`FILE_TREE_TOO_LARGE`). Ignored entries have a separate cap of
    * 2,000; past it they are dropped rather than failing the request.
+   *
+   * The links of the project's registered mounts are listed as directories
+   * with `mount`, whatever the `.gitignore` says, and the mounts folder's
+   * sentinel `.gitignore` is left out. With `markIgnored` a mount's contents
+   * are listed too, flagged `inMount`, under the hard exclusions only and on
+   * a budget of 2,000 entries shared by all mounts; past it the mount is
+   * flagged `truncated` instead of failing the request.
    */
   listProjectFiles(
     projectId: string,
@@ -2353,7 +2585,8 @@ export type FileTreeServices = {
    * matches, ties broken shallowest first in listing order.
    *
    * The walk applies the palette's listing rules: `listProjectFiles` with `respectGitignore` and
-   * `markIgnored`, the same depth, and no symlink is followed. It reads at most 100,000 entries
+   * `markIgnored`, the same depth, and no symlink is followed; the links of registered mounts
+   * and the mounts folder's sentinel are left out altogether. It reads at most 100,000 entries
    * and runs for at most 2 seconds; past either it returns what it found with `incomplete` set.
    * An aborted `signal` (the browser gave up on the request) stops it the same way.
    */

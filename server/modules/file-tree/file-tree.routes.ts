@@ -111,7 +111,13 @@ function createRouteHandler(
       await operation(request, response);
     } catch (error) {
       if (error instanceof AppError) {
-        response.status(error.statusCode).json({ error: error.message });
+        // `code` and `details` let the client tell errors apart (MOUNT_PROTECTED,
+        // FILE_TOO_LARGE with the size and the limit) beside the message.
+        response.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          ...(error.details !== undefined ? { details: error.details } : {}),
+        });
         return;
       }
 

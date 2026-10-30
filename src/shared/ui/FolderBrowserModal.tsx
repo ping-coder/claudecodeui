@@ -2,27 +2,69 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, FolderOpen, FolderPlus, Loader2, Plus, X } from 'lucide-react';
 
-import { Button, Input } from '@/shared/ui';
-import { browseFilesystemFolders, createFolderInFilesystem } from '@/modules/project-creation-wizard/utils/workspaceApi';
-import { getParentPath, joinFolderPath } from '@/modules/project-creation-wizard/utils/pathUtils';
-import type { FolderSuggestion } from '@/shared/types';
+import { Button } from '@/shared/ui/Button';
+import { Input } from '@/shared/ui/Input';
+import { cn } from '@/shared/utils';
+import type { FolderBrowseResult, FolderSuggestion } from '@/shared/types';
+
+const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:\\?$/;
+
+// The folder above `currentPath`, or null at a root; handles Unix and Windows paths. Used when the
+// browse endpoint does not say what the parent is.
+const getParentPath = (currentPath: string): string | null => {
+  if (currentPath === '~' || currentPath === '/' || WINDOWS_DRIVE_PATTERN.test(currentPath)) {
+    return null;
+  }
+
+  const lastSeparatorIndex = Math.max(currentPath.lastIndexOf('/'), currentPath.lastIndexOf('\\'));
+  if (lastSeparatorIndex <= 0) {
+    return '/';
+  }
+
+  if (lastSeparatorIndex === 2 && /^[A-Za-z]:/.test(currentPath)) {
+    return `${currentPath.slice(0, 2)}\\`;
+  }
+
+  return currentPath.slice(0, lastSeparatorIndex);
+};
 
 type FolderBrowserModalProps = {
   isOpen: boolean;
-  autoAdvanceOnSelect: boolean;
   onClose: () => void;
   onFolderSelected: (folderPath: string, advanceToConfirm: boolean) => void;
+  // Passed back with the picked folder, for a caller that moves on once a folder is chosen.
+  autoAdvanceOnSelect?: boolean;
+  // Lists one folder; null asks the endpoint for its default folder.
+  browse: (folderPath: string | null) => Promise<FolderBrowseResult>;
+  // Creates `name` in `parentPath` and resolves to the new folder's path. Without it the modal
+  // offers no way to create a folder.
+  createFolder?: (parentPath: string, name: string) => Promise<string>;
+  // Where browsing starts each time the modal opens.
+  initialPath?: string | null;
+  // Extra classes for the overlay, such as a z-index above the dialog that opened it.
+  className?: string;
 };
 
-/** Opened by WorkspacePathField so the user can browse the filesystem and pick or create the workspace folder. */
-export default function FolderBrowserModal({
+/**
+ * Lets the user browse folders through an injected endpoint and pick one. Used by the
+ * project-creation-wizard module (the new workspace's folder, under the workspace rules) and the
+ * file-tree module (a mount's target folder, under the mount rules).
+ */
+export function FolderBrowserModal({
   isOpen,
-  autoAdvanceOnSelect,
   onClose,
   onFolderSelected,
+  autoAdvanceOnSelect = false,
+  browse,
+  createFolder,
+  initialPath = '~',
+  className,
 }: FolderBrowserModalProps) {
   const { t } = useTranslation();
-  const [currentPath, setCurrentPath] = useState('~');
+  const [currentPath, setCurrentPath] = useState(initialPath ?? '');
+  // The parent the browse endpoint reported for the folder shown; undefined when it reports none,
+  // and the parent is then worked out from the path.
+  const [reportedParentPath, setReportedParentPath] = useState<string | null | undefined>(undefined);
   const [folders, setFolders] = useState<FolderSuggestion[]>([]);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [showHiddenFolders, setShowHiddenFolders] = useState(false);
@@ -31,35 +73,43 @@ export default function FolderBrowserModal({
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep the loader stable across locale changes: t lands in a ref so an
-  // open browser does not reload and snap back to the home folder when the
-  // user switches language.
-  const loadFoldersRef = useRef<(pathToLoad: string) => Promise<void>>();
+  // Keep the loader stable across locale changes and new `browse` identities: it lands in a ref so
+  // an open browser does not reload and snap back to its first folder when the user switches
+  // language or the caller re-renders.
+  const loadFoldersRef = useRef<(pathToLoad: string | null) => Promise<void>>();
+  const initialPathRef = useRef(initialPath);
 
-  const loadFolders = useCallback(async (pathToLoad: string) => {
+  const loadFolders = useCallback(async (pathToLoad: string | null) => {
     setLoadingFolders(true);
     setError(null);
 
     try {
-      const result = await browseFilesystemFolders(pathToLoad);
+      const result = await browse(pathToLoad);
       setCurrentPath(result.path);
-      setFolders(result.suggestions);
+      setReportedParentPath(result.parent);
+      setFolders(result.folders);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : t('folderBrowser.loadFailed'));
     } finally {
       setLoadingFolders(false);
     }
-  }, [t]);
+  }, [browse, t]);
 
+  // Declared before the opening effect, which reads both refs in the same commit.
   useEffect(() => {
     loadFoldersRef.current = loadFolders;
-  }, [loadFolders]);
+    initialPathRef.current = initialPath;
+  }, [initialPath, loadFolders]);
 
   useEffect(() => {
     if (!isOpen) {
       return;
     }
-    void loadFoldersRef.current?.('~');
+    // Shown until the first answer, so a folder that cannot be listed still offers its parent.
+    setCurrentPath(initialPathRef.current ?? '');
+    setReportedParentPath(undefined);
+    setFolders([]);
+    void loadFoldersRef.current?.(initialPathRef.current ?? null);
   }, [isOpen]);
 
   const visibleFolders = useMemo(
@@ -84,7 +134,7 @@ export default function FolderBrowserModal({
   };
 
   const handleCreateFolder = useCallback(async () => {
-    if (!newFolderName.trim()) {
+    if (!createFolder || !newFolderName.trim()) {
       return;
     }
 
@@ -92,8 +142,7 @@ export default function FolderBrowserModal({
     setError(null);
 
     try {
-      const folderPath = joinFolderPath(currentPath, newFolderName);
-      const createdPath = await createFolderInFilesystem(folderPath);
+      const createdPath = await createFolder(currentPath, newFolderName.trim());
       resetNewFolderState();
       await loadFolders(createdPath);
     } catch (createError) {
@@ -101,16 +150,16 @@ export default function FolderBrowserModal({
     } finally {
       setCreatingFolder(false);
     }
-  }, [currentPath, loadFolders, newFolderName, t]);
+  }, [createFolder, currentPath, loadFolders, newFolderName, t]);
 
-  const parentPath = getParentPath(currentPath);
+  const parentPath = reportedParentPath !== undefined ? reportedParentPath : currentPath ? getParentPath(currentPath) : null;
 
   if (!isOpen) {
     return null;
   }
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+    <div className={cn('fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm', className)}>
       <div className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800">
         <div className="flex items-center justify-between border-b border-gray-200 p-4 dark:border-gray-700">
           <div className="flex items-center gap-3">
@@ -132,17 +181,19 @@ export default function FolderBrowserModal({
             >
               {showHiddenFolders ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
             </button>
-            <button
-              onClick={() => setShowNewFolderInput((previous) => !previous)}
-              className={`rounded-md p-2 transition-colors ${
-                showNewFolderInput
-                  ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                  : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300'
-              }`}
-              title={t('folderBrowser.createNew')}
-            >
-              <Plus className="h-5 w-5" />
-            </button>
+            {createFolder && (
+              <button
+                onClick={() => setShowNewFolderInput((previous) => !previous)}
+                className={`rounded-md p-2 transition-colors ${
+                  showNewFolderInput
+                    ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                    : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300'
+                }`}
+                title={t('folderBrowser.createNew')}
+              >
+                <Plus className="h-5 w-5" />
+              </button>
+            )}
             <button
               onClick={handleClose}
               className="rounded-md p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
@@ -152,7 +203,7 @@ export default function FolderBrowserModal({
           </div>
         </div>
 
-        {showNewFolderInput && (
+        {createFolder && showNewFolderInput && (
           <div className="border-b border-gray-200 bg-blue-50 px-4 py-3 dark:border-gray-700 dark:bg-blue-900/20">
             <div className="flex items-center gap-2">
               <Input
@@ -252,6 +303,8 @@ export default function FolderBrowserModal({
             </Button>
             <Button
               variant="outline"
+              // Not before the first answer: until then the path shown is only what was asked for.
+              disabled={loadingFolders || !currentPath}
               onClick={() => onFolderSelected(currentPath, autoAdvanceOnSelect)}
             >
               {t('folderBrowser.useThisFolder')}

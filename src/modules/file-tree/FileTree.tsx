@@ -1,9 +1,9 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Check, X, Loader2, Folder, Upload } from 'lucide-react';
+import { AlertTriangle, Check, X, Loader2, Folder, FolderSymlink, Upload } from 'lucide-react';
 
-import { cn } from '@/shared/utils';
+import { cn, copyTextToClipboard } from '@/shared/utils';
 import { ICON_SIZE_CLASS, getFileIconData } from '@/modules/file-tree/utils/fileIcons';
 import { useExpandedDirectories } from '@/modules/file-tree/hooks/useExpandedDirectories';
 import { useFileTreeData } from '@/modules/file-tree/hooks/useFileTreeData';
@@ -11,18 +11,29 @@ import { useFileTreeOperations } from '@/modules/file-tree/hooks/useFileTreeOper
 import { useFileTreeSearch } from '@/modules/file-tree/hooks/useFileTreeSearch';
 import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMode';
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
+import { useProjectMounts } from '@/modules/file-tree/hooks/useProjectMounts';
 import type { DirectoryRevealRequest, FileTreeDetailedColumn, FileTreeImageSelection, FileTreeNode,Project } from '@/shared/types';
 import { useElementWidth } from '@/shared/hooks/useElementWidth';
 import { useRefreshSignal } from '@/shared/hooks/useRefreshSignal';
-import { formatFileSize, formatRelativeTime, isImageFile } from '@/modules/file-tree/utils/fileTreeUtils';
+import {
+  findMountsFolderPath,
+  findMountsFolderRow,
+  formatFileSize,
+  formatRelativeTime,
+  isBrokenMount,
+  isGitignoredEntry,
+  isImageFile,
+} from '@/modules/file-tree/utils/fileTreeUtils';
 import { directoryRevealFolders } from '@/modules/file-tree/utils/revealDirectory';
 import { ScrollArea, Input } from '@/shared/ui';
+import FileContextMenu from '@/modules/file-tree/FileContextMenu';
 import FileTreeBody from '@/modules/file-tree/FileTreeBody';
 import FileTreeDetailedColumns from '@/modules/file-tree/FileTreeDetailedColumns';
 import FileTreeHeader from '@/modules/file-tree/FileTreeHeader';
 import FileTreeLoadingState from '@/modules/file-tree/FileTreeLoadingState';
 import FileTreeUploadProgress from '@/modules/file-tree/FileTreeUploadProgress';
 import ImageViewer from '@/modules/file-tree/ImageViewer';
+import MountFolderDialog from '@/modules/file-tree/MountFolderDialog';
 
 
 // Detailed-view columns that fit a tree this wide, widest tier first. A width of 0 (not measured yet,
@@ -44,6 +55,25 @@ const DETAILED_COLUMN_TRACKS: Record<FileTreeDetailedColumn, string> = {
 const selectDetailedColumns = (width: number): readonly FileTreeDetailedColumn[] =>
   (width === 0 ? DETAILED_COLUMN_TIERS[0] : DETAILED_COLUMN_TIERS.find((tier) => width >= tier.minWidth) ?? DETAILED_COLUMN_TIERS[0]).columns;
 
+// A folder the tree cannot open: a gitignored one was never walked, and a broken mount has nothing to list.
+const isClosedFolder = (item: FileTreeNode) => isGitignoredEntry(item) || isBrokenMount(item);
+
+// The mount root `itemPath` is in or is, found by walking the tree already loaded, so the delete
+// dialog can name the folder outside the project that the files really live in.
+const findContainingMount = (nodes: FileTreeNode[], itemPath: string): FileTreeNode | null => {
+  for (const node of nodes) {
+    if (node.type !== 'directory') {
+      continue;
+    }
+    const containsItem = itemPath === node.path || itemPath.startsWith(`${node.path}/`) || itemPath.startsWith(`${node.path}\\`);
+    if (!containsItem) {
+      continue;
+    }
+    return node.mount ? node : findContainingMount(node.children ?? [], itemPath);
+  }
+  return null;
+};
+
 type FileTreeProps = {
   selectedProject: Project | null;
   onFileOpen?: (filePath: string) => void;
@@ -59,6 +89,10 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
   const { t } = useTranslation();
   const [selectedImage, setSelectedImage] = useState<FileTreeImageSelection | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  // Whether the mount dialog is open; the header button and the empty area's menu open it.
+  const [mountDialogOpen, setMountDialogOpen] = useState(false);
+  // The mount root whose Unmount, picked from its menu, waits for confirmation.
+  const [unmountCandidate, setUnmountCandidate] = useState<FileTreeNode | null>(null);
   const newItemInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -104,7 +138,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     // Reaching a gitignored folder serves the request too, but the folder is
     // not recorded as expanded: it cannot open, and the record would open it
     // on a refresh once it stops being ignored.
-    expandDirectories(folders.filter((folder) => !folder.isIgnored).map((folder) => folder.path));
+    expandDirectories(folders.filter((folder) => !isClosedFolder(folder)).map((folder) => folder.path));
   }, [revealDirectory, selectedProject?.path, selectedProject?.fullPath, expandDirectories, files]);
 
   // File operations
@@ -122,6 +156,49 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     showToast,
   });
   const operationLoading = operations.operationLoading || upload.operationLoading;
+
+  const projectMounts = useProjectMounts({
+    projectId: selectedProject?.projectId ?? null,
+    dialogOpen: mountDialogOpen,
+    onChanged: refreshFiles,
+    showToast,
+  });
+  const { loadMounts, repairMount, unmount } = projectMounts;
+
+  // A tree showing mounts/ lists the project's mounts once, so mounts/ is known for what it is
+  // even when every link in it is gone from disk and nothing is listed under it. The dialog and
+  // the mount actions list them again whenever they change.
+  const showsMountsFolder = findMountsFolderRow(files) !== null;
+  useEffect(() => {
+    if (showsMountsFolder) {
+      void loadMounts();
+    }
+  }, [loadMounts, showsMountsFolder]);
+  const mountsFolderPath = findMountsFolderPath(files, projectMounts.mounts.length > 0);
+
+  const openMountDialog = useCallback(() => setMountDialogOpen(true), []);
+
+  const handleRepairMount = useCallback((item: FileTreeNode) => {
+    if (item.mount) {
+      void repairMount(item.mount);
+    }
+  }, [repairMount]);
+
+  const handleCopyTargetPath = useCallback(async (item: FileTreeNode) => {
+    const copied = item.mount ? await copyTextToClipboard(item.mount.targetPath) : false;
+    showToast(
+      copied ? t('fileTree.toast.pathCopied', 'Path copied to clipboard') : t('fileTree.toast.copyFailed', 'Failed to copy path'),
+      copied ? 'success' : 'error',
+    );
+  }, [showToast, t]);
+
+  const handleConfirmUnmount = useCallback(() => {
+    const mount = unmountCandidate?.mount;
+    setUnmountCandidate(null);
+    if (mount) {
+      void unmount(mount);
+    }
+  }, [unmount, unmountCandidate]);
 
   // Which detailed columns fit the tree's own width (a docked editor, a split pane or a phone narrows it).
   // `loading` re-measures once the root replaces the loading state.
@@ -177,7 +254,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
       if (item.type === 'directory') {
         // A gitignored folder cannot be opened. Recording it as expanded would
         // only leave stale state that opens it once it stops being ignored.
-        if (!item.isIgnored) {
+        if (!isClosedFolder(item)) {
           toggleDirectory(item.path);
         }
         return;
@@ -205,11 +282,12 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     [t],
   );
 
-  if (loading) {
-    return <FileTreeLoadingState />;
-  }
+  // The mount the item up for deletion lives in, if any: its files are the real ones, outside the project.
+  const deleteMountRoot = operations.deleteConfirmation.item
+    ? findContainingMount(files, operations.deleteConfirmation.item.path)
+    : null;
 
-  return (
+  const treeView = (
     <div
       ref={treeRef}
       className="relative flex h-full flex-col bg-background"
@@ -253,6 +331,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
         onUploadFiles={upload.handleFileSelect}
         onNewFile={() => operations.handleStartCreate('', 'file')}
         onNewFolder={() => operations.handleStartCreate('', 'directory')}
+        onMountFolder={selectedProject ? openMountDialog : undefined}
         onRefresh={refreshFiles}
         onCollapseAll={collapseAll}
         loading={loading || refreshing}
@@ -263,77 +342,91 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
 
       <FileTreeUploadProgress upload={upload.uploadProgress} />
 
-      <ScrollArea className="flex-1 px-2 py-1">
-        {/* Inside the scroller, so a vertical scrollbar narrows the labels and the rows alike. */}
-        {viewMode === 'detailed' && filteredFiles.length > 0 && (
-          <FileTreeDetailedColumns columns={detailedColumns} gridTemplate={detailedGridTemplate} />
-        )}
+      {/* The empty area's menu: rows open their own and stop the event, so this one only opens around them. */}
+      <FileContextMenu
+        onNewFile={(path) => operations.handleStartCreate(path, 'file')}
+        onNewFolder={(path) => operations.handleStartCreate(path, 'directory')}
+        onUpload={handleUploadToFolder}
+        onRefresh={refreshFiles}
+        onMountFolder={selectedProject ? openMountDialog : undefined}
+      >
+        <ScrollArea className="flex-1 px-2 py-1">
+          {/* Inside the scroller, so a vertical scrollbar narrows the labels and the rows alike. */}
+          {viewMode === 'detailed' && filteredFiles.length > 0 && (
+            <FileTreeDetailedColumns columns={detailedColumns} gridTemplate={detailedGridTemplate} />
+          )}
 
-        {/* New item input */}
-        {operations.isCreating && (
-          <div
-            className="mb-1 flex items-center gap-1.5 py-[3px] pe-2"
-            style={{ paddingInlineStart: `${(operations.newItemParent.split('/').length - 1) * 16 + 4}px` }}
-          >
-            {operations.newItemType === 'directory' ? (
-              <Folder className={cn(ICON_SIZE_CLASS, 'text-blue-500')} />
-            ) : (
-              <span className="ms-[18px]">{renderFileIcon(operations.newItemName)}</span>
-            )}
-            <Input
-              ref={newItemInputRef}
-              type="text"
-              value={operations.newItemName}
-              onChange={(e) => operations.setNewItemName(e.target.value)}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Enter') operations.handleConfirmCreate();
-                if (e.key === 'Escape') operations.handleCancelCreate();
-              }}
-              onBlur={() => {
-                setTimeout(() => {
-                  if (operations.isCreating) operations.handleConfirmCreate();
-                }, 100);
-              }}
-              className="h-6 flex-1 text-sm"
-              disabled={operationLoading}
-            />
-          </div>
-        )}
+          {/* New item input */}
+          {operations.isCreating && (
+            <div
+              className="mb-1 flex items-center gap-1.5 py-[3px] pe-2"
+              style={{ paddingInlineStart: `${(operations.newItemParent.split('/').length - 1) * 16 + 4}px` }}
+            >
+              {operations.newItemType === 'directory' ? (
+                <Folder className={cn(ICON_SIZE_CLASS, 'text-blue-500')} />
+              ) : (
+                <span className="ms-[18px]">{renderFileIcon(operations.newItemName)}</span>
+              )}
+              <Input
+                ref={newItemInputRef}
+                type="text"
+                value={operations.newItemName}
+                onChange={(e) => operations.setNewItemName(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') operations.handleConfirmCreate();
+                  if (e.key === 'Escape') operations.handleCancelCreate();
+                }}
+                onBlur={() => {
+                  setTimeout(() => {
+                    if (operations.isCreating) operations.handleConfirmCreate();
+                  }, 100);
+                }}
+                className="h-6 flex-1 text-sm"
+                disabled={operationLoading}
+              />
+            </div>
+          )}
 
-        <FileTreeBody
-          files={files}
-          filteredFiles={filteredFiles}
-          error={error}
-          searchQuery={searchQuery}
-          viewMode={viewMode}
-          detailedColumns={detailedColumns}
-          detailedGridTemplate={detailedGridTemplate}
-          expandedDirs={expandedDirs}
-          onItemClick={handleItemClick}
-          renderFileIcon={renderFileIcon}
-          formatFileSize={formatFileSize}
-          formatRelativeTime={formatRelativeTimeLabel}
-          onRename={operations.handleStartRename}
-          onDelete={operations.handleStartDelete}
-          onNewFile={(path) => operations.handleStartCreate(path, 'file')}
-          onNewFolder={(path) => operations.handleStartCreate(path, 'directory')}
-          onCopyPath={operations.handleCopyPath}
-          onDownload={operations.handleDownload}
-          onUpload={handleUploadToFolder}
-          onRefresh={refreshFiles}
-          dropTarget={upload.dropTarget}
-          onItemDragOver={upload.handleItemDragOver}
-          // Pass rename state and handlers for inline editing
-          renamingItem={operations.renamingItem}
-          renameValue={operations.renameValue}
-          setRenameValue={operations.setRenameValue}
-          handleConfirmRename={operations.handleConfirmRename}
-          handleCancelRename={operations.handleCancelRename}
-          renameInputRef={renameInputRef}
-          operationLoading={operationLoading}
-        />
-      </ScrollArea>
+          <FileTreeBody
+            files={files}
+            filteredFiles={filteredFiles}
+            error={error}
+            searchQuery={searchQuery}
+            viewMode={viewMode}
+            detailedColumns={detailedColumns}
+            detailedGridTemplate={detailedGridTemplate}
+            expandedDirs={expandedDirs}
+            onItemClick={handleItemClick}
+            renderFileIcon={renderFileIcon}
+            formatFileSize={formatFileSize}
+            formatRelativeTime={formatRelativeTimeLabel}
+            onRename={operations.handleStartRename}
+            onDelete={operations.handleStartDelete}
+            onNewFile={(path) => operations.handleStartCreate(path, 'file')}
+            onNewFolder={(path) => operations.handleStartCreate(path, 'directory')}
+            onCopyPath={operations.handleCopyPath}
+            onDownload={operations.handleDownload}
+            onUpload={handleUploadToFolder}
+            onRefresh={refreshFiles}
+            onUnmount={setUnmountCandidate}
+            onRepairMount={handleRepairMount}
+            onCopyTargetPath={handleCopyTargetPath}
+            onMountFolder={selectedProject ? openMountDialog : undefined}
+            mountsFolderPath={mountsFolderPath}
+            dropTarget={upload.dropTarget}
+            onItemDragOver={upload.handleItemDragOver}
+            // Pass rename state and handlers for inline editing
+            renamingItem={operations.renamingItem}
+            renameValue={operations.renameValue}
+            setRenameValue={operations.setRenameValue}
+            handleConfirmRename={operations.handleConfirmRename}
+            handleCancelRename={operations.handleCancelRename}
+            renameInputRef={renameInputRef}
+            operationLoading={operationLoading}
+          />
+        </ScrollArea>
+      </FileContextMenu>
 
       {selectedImage && (
         <ImageViewer
@@ -366,6 +459,18 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
                 ? t('fileTree.delete.folderWarning', 'This folder and all its contents will be permanently deleted.')
                 : t('fileTree.delete.fileWarning', 'This file will be permanently deleted.')}
             </p>
+            {deleteMountRoot ? (
+              <p className="mb-4 text-sm font-medium text-red-600 dark:text-red-400" data-delete-warning="mount">
+                {t('fileTree.delete.inMountWarning', {
+                  mount: deleteMountRoot.mount?.name ?? deleteMountRoot.name,
+                  target: deleteMountRoot.mount?.targetPath ?? '',
+                })}
+              </p>
+            ) : operations.deleteConfirmation.item.inMount ? (
+              <p className="mb-4 text-sm font-medium text-red-600 dark:text-red-400" data-delete-warning="mount">
+                {t('fileTree.delete.inMountWarningNoTarget')}
+              </p>
+            ) : null}
             <div className="flex justify-end gap-2">
               <button
                 onClick={operations.handleCancelDelete}
@@ -386,6 +491,53 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
           </div>
         </div>
       )}
+    </div>
+  );
+
+  // Beside the tree rather than in it, so a reload that brings back the loading state (a mount action
+  // on a tree that failed to load) leaves the mount dialog, an Unmount confirmation and a toast as they were.
+  const overlays = (
+    <>
+      {/* Unmount confirmation, for a mount root's menu: only the link goes, the folder stays */}
+      {unmountCandidate?.mount && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50">
+          <div className="mx-4 max-w-sm rounded-lg border border-border bg-background p-4 shadow-lg">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="rounded-full bg-sky-100 p-2 dark:bg-sky-900/30">
+                <FolderSymlink className="h-5 w-5 text-sky-600 dark:text-sky-400" />
+              </div>
+              <h3 className="font-medium text-foreground">
+                {t('fileTree.mounts.unmountTitle', { name: unmountCandidate.mount.name })}
+              </h3>
+            </div>
+            <p className="mb-4 text-sm text-muted-foreground">
+              {t('fileTree.mounts.unmountConfirm', { name: unmountCandidate.mount.name, target: unmountCandidate.mount.targetPath })}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setUnmountCandidate(null)}
+                className="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-accent"
+              >
+                {t('common.cancel', 'Cancel')}
+              </button>
+              <button
+                onClick={handleConfirmUnmount}
+                className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                {t('fileTree.mounts.unmount')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedProject && (
+        <MountFolderDialog
+          isOpen={mountDialogOpen}
+          onClose={() => setMountDialogOpen(false)}
+          mounts={projectMounts}
+        />
+      )}
 
       {/* Toast Notification */}
       {toast && (
@@ -405,6 +557,13 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
           <span className="text-sm">{toast.message}</span>
         </div>
       )}
-    </div>
+    </>
+  );
+
+  return (
+    <>
+      {loading ? <FileTreeLoadingState /> : treeView}
+      {overlays}
+    </>
   );
 }

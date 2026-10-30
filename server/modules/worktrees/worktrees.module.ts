@@ -4,10 +4,12 @@ import { projectsDb } from '@/modules/database/index.js';
 import {
   createProject,
   deleteOrArchiveProject,
+  detachProjectMountLinks,
   restoreArchivedProject,
 } from '@/modules/projects/index.js';
 import type {
   WorktreeFileSystem,
+  WorktreeMountsGateway,
   WorktreeProjectGateway,
   WorktreeServices,
 } from '@/shared/types.js';
@@ -53,9 +55,15 @@ const worktreeProjects: WorktreeProjectGateway = {
   archiveProject: (projectId) => deleteOrArchiveProject(projectId, false),
 };
 
+// The projects module's mount links, which worktree removal takes out before git runs.
+const worktreeMounts: WorktreeMountsGateway = {
+  detachMountLinks: (worktreePath) => detachProjectMountLinks(worktreePath),
+};
+
 const remove: WorktreeServices['remove'] = (input) => removeWorktree(input, {
   runGit: runGitCommand,
   projects: worktreeProjects,
+  mounts: worktreeMounts,
 });
 
 const create: WorktreeServices['create'] = (input) => createWorktree(input, {

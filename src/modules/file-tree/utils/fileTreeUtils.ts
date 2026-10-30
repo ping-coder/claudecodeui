@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next';
 
-import type { FileTreeNode } from '@/shared/types';
+import type { FileTreeNode, ProjectMountStatus } from '@/shared/types';
 
 const IMAGE_FILE_EXTENSIONS = new Set([
   'png',
@@ -12,6 +12,60 @@ const IMAGE_FILE_EXTENSIONS = new Set([
   'ico',
   'bmp',
 ]);
+
+/**
+ * Whether a node is greyed out as matching a .gitignore rule. A registered mount, and the mounts/
+ * folder holding mounts, are listed whatever a root rule says about mounts/: the server walks them.
+ */
+export function isGitignoredEntry(item: FileTreeNode): boolean {
+  return item.isIgnored === true && !item.mount && !item.children?.some((child) => Boolean(child.mount));
+}
+
+/**
+ * Whether a node is a mount root whose folder cannot be listed: the link is gone or points
+ * elsewhere, or the target is gone or not a folder. Like a gitignored folder it has no children,
+ * cannot be opened and takes no uploads; Repair or Unmount are what it offers. A mount that only
+ * lost its ignore file ('not-ignored') still lists and opens.
+ */
+export function isBrokenMount(item: FileTreeNode): boolean {
+  return Boolean(item.mount) && item.mount?.status !== 'ok' && item.mount?.status !== 'not-ignored';
+}
+
+// The folder at the project root that holds the mount links (the server's PROJECT_MOUNTS_DIRECTORY_NAME).
+const MOUNTS_FOLDER_NAME = 'mounts';
+
+/** The project's top-level mounts/ row, if the tree lists one. */
+export function findMountsFolderRow(files: FileTreeNode[]): FileTreeNode | null {
+  return files.find((node) => node.type === 'directory' && node.name === MOUNTS_FOLDER_NAME) ?? null;
+}
+
+/**
+ * The path of mounts/ while the project has mounts, or null. It then holds only the links and
+ * their ignore file: nothing is created, uploaded, renamed or deleted in it, and the server
+ * refuses to rename or delete it. A mount listed in it says so; when every link is gone from
+ * disk nothing is listed, and the project's registered mounts say so instead.
+ */
+export function findMountsFolderPath(files: FileTreeNode[], hasRegisteredMounts: boolean): string | null {
+  const folder = findMountsFolderRow(files);
+  if (!folder) {
+    return null;
+  }
+  return hasRegisteredMounts || folder.children?.some((child) => Boolean(child.mount)) ? folder.path : null;
+}
+
+const MOUNT_STATUS_KEYS: Record<ProjectMountStatus, string> = {
+  ok: 'fileTree.mounts.status.ok',
+  'missing-link': 'fileTree.mounts.status.missingLink',
+  'link-mismatch': 'fileTree.mounts.status.linkMismatch',
+  'missing-target': 'fileTree.mounts.status.missingTarget',
+  'not-directory': 'fileTree.mounts.status.notDirectory',
+  'not-ignored': 'fileTree.mounts.status.notIgnored',
+};
+
+/** A mount's status in words, for the mount dialog's rows and a mount node's tooltip. */
+export function describeMountStatus(status: ProjectMountStatus, t: TFunction): string {
+  return t(MOUNT_STATUS_KEYS[status] ?? MOUNT_STATUS_KEYS['missing-link']);
+}
 
 export function filterFileTree(items: FileTreeNode[], query: string): FileTreeNode[] {
   return items.reduce<FileTreeNode[]>((filteredItems, item) => {

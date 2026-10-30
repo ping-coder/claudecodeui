@@ -293,7 +293,7 @@ test('a dynamic loop beside other work takes a turn that ends it with stop: true
     try {
       assert.deepEqual(
         await claudeRuntime.stopScheduledWork(held.sessionId, 'wakeup:toolu_wakeup_1'),
-        { status: 'turn', content: STOP_WAKEUP, options: { inheritUnset: true }, targetIds: ['wakeup:toolu_wakeup_1'] },
+        { status: 'turn', content: STOP_WAKEUP, options: { inheritUnset: true, keepProcessMounts: true }, targetIds: ['wakeup:toolu_wakeup_1'] },
         label,
       );
       assert.equal(held.script.released(), false, label);
@@ -311,7 +311,7 @@ test('a cron job takes a turn that deletes it; the turn goes into the held proce
     assert.deepEqual(stop, {
       status: 'turn',
       content: `Cancel scheduled job b2148320 now: call CronDelete with id "b2148320". ${TAIL}`,
-      options: { inheritUnset: true },
+      options: { inheritUnset: true, keepProcessMounts: true },
       targetIds: ['cron:b2148320'],
     });
     if (stop.status !== 'turn') {
@@ -428,7 +428,7 @@ test('stopping all of a session\'s scheduled work takes one turn for every piece
       {
         status: 'turn',
         content: `Stop these loops now: call CronDelete once for each id: "b2148320", "7b7cd8fc"; then call ScheduleWakeup with stop: true. ${TAIL}`,
-        options: { inheritUnset: true },
+        options: { inheritUnset: true, keepProcessMounts: true },
         targetIds: ['cron:b2148320', 'cron:7b7cd8fc', 'wakeup:toolu_wakeup_1'],
       },
       'a job whose id the CLI did not report is no target',
@@ -447,7 +447,7 @@ test('stopping all of a session\'s scheduled work takes one turn for every piece
       {
         status: 'turn',
         content: `Cancel these scheduled jobs now: call CronDelete once for each id: "b2148320", "7b7cd8fc". ${TAIL}`,
-        options: { inheritUnset: true },
+        options: { inheritUnset: true, keepProcessMounts: true },
         targetIds: ['cron:b2148320', 'cron:7b7cd8fc'],
       },
     );
@@ -517,7 +517,7 @@ test('work a nested agent sets up is not followed: only calls that end scheduled
 });
 
 test('a process in plan mode runs the stop turn in the default mode, permissions not skipped, and is switched back after it', async () => {
-  const PLAN_STOP = { inheritUnset: true, permissionMode: 'default', restoreSwitchesAfterTurn: true, toolsSettings: { skipPermissions: false } };
+  const PLAN_STOP = { inheritUnset: true, keepProcessMounts: true, permissionMode: 'default', restoreSwitchesAfterTurn: true, toolsSettings: { skipPermissions: false } };
   for (const skipPermissions of [false, true]) {
     const label = `skipPermissions ${skipPermissions}`;
     // Two jobs: the one left keeps the process held after the turn, which is
@@ -566,7 +566,7 @@ test('a process in plan mode runs the stop turn in the default mode, permissions
   const auto = await startRun((script) => createCronJob(script, 'b2148320'), { permissionMode: 'auto' });
   try {
     const stop = await claudeRuntime.stopScheduledWork(auto.sessionId, 'cron:b2148320');
-    assert.deepEqual(stop.status === 'turn' ? stop.options : null, { inheritUnset: true });
+    assert.deepEqual(stop.status === 'turn' ? stop.options : null, { inheritUnset: true, keepProcessMounts: true });
   } finally {
     await finish(auto);
   }

@@ -4,8 +4,10 @@ import { listProjectTemplates } from '@/modules/project-templates/index.js';
 import { updateProjectDisplayName } from '@/modules/projects/services/project-management.service.js';
 import { createProjectCloneRouter } from '@/modules/projects/project-clone.routes.js';
 import { createProjectCreateRouter } from '@/modules/projects/project-create.routes.js';
+import { createProjectMountsRouter } from '@/modules/projects/project-mounts.routes.js';
 import { createPendingCloneRequests } from '@/modules/projects/services/project-clone-request.service.js';
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
+import { projectMountsService } from '@/modules/projects/services/project-mounts.service.js';
 import { createProjectWithTemplate } from '@/modules/projects/services/project-template-create.service.js';
 import { getProjectTaskMaster } from '@/modules/projects/services/projects-has-taskmaster.service.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
@@ -125,6 +127,9 @@ router.use(
     pendingCloneRequests: createPendingCloneRequests(PENDING_CLONE_REQUEST_TTL_MS),
   }),
 );
+
+// GET /mount-browse and the /:projectId/mounts endpoints.
+router.use(createProjectMountsRouter(projectMountsService));
 
 router.get(
   '/:projectId/taskmaster',

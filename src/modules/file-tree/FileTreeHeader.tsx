@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import type { ChangeEvent } from 'react';
-import { ChevronDown, Eye, FileText, FolderPlus, List, Loader2, RefreshCw, Search, TableProperties, Upload, X } from 'lucide-react';
+import { ChevronDown, Eye, FileText, FolderPlus, FolderSymlink, List, Loader2, RefreshCw, Search, TableProperties, Upload, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button, Input } from '@/shared/ui';
@@ -17,6 +17,8 @@ type FileTreeHeaderProps = {
   onNewFile?: () => void;
   onNewFolder?: () => void;
   onUploadFiles?: (files: FileList) => void;
+  // Opens the dialog that links a folder outside the project into mounts/.
+  onMountFolder?: () => void;
   onRefresh?: () => void;
   onCollapseAll?: () => void;
   // Loading state
@@ -26,7 +28,7 @@ type FileTreeHeaderProps = {
   uploadProgress?: number | null;
 };
 
-/** Rendered by FileTree to host the search box, view-mode switch and the create/upload/refresh/collapse actions. */
+/** Rendered by FileTree to host the search box, view-mode switch and the create/upload/mount/refresh/collapse actions. */
 export default function FileTreeHeader({
   viewMode,
   onViewModeChange,
@@ -35,6 +37,7 @@ export default function FileTreeHeader({
   onNewFile,
   onNewFolder,
   onUploadFiles,
+  onMountFolder,
   onRefresh,
   onCollapseAll,
   loading,
@@ -128,6 +131,19 @@ export default function FileTreeHeader({
               disabled={operationLoading}
             >
               <FolderPlus className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {onMountFolder && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={onMountFolder}
+              title={t('fileTree.mounts.open')}
+              aria-label={t('fileTree.mounts.open')}
+              disabled={operationLoading}
+            >
+              <FolderSymlink className="h-3.5 w-3.5" />
             </Button>
           )}
           {onRefresh && (
