@@ -5,8 +5,14 @@ import path from 'node:path';
 import spawn from 'cross-spawn';
 
 import { githubTokensDb } from '@/modules/database/index.js';
+import { applyProjectTemplate, resolveProjectTemplate } from '@/modules/project-templates/index.js';
 import { createProject } from '@/modules/projects/services/project-management.service.js';
-import type { WorkspacePathValidationResult } from '@/shared/types.js';
+import type {
+  ProjectTemplateApplyResult,
+  ProjectTemplateDefinition,
+  ProjectTemplateReport,
+  WorkspacePathValidationResult,
+} from '@/shared/types.js';
 import { AppError, validateWorkspacePath } from '@/shared/utils.js';
 
 type CloneProjectInput = {
@@ -14,16 +20,21 @@ type CloneProjectInput = {
   githubUrl: string;
   githubTokenId?: number | null;
   newGithubToken?: string | null;
+  templateId?: string | null;
+  locale?: string | null;
   userId: number | string;
 };
 
 type CloneCompletePayload = {
   project: Record<string, unknown>;
   message: string;
+  template?: ProjectTemplateReport;
 };
 
 type CloneProjectEventHandlers = {
-  onProgress: (message: string) => void;
+  /** `phase` is set for the template step so the client can show it in its own words. */
+  onProgress: (message: string, phase?: 'template') => void;
+  onTemplate?: (report: ProjectTemplateReport) => void;
   onComplete: (payload: CloneCompletePayload) => void;
 };
 
@@ -50,6 +61,12 @@ type CloneProjectDependencies = {
     environment: NodeJS.ProcessEnv,
   ) => GitCloneProcess;
   registerProject: (projectPath: string, customName: string) => Promise<{ project: Record<string, unknown> }>;
+  applyTemplate: (input: {
+    projectRoot: string;
+    template: ProjectTemplateDefinition;
+    locale?: string | null;
+    projectName: string;
+  }) => Promise<ProjectTemplateApplyResult>;
   logError: (message: string, error: unknown) => void;
 };
 
@@ -169,6 +186,7 @@ const defaultDependencies: CloneProjectDependencies = {
       projectPath,
       customName,
     }) as Promise<{ project: Record<string, unknown> }>,
+  applyTemplate: (input) => applyProjectTemplate(input),
   logError: (message: string, error: unknown): void => {
     console.error(message, error);
   },
@@ -224,6 +242,9 @@ export async function startCloneProject(
       statusCode: 400,
     });
   }
+
+  // An unknown template is refused before the workspace directory is created.
+  const template = resolveProjectTemplate(input.templateId);
 
   if (normalizedGithubUrl.startsWith('-')) {
     throw new AppError('Invalid githubUrl', {
@@ -325,14 +346,46 @@ export async function startCloneProject(
     }
   });
 
+  /**
+   * Writes the template into the finished clone. The clone is never removed
+   * here: a template problem becomes a warning and the files stay uncommitted
+   * for the user to review in Source Control.
+   */
+  const applyTemplateToClone = async (cloneTemplate: ProjectTemplateDefinition): Promise<ProjectTemplateReport> => {
+    handlers.onProgress('Adding template files...', 'template');
+    let applyResult: ProjectTemplateApplyResult;
+    try {
+      applyResult = await dependencies.applyTemplate({
+        projectRoot: clonePath,
+        template: cloneTemplate,
+        locale: input.locale,
+        projectName: repoName,
+      });
+    } catch (error) {
+      dependencies.logError('Failed to apply project template to clone:', error);
+      applyResult = { created: [], skipped: [], warnings: ['TEMPLATE_APPLY_FAILED'] };
+    }
+    const report: ProjectTemplateReport = {
+      templateId: cloneTemplate.id,
+      ...applyResult,
+      git: { action: 'cloned', committed: false },
+    };
+    handlers.onTemplate?.(report);
+    return report;
+  };
+
   const waitForCompletion = new Promise<void>((resolve, reject) => {
     gitProcess.on('close', async (code) => {
       if (code === 0) {
         try {
+          // The template goes in before the project is registered, so the
+          // project appears with its files already in place.
+          const templateReport = template ? await applyTemplateToClone(template) : null;
           const createdProject = await dependencies.registerProject(clonePath, repoName);
           handlers.onComplete({
             project: createdProject.project,
             message: 'Repository cloned successfully',
+            ...(templateReport ? { template: templateReport } : {}),
           });
           resolve();
         } catch (error) {

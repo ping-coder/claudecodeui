@@ -139,27 +139,12 @@
   "projectWizard": {
     "title": "建立新專案",
     "steps": {
-      "type": "類型",
       "configure": "設定",
       "confirm": "確認"
     },
-    "step1": {
-      "question": "您已經有工作區，還是想建立一個新的工作區？",
-      "existing": {
-        "title": "現有工作區",
-        "description": "我的伺服器上已經有工作區，只需要將其加入專案列表"
-      },
-      "new": {
-        "title": "新建工作區",
-        "description": "建立新工作區，可選擇從 GitHub 儲存庫複製"
-      }
-    },
     "step2": {
-      "existingPath": "工作區路徑",
       "newPath": "工作區路徑",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "您現有工作區目錄的完整路徑",
       "newHelp": "工作區目錄的完整路徑",
       "githubUrl": "GitHub URL（選填）",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -181,7 +166,6 @@
     },
     "step3": {
       "reviewConfig": "檢閱您的設定",
-      "existingWorkspace": "現有工作區",
       "newWorkspace": "新建工作區",
       "path": "路徑：",
       "cloneFrom": "複製自：",
@@ -190,7 +174,6 @@
       "usingProvidedToken": "使用提供的權杖",
       "noAuthentication": "無身分驗證",
       "sshKey": "SSH 金鑰",
-      "existingInfo": "工作區將加入您的專案列表，並可用於 Claude/Cursor 工作階段。",
       "newWithClone": "儲存庫將從此資料夾複製。",
       "newEmpty": "工作區將加入您的專案列表，並可用於 Claude/Cursor 工作階段。",
       "cloningRepository": "正在複製儲存庫..."
@@ -204,7 +187,6 @@
       "cloning": "正在複製..."
     },
     "errors": {
-      "selectType": "請選擇您已有現有工作區還是想建立新工作區",
       "providePath": "請提供工作區路徑",
       "failedToCreate": "建立工作區失敗",
       "failedToCreateFolder": "建立資料夾失敗"

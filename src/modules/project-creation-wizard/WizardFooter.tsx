@@ -8,23 +8,42 @@ type WizardFooterProps = {
   step: WizardStep;
   isCreating: boolean;
   isCloneWorkflow: boolean;
+  /** Holds the forward button, e.g. while the Template step's list is still loading. */
+  isNextDisabled?: boolean;
+  /** The result view is open: Done is the only action left. */
+  isShowingResult?: boolean;
   onClose: () => void;
   onBack: () => void;
   onNext: () => void;
   onCreate: () => void;
 };
 
-/** Rendered by ProjectCreationWizard to provide its cancel, back, next and create actions. */
+const LAST_STEP: WizardStep = 3;
+
+/** Rendered by ProjectCreationWizard to provide its cancel, back, next, create and done actions. */
 export default function WizardFooter({
   step,
   isCreating,
   isCloneWorkflow,
+  isNextDisabled = false,
+  isShowingResult = false,
   onClose,
   onBack,
   onNext,
   onCreate,
 }: WizardFooterProps) {
   const { t } = useTranslation();
+
+  if (isShowingResult) {
+    return (
+      <div className="flex items-center justify-end border-t border-gray-200 p-6 dark:border-gray-700">
+        <Button onClick={onClose}>
+          <Check className="me-1 h-4 w-4" />
+          {t('projectWizard.buttons.done')}
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center justify-between border-t border-gray-200 p-6 dark:border-gray-700">
@@ -39,7 +58,7 @@ export default function WizardFooter({
         )}
       </Button>
 
-      <Button onClick={step === 2 ? onCreate : onNext} disabled={isCreating}>
+      <Button onClick={step === LAST_STEP ? onCreate : onNext} disabled={isCreating || isNextDisabled}>
         {isCreating ? (
           <>
             <Loader2 className="me-2 h-4 w-4 animate-spin" />
@@ -47,7 +66,7 @@ export default function WizardFooter({
               ? t('projectWizard.buttons.cloning', { defaultValue: 'Cloning...' })
               : t('projectWizard.buttons.creating')}
           </>
-        ) : step === 2 ? (
+        ) : step === LAST_STEP ? (
           <>
             <Check className="me-1 h-4 w-4" />
             {t('projectWizard.buttons.createProject')}

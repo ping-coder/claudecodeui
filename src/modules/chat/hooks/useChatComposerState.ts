@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
   ClipboardEvent,
@@ -349,9 +349,14 @@ type KeepWorkSend = {
  * `clientRequestId` each carried. A `send_refused` comes on the socket every
  * pane on the page shares and hands that id back, so only the composer that
  * made the send undoes it, and two panes sending to one session at once each
- * undo their own. A send the server started is never refused afterwards, so
- * its record is never acted on; it goes with its composer's next send to the
- * session, or with the composer.
+ * undo their own. A send the server started is refused afterwards only when
+ * its run fails at the hand-over (HAND_OVER_FAILED), before its turn runs;
+ * any other's record is never acted on. The server sends that refusal again
+ * whenever the page subscribes to the session within the hour, for a page
+ * that was offline or showing another session when it went out. A record
+ * goes once its refusal is handled, so a repeat finds none, with its
+ * composer's next send to the session, so a refusal that comes late never
+ * brings back a message the user has written again, or with the composer.
  */
 const keepWorkSends = new Map<string, KeepWorkSend>();
 
@@ -1058,14 +1063,18 @@ export function useChatComposerState({
   // dialog is rendered by the composer; the submit awaits the user's choice
   // through this resolver.
   const [backgroundSendPrompt, setBackgroundSendPrompt] = useState<BackgroundSendPrompt | null>(null);
+  // The session whose work the open prompt lists as it is now rather than as
+  // it was when asked (see handleSendRefused), or null.
+  const [liveWorkSessionId, setLiveWorkSessionId] = useState<string | null>(null);
   const backgroundSendResolverRef = useRef<((choice: BackgroundSendChoice) => void) | null>(null);
 
   const askBeforeSendingOverBackgroundWork = useCallback(
-    (prompt: BackgroundSendPrompt) => new Promise<BackgroundSendChoice>((resolve) => {
+    (prompt: BackgroundSendPrompt, liveWorkSession: string | null = null) => new Promise<BackgroundSendChoice>((resolve) => {
       // Only one prompt at a time: a stale one is answered "cancel".
       backgroundSendResolverRef.current?.('cancel');
       backgroundSendResolverRef.current = resolve;
       setBackgroundSendPrompt(prompt);
+      setLiveWorkSessionId(liveWorkSession);
     }),
     [],
   );
@@ -1074,8 +1083,18 @@ export function useChatComposerState({
     const resolve = backgroundSendResolverRef.current;
     backgroundSendResolverRef.current = null;
     setBackgroundSendPrompt(null);
+    setLiveWorkSessionId(null);
     resolve?.(choice);
   }, []);
+
+  // The prompt the dialog shows. One asked with a live session lists that
+  // session's work, and offers Queue or not, as its activity says at each
+  // render (buildBackgroundSendPrompt), over what the prompt was asked with.
+  const shownBackgroundSendPrompt = useMemo(() => (
+    backgroundSendPrompt && liveWorkSessionId
+      ? { ...backgroundSendPrompt, ...buildBackgroundSendPrompt(processingSessions?.get(liveWorkSessionId), t) }
+      : backgroundSendPrompt
+  ), [backgroundSendPrompt, liveWorkSessionId, processingSessions, t]);
 
   // An unmounted composer cannot answer; let the pending submit finish.
   useEffect(() => () => {
@@ -1090,7 +1109,8 @@ export function useChatComposerState({
   // the turn can go there, a process of its own keeps the work (even once the
   // loop's run under way is over), or the server cannot say, it is sent with
   // keepBackgroundWork, so the server refuses or fails it rather than stop
-  // the work (a failure shows in the transcript as HAND_OVER_FAILED); when it
+  // the work (a failure shows in the transcript as HAND_OVER_FAILED, and the
+  // server refuses the send then too: see handleSendRefused); when it
   // cannot, the user is asked, told what only a new process can apply.
   // Elsewhere, and for an edit, every new turn replaces that process,
   // so the user is asked. The prompt lists the session's tasks and scheduled
@@ -1560,6 +1580,13 @@ export function useChatComposerState({
   // of that process: cancel leaves the message in the composer, queue and
   // send anyway take it out again. Once the composer shows another session,
   // the text goes back into that session's draft and nothing is asked.
+  //
+  // A send refused once its run had begun (reason HAND_OVER_FAILED: the turn
+  // waited for a loop's fire, which started work a new process would stop)
+  // is undone the same way, except that the session is left as that run's
+  // `complete` left it, and the prompt lists the session's work as it is now
+  // (see shownBackgroundSendPrompt): work the send knew nothing of, which the
+  // page may hear of only after the refusal.
   const handleSendRefused = useCallback((event: SendRefusedEvent) => {
     const requestId = event.clientRequestId ?? latestSendIds.get(event.sessionId);
     const refused = requestId ? keepWorkSends.get(requestId) : undefined;
@@ -1567,19 +1594,24 @@ export function useChatComposerState({
       return;
     }
     keepWorkSends.delete(requestId);
+    const refusedAfterRun = event.reason === 'HAND_OVER_FAILED';
     removeMessage?.(refused.sessionId, refused.echoRowId);
-    onSessionBackground?.(refused.sessionId, refused.tasks, refused.scheduled);
+    if (!refusedAfterRun) {
+      onSessionBackground?.(refused.sessionId, refused.tasks, refused.scheduled);
+    }
     putTextBack(refused.sessionId, refused.content, refused.browserFiles);
     if (sessionKeyRef.current !== refused.sessionId) {
       return;
     }
 
     void (async () => {
-      const choice = await askBeforeSendingOverBackgroundWork({
-        ...buildBackgroundSendPrompt(refused, t),
+      const why = {
         changes: event.changes,
         ...(event.details ? { details: event.details } : {}),
-      });
+      };
+      const choice = await (refusedAfterRun
+        ? askBeforeSendingOverBackgroundWork({ work: [], ...why }, refused.sessionId)
+        : askBeforeSendingOverBackgroundWork({ ...buildBackgroundSendPrompt(refused, t), ...why }));
       if (choice === 'cancel') {
         return;
       }
@@ -2357,7 +2389,7 @@ export function useChatComposerState({
     handleInsertStatus,
     handleInsertRunEnded,
     handleSendRefused,
-    backgroundSendPrompt,
+    backgroundSendPrompt: shownBackgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,
     editQueuedDraft,

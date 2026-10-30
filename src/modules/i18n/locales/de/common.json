@@ -139,27 +139,12 @@
   "projectWizard": {
     "title": "Neues Projekt erstellen",
     "steps": {
-      "type": "Typ",
       "configure": "Konfigurieren",
       "confirm": "Bestätigen"
     },
-    "step1": {
-      "question": "Hast du bereits einen Arbeitsbereich, oder möchtest du einen neuen erstellen?",
-      "existing": {
-        "title": "Vorhandener Arbeitsbereich",
-        "description": "Ich habe bereits einen Arbeitsbereich auf meinem Server und möchte ihn nur zur Projektliste hinzufügen"
-      },
-      "new": {
-        "title": "Neuer Arbeitsbereich",
-        "description": "Einen neuen Arbeitsbereich erstellen, optional aus einem GitHub-Repository klonen"
-      }
-    },
     "step2": {
-      "existingPath": "Arbeitsbereichspfad",
       "newPath": "Arbeitsbereichspfad",
-      "existingPlaceholder": "/Pfad/zum/vorhandenen/Arbeitsbereich",
       "newPlaceholder": "/Pfad/zum/neuen/Arbeitsbereich",
-      "existingHelp": "Vollständiger Pfad zu deinem vorhandenen Arbeitsbereichsverzeichnis",
       "newHelp": "Vollständiger Pfad zu deinem Arbeitsbereichsverzeichnis",
       "githubUrl": "GitHub-URL (Optional)",
       "githubPlaceholder": "https://github.com/benutzername/repository",
@@ -181,7 +166,6 @@
     },
     "step3": {
       "reviewConfig": "Konfiguration überprüfen",
-      "existingWorkspace": "Vorhandener Arbeitsbereich",
       "newWorkspace": "Neuer Arbeitsbereich",
       "path": "Pfad:",
       "cloneFrom": "Klonen von:",
@@ -190,7 +174,6 @@
       "usingProvidedToken": "Angegebener Token wird verwendet",
       "noAuthentication": "Keine Authentifizierung",
       "sshKey": "SSH-Schlüssel",
-      "existingInfo": "Der Arbeitsbereich wird zur Projektliste hinzugefügt und steht für Claude/Cursor-Sitzungen zur Verfügung.",
       "newWithClone": "Das Repository wird aus diesem Ordner geklont.",
       "newEmpty": "Der Arbeitsbereich wird zur Projektliste hinzugefügt und steht für Claude/Cursor-Sitzungen zur Verfügung.",
       "cloningRepository": "Repository wird geklont..."
@@ -204,7 +187,6 @@
       "cloning": "Wird geklont..."
     },
     "errors": {
-      "selectType": "Bitte wähl aus, ob du einen vorhandenen Arbeitsbereich hast oder einen neuen erstellen möchtest",
       "providePath": "Bitte gib einen Arbeitsbereichspfad an",
       "failedToCreate": "Arbeitsbereich konnte nicht erstellt werden",
       "failedToCreateFolder": "Ordner konnte nicht erstellt werden"

@@ -1,9 +1,12 @@
 import express from 'express';
 
-import { createProject, updateProjectDisplayName } from '@/modules/projects/services/project-management.service.js';
+import { listProjectTemplates } from '@/modules/project-templates/index.js';
+import { updateProjectDisplayName } from '@/modules/projects/services/project-management.service.js';
 import { createProjectCloneRouter } from '@/modules/projects/project-clone.routes.js';
+import { createProjectCreateRouter } from '@/modules/projects/project-create.routes.js';
 import { createPendingCloneRequests } from '@/modules/projects/services/project-clone-request.service.js';
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
+import { createProjectWithTemplate } from '@/modules/projects/services/project-template-create.service.js';
 import { getProjectTaskMaster } from '@/modules/projects/services/projects-has-taskmaster.service.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
 import { getArchivedProjectsWithSessions, getProjectSessionsPage, getProjectsWithSessions } from '@/modules/projects/services/projects-with-sessions-fetch.service.js';
@@ -94,41 +97,11 @@ router.get(
   }),
 );
 
-router.post(
-  '/create-project',
-  asyncHandler(async (req, res) => {
-    const requestBody = req.body as Record<string, unknown>;
-    const projectPath = typeof requestBody.path === 'string' ? requestBody.path : '';
-    const customName = typeof requestBody.customName === 'string' ? requestBody.customName : null;
-
-    if (requestBody.workspaceType !== undefined) {
-      throw new AppError('workspaceType is no longer supported. Use the single create-project flow.', {
-        code: 'LEGACY_WORKSPACE_TYPE_UNSUPPORTED',
-        statusCode: 400,
-      });
-    }
-
-    if (requestBody.githubUrl || requestBody.githubTokenId || requestBody.newGithubToken) {
-      throw new AppError('Repository cloning is not supported on create-project', {
-        code: 'CLONE_NOT_SUPPORTED_ON_CREATE_PROJECT',
-        statusCode: 400,
-        details: 'Use /api/projects/clone for cloning workflows',
-      });
-    }
-
-    const projectCreationResult = await createProject({
-      projectPath,
-      customName,
-    });
-
-    res.json({
-      success: true,
-      project: projectCreationResult.project,
-      message:
-        projectCreationResult.outcome === 'reactivated_archived'
-          ? 'Archived project path reused successfully'
-          : 'Project created successfully',
-    });
+// GET /templates and POST /create-project.
+router.use(
+  createProjectCreateRouter({
+    listProjectTemplates,
+    createProjectWithTemplate,
   }),
 );
 

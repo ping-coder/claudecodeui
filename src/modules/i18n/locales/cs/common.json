@@ -195,27 +195,12 @@
   "projectWizard": {
     "title": "Vytvořit nový projekt",
     "steps": {
-      "type": "Typ",
       "configure": "Nastavení",
       "confirm": "Potvrzení"
     },
-    "step1": {
-      "question": "Máte už pracovní prostor, nebo chcete vytvořit nový?",
-      "existing": {
-        "title": "Existující pracovní prostor",
-        "description": "Pracovní prostor už na serveru mám a potřebuji ho jen přidat do seznamu projektů"
-      },
-      "new": {
-        "title": "Nový pracovní prostor",
-        "description": "Vytvořit nový pracovní prostor, volitelně naklonovaný z repozitáře na GitHubu"
-      }
-    },
     "step2": {
-      "existingPath": "Cesta k pracovnímu prostoru",
       "newPath": "Cesta k pracovnímu prostoru",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "Úplná cesta k adresáři vašeho existujícího pracovního prostoru",
       "newHelp": "Úplná cesta k adresáři vašeho pracovního prostoru",
       "githubUrl": "GitHub URL (volitelné)",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -237,7 +222,6 @@
     },
     "step3": {
       "reviewConfig": "Zkontrolujte nastavení",
-      "existingWorkspace": "Existující pracovní prostor",
       "newWorkspace": "Nový pracovní prostor",
       "path": "Cesta:",
       "cloneFrom": "Klonovat z:",
@@ -246,7 +230,6 @@
       "usingProvidedToken": "Použije se zadaný token",
       "noAuthentication": "Bez ověření",
       "sshKey": "SSH klíč",
-      "existingInfo": "Pracovní prostor bude přidán do seznamu projektů a bude k dispozici pro relace Claude/Cursor.",
       "newWithClone": "Repozitář bude naklonován z této složky.",
       "newEmpty": "Pracovní prostor bude přidán do seznamu projektů a bude k dispozici pro relace Claude/Cursor.",
       "cloningRepository": "Klonování repozitáře..."
@@ -260,7 +243,6 @@
       "cloning": "Klonování..."
     },
     "errors": {
-      "selectType": "Vyberte, zda máte existující pracovní prostor, nebo chcete vytvořit nový",
       "providePath": "Zadejte cestu k pracovnímu prostoru",
       "failedToCreate": "Nepodařilo se vytvořit pracovní prostor",
       "failedToCreateFolder": "Nepodařilo se vytvořit složku"

@@ -260,10 +260,15 @@ export type MessageKind =
  * needs one kind-based switch.
  *
  * `send_refused` answers a `chat.send` that asked to keep the session's
- * background work and could not: the gateway started no run, and tells only
- * the asking socket, without `seq` (see `ProviderHandOverPlan`).
+ * background work and could not, without `seq` (see `ProviderHandOverPlan`):
+ * the gateway started no run and tells only the asking socket, or the run's
+ * turn failed at the hand-over (HAND_OVER_FAILED) and it tells every socket
+ * watching the run, after the run's `complete`, and again each socket of the
+ * same user that subscribes to the session within the hour; a send without a
+ * `clientRequestId` hears that one on the asking socket alone.
  * `stop_task_status` answers a `chat.stop-task` that names scheduled work
- * the same way, once for each step of the stop (see `ScheduledWorkSummary`),
+ * on the asking socket alone, without `seq`, once for each step of the stop
+ * (see `ScheduledWorkSummary`),
  * and `resume_loops_status` a `chat.resume-loops` (see `PausedScheduledWork`).
  * `dispatch_waiting` says why a queued or scheduled message waits (see
  * `DispatchWaitingEvent`).
@@ -1741,6 +1746,119 @@ export type WorkspacePathValidationResult = {
   valid: boolean;
   resolvedPath?: string;
   error?: string;
+};
+
+// ---------------------------
+//----------------- PROJECT TEMPLATE TYPES ------------
+/**
+ * One file a project template writes.
+ *
+ * `target` is the real POSIX path relative to the project root (for example
+ * `.claude/skills/task-runner/SKILL.md`); it must not be absolute or contain
+ * `..`. `source` is the asset path under `templates/<id>/<locale>/`, always a
+ * `.tpl` name so the repository's .gitignore and npm's packlist cannot drop it.
+ * `render` turns on `{{projectName}}` substitution. Files that share a `group`
+ * (the directory they live in, such as a skill folder) are skipped together
+ * when that directory already exists.
+ */
+export type ProjectTemplateFile = {
+  target: string;
+  source: string;
+  render: boolean;
+  group?: string;
+};
+
+/**
+ * How a template's new project gets its repository: `init` runs `git init`
+ * plus an initial commit of the template files, `none` leaves git alone.
+ * Cloning is a separate endpoint, so it is not a mode here.
+ */
+export type ProjectTemplateGitMode = 'init' | 'none';
+
+/**
+ * One entry of the project template registry.
+ *
+ * The registry module owns the list; the apply engine reads `files` and the
+ * assets for `locales`, and the projects module reads `git` to decide whether
+ * to initialize a repository and with which commit message. A template with no
+ * files (Blank) means "create the project exactly as without templates".
+ */
+export type ProjectTemplateDefinition = {
+  id: string;
+  locales: string[];
+  defaultLocale: string;
+  files: ProjectTemplateFile[];
+  skills: string[];
+  git: {
+    offersInit: boolean;
+    offersClone: boolean;
+    defaultMode: ProjectTemplateGitMode;
+    initialCommitMessage: string;
+  };
+};
+
+/**
+ * Template list item returned by `GET /api/projects/templates`.
+ *
+ * Names and descriptions are localized on the client from `id`; the server
+ * only sends what the wizard needs to list files and offer git sources.
+ */
+export type ProjectTemplateSummary = {
+  id: string;
+  files: string[];
+  skills: string[];
+  git: { init: boolean; clone: boolean };
+};
+
+/**
+ * Why a template file was not written: something already exists at the path,
+ * a parent directory is a symlink or resolves outside the project, or the
+ * file's whole group directory already exists.
+ */
+export type ProjectTemplateSkipReason = 'exists' | 'unsafe-path' | 'group-exists';
+
+/**
+ * Structured problems a template run reports instead of failing the project
+ * creation. The client turns each code into localized text.
+ */
+export type ProjectTemplateWarning =
+  | 'GIT_IDENTITY_MISSING'
+  | 'GIT_NOT_FOUND'
+  | 'GIT_INIT_FAILED'
+  | 'GIT_COMMIT_FAILED'
+  | 'INSIDE_PARENT_REPOSITORY'
+  | 'TEMPLATE_APPLY_FAILED';
+
+/**
+ * Outcome of writing a template's files into a project directory.
+ *
+ * Returned by the project-templates apply engine to the projects module, which
+ * adds the git outcome to build a `ProjectTemplateReport`. Paths are the
+ * registry `target` values.
+ */
+export type ProjectTemplateApplyResult = {
+  created: string[];
+  skipped: { path: string; reason: ProjectTemplateSkipReason }[];
+  warnings: ProjectTemplateWarning[];
+};
+
+/**
+ * What happened to git for a template project. `cloned` is reported by the
+ * clone flow, where template files stay uncommitted.
+ */
+export type ProjectTemplateGitResult = {
+  action: 'initialized' | 'already-repository' | 'inside-parent-repository' | 'cloned' | 'none';
+  committed: boolean;
+  commitSha?: string;
+};
+
+/**
+ * Full template report sent with `POST /create-project` responses and the
+ * clone stream's `template` and `complete` events.
+ */
+export type ProjectTemplateReport = ProjectTemplateApplyResult & {
+  templateId: string;
+  git: ProjectTemplateGitResult;
 };
 
 // ---------------------------

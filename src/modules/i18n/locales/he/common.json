@@ -208,27 +208,30 @@
   "projectWizard": {
     "title": "יצירת פרויקט חדש",
     "steps": {
-      "type": "סוג",
+      "template": "תבנית",
       "configure": "הגדרה",
       "confirm": "אישור"
     },
     "step1": {
-      "question": "כבר יש סביבת עבודה, או ליצור סביבה חדשה?",
-      "existing": {
-        "title": "סביבת עבודה קיימת",
-        "description": "כבר יש לי סביבת עבודה בשרת ורק צריך להוסיף אותה לרשימת הפרויקטים"
+      "question": "בחירת תבנית להתחלה",
+      "loading": "טוען תבניות…",
+      "loadFailed": "לא ניתן היה לטעון את רשימת התבניות, לכן זמינה רק התבנית הריקה.",
+      "files": "קבצים",
+      "skills": "Skills"
+    },
+    "templates": {
+      "blank": {
+        "title": "ריק",
+        "description": "תיקיית פרויקט ריקה, עם אפשרות לשכפל מ-GitHub."
       },
-      "new": {
-        "title": "סביבת עבודה חדשה",
-        "description": "יצירת סביבת עבודה חדשה, עם אפשרות לשכפל מאגר מ-GitHub"
+      "coding": {
+        "title": "פיתוח",
+        "description": "רשימת משימות, הנחיות לסוכן ושני skills, במאגר Git חדש או מיובא מ-GitHub."
       }
     },
     "step2": {
-      "existingPath": "נתיב סביבת העבודה",
       "newPath": "נתיב סביבת העבודה",
-      "existingPlaceholder": "\u2066/path/to/existing/workspace\u2069",
       "newPlaceholder": "\u2066/path/to/new/workspace\u2069",
-      "existingHelp": "הנתיב המלא לתיקיית סביבת העבודה הקיימת",
       "newHelp": "הנתיב המלא לתיקיית סביבת העבודה",
       "githubUrl": "כתובת GitHub (אופציונלי)",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -248,9 +251,16 @@
       "optionalTokenPublic": "טוקן GitHub (אופציונלי למאגרים ציבוריים)",
       "tokenPublicPlaceholder": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (להשאיר ריק למאגרים ציבוריים)"
     },
+    "git": {
+      "label": "מאגר",
+      "newRepo": "מאגר חדש",
+      "newRepoHelp": "מריץ \u2066git init\u2069 בתיקייה ושומר את קובצי התבנית ב-commit הראשון. אם התיקייה כבר מאגר Git, הקבצים נוספים בלי commit.",
+      "importGithub": "ייבוא מ-GitHub",
+      "importGithubHelp": "משכפל את המאגר לתת-תיקייה חדשה בשם המאגר ומוסיף שם את קובצי התבנית בלי commit. הם יופיעו בניהול גרסאות לבדיקה.",
+      "githubUrl": "כתובת GitHub"
+    },
     "step3": {
       "reviewConfig": "סקירת ההגדרות",
-      "existingWorkspace": "סביבת עבודה קיימת",
       "newWorkspace": "סביבת עבודה חדשה",
       "path": "נתיב:",
       "cloneFrom": "שכפול מ:",
@@ -259,10 +269,44 @@
       "usingProvidedToken": "שימוש בטוקן שהוזן",
       "noAuthentication": "ללא אימות",
       "sshKey": "מפתח SSH",
-      "existingInfo": "סביבת העבודה תתווסף לרשימת הפרויקטים ותהיה זמינה לסשנים של Claude/Cursor.",
       "newWithClone": "המאגר ישוכפל מהתיקייה הזו.",
       "newEmpty": "סביבת העבודה תתווסף לרשימת הפרויקטים ותהיה זמינה לסשנים של Claude/Cursor.",
-      "cloningRepository": "משכפל את המאגר…"
+      "cloningRepository": "משכפל את המאגר…",
+      "template": "תבנית:",
+      "finalPath": "תיקיית הפרויקט:",
+      "filesToAdd": "קבצים שיתווספו:",
+      "skillsToAdd": "Skills:",
+      "gitAction": "Git:",
+      "gitInitCommit": "מאגר חדש, commit ראשון עם קובצי התבנית (בלי commit אם התיקייה כבר מאגר)",
+      "gitCloneUncommitted": "שכפול, ואז הוספת קובצי התבנית בלי commit",
+      "gitNone": "בלי שינויים במאגר",
+      "keepsExisting": "קבצים שכבר קיימים נשארים כמו שהם.",
+      "creatingWithTemplate": "יוצר את הפרויקט ומוסיף את קובצי התבנית…",
+      "phaseClone": "שכפול המאגר",
+      "phaseTemplate": "הוספת קובצי התבנית"
+    },
+    "result": {
+      "title": "הפרויקט נוצר",
+      "summary": "הפרויקט נוסף לרשימה. כמה דברים דורשים תשומת לב.",
+      "created": "נוצרו",
+      "skipped": "נשארו ללא שינוי",
+      "skippedExists": "כבר קיים",
+      "skippedUnsafe": "הנתיב עובר דרך קישור סמלי או מוביל אל מחוץ לפרויקט",
+      "skippedGroup": "תיקיית ה-skill כבר קיימת",
+      "warnings": "אזהרות",
+      "gitInitialized": "נוצר מאגר Git וקובצי התבנית נשמרו ב-commit.",
+      "gitInitializedUncommitted": "נוצר מאגר Git. לא בוצע commit.",
+      "gitAlreadyRepository": "התיקייה כבר הייתה מאגר Git, לכן הקבצים החדשים נשארו בלי commit.",
+      "gitAlreadyRepositoryNoFiles": "התיקייה כבר הייתה מאגר Git.",
+      "gitCloned": "קובצי התבנית נמצאים בשכפול בלי commit. אפשר לבדוק אותם בניהול גרסאות.",
+      "gitClonedNoFiles": "המאגר שוכפל.",
+      "gitIdentityMissing": "ל-Git לא הוגדרו שם ואימייל, לכן לא בוצע commit. אפשר להגדיר אותם בהגדרות, בלשונית Git, ואז לבצע commit לקבצים.",
+      "gitNotFound": "Git לא מותקן בשרת, לכן לא נוצר מאגר.",
+      "gitInitFailed": "\u2066git init\u2069 נכשל, לכן לא נוצר מאגר.",
+      "gitCommitFailed": "ה-commit הראשון נכשל. הקבצים נכתבו אבל לא נשמרו ב-commit.",
+      "insideParentRepository": "התיקייה נמצאת בתוך מאגר Git אחר, לכן לא נוצר בה מאגר חדש.",
+      "templateApplyFailed": "לא ניתן היה לכתוב את קובצי התבנית. הפרויקט נוצר בלעדיהם.",
+      "unknownWarning": "אזהרה מהשרת: \u2066{{code}}\u2069"
     },
     "buttons": {
       "cancel": "ביטול",
@@ -270,13 +314,16 @@
       "next": "הבא",
       "createProject": "יצירת פרויקט",
       "creating": "יוצר…",
-      "cloning": "משכפל…"
+      "cloning": "משכפל…",
+      "done": "סיום"
     },
     "errors": {
-      "selectType": "יש לבחור אם יש סביבת עבודה קיימת או ליצור סביבה חדשה",
       "providePath": "יש להזין נתיב לסביבת העבודה",
       "failedToCreate": "יצירת סביבת העבודה נכשלה",
-      "failedToCreateFolder": "יצירת התיקייה נכשלה"
+      "failedToCreateFolder": "יצירת התיקייה נכשלה",
+      "provideGithubUrl": "יש להזין את כתובת ה-GitHub של המאגר לייבוא",
+      "unknownTemplate": "התבנית הזו כבר לא זמינה בשרת. אפשר לחזור ולבחור תבנית אחרת.",
+      "templateAtRoot": "אי אפשר להוסיף תבנית ישירות לתיקיית הבית או לשורש סביבת העבודה: הכישורים יחולו על כל הפרויקטים ו-⁦git⁩ יכסה את כל מה שמתחת. אפשר לבחור תיקייה בתוכה או ליצור חדשה."
     }
   },
   "notifications": {

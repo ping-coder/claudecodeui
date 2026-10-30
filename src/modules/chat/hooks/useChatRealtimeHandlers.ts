@@ -161,10 +161,12 @@ type UseChatRealtimeHandlersArgs = {
    */
   onInsertRunEnded?: (sessionId: string, sentBefore: number | null) => void;
   /**
-   * Hands over a `send_refused`: the server did not start a `chat.send` this
-   * page sent with `keepBackgroundWork`, as it would have stopped the
-   * session's background work, with the send's `clientRequestId` when the
-   * frame carries one. Never a transcript row.
+   * Hands over a `send_refused`: a `chat.send` sent with
+   * `keepBackgroundWork` did not go, as it would have stopped the session's
+   * background work (no run started, or, with reason HAND_OVER_FAILED, its
+   * run failed at the hand-over), with the send's `clientRequestId` when the
+   * frame carries one. A HAND_OVER_FAILED one may be another page's send, or
+   * come again on a later subscribe; the id tells. Never a transcript row.
    */
   onSendRefused?: (event: SendRefusedEvent) => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
@@ -576,10 +578,12 @@ export function useChatRealtimeHandlers({
           return;
         }
 
-        // The answer to this page's own `chat.send`, before any run began: no
-        // seq, nothing to store, and the session is left as it was. Only the
-        // composer that sent the message acts on it, found by the send's
-        // `clientRequestId` when the server hands one back.
+        // The answer to a `chat.send`, before any run began, or after the
+        // run's `complete` or on a later subscribe of the session (then
+        // possibly another page's send, or one already answered): no seq,
+        // nothing to store, and the session is left as it was. Only the
+        // composer that sent the message acts on it, once, found by the
+        // send's `clientRequestId` when the server hands one back.
         case 'send_refused': {
           if (frameSessionId) {
             const details = parseHandOverDetails(msg.details);

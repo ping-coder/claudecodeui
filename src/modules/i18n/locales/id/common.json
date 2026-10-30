@@ -140,27 +140,12 @@
   "projectWizard": {
     "title": "Buat Proyek Baru",
     "steps": {
-      "type": "Jenis",
       "configure": "Konfigurasi",
       "confirm": "Konfirmasi"
     },
-    "step1": {
-      "question": "Sudah memiliki workspace atau ingin membuat yang baru?",
-      "existing": {
-        "title": "Workspace yang Ada",
-        "description": "Saya sudah memiliki workspace di server dan hanya perlu menambahkannya ke daftar proyek"
-      },
-      "new": {
-        "title": "Workspace Baru",
-        "description": "Buat workspace baru, dengan opsi clone dari repositori GitHub"
-      }
-    },
     "step2": {
-      "existingPath": "Path Workspace",
       "newPath": "Path Workspace",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "Path lengkap ke direktori workspace yang ada",
       "newHelp": "Path lengkap ke direktori workspace",
       "githubUrl": "URL GitHub (Opsional)",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -182,7 +167,6 @@
     },
     "step3": {
       "reviewConfig": "Tinjau Konfigurasi",
-      "existingWorkspace": "Workspace yang Ada",
       "newWorkspace": "Workspace Baru",
       "path": "Path:",
       "cloneFrom": "Clone Dari:",
@@ -191,7 +175,6 @@
       "usingProvidedToken": "Menggunakan token yang diberikan",
       "noAuthentication": "Tanpa autentikasi",
       "sshKey": "Kunci SSH",
-      "existingInfo": "Workspace akan ditambahkan ke daftar proyek dan tersedia untuk sesi Claude/Cursor.",
       "newWithClone": "Repositori akan di-clone dari folder ini.",
       "newEmpty": "Workspace akan ditambahkan ke daftar proyek dan tersedia untuk sesi Claude/Cursor.",
       "cloningRepository": "Melakukan clone repositori..."
@@ -205,7 +188,6 @@
       "cloning": "Melakukan clone..."
     },
     "errors": {
-      "selectType": "Pilih apakah menggunakan workspace yang ada atau ingin membuat yang baru",
       "providePath": "Masukkan path workspace",
       "failedToCreate": "Gagal membuat workspace",
       "failedToCreateFolder": "Gagal membuat folder"

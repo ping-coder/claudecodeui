@@ -557,3 +557,221 @@ test('startCloneProject offers the GitHub token to no host but github.com', asyn
   }
 });
 
+
+const sampleTemplateResult = {
+  created: ['TASKS.md'],
+  skipped: [{ path: '.gitignore', reason: 'exists' as const }],
+  warnings: [],
+};
+
+test('startCloneProject refuses an unknown template before preparing the workspace', async () => {
+  let ensured = 0;
+  await assert.rejects(
+    startCloneProject(
+      { workspacePath: '/workspace/root', githubUrl: 'https://github.com/example/repo.git', templateId: 'nope', userId: 1 },
+      { onProgress: () => undefined, onComplete: () => undefined },
+      buildDependencies({
+        ensureDirectory: async () => { ensured += 1; },
+        spawnGitClone: () => { throw new Error('must not spawn'); },
+      }),
+    ),
+    (error: unknown) => error instanceof AppError && error.code === 'UNKNOWN_PROJECT_TEMPLATE' && error.statusCode === 400,
+  );
+  assert.equal(ensured, 0);
+});
+
+test('startCloneProject never applies a template to an existing folder such as the home folder', async () => {
+  // A repo name of `..` points the clone at the workspace path's parent, here the home folder.
+  let applied = 0;
+  await assert.rejects(
+    startCloneProject(
+      { workspacePath: '/home/user/projects', githubUrl: 'https://github.com/example/..', templateId: 'coding', userId: 1 },
+      { onProgress: () => undefined, onComplete: () => undefined },
+      buildDependencies({
+        validatePath: async () => ({ valid: true, resolvedPath: '/home/user/projects' }),
+        pathExists: async (targetPath) => targetPath === '/home/user',
+        spawnGitClone: () => { throw new Error('must not spawn'); },
+        applyTemplate: async () => {
+          applied += 1;
+          return sampleTemplateResult;
+        },
+      }),
+    ),
+    (error: unknown) => error instanceof AppError && error.code === 'CLONE_TARGET_ALREADY_EXISTS' && error.statusCode === 409,
+  );
+  assert.equal(applied, 0);
+});
+
+test('startCloneProject applies the template after the clone and before registering, then reports it', async () => {
+  const gitProcess = createMockGitProcess();
+  const events: string[] = [];
+  let completePayload: Record<string, unknown> | null = null;
+
+  const operation = await startCloneProject(
+    {
+      workspacePath: '/workspace/root',
+      githubUrl: 'https://github.com/example/repo.git',
+      templateId: 'coding',
+      locale: 'zh-CN',
+      userId: 1,
+    },
+    {
+      onProgress: (message, phase) => {
+        if (phase) events.push(`progress:${phase}:${message}`);
+      },
+      onTemplate: (report) => {
+        events.push(`template:${report.templateId}:${report.git.action}`);
+      },
+      onComplete: (payload) => {
+        events.push('complete');
+        completePayload = payload as unknown as Record<string, unknown>;
+      },
+    },
+    buildDependencies({
+      spawnGitClone: () => gitProcess as never,
+      applyTemplate: async (input) => {
+        events.push(`apply:${input.projectRoot}:${input.template.id}:${input.locale ?? ''}:${input.projectName}`);
+        return sampleTemplateResult;
+      },
+      registerProject: async (projectPath) => {
+        events.push(`register:${projectPath}`);
+        return { project: { projectId: 'project-1' } };
+      },
+    }),
+  );
+
+  assert.equal(events.length, 0, 'nothing may be applied before git finishes');
+  gitProcess.emit('close', 0);
+  await operation.waitForCompletion;
+
+  const clonePath = path.join('/workspace/root', 'repo');
+  assert.deepEqual(events, [
+    'progress:template:Adding template files...',
+    `apply:${clonePath}:coding:zh-CN:repo`,
+    'template:coding:cloned',
+    `register:${clonePath}`,
+    'complete',
+  ]);
+  assert.deepEqual((completePayload as unknown as { template: unknown }).template, {
+    templateId: 'coding',
+    ...sampleTemplateResult,
+    git: { action: 'cloned', committed: false },
+  });
+});
+
+test('startCloneProject keeps the clone when the template fails and reports a warning', async () => {
+  const gitProcess = createMockGitProcess();
+  const removed: string[] = [];
+  const reports: unknown[] = [];
+  let registered = 0;
+
+  const operation = await startCloneProject(
+    { workspacePath: '/workspace/root', githubUrl: 'https://github.com/example/repo.git', templateId: 'coding', userId: 1 },
+    {
+      onProgress: () => undefined,
+      onTemplate: (report) => { reports.push(report); },
+      onComplete: () => undefined,
+    },
+    buildDependencies({
+      spawnGitClone: () => gitProcess as never,
+      removePath: async (targetPath) => { removed.push(targetPath); },
+      applyTemplate: async () => { throw new Error('disk on fire'); },
+      registerProject: async () => {
+        registered += 1;
+        return { project: { projectId: 'project-1' } };
+      },
+    }),
+  );
+
+  gitProcess.emit('close', 0);
+  await operation.waitForCompletion;
+
+  assert.deepEqual(removed, []);
+  assert.equal(registered, 1);
+  assert.deepEqual(reports, [{
+    templateId: 'coding',
+    created: [],
+    skipped: [],
+    warnings: ['TEMPLATE_APPLY_FAILED'],
+    git: { action: 'cloned', committed: false },
+  }]);
+});
+
+test('startCloneProject without a template behaves as before: no template step, no template event', async () => {
+  for (const templateId of [undefined, 'blank']) {
+    const gitProcess = createMockGitProcess();
+    let applied = 0;
+    let templateEvents = 0;
+    let completePayload: Record<string, unknown> | null = null;
+
+    const operation = await startCloneProject(
+      { workspacePath: '/workspace/root', githubUrl: 'https://github.com/example/repo.git', templateId, userId: 1 },
+      {
+        onProgress: () => undefined,
+        onTemplate: () => { templateEvents += 1; },
+        onComplete: (payload) => { completePayload = payload as unknown as Record<string, unknown>; },
+      },
+      buildDependencies({
+        spawnGitClone: () => gitProcess as never,
+        applyTemplate: async () => {
+          applied += 1;
+          return sampleTemplateResult;
+        },
+      }),
+    );
+    gitProcess.emit('close', 0);
+    await operation.waitForCompletion;
+
+    assert.equal(applied, 0);
+    assert.equal(templateEvents, 0);
+    assert.equal('template' in (completePayload ?? {}), false);
+  }
+});
+
+test('startCloneProject writes the coding template into a real clone and leaves it uncommitted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'project-clone-template-'));
+  try {
+    const seedPath = path.join(root, 'seed');
+    const originPath = path.join(root, 'origin.git');
+    const workspacePath = path.join(root, 'workspace');
+    await execFileAsync('git', ['init', '-q', seedPath]);
+    await execFileAsync('git', [
+      '-C', seedPath,
+      '-c', 'user.email=clone@example.test',
+      '-c', 'user.name=Clone Test',
+      'commit', '-q', '--allow-empty', '-m', 'initial',
+    ]);
+    await execFileAsync('git', ['clone', '-q', '--bare', seedPath, originPath]);
+
+    let report: { created: string[]; warnings: string[] } | null = null;
+    const operation = await startCloneProject(
+      { workspacePath, githubUrl: pathToFileURL(originPath).href, templateId: 'coding', locale: 'en', userId: 1 },
+      {
+        onProgress: () => undefined,
+        onTemplate: (templateReport) => { report = templateReport; },
+        onComplete: () => undefined,
+      },
+      {
+        validatePath: async () => ({ valid: true, resolvedPath: workspacePath }),
+        registerProject: async (projectPath, customName) => ({ project: { path: projectPath, name: customName } }),
+      },
+    );
+    await operation.waitForCompletion;
+
+    const clonePath = path.join(workspacePath, 'origin');
+    const resolvedReport = report as unknown as { created: string[]; warnings: string[] };
+    assert.equal(resolvedReport.created.length, 5);
+    assert.deepEqual(resolvedReport.warnings, []);
+    assert.equal((await readFile(path.join(clonePath, 'TASKS.md'), 'utf8')).split('\n')[0], '# origin tasks');
+    const { stdout } = await execFileAsync('git', ['-C', clonePath, 'status', '--porcelain', '--untracked-files=all']);
+    assert.deepEqual(stdout.trim().split('\n').sort(), [
+      '?? .claude/skills/issue/SKILL.md',
+      '?? .claude/skills/task-runner/SKILL.md',
+      '?? .gitignore',
+      '?? CLAUDE.md',
+      '?? TASKS.md',
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

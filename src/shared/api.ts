@@ -241,6 +241,8 @@ export const api = {
   deleteProject: (projectId: string, hardDelete = false) =>
     del(`/api/projects/${projectId}${query({ force: hardDelete })}`),
   createProject: (projectData: unknown) => post('/api/projects/create-project', projectData),
+  // The templates the project-creation wizard offers; names and descriptions are localized client-side.
+  projectTemplates: () => get('/api/projects/templates'),
   migrateLegacyProjectStars: (projectIds: string[]) =>
     post('/api/projects/migrate-legacy-stars', { projectIds }),
   toggleProjectStar: (projectId: string) =>
@@ -253,6 +255,9 @@ export const api = {
     githubUrl: string;
     githubTokenId: number | null;
     newGithubToken: string | null;
+    // Set only for a template other than Blank: its files are written into the clone, uncommitted.
+    templateId?: string;
+    locale?: string;
   }) => post('/api/projects/clone', cloneRequest),
   // EventSource cannot send an Authorization header, so the token rides along as
   // a query parameter on the streaming endpoints below.

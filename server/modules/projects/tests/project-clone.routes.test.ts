@@ -150,6 +150,8 @@ test('GET /clone-progress streams the clone the id names, then retires the id', 
       githubUrl: 'https://github.com/example/repo.git',
       githubTokenId: 12,
       newGithubToken: null,
+      templateId: null,
+      locale: null,
       userId: 7,
     }]);
 
@@ -242,5 +244,73 @@ test('GET /clone-progress cancels a clone whose client left before the git proce
     releaseStart();
     await runFinished;
     assert.equal(cancelled, 1, 'the operation is cancelled as soon as it exists');
+  });
+});
+
+test('POST /clone carries the template id and locale through the claim to the clone', async () => {
+  const inputs: CloneInput[] = [];
+  await withProjectsServer({ startCloneProject: createFakeCloneRunner(inputs) }, async (baseUrl) => {
+    const { body } = await postClone(baseUrl, 1, { ...cloneBody, templateId: 'coding', locale: 'zh-CN' });
+    await openProgress(baseUrl, 1, body.cloneId ?? '');
+
+    assert.equal(inputs[0]?.templateId, 'coding');
+    assert.equal(inputs[0]?.locale, 'zh-CN');
+  });
+});
+
+test('POST /clone refuses an unknown template with 400 and parks nothing', async () => {
+  await withProjectsServer({ startCloneProject: unexpectedCloneRunner }, async (baseUrl) => {
+    const response = await postClone(baseUrl, 1, { ...cloneBody, templateId: 'no-such-template' });
+
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, 'UNKNOWN_PROJECT_TEMPLATE');
+    assert.equal(response.body.cloneId, undefined);
+  });
+});
+
+test('GET /clone-progress streams the template phase, the template report, then complete with it', async () => {
+  const report = {
+    templateId: 'coding',
+    created: ['TASKS.md'],
+    skipped: [],
+    warnings: [],
+    git: { action: 'cloned' as const, committed: false },
+  };
+  const templateRunner: CloneRunner = async (_input, handlers) => {
+    handlers.onProgress('Receiving objects: 100% (20/20), done.');
+    handlers.onProgress('Adding template files...', 'template');
+    handlers.onTemplate?.(report);
+    handlers.onComplete({ project: { projectId: 'project-1' }, message: 'Repository cloned successfully', template: report });
+    return { waitForCompletion: Promise.resolve(), cancel: () => undefined };
+  };
+
+  await withProjectsServer({ startCloneProject: templateRunner }, async (baseUrl) => {
+    const { body } = await postClone(baseUrl, 1, { ...cloneBody, templateId: 'coding' });
+    const stream = await openProgress(baseUrl, 1, body.cloneId ?? '');
+    const events = stream.events as Array<Record<string, unknown>>;
+
+    assert.deepEqual(events.map((event) => event.type), ['progress', 'progress', 'template', 'complete']);
+    assert.equal('phase' in (events[0] ?? {}), false);
+    assert.equal(events[1]?.phase, 'template');
+    assert.deepEqual(events[2]?.report, report);
+    assert.deepEqual(events[3]?.template, report);
+  });
+});
+
+test('GET /clone-progress puts the failure code on the error event', async () => {
+  const failingRunner: CloneRunner = async () => {
+    throw new AppError('Directory "repo" already exists.', { code: 'CLONE_TARGET_ALREADY_EXISTS', statusCode: 409 });
+  };
+
+  await withProjectsServer({ startCloneProject: failingRunner }, async (baseUrl) => {
+    const { body } = await postClone(baseUrl, 1);
+    const stream = await openProgress(baseUrl, 1, body.cloneId ?? '');
+    const events = stream.events as Array<Record<string, unknown>>;
+
+    assert.deepEqual(events, [{
+      type: 'error',
+      message: 'Directory "repo" already exists.',
+      code: 'CLONE_TARGET_ALREADY_EXISTS',
+    }]);
   });
 });

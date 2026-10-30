@@ -139,27 +139,12 @@
   "projectWizard": {
     "title": "新規プロジェクトを作成",
     "steps": {
-      "type": "種類",
       "configure": "設定",
       "confirm": "確認"
     },
-    "step1": {
-      "question": "既存のワークスペースがありますか？それとも新しく作成しますか？",
-      "existing": {
-        "title": "既存のワークスペース",
-        "description": "サーバー上に既存のワークスペースがあり、プロジェクト一覧に追加したい"
-      },
-      "new": {
-        "title": "新しいワークスペース",
-        "description": "新しいワークスペースを作成し、必要に応じてGitHubリポジトリからクローンする"
-      }
-    },
     "step2": {
-      "existingPath": "ワークスペースのパス",
       "newPath": "ワークスペースのパス",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "既存のワークスペースディレクトリのフルパス",
       "newHelp": "ワークスペースディレクトリのフルパス",
       "githubUrl": "GitHub URL（任意）",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -181,7 +166,6 @@
     },
     "step3": {
       "reviewConfig": "設定の確認",
-      "existingWorkspace": "既存のワークスペース",
       "newWorkspace": "新しいワークスペース",
       "path": "パス:",
       "cloneFrom": "クローン元:",
@@ -190,7 +174,6 @@
       "usingProvidedToken": "入力されたトークンを使用",
       "noAuthentication": "認証なし",
       "sshKey": "SSHキー",
-      "existingInfo": "ワークスペースがプロジェクト一覧に追加され、Claude/Cursorセッションで使用できるようになります。",
       "newWithClone": "このフォルダからリポジトリがクローンされます。",
       "newEmpty": "ワークスペースがプロジェクト一覧に追加され、Claude/Cursorセッションで使用できるようになります。",
       "cloningRepository": "リポジトリをクローンしています..."
@@ -204,7 +187,6 @@
       "cloning": "クローン中..."
     },
     "errors": {
-      "selectType": "既存のワークスペースか新規作成かを選択してください",
       "providePath": "ワークスペースのパスを入力してください",
       "failedToCreate": "ワークスペースの作成に失敗しました",
       "failedToCreateFolder": "フォルダの作成に失敗しました"

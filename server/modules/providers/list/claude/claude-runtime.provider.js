@@ -2256,10 +2256,15 @@ function haveSameEntries(first, second) {
  * confirmed last. `current` says which before the CLI has answered: a turn
  * planned or handed over meanwhile, such as a due message sent right behind
  * one whose switch back is on its way, weighs what its prompt will run with.
+ * `report` takes the value the CLI says it runs with now, which it also
+ * says of a permission mode it changed on its own (followReportedPermissionMode):
+ * that is the confirmed value from then on, and a switch still unanswered is
+ * applied after it, so the next prompt still runs with the last one sent.
  * @param {string} initial - The value the process was launched with
  * @returns {{
  *   current: () => string,
  *   confirmed: () => string,
+ *   report: (value: string) => void,
  *   send: (value: string) => { confirm: () => void, refuse: () => void }
  * }}
  */
@@ -2270,6 +2275,9 @@ function createSwitchTracker(initial) {
   return {
     current: () => (unanswered.length > 0 ? unanswered[unanswered.length - 1].value : confirmed),
     confirmed: () => confirmed,
+    report(value) {
+      confirmed = value;
+    },
     send(value) {
       const entry = { value };
       unanswered.push(entry);
@@ -2928,7 +2936,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // `skipPermissions` of the tool settings its current turn came with. Set
   // once the query exists; a turn handed over later is compared with it
   // (planTurnHandOver). The model and permission mode follow the switches
-  // sent since, before the CLI answers them (switchProcess).
+  // sent since, before the CLI answers them (switchProcess), and the
+  // permission mode follows the CLI's own changes too, such as leaving plan
+  // mode through an approved ExitPlanMode (followReportedPermissionMode).
   let launched = null;
   // The switches of the model and of the permission mode sent to the
   // process (createSwitchTracker), set with `launched`.
@@ -3300,7 +3310,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         ultracode: typeof launched.ultracode === 'boolean' ? launched.ultracode : null,
         allowedTools: [...(liveSdkOptions?.allowedTools ?? launched.allowedTools)],
         disallowedTools: [...launched.disallowedTools],
-        skipPermissions: launched.skipPermissions,
+        skipPermissions: liveSkipPermissions(),
       },
     };
     const signature = JSON.stringify([record, scheduled.list().map((item) => item.id)]);
@@ -3866,11 +3876,24 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       || untrackedWorkHeld()
       || Boolean(handedOverHold && (handedOverHold.untracked || handedOverHold.relayPending)));
 
+  // Whether the process skips permissions, as a turn that inherits the
+  // setting (liveSettings) and the record of the hold (syncScheduleHold)
+  // pass it on: as its current turn came with, while it runs in plan mode or
+  // bypassPermissions. In any other mode it asks before tools, as after
+  // Claude leaves plan mode through an approved ExitPlanMode
+  // (followReportedPermissionMode) or after the CLI refuses a switch to
+  // bypassPermissions, and mapCliOptionsToSDK would turn that mode with
+  // permissions skipped into bypassPermissions: a turn that inherits it,
+  // the stop turn of scheduled work included, would switch the process to
+  // it, and a revived loop would launch in it.
+  const liveSkipPermissions = () => launched.skipPermissions
+    && (launched.permissionMode === 'plan' || launched.permissionMode === 'bypassPermissions');
+
   // The live process's own settings, which a later send's turn that leaves
   // one out inherits (inheritUnsetSettings): its working directory, model,
   // effort, ultracode and permission mode, the tools canUseTool allows now
   // (what the user allowed for good included), the tools it was launched
-  // denying, and the `skipPermissions` its current turn came with.
+  // denying, and whether it skips permissions (liveSkipPermissions).
   const liveSettings = () => ({
     cwd: launched.cwd,
     model: launched.model,
@@ -3879,7 +3902,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     permissionMode: launched.permissionMode,
     allowedTools: liveSdkOptions.allowedTools,
     disallowedTools: launched.disallowedTools,
-    skipPermissions: launched.skipPermissions,
+    skipPermissions: liveSkipPermissions(),
   });
 
   // Whether the process is held only for scheduled work: work of it holds
@@ -4047,6 +4070,30 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     } catch (error) {
       return Promise.resolve(refused(error));
     }
+  };
+
+  // Follows the permission mode the CLI says it runs with (a `system/status`
+  // with a `permissionMode`), which it reports whenever its mode changes:
+  // after a switch sent to it, and after a change of its own, such as Claude
+  // leaving plan mode through an ExitPlanMode the user approved (the CLI
+  // goes back to the mode it had before plan mode, `default` for a process
+  // launched in it). From then on canUseTool follows that mode, a turn is
+  // planned against it (planTurnHandOver), skipping permissions only in a
+  // mode that keeps them skipped (liveSkipPermissions), and a turn that
+  // switches it for itself is switched back to it (writeHandedOverPrompt),
+  // whatever the CLI changes during that turn; a turn that switches none
+  // leaves such a change in place, as a turn of the CLI's own does. A
+  // switch still unanswered names what the next prompt runs with
+  // (createSwitchTracker).
+  const followReportedPermissionMode = (mode) => {
+    const tracker = switchTrackers.permissionMode;
+    // Not the echo of a switch sent to it.
+    if (mode !== tracker.confirmed() && mode !== tracker.current()) {
+      console.log(`[Claude SDK] Session ${sessionKey()}: the CLI runs in ${mode} mode now`);
+    }
+    tracker.report(mode);
+    launched.permissionMode = tracker.current();
+    liveSdkOptions.permissionMode = tracker.confirmed();
   };
 
   // Switches the model and permission mode a hand-over's plan names, ahead
@@ -4496,7 +4543,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
           return { behavior: 'allow', updatedInput: input };
         }
 
-        // The mode the CLI confirmed last (switchProcess).
+        // The mode the CLI confirmed or reported last (switchProcess,
+        // followReportedPermissionMode).
         if (sdkOptions.permissionMode === 'plan' && PLAN_MODE_TOOLS.has(toolName)) {
           return { behavior: 'allow', updatedInput: input };
         }
@@ -4739,6 +4787,9 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       }
       if (message.type === 'command_lifecycle' && message.state === 'started') {
         noteCommandStarted(message);
+      }
+      if (message.type === 'system' && message.subtype === 'status' && namesSetting(message.permissionMode)) {
+        followReportedPermissionMode(message.permissionMode);
       }
       // The CLI feeds a finished task's notification into a turn, which
       // relays it (see finishedOwnTaskIds).

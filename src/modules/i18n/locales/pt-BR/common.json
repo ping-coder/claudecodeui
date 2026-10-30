@@ -142,27 +142,12 @@
   "projectWizard": {
     "title": "Criar novo projeto",
     "steps": {
-      "type": "Tipo",
       "configure": "Configurar",
       "confirm": "Confirmar"
     },
-    "step1": {
-      "question": "Você já tem um espaço de trabalho ou quer criar um novo?",
-      "existing": {
-        "title": "Espaço de trabalho existente",
-        "description": "Já tenho um espaço de trabalho no meu servidor e só preciso adicioná-lo à lista de projetos"
-      },
-      "new": {
-        "title": "Novo espaço de trabalho",
-        "description": "Criar um novo espaço de trabalho, opcionalmente clonando de um repositório GitHub"
-      }
-    },
     "step2": {
-      "existingPath": "Caminho do espaço de trabalho",
       "newPath": "Caminho do espaço de trabalho",
-      "existingPlaceholder": "/caminho/para/espaço/de/trabalho/existente",
       "newPlaceholder": "/caminho/para/novo/espaço/de/trabalho",
-      "existingHelp": "Caminho completo para o diretório do seu espaço de trabalho existente",
       "newHelp": "Caminho completo para o diretório do seu espaço de trabalho",
       "githubUrl": "URL do GitHub (Opcional)",
       "githubPlaceholder": "https://github.com/usuario/repositorio",
@@ -184,7 +169,6 @@
     },
     "step3": {
       "reviewConfig": "Revise sua configuração",
-      "existingWorkspace": "Espaço de trabalho existente",
       "newWorkspace": "Novo espaço de trabalho",
       "path": "Caminho:",
       "cloneFrom": "Clonar de:",
@@ -193,7 +177,6 @@
       "usingProvidedToken": "Usando token fornecido",
       "noAuthentication": "Sem autenticação",
       "sshKey": "Chave SSH",
-      "existingInfo": "O espaço de trabalho será adicionado à sua lista de projetos e ficará disponível para sessões Claude/Cursor.",
       "newWithClone": "O repositório será clonado a partir desta pasta.",
       "newEmpty": "O espaço de trabalho será adicionado à sua lista de projetos e ficará disponível para sessões Claude/Cursor.",
       "cloningRepository": "Clonando repositório..."
@@ -207,7 +190,6 @@
       "cloning": "Clonando..."
     },
     "errors": {
-      "selectType": "Selecione se você tem um espaço de trabalho existente ou quer criar um novo",
       "providePath": "Forneça um caminho para o espaço de trabalho",
       "failedToCreate": "Falha ao criar espaço de trabalho",
       "failedToCreateFolder": "Falha ao criar pasta"

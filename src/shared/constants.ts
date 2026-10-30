@@ -17,6 +17,7 @@ import type {
   McpProvider,
   McpScope,
   McpTransport,
+  ProjectTemplateSummary,
   SettingsMainTab,
   WorkspacePaneSide,
 } from '@/shared/types';
@@ -386,3 +387,19 @@ export const FILES_TREE_RATIO_DEFAULT = 0.4;
  * a wrapper for a row.
  */
 export const TURN_OPENER_ROW_CLASS = 'chat-turn-opener-row';
+
+// ---------------------------
+
+//----------------- PROJECT TEMPLATES ------------
+
+/**
+ * The Blank project template: an empty folder with an optional GitHub clone, exactly what the wizard
+ * did before templates. The project-creation wizard compares template ids against it and falls back to
+ * it when the server's template list cannot be loaded or no longer has the remembered template.
+ */
+export const BLANK_PROJECT_TEMPLATE: ProjectTemplateSummary = {
+  id: 'blank',
+  files: [],
+  skills: [],
+  git: { init: false, clone: true },
+};

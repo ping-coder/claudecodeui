@@ -195,27 +195,30 @@
   "projectWizard": {
     "title": "Create New Project",
     "steps": {
-      "type": "Type",
+      "template": "Template",
       "configure": "Configure",
       "confirm": "Confirm"
     },
     "step1": {
-      "question": "Do you already have a workspace, or would you like to create a new one?",
-      "existing": {
-        "title": "Existing Workspace",
-        "description": "I already have a workspace on my server and just need to add it to the project list"
+      "question": "Start from a template",
+      "loading": "Loading templates…",
+      "loadFailed": "Couldn't load the template list, so only Blank is offered.",
+      "files": "Files",
+      "skills": "Skills"
+    },
+    "templates": {
+      "blank": {
+        "title": "Blank",
+        "description": "An empty project folder, optionally cloned from GitHub."
       },
-      "new": {
-        "title": "New Workspace",
-        "description": "Create a new workspace, optionally clone from a GitHub repository"
+      "coding": {
+        "title": "Coding",
+        "description": "A task list, agent instructions and two skills, in a Git repository that is new or imported from GitHub."
       }
     },
     "step2": {
-      "existingPath": "Workspace Path",
       "newPath": "Workspace Path",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "Full path to your existing workspace directory",
       "newHelp": "Full path to your workspace directory",
       "githubUrl": "GitHub URL (Optional)",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -235,9 +238,16 @@
       "optionalTokenPublic": "GitHub Token (Optional for Public Repos)",
       "tokenPublicPlaceholder": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (leave empty for public repos)"
     },
+    "git": {
+      "label": "Repository",
+      "newRepo": "New repository",
+      "newRepoHelp": "Runs git init in the folder and commits the template files as the first commit. If the folder is already a Git repository, the files are added but not committed.",
+      "importGithub": "Import from GitHub",
+      "importGithubHelp": "Clones the repository into a subfolder named after it, then adds the template files there without committing them. They show up in Source Control for review.",
+      "githubUrl": "GitHub URL"
+    },
     "step3": {
       "reviewConfig": "Review Your Configuration",
-      "existingWorkspace": "Existing Workspace",
       "newWorkspace": "New Workspace",
       "path": "Path:",
       "cloneFrom": "Clone From:",
@@ -246,10 +256,44 @@
       "usingProvidedToken": "Using provided token",
       "noAuthentication": "No authentication",
       "sshKey": "SSH Key",
-      "existingInfo": "The workspace will be added to your project list and will be available for Claude/Cursor sessions.",
       "newWithClone": "The repository will be cloned from this folder.",
       "newEmpty": "The workspace will be added to your project list and will be available for Claude/Cursor sessions.",
-      "cloningRepository": "Cloning repository..."
+      "cloningRepository": "Cloning repository...",
+      "template": "Template:",
+      "finalPath": "Project folder:",
+      "filesToAdd": "Files to add:",
+      "skillsToAdd": "Skills:",
+      "gitAction": "Git:",
+      "gitInitCommit": "New repository, first commit with the template files (left uncommitted if the folder is already a repository)",
+      "gitCloneUncommitted": "Clone, then add the template files uncommitted",
+      "gitNone": "No repository changes",
+      "keepsExisting": "Files that already exist are left as they are.",
+      "creatingWithTemplate": "Creating the project and adding the template files…",
+      "phaseClone": "Clone the repository",
+      "phaseTemplate": "Add the template files"
+    },
+    "result": {
+      "title": "Project created",
+      "summary": "The project is in your list. A few things need a look.",
+      "created": "Created",
+      "skipped": "Left as they were",
+      "skippedExists": "already exists",
+      "skippedUnsafe": "the path goes through a symlink or leads outside the project",
+      "skippedGroup": "skill folder already exists",
+      "warnings": "Warnings",
+      "gitInitialized": "Created a Git repository and committed the template files.",
+      "gitInitializedUncommitted": "Created a Git repository. Nothing was committed.",
+      "gitAlreadyRepository": "The folder was already a Git repository, so the new files are left uncommitted.",
+      "gitAlreadyRepositoryNoFiles": "The folder was already a Git repository.",
+      "gitCloned": "The template files are uncommitted in the clone. Review them in Source Control.",
+      "gitClonedNoFiles": "Cloned the repository.",
+      "gitIdentityMissing": "Git has no name and email set, so nothing was committed. Set them in Settings → Git, then commit the files.",
+      "gitNotFound": "Git is not installed on the server, so no repository was created.",
+      "gitInitFailed": "git init failed, so no repository was created.",
+      "gitCommitFailed": "The first commit failed. The files are written but not committed.",
+      "insideParentRepository": "The folder is inside another Git repository, so no new repository was created in it.",
+      "templateApplyFailed": "The template files couldn't be written. The project was created without them.",
+      "unknownWarning": "Warning from the server: {{code}}"
     },
     "buttons": {
       "cancel": "Cancel",
@@ -257,13 +301,16 @@
       "next": "Next",
       "createProject": "Create Project",
       "creating": "Creating...",
-      "cloning": "Cloning..."
+      "cloning": "Cloning...",
+      "done": "Done"
     },
     "errors": {
-      "selectType": "Please select whether you have an existing workspace or want to create a new one",
       "providePath": "Please provide a workspace path",
       "failedToCreate": "Failed to create workspace",
-      "failedToCreateFolder": "Failed to create folder"
+      "failedToCreateFolder": "Failed to create folder",
+      "provideGithubUrl": "Enter the GitHub URL of the repository to import",
+      "unknownTemplate": "The server no longer offers this template. Go back and pick another one.",
+      "templateAtRoot": "Templates can't go straight into the home folder or the workspace root: the skills would apply to every project and git would cover everything below. Pick or create a folder inside it."
     }
   },
   "notifications": {

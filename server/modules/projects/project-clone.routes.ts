@@ -1,5 +1,6 @@
 import express, { type Request } from 'express';
 
+import { resolveProjectTemplate } from '@/modules/project-templates/index.js';
 import type { PendingCloneRequests } from '@/modules/projects/services/project-clone-request.service.js';
 import type { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
 import { AppError, asyncHandler } from '@/shared/utils.js';
@@ -50,17 +51,23 @@ export function createProjectCloneRouter(dependencies: ProjectCloneRouterDepende
   /**
    * Parks the request under a fresh id for `/clone-progress` to pick up.
    * Nothing is spawned here; the stream that follows runs and reports it.
+   * An unknown template is refused here, while the client can still get a
+   * plain 400 instead of an error inside the stream.
    */
   router.post(
     '/clone',
     asyncHandler(async (req, res) => {
       const userId = requireAuthenticatedUserId(req);
       const requestBody = req.body as Record<string, unknown>;
+      const templateId = typeof requestBody.templateId === 'string' ? requestBody.templateId : null;
+      resolveProjectTemplate(templateId);
       const cloneId = dependencies.pendingCloneRequests.add(userId, {
         workspacePath: typeof requestBody.path === 'string' ? requestBody.path : '',
         githubUrl: typeof requestBody.githubUrl === 'string' ? requestBody.githubUrl : '',
         githubTokenId: typeof requestBody.githubTokenId === 'number' ? requestBody.githubTokenId : null,
         newGithubToken: typeof requestBody.newGithubToken === 'string' ? requestBody.newGithubToken : null,
+        templateId,
+        locale: typeof requestBody.locale === 'string' ? requestBody.locale : null,
       });
 
       res.json({ cloneId });
@@ -114,11 +121,14 @@ export function createProjectCloneRouter(dependencies: ProjectCloneRouterDepende
         cloneOperation = await dependencies.startCloneProject(
           { ...cloneRequest, userId },
           {
-            onProgress: (message) => {
-              sendEvent('progress', { message });
+            onProgress: (message, phase) => {
+              sendEvent('progress', phase ? { message, phase } : { message });
             },
-            onComplete: ({ project, message }) => {
-              sendEvent('complete', { project, message });
+            onTemplate: (report) => {
+              sendEvent('template', { report });
+            },
+            onComplete: ({ project, message, template }) => {
+              sendEvent('complete', template ? { project, message, template } : { project, message });
             },
           },
         );
@@ -128,7 +138,11 @@ export function createProjectCloneRouter(dependencies: ProjectCloneRouterDepende
 
         await cloneOperation.waitForCompletion;
       } catch (error) {
-        sendEvent('error', { message: resolveRouteErrorMessage(error) });
+        // The code lets the client show its own text for failures it knows.
+        sendEvent('error', {
+          message: resolveRouteErrorMessage(error),
+          ...(error instanceof AppError ? { code: error.code } : {}),
+        });
       } finally {
         req.off('close', closeListener);
         if (!res.writableEnded) {

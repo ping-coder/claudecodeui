@@ -1198,14 +1198,21 @@ export type DispatchWait = {
 
 /**
  * A `send_refused` frame as chat's realtime handler hands it to the composer:
- * the server did not start a `chat.send` sent with `keepBackgroundWork`,
- * because the session's process still holds background work and the turn
- * cannot go into it. It answers only the socket that sent it, which every
- * pane on the page shares: `clientRequestId` is the send's own, so the
- * composer that made that send takes it. A server older than ids sends none,
- * and then the composer that sent the session's latest such send takes it.
- * `reason` is the server's code (BACKGROUND_WORK_WOULD_STOP); `changes` holds
- * its labels for what keeps the turn out (see BackgroundSendPrompt).
+ * a `chat.send` sent with `keepBackgroundWork` did not go, because the
+ * session's process still holds background work and the turn cannot go
+ * into it. `reason` is the server's code. BACKGROUND_WORK_WOULD_STOP: no
+ * run started, and only the socket that sent it hears it, which every pane
+ * on the page shares. HAND_OVER_FAILED: the send's run started and the turn
+ * failed at the hand-over (it waited for a loop's fire, which started work a
+ * new process would stop); it comes after that run's `complete` to every
+ * socket watching the run, other pages' too, and again whenever a socket of
+ * the same user subscribes to the session within the hour, so it may come
+ * more than once. `clientRequestId` is the send's own: only the composer
+ * that made that send takes it, once, and every other composer and page
+ * ignores it. A server older than ids sends none, only to the socket that
+ * sent it, and then the composer that sent the session's latest such send
+ * takes it. `changes` holds its labels for what keeps the turn out (see
+ * BackgroundSendPrompt).
  */
 export type SendRefusedEvent = {
   sessionId: string;
@@ -1831,8 +1838,42 @@ export type ExistingPrdFile = {
 
 //----------------- PROJECT CREATION WIZARD ------------
 
-/** The one-based index of the step currently shown by the project-creation wizard: 1 configures the workspace, 2 reviews it before creation. */
-export type WizardStep = 1 | 2;
+/** The one-based index of the step currently shown by the project-creation wizard: 1 picks the template, 2 configures the workspace, 3 reviews it before creation. */
+export type WizardStep = 1 | 2 | 3;
+
+/** Where a template project's Git repository comes from, chosen in the wizard's Configure step: a new local repository ('init') or a GitHub clone ('clone'). */
+export type ProjectTemplateGitSource = 'init' | 'clone';
+
+/** One project template as GET /api/projects/templates lists it: the target paths it writes, the skill folders among them and the Git sources it offers. Names and descriptions are localized on the client from the id. */
+export type ProjectTemplateSummary = {
+  id: string;
+  files: string[];
+  skills: string[];
+  git: { init: boolean; clone: boolean };
+};
+
+/** How far a template clone has got, as the wizard's Confirm step lists it: git is cloning, the server is writing the template files, or both are done. */
+export type CloneTemplatePhase = 'clone' | 'template' | 'done';
+
+/** What applying a template did, returned by create-project and the clone stream: files written, files left alone and why, the Git outcome, and warning codes the wizard localizes. */
+export type ProjectTemplateReport = {
+  templateId: string;
+  created: string[];
+  skipped: { path: string; reason: 'exists' | 'unsafe-path' | 'group-exists' }[];
+  git: {
+    action: 'initialized' | 'already-repository' | 'inside-parent-repository' | 'cloned' | 'none';
+    committed: boolean;
+    commitSha?: string;
+  };
+  warnings: (
+    | 'GIT_IDENTITY_MISSING'
+    | 'GIT_NOT_FOUND'
+    | 'GIT_INIT_FAILED'
+    | 'GIT_COMMIT_FAILED'
+    | 'INSIDE_PARENT_REPOSITORY'
+    | 'TEMPLATE_APPLY_FAILED'
+  )[];
+};
 
 /** How the project-creation wizard authenticates a GitHub clone: reuse a 'stored' credential, enter a 'new' token, or use 'none' and rely on public access or an SSH key. */
 export type TokenMode = 'stored' | 'new' | 'none';
@@ -1853,6 +1894,9 @@ export type GithubTokenCredential = {
 
 /** The full set of user-entered values carried across the project-creation wizard's steps, owned by ProjectCreationWizard and passed down to each step. */
 export type WizardFormState = {
+  templateId: string;
+  /** Only read when the chosen template offers both a new repository and a GitHub import. */
+  gitSource: ProjectTemplateGitSource;
   workspacePath: string;
   githubUrl: string;
   tokenMode: TokenMode;

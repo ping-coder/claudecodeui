@@ -248,6 +248,20 @@ function readRequiredSessionId(data: AnyRecord): string | null {
  * Only such a send waits for that check, and only while no turn is under way
  * (a busy session refuses it as RUN_IN_PROGRESS below): every other send
  * reserves its run at once, before the socket's next frame is handled.
+ *
+ * Such a send can also fail once its run has started: it waited for a turn
+ * the CLI ran on its own (a loop's fire), which started work a new process
+ * would stop, and the runtime failed it (HAND_OVER_FAILED) rather than stop
+ * that work. It then gets `send_refused` too, after the run's `complete`, so
+ * the composer that sent it takes the message back and asks. That turn can
+ * wait minutes, long enough for the page to reconnect meanwhile, or to be
+ * offline or showing another session when the turn fails, so this refusal
+ * goes to every socket watching the run, including one the page subscribed
+ * with after reconnecting, and is kept for every later `chat.subscribe` of
+ * the session by the same user (see `handleChatSubscribe`). It carries the send's
+ * `clientRequestId`, which every other page ignores; a send without one is
+ * answered on the asking socket alone and not kept, as a refusal without an
+ * id is taken by any page as the answer to its own latest send.
  */
 async function handleChatSend(
   ws: WebSocket,
@@ -259,15 +273,25 @@ async function handleChatSend(
   if (!resolved) {
     return;
   }
+  const keepBackgroundWork = (data.options as AnyRecord | undefined)?.keepBackgroundWork === true;
   if (
-    (data.options as AnyRecord | undefined)?.keepBackgroundWork === true
+    keepBackgroundWork
     && !chatRunRegistry.isProcessing(resolved.sessionId)
     && await refuseSendThatStopsBackgroundWork(ws, resolved, data, dependencies)
   ) {
     return;
   }
 
-  await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies);
+  const { run, handOverFailure } = await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies);
+  if (keepBackgroundWork && run && handOverFailure) {
+    const frame = buildSendRefusedFrame(resolved, data, { reason: 'HAND_OVER_FAILED', changes: handOverFailure.changes });
+    if (frame.clientRequestId) {
+      chatRunRegistry.keepSendRefusal(resolved.sessionId, userId, frame);
+      run.writer.sendToAudience(frame);
+    } else {
+      sendJson(ws, frame);
+    }
+  }
 }
 
 type ResolvedSendTarget = {
@@ -277,10 +301,15 @@ type ResolvedSendTarget = {
 };
 
 /**
- * The gateway's answer to a `chat.send` it did not start because the turn
- * would stop the session's background work, sent to the asking socket alone
- * in the envelope of the insert refusals: no `seq`, and never a
- * `protocol_error`, which the client takes as the session's run failing.
+ * The gateway's answer to a `chat.send` with `keepBackgroundWork` that did
+ * not go because the turn would stop the session's background work, in the
+ * envelope of the insert refusals: no `seq`, and never a `protocol_error`,
+ * which the client takes as the session's run failing. `reason` is
+ * BACKGROUND_WORK_WOULD_STOP when no run started, sent to the asking socket
+ * alone, and HAND_OVER_FAILED when the run started and the runtime failed
+ * the turn at the hand-over, sent after that run's `complete` to the sockets
+ * watching it and again on every later `chat.subscribe` of the session while
+ * kept (see `handleChatSend`).
  * `changes` says why the turn cannot go into the held process, and `details`
  * what exactly (see `HandOverBlockDetail`); `content` is
  * the message as sent, for the composer to put back. `clientRequestId` is the
@@ -293,13 +322,34 @@ type SendRefusedFrame = {
   id: string;
   sessionId: string;
   provider: LLMProvider;
-  reason: 'BACKGROUND_WORK_WOULD_STOP';
+  reason: 'BACKGROUND_WORK_WOULD_STOP' | 'HAND_OVER_FAILED';
   changes: HandOverChange[];
   details?: HandOverBlockDetail;
   content: string;
   clientRequestId?: string;
   timestamp: string;
 };
+
+/** The `send_refused` for this `chat.send` (see `SendRefusedFrame`). */
+function buildSendRefusedFrame(
+  target: ResolvedSendTarget,
+  data: AnyRecord,
+  refusal: Pick<SendRefusedFrame, 'reason' | 'changes' | 'details'>,
+): SendRefusedFrame {
+  const clientRequestId = readClientRequestId(data);
+  return {
+    kind: 'send_refused',
+    id: generateMessageId('send_refused'),
+    sessionId: target.sessionId,
+    provider: target.provider,
+    reason: refusal.reason,
+    changes: refusal.changes,
+    ...(refusal.details ? { details: refusal.details } : {}),
+    content: typeof data.content === 'string' ? data.content : '',
+    ...(clientRequestId ? { clientRequestId } : {}),
+    timestamp: new Date().toISOString(),
+  };
+}
 
 /**
  * How a client names one of its requests (`clientRequestId`), for the gateway
@@ -361,20 +411,7 @@ async function refuseSendThatStopsBackgroundWork(
     return false;
   }
 
-  const clientRequestId = readClientRequestId(data);
-  const frame: SendRefusedFrame = {
-    kind: 'send_refused',
-    id: generateMessageId('send_refused'),
-    sessionId: target.sessionId,
-    provider: target.provider,
-    reason: 'BACKGROUND_WORK_WOULD_STOP',
-    changes: plan.changes,
-    ...(plan.details ? { details: plan.details } : {}),
-    content: typeof data.content === 'string' ? data.content : '',
-    ...(clientRequestId ? { clientRequestId } : {}),
-    timestamp: new Date().toISOString(),
-  };
-  sendJson(ws, frame);
+  sendJson(ws, buildSendRefusedFrame(target, data, { reason: 'BACKGROUND_WORK_WOULD_STOP', changes: plan.changes, details: plan.details }));
   return true;
 }
 
@@ -575,10 +612,17 @@ function recordForTurnAlone<T>(
  */
 export type HandOverFailure = { reason: string | null; content: string | null };
 
+/**
+ * A run's `HandOverFailure` with what kept its turn out of the held process
+ * (`changes`, the error's HandOverChange labels), which a composer's send
+ * hears back in its `send_refused` (see `handleChatSend`).
+ */
+type RunHandOverFailure = HandOverFailure & { changes: HandOverChange[] };
+
 type ChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
 
-/** The `HandOverFailure` a run's events report, or null when its runtime reported none. */
-function readHandOverFailure(run: ChatRun): HandOverFailure | null {
+/** The `RunHandOverFailure` a run's events report, or null when its runtime reported none. */
+function readHandOverFailure(run: ChatRun): RunHandOverFailure | null {
   const error = run.events.find((event) => event.kind === 'error' && event.code === 'HAND_OVER_FAILED');
   if (!error) {
     return null;
@@ -586,6 +630,9 @@ function readHandOverFailure(run: ChatRun): HandOverFailure | null {
   return {
     reason: typeof error.reason === 'string' ? error.reason : null,
     content: typeof error.content === 'string' ? error.content : null,
+    changes: Array.isArray(error.changes)
+      ? error.changes.filter((change) => typeof change === 'string')
+      : [],
   };
 }
 
@@ -617,7 +664,8 @@ function readTurnOutcome(run: ChatRun): DetachedTurnOutcome {
 /**
  * Registers the run and hands the turn to the provider runtime. Resolves once
  * the runtime's run settles, with whether the run started, how it failed,
- * and the `HandOverFailure` its events report.
+ * the `RunHandOverFailure` its events report, and the run (null when it did
+ * not start).
  *
  * `extraRuntimeOptions` go over the client's options (see
  * `buildTurnRunOptions`): how an edited message asks the provider to resume
@@ -634,7 +682,7 @@ async function dispatchRun(
   dependencies: ChatWebSocketDependencies,
   extraRuntimeOptions: AnyRecord = {},
   beforeRun?: (run: ChatRun) => void | Promise<void>,
-): Promise<{ started: boolean; error: string | null; handOverFailure: HandOverFailure | null }> {
+): Promise<{ started: boolean; error: string | null; handOverFailure: RunHandOverFailure | null; run: ChatRun | null }> {
   const provider = session.provider as LLMProvider;
 
   const run = chatRunRegistry.startRun({
@@ -654,7 +702,7 @@ async function dispatchRun(
         sessionId
       );
     }
-    return { started: false, error: 'A run is already in progress for this session.', handOverFailure: null };
+    return { started: false, error: 'A run is already in progress for this session.', handOverFailure: null, run: null };
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -755,7 +803,7 @@ async function dispatchRun(
     chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
   }
 
-  return { started: true, error: failure, handOverFailure: readHandOverFailure(run) };
+  return { started: true, error: failure, handOverFailure: readHandOverFailure(run), run };
 }
 
 /**
@@ -1478,13 +1526,16 @@ async function handleChatInsertCancel(
 /**
  * Handles `chat.subscribe`: for each requested session, reports whether a run
  * is processing, re-attaches the live stream to this socket, replays missed
- * events (seq > lastSeq), and includes pending permission requests.
+ * events (seq > lastSeq), includes pending permission requests, and sends
+ * again the `send_refused` frames kept for the session's sends by the
+ * socket's user.
  *
  * This single message replaces the old `check-session-status`,
  * `get-pending-permissions`, and Claude-only writer reconnect flows.
  */
 function handleChatSubscribe(
   ws: WebSocket,
+  userId: string | number | null,
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies
 ): void {
@@ -1542,6 +1593,15 @@ function handleChatSubscribe(
       for (const event of chatRunRegistry.replayEvents(sessionId, lastSeq)) {
         sendJson(ws, event);
       }
+    }
+
+    // A send refused once its run was over (see `handleChatSend`) may have
+    // found no socket of the page that made it: the page was offline, or
+    // showing another session, then. Its refusal goes again with every
+    // subscribe of the session by the same user while kept; only the
+    // composer that made the send acts on it, and only once.
+    for (const refusal of chatRunRegistry.listSendRefusals(sessionId, userId)) {
+      sendJson(ws, refusal);
     }
   }
 }
@@ -1686,11 +1746,11 @@ export async function runDetachedChatTurn(
       }
       onStarted?.();
     },
-  ).then(({ handOverFailure, ...result }) => {
+  ).then(({ started, error, handOverFailure }) => {
     if (handOverFailure) {
-      onHandOverFailed?.(handOverFailure);
+      onHandOverFailed?.({ reason: handOverFailure.reason, content: handOverFailure.content });
     }
-    return result;
+    return { started, error };
   });
   return Promise.race([dispatched, handedOver]);
 }
@@ -1721,11 +1781,17 @@ export async function runDetachedChatTurn(
  * `protocol_error`, `send_refused`, `stop_task_status`, `resume_loops_status`). `insert_status`
  * comes both ways: a runtime's go out through the run's writer with `seq`,
  * while the gateway answers a refused insert or a failed cancel to the
- * asking socket alone, without one. `send_refused` goes the same way, for a
- * `chat.send` with `keepBackgroundWork` that would have stopped the session's
- * background work, and so does `stop_task_status`, for a `chat.stop-task`
- * that names scheduled work, and `resume_loops_status`, for a
- * `chat.resume-loops`.
+ * asking socket alone, without one. So does `stop_task_status`, for a
+ * `chat.stop-task` that names scheduled work, and `resume_loops_status`, for
+ * a `chat.resume-loops`. `send_refused` answers a `chat.send` with
+ * `keepBackgroundWork` that would have stopped the session's background
+ * work, without `seq`: on the asking socket alone when no run started
+ * (BACKGROUND_WORK_WOULD_STOP); when the run's turn failed at the hand-over
+ * (HAND_OVER_FAILED), after the run's `complete` to every socket watching the
+ * run and again with each later `chat.subscribe` of the session by the same
+ * user, for an hour. Other pages ignore that one by its `clientRequestId`;
+ * a send without one gets it on the asking socket alone (see
+ * `handleChatSend`).
  */
 export function handleChatConnection(
   ws: WebSocket,
@@ -1770,7 +1836,7 @@ export function handleChatConnection(
           await handleChatResumeLoops(ws, userId, data, dependencies);
           return;
         case 'chat.subscribe':
-          handleChatSubscribe(ws, data, dependencies);
+          handleChatSubscribe(ws, userId, data, dependencies);
           return;
         case 'chat.permission-response':
           handlePermissionResponse(data, dependencies);

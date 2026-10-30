@@ -192,27 +192,30 @@
   "projectWizard": {
     "title": "创建新项目",
     "steps": {
-      "type": "类型",
+      "template": "模板",
       "configure": "配置",
       "confirm": "确认"
     },
     "step1": {
-      "question": "已经有工作区了，还是新建一个？",
-      "existing": {
-        "title": "现有工作区",
-        "description": "我的服务器上已经有工作区，只需要将其添加到项目列表中"
+      "question": "选一个模板开始",
+      "loading": "正在加载模板…",
+      "loadFailed": "模板列表加载失败，只能用空白模板。",
+      "files": "文件",
+      "skills": "技能"
+    },
+    "templates": {
+      "blank": {
+        "title": "空白",
+        "description": "空的项目文件夹，可以从 GitHub 克隆。"
       },
-      "new": {
-        "title": "新建工作区",
-        "description": "创建一个新工作区，可选择从 GitHub 仓库克隆"
+      "coding": {
+        "title": "编程",
+        "description": "任务清单、智能体说明和两个技能，放进新建或从 GitHub 导入的 Git 仓库。"
       }
     },
     "step2": {
-      "existingPath": "工作区路径",
       "newPath": "工作区路径",
-      "existingPlaceholder": "/path/to/existing/workspace",
       "newPlaceholder": "/path/to/new/workspace",
-      "existingHelp": "现有工作区目录的完整路径",
       "newHelp": "工作区目录的完整路径",
       "githubUrl": "GitHub URL（可选）",
       "githubPlaceholder": "https://github.com/username/repository",
@@ -232,9 +235,16 @@
       "optionalTokenPublic": "GitHub 令牌（公共仓库可选）",
       "tokenPublicPlaceholder": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx（公共仓库可留空）"
     },
+    "git": {
+      "label": "仓库",
+      "newRepo": "新建仓库",
+      "newRepoHelp": "在文件夹里运行 git init，把模板文件作为第一次提交。文件夹已经是 Git 仓库时只添加文件，不提交。",
+      "importGithub": "从 GitHub 导入",
+      "importGithubHelp": "把仓库克隆到这个文件夹里以仓库名命名的子文件夹，再加入模板文件，不提交。可以在源代码管理里检查。",
+      "githubUrl": "GitHub URL"
+    },
     "step3": {
       "reviewConfig": "确认配置",
-      "existingWorkspace": "现有工作区",
       "newWorkspace": "新建工作区",
       "path": "路径：",
       "cloneFrom": "克隆自：",
@@ -243,10 +253,44 @@
       "usingProvidedToken": "使用提供的令牌",
       "noAuthentication": "无身份验证",
       "sshKey": "SSH 密钥",
-      "existingInfo": "工作区会加入项目列表，可以用于 Claude/Cursor 会话。",
       "newWithClone": "仓库将从此文件夹克隆。",
       "newEmpty": "工作区会加入项目列表，可以用于 Claude/Cursor 会话。",
-      "cloningRepository": "正在克隆仓库…"
+      "cloningRepository": "正在克隆仓库…",
+      "template": "模板：",
+      "finalPath": "项目文件夹：",
+      "filesToAdd": "添加的文件：",
+      "skillsToAdd": "技能：",
+      "gitAction": "Git：",
+      "gitInitCommit": "新建仓库，模板文件作为第一次提交（文件夹已经是仓库时不提交）",
+      "gitCloneUncommitted": "克隆后加入模板文件，不提交",
+      "gitNone": "不改动仓库",
+      "keepsExisting": "已经存在的文件保持原样。",
+      "creatingWithTemplate": "正在创建项目并加入模板文件…",
+      "phaseClone": "克隆仓库",
+      "phaseTemplate": "加入模板文件"
+    },
+    "result": {
+      "title": "项目已创建",
+      "summary": "项目已经加入列表，有几处需要留意。",
+      "created": "已创建",
+      "skipped": "未改动",
+      "skippedExists": "已存在",
+      "skippedUnsafe": "路径经过符号链接或指向项目外",
+      "skippedGroup": "技能文件夹已存在",
+      "warnings": "警告",
+      "gitInitialized": "已新建 Git 仓库，并提交了模板文件。",
+      "gitInitializedUncommitted": "已新建 Git 仓库，没有提交。",
+      "gitAlreadyRepository": "文件夹本来就是 Git 仓库，新文件没有提交。",
+      "gitAlreadyRepositoryNoFiles": "文件夹本来就是 Git 仓库。",
+      "gitCloned": "模板文件在克隆的仓库里，还没提交，可以在源代码管理里检查。",
+      "gitClonedNoFiles": "已克隆仓库。",
+      "gitIdentityMissing": "Git 还没设置姓名和邮箱，所以没有提交。到「设置」→「Git」里设置后，再提交这些文件。",
+      "gitNotFound": "服务器上没有安装 Git，没有创建仓库。",
+      "gitInitFailed": "git init 失败，没有创建仓库。",
+      "gitCommitFailed": "第一次提交失败。文件已经写入，还没提交。",
+      "insideParentRepository": "这个文件夹在另一个 Git 仓库里面，所以没有在这里新建仓库。",
+      "templateApplyFailed": "模板文件写入失败。项目已创建，但没有这些文件。",
+      "unknownWarning": "服务器警告：{{code}}"
     },
     "buttons": {
       "cancel": "取消",
@@ -254,13 +298,16 @@
       "next": "下一步",
       "createProject": "创建项目",
       "creating": "创建中…",
-      "cloning": "正在克隆…"
+      "cloning": "正在克隆…",
+      "done": "完成"
     },
     "errors": {
-      "selectType": "先选择使用现有工作区还是新建一个",
       "providePath": "请提供工作区路径",
       "failedToCreate": "创建工作区失败",
-      "failedToCreateFolder": "创建文件夹失败"
+      "failedToCreateFolder": "创建文件夹失败",
+      "provideGithubUrl": "请填写要导入的 GitHub 仓库地址",
+      "unknownTemplate": "服务器上已经没有这个模板了，请返回重新选择。",
+      "templateAtRoot": "不能把模板直接放进家目录或工作区根目录：skill 会对所有项目生效，git 也会管到下面所有文件夹。请选它下面的一个文件夹，或者新建一个。"
     }
   },
   "notifications": {

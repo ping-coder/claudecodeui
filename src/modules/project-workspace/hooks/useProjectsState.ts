@@ -688,9 +688,12 @@ export function useProjectsState({
         && event.kind !== 'stream_end'
         && event.kind !== 'permission_resolved'
         && event.kind !== 'permission_cancelled'
-        // Why a message waits, and a resume's progress, carry no new content.
+        // Why a message waits, a resume's progress and a refused send (an
+        // answer to this page's own send, replayed on each subscribe) carry no
+        // new content.
         && event.kind !== 'dispatch_waiting'
         && event.kind !== 'resume_loops_status'
+        && event.kind !== 'send_refused'
       ) {
         markSessionAttention(eventSessionId);
       }

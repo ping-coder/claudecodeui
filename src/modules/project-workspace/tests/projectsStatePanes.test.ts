@@ -127,13 +127,14 @@ test('sessions on screen in either pane never get the attention mark; background
   assert.deepEqual([...result.current.attentionSessionIds], ['a2']);
 });
 
-test('a wait reason or a resume step for a background session adds no attention mark', async () => {
+test('a wait reason, a resume step or a refused send for a background session adds no attention mark', async () => {
   const { result } = await renderProjectsState();
   openBothPanes(result);
 
   act(() => {
     emit({ kind: 'dispatch_waiting', sessionId: 'a2', target: { kind: 'queued' }, wait: null });
     emit({ kind: 'resume_loops_status', sessionId: 'a2', status: 'started' });
+    emit({ kind: 'send_refused', sessionId: 'a2', reason: 'HAND_OVER_FAILED', clientRequestId: 'r1' });
   });
 
   assert.equal(result.current.attentionSessionIds.size, 0);

@@ -93,6 +93,20 @@ const RECENT_RUN_ENDS_RETENTION_MS = 10 * 60 * 1000;
 const MAX_RECENT_RUN_ENDS = 200;
 
 /**
+ * How long a refusal the gateway sends once a send's run is over stays on
+ * hand for `chat.subscribe` (see `keepSendRefusal`). The page that made the
+ * send may have been offline, or showing another session, when it went out,
+ * and gets it once it subscribes to the session again within this window.
+ */
+const SEND_REFUSAL_RETENTION_MS = 60 * 60 * 1000;
+
+/**
+ * Upper bound on kept refusals across all sessions. When exceeded, the
+ * oldest are dropped first.
+ */
+const MAX_SEND_REFUSALS = 100;
+
+/**
  * Active and recently-completed runs keyed by app session id.
  *
  * This map is the single in-memory source of truth for "is something running
@@ -108,6 +122,19 @@ const runs = new Map<string, ChatRun>();
  * empties it.
  */
 let recentRunEnds: RunEndedEvent[] = [];
+
+/**
+ * Every refusal kept by `keepSendRefusal` in the last
+ * SEND_REFUSAL_RETENTION_MS, at most MAX_SEND_REFUSALS, oldest first, with
+ * the app session it is about and the user whose send it answers. Pruned on
+ * every write and read; lives only in memory.
+ */
+let sendRefusals: Array<{
+  appSessionId: string;
+  userId: string | number | null;
+  keptAt: number;
+  frame: object;
+}> = [];
 
 /**
  * Answers whether a completed run must stay registered a while longer. Set by
@@ -197,6 +224,12 @@ function settleHandedOverIfDone(run: ChatRun): void {
 function pruneRecentRunEnds(now: number): void {
   const cutoff = now - RECENT_RUN_ENDS_RETENTION_MS;
   recentRunEnds = recentRunEnds.filter((end) => end.endedAt >= cutoff).slice(-MAX_RECENT_RUN_ENDS);
+}
+
+/** Drops refusals older than the retention window, then all but the newest MAX_SEND_REFUSALS. */
+function pruneSendRefusals(now: number): void {
+  const cutoff = now - SEND_REFUSAL_RETENTION_MS;
+  sendRefusals = sendRefusals.filter((refusal) => refusal.keptAt >= cutoff).slice(-MAX_SEND_REFUSALS);
 }
 
 /**
@@ -647,10 +680,35 @@ export const chatRunRegistry = {
   },
 
   /**
-   * Test-only escape hatch: clears every tracked run and every recorded end.
+   * Keeps a refusal the gateway sent once a send's run was over, for
+   * `listSendRefusals` to hand to every later `chat.subscribe` of the
+   * session by the user who made the send, for an hour (at most 100 kept).
+   * Kept apart from the runs, so a newer run taking the session's slot, or
+   * the run's eviction, does not lose it. Only a refusal that names its send
+   * (`clientRequestId`) may be kept: every page but the one that made the
+   * send ignores it, and that one acts on it once, however often it comes.
+   */
+  keepSendRefusal(appSessionId: string, userId: string | number | null, frame: object): void {
+    const keptAt = Date.now();
+    sendRefusals.push({ appSessionId, userId, keptAt, frame });
+    pruneSendRefusals(keptAt);
+  },
+
+  /** The session's refusals kept for this user (see `keepSendRefusal`), oldest first. */
+  listSendRefusals(appSessionId: string, userId: string | number | null): object[] {
+    pruneSendRefusals(Date.now());
+    return sendRefusals
+      .filter((refusal) => refusal.appSessionId === appSessionId && refusal.userId === userId)
+      .map((refusal) => refusal.frame);
+  },
+
+  /**
+   * Test-only escape hatch: clears every tracked run, every recorded end and
+   * every kept refusal.
    */
   clearAll(): void {
     runs.clear();
     recentRunEnds = [];
+    sendRefusals = [];
   },
 };

@@ -1110,4 +1110,116 @@ describe('a session held only for scheduled work', () => {
     await waitFor(() => assert.deepEqual(view.result.current.backgroundSendPrompt, { work: ['Loop check CI'], queue: false, changes: ['tools'] }));
     await act(async () => { view.result.current.resolveBackgroundSendPrompt('cancel'); });
   });
+
+  // A send into a process held for the cron loop alone goes ahead: a process
+  // of its own would bring the loop back. While the loop's fire is under way
+  // it waits, and when that fire starts a task, the run fails at the
+  // hand-over rather than stop it, and the server refuses the send after the
+  // run's `complete` (reason HAND_OVER_FAILED).
+  describe('a send refused once its run began, the loop\'s fire having started a task meanwhile', () => {
+    const renderOverLoop = () => {
+      const sent: SentFrame[] = [];
+      const echoes: Array<string | undefined> = [];
+      const removeMessage = vi.fn<(sessionId: string, rowId: string) => void>();
+      const onSessionBackground = vi.fn();
+      const view = renderHook(({ activity }: { activity: SessionActivityMap }) => useChatComposerState({
+        selectedProject: PROJECT,
+        selectedSession: SESSION,
+        currentSessionId: SESSION.id,
+        provider: 'claude',
+        permissionMode: 'default',
+        cyclePermissionMode: () => undefined,
+        resolvePermissionModeForProvider: () => 'default' as PermissionMode,
+        currentProviderModel: 'test-model',
+        currentProviderEffort: 'medium',
+        isLoading: false,
+        processingSessions: activity,
+        canAbortSession: false,
+        ...takesInserts,
+        tokenBudget: null,
+        sendMessage: (message) => { sent.push(message as SentFrame); },
+        scrollToBottom: () => undefined,
+        addMessage: (message, options) => {
+          if (message.type === 'user') {
+            echoes.push(options?.rowId);
+          }
+        },
+        removeMessage,
+        onSessionBackground,
+        setIsUserScrolledUp: () => undefined,
+        setPendingPermissionRequests: () => undefined,
+      }), { initialProps: { activity: onlyLoop } });
+      const sends = () => sent.filter((message) => message.type === 'chat.send');
+      return { view, sends, echoes, removeMessage, onSessionBackground };
+    };
+
+    const sendThenRefuseAfterRun = async (composer: ReturnType<typeof renderOverLoop>) => {
+      handOverPlan = { heldWork: true, canHandOver: false, changes: ['effort'], replaceKeepsWork: true };
+      await act(async () => { composer.view.result.current.setInput('think harder'); });
+      await act(async () => { await composer.view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+      assert.equal(composer.sends().at(-1)?.options?.keepBackgroundWork, true, 'sent without asking');
+      act(() => {
+        composer.view.result.current.handleSendRefused({
+          sessionId: 'session-1',
+          reason: 'HAND_OVER_FAILED',
+          changes: ['effort'],
+          clientRequestId: composer.sends().at(-1)?.clientRequestId,
+        });
+      });
+    };
+
+    test('is undone in its composer, leaving the session as its run left it, and asks with the session\'s work as it is now, offering Queue once the task shows', async () => {
+      const composer = renderOverLoop();
+      await sendThenRefuseAfterRun(composer);
+
+      assert.deepEqual(composer.removeMessage.mock.calls, [['session-1', composer.echoes[0]]]);
+      assert.equal(composer.onSessionBackground.mock.calls.length, 0, 'not put back to the loop alone it had at the send');
+      assert.equal(composer.view.result.current.input, 'think harder');
+      await waitFor(() => assert.deepEqual(composer.view.result.current.backgroundSendPrompt, { work: ['Loop check CI'], queue: false, changes: ['effort'] }));
+
+      // The page hears of the task the fire started.
+      composer.view.rerender({ activity: loopBesideTasks });
+      assert.deepEqual(composer.view.result.current.backgroundSendPrompt, {
+        work: ['Workflow frontend-architecture-audit', 'Agent Survey the repo', 'Loop check CI'],
+        changes: ['effort'],
+      });
+
+      await act(async () => { composer.view.result.current.resolveBackgroundSendPrompt('queue'); });
+      await waitFor(() => assert.equal(appendQueuedMessage.mock.calls.length, 1));
+      assert.equal(appendQueuedMessage.mock.calls[0]?.[1]?.content, 'think harder');
+      assert.equal(composer.sends().length, 1, 'queued, not sent again');
+      assert.equal(composer.view.result.current.input, '');
+      assert.equal(composer.view.result.current.backgroundSendPrompt, null);
+    });
+
+    test('send anyway sends it again without keepBackgroundWork, and cancel leaves the text', async () => {
+      const composer = renderOverLoop();
+      await sendThenRefuseAfterRun(composer);
+      composer.view.rerender({ activity: loopBesideTasks });
+      await waitFor(() => assert.notEqual(composer.view.result.current.backgroundSendPrompt, null));
+      await act(async () => { composer.view.result.current.resolveBackgroundSendPrompt('send'); });
+
+      assert.deepEqual(composer.sends().map((frame) => [frame.content, frame.options?.keepBackgroundWork]), [
+        ['think harder', true],
+        ['think harder', undefined],
+      ]);
+      assert.equal(composer.view.result.current.input, '');
+
+      act(() => {
+        composer.view.result.current.handleSendRefused({
+          sessionId: 'session-1',
+          reason: 'HAND_OVER_FAILED',
+          changes: ['effort'],
+          clientRequestId: composer.sends()[1]?.clientRequestId,
+        });
+      });
+      assert.equal(composer.view.result.current.backgroundSendPrompt, null, 'a send made without keepBackgroundWork is never taken back');
+
+      composer.view.rerender({ activity: onlyLoop });
+      await sendThenRefuseAfterRun(composer);
+      await waitFor(() => assert.notEqual(composer.view.result.current.backgroundSendPrompt, null));
+      await act(async () => { composer.view.result.current.resolveBackgroundSendPrompt('cancel'); });
+      assert.equal(composer.view.result.current.input, 'think harder');
+    });
+  });
 });

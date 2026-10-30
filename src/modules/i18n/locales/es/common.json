@@ -191,27 +191,12 @@
   "projectWizard": {
     "title": "Crear proyecto nuevo",
     "steps": {
-      "type": "Tipo",
       "configure": "Configurar",
       "confirm": "Confirmar"
     },
-    "step1": {
-      "question": "¿Ya tienes un espacio de trabajo o quieres crear uno nuevo?",
-      "existing": {
-        "title": "Espacio de trabajo existente",
-        "description": "Ya tengo un espacio de trabajo en mi servidor y solo necesito añadirlo a la lista de proyectos"
-      },
-      "new": {
-        "title": "Espacio de trabajo nuevo",
-        "description": "Crea un espacio de trabajo nuevo, opcionalmente clonando un repositorio de GitHub"
-      }
-    },
     "step2": {
-      "existingPath": "Ruta del espacio de trabajo",
       "newPath": "Ruta del espacio de trabajo",
-      "existingPlaceholder": "/ruta/al/espacio/existente",
       "newPlaceholder": "/ruta/al/espacio/nuevo",
-      "existingHelp": "Ruta completa al directorio de tu espacio de trabajo existente",
       "newHelp": "Ruta completa al directorio de tu espacio de trabajo",
       "githubUrl": "URL de GitHub (opcional)",
       "githubPlaceholder": "https://github.com/usuario/repositorio",
@@ -233,7 +218,6 @@
     },
     "step3": {
       "reviewConfig": "Revisa tu configuración",
-      "existingWorkspace": "Espacio de trabajo existente",
       "newWorkspace": "Espacio de trabajo nuevo",
       "path": "Ruta:",
       "cloneFrom": "Clonar desde:",
@@ -242,7 +226,6 @@
       "usingProvidedToken": "Usando token proporcionado",
       "noAuthentication": "Sin autenticación",
       "sshKey": "Clave SSH",
-      "existingInfo": "El espacio de trabajo se añadirá a tu lista de proyectos y estará disponible para sesiones de Claude/Cursor.",
       "newWithClone": "El repositorio se clonará desde esta carpeta.",
       "newEmpty": "El espacio de trabajo se añadirá a tu lista de proyectos y estará disponible para sesiones de Claude/Cursor.",
       "cloningRepository": "Clonando repositorio..."
@@ -256,7 +239,6 @@
       "cloning": "Clonando..."
     },
     "errors": {
-      "selectType": "Selecciona si tienes un espacio de trabajo existente o quieres crear uno nuevo",
       "providePath": "Proporciona la ruta del espacio de trabajo",
       "failedToCreate": "No se pudo crear el espacio de trabajo",
       "failedToCreateFolder": "No se pudo crear la carpeta"

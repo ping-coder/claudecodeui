@@ -19,7 +19,8 @@ type SidebarModalsProps = {
   onCloseSettings: () => void;
   showNewProject: boolean;
   onCloseNewProject: () => void;
-  onProjectCreated: () => void;
+  /** Gets the project the wizard created, so the sidebar can open it. */
+  onProjectCreated: (project?: Record<string, unknown>) => void;
   pendingDeletion: PendingSidebarDeletion | null;
   onCancelDeletion: () => void;
   onConfirmDeleteProject: (deleteData?: boolean) => void;

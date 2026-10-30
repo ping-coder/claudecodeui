@@ -139,27 +139,12 @@
   "projectWizard": {
     "title": "Créer un nouveau projet",
     "steps": {
-      "type": "Type",
       "configure": "Configurer",
       "confirm": "Confirmer"
     },
-    "step1": {
-      "question": "Avez-vous déjà un espace de travail, ou souhaitez-vous en créer un nouveau ?",
-      "existing": {
-        "title": "Espace de travail existant",
-        "description": "J'ai déjà un espace de travail sur mon serveur et je veux juste l'ajouter à la liste des projets"
-      },
-      "new": {
-        "title": "Nouvel espace de travail",
-        "description": "Créer un nouvel espace de travail, éventuellement cloné depuis un dépôt GitHub"
-      }
-    },
     "step2": {
-      "existingPath": "Chemin de l'espace de travail",
       "newPath": "Chemin de l'espace de travail",
-      "existingPlaceholder": "/chemin/vers/espace-de-travail",
       "newPlaceholder": "/chemin/vers/nouvel-espace",
-      "existingHelp": "Chemin complet vers votre répertoire d'espace de travail existant",
       "newHelp": "Chemin complet vers votre répertoire d'espace de travail",
       "githubUrl": "URL GitHub (optionnel)",
       "githubPlaceholder": "https://github.com/utilisateur/depot",
@@ -181,7 +166,6 @@
     },
     "step3": {
       "reviewConfig": "Vérifiez votre configuration",
-      "existingWorkspace": "Espace de travail existant",
       "newWorkspace": "Nouvel espace de travail",
       "path": "Chemin :",
       "cloneFrom": "Cloner depuis :",
@@ -190,7 +174,6 @@
       "usingProvidedToken": "Utilisation du token fourni",
       "noAuthentication": "Sans authentification",
       "sshKey": "Clé SSH",
-      "existingInfo": "L'espace de travail sera ajouté à votre liste de projets et disponible pour les sessions Claude/Cursor.",
       "newWithClone": "Le dépôt sera cloné depuis ce dossier.",
       "newEmpty": "L'espace de travail sera ajouté à votre liste de projets et disponible pour les sessions Claude/Cursor.",
       "cloningRepository": "Clonage du dépôt..."
@@ -204,7 +187,6 @@
       "cloning": "Clonage..."
     },
     "errors": {
-      "selectType": "Veuillez indiquer si vous avez un espace de travail existant ou si vous souhaitez en créer un nouveau",
       "providePath": "Veuillez fournir un chemin d'espace de travail",
       "failedToCreate": "Échec de la création de l'espace de travail",
       "failedToCreateFolder": "Échec de la création du dossier"

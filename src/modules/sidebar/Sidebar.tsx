@@ -192,8 +192,17 @@ function Sidebar({
     document.body.classList.toggle('pwa-mode', isPWA);
   }, [isPWA]);
 
-  const handleProjectCreated = () => {
-    void paletteOps.refreshProjects();
+  // The new project joins the list, then opens in a new chat like a click on its New session would,
+  // which selects and expands it in the sidebar.
+  const handleProjectCreated = (createdProject?: Record<string, unknown>) => {
+    void Promise.resolve(paletteOps.refreshProjects()).finally(() => {
+      if (typeof createdProject?.projectId !== 'string') {
+        return;
+      }
+      const project = createdProject as Project;
+      handleProjectSelect(project);
+      onNewSession(project);
+    });
   };
 
   // Stable so memo() on the row components can bail out; an inline arrow here

@@ -1,5 +1,11 @@
 import { api } from '@/shared/api';
-import type { FolderSuggestion, GithubTokenCredential, TokenMode } from '@/shared/types';
+import type {
+  FolderSuggestion,
+  GithubTokenCredential,
+  ProjectTemplateReport,
+  ProjectTemplateSummary,
+  TokenMode,
+} from '@/shared/types';
 
 type CredentialsResponse = {
   credentials?: GithubTokenCredential[];
@@ -22,6 +28,10 @@ type CreateFolderResponse = {
 type CreateProjectPayload = {
   path: string;
   customName?: string;
+  // Left out for Blank, so its request stays exactly what it was before templates.
+  templateId?: string;
+  git?: 'init' | 'none';
+  locale?: string;
 };
 
 type CreateProjectApiError = {
@@ -33,15 +43,27 @@ type CreateProjectApiError = {
 type CreateProjectResponse = {
   success?: boolean;
   project?: Record<string, unknown>;
+  template?: ProjectTemplateReport;
   error?: string | CreateProjectApiError;
   details?: string;
   message?: string;
 };
 
+type ProjectTemplatesResponse = {
+  success?: boolean;
+  data?: { templates?: ProjectTemplateSummary[] };
+  error?: string | CreateProjectApiError;
+};
+
 type CloneProgressEvent = {
   type?: string;
   message?: string;
+  // 'template' marks the server writing the template files after the clone.
+  phase?: string;
+  code?: string;
   project?: Record<string, unknown>;
+  report?: ProjectTemplateReport;
+  template?: ProjectTemplateReport;
 };
 
 type CloneWorkspaceParams = {
@@ -50,11 +72,31 @@ type CloneWorkspaceParams = {
   tokenMode: TokenMode;
   selectedGithubToken: string;
   newGithubToken: string;
+  // Left out for Blank, so its request stays exactly what it was before templates.
+  templateId?: string;
+  locale?: string;
 };
 
 type CloneProgressHandlers = {
   onProgress: (message: string) => void;
+  // The clone is done and the template's files are being written; the wizard says so in its own words.
+  onTemplatePhase?: () => void;
+  // The template's files are in the clone; registration comes next.
+  onTemplate?: (report: ProjectTemplateReport) => void;
 };
+
+/** The created project and, for a template other than Blank, what the template did. */
+type ProjectCreationResult = {
+  project?: Record<string, unknown>;
+  template?: ProjectTemplateReport;
+};
+
+/** An Error that keeps the server's structured code, so the wizard can show its own text for codes it knows. */
+const createCodedError = (message: string, code: unknown): Error & { code?: string } =>
+  Object.assign(new Error(message), typeof code === 'string' ? { code } : {});
+
+const readErrorCode = (error: CreateProjectResponse['error']): string | undefined =>
+  error && typeof error === 'object' && typeof error.code === 'string' ? error.code : undefined;
 
 const parseJson = async <T>(response: Response): Promise<T> => {
   const data = (await response.json()) as T;
@@ -133,15 +175,31 @@ export const createFolderInFilesystem = async (folderPath: string) => {
   return data.path || folderPath;
 };
 
-export const createProjectRequest = async (payload: CreateProjectPayload) => {
+export const fetchProjectTemplates = async (): Promise<ProjectTemplateSummary[]> => {
+  const response = await api.projectTemplates();
+  const data = await parseJson<ProjectTemplatesResponse>(response);
+  const templates = data.data?.templates;
+
+  if (!response.ok || !Array.isArray(templates)) {
+    const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
+    throw new Error(errorMessage || 'Failed to load project templates');
+  }
+
+  return templates;
+};
+
+export const createProjectRequest = async (payload: CreateProjectPayload): Promise<ProjectCreationResult> => {
   const response = await api.createProject(payload);
   const data = await parseJson<CreateProjectResponse>(response);
 
   if (!response.ok) {
-    throw new Error(resolveCreateProjectErrorMessage(data) || 'Failed to create project');
+    throw createCodedError(
+      resolveCreateProjectErrorMessage(data) || 'Failed to create project',
+      readErrorCode(data.error),
+    );
   }
 
-  return data.project;
+  return { project: data.project, template: data.template };
 };
 
 type StartCloneResponse = {
@@ -157,18 +215,21 @@ const startClone = async ({
   tokenMode,
   selectedGithubToken,
   newGithubToken,
+  templateId,
+  locale,
 }: CloneWorkspaceParams) => {
   const response = await api.startProjectClone({
     path: workspacePath.trim(),
     githubUrl: githubUrl.trim(),
     githubTokenId: tokenMode === 'stored' && selectedGithubToken ? Number(selectedGithubToken) : null,
     newGithubToken: tokenMode === 'new' ? newGithubToken.trim() : null,
+    ...(templateId ? { templateId, locale } : {}),
   });
   const data = await parseJson<StartCloneResponse>(response);
 
   if (!response.ok || !data.cloneId) {
     const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
-    throw new Error(errorMessage || 'Failed to start clone');
+    throw createCodedError(errorMessage || 'Failed to start clone', readErrorCode(data.error));
   }
 
   return data.cloneId;
@@ -178,9 +239,11 @@ const streamCloneProgress = (
   cloneId: string,
   handlers: CloneProgressHandlers,
 ) =>
-  new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+  new Promise<ProjectCreationResult>((resolve, reject) => {
     const eventSource = new EventSource(api.cloneProjectProgressUrl({ cloneId }));
     let settled = false;
+    // `complete` carries the report too; this keeps the one the template event delivered in case it does not.
+    let templateReport: ProjectTemplateReport | undefined;
 
     const settle = (callback: () => void) => {
       if (settled) {
@@ -195,18 +258,29 @@ const streamCloneProgress = (
       try {
         const payload = JSON.parse(event.data) as CloneProgressEvent;
 
+        if (payload.type === 'progress' && payload.phase === 'template') {
+          handlers.onTemplatePhase?.();
+          return;
+        }
+
         if (payload.type === 'progress' && payload.message) {
           handlers.onProgress(payload.message);
           return;
         }
 
+        if (payload.type === 'template' && payload.report) {
+          templateReport = payload.report;
+          handlers.onTemplate?.(payload.report);
+          return;
+        }
+
         if (payload.type === 'complete') {
-          settle(() => resolve(payload.project));
+          settle(() => resolve({ project: payload.project, template: payload.template ?? templateReport }));
           return;
         }
 
         if (payload.type === 'error') {
-          settle(() => reject(new Error(payload.message || 'Failed to clone repository')));
+          settle(() => reject(createCodedError(payload.message || 'Failed to clone repository', payload.code)));
         }
       } catch (error) {
         console.error('Error parsing clone progress event:', error);

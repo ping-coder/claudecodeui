@@ -139,27 +139,12 @@
   "projectWizard": {
     "title": "Yeni Proje Oluştur",
     "steps": {
-      "type": "Tür",
       "configure": "Yapılandır",
       "confirm": "Onayla"
     },
-    "step1": {
-      "question": "Zaten bir çalışma alanın var mı, yoksa yeni bir tane mi oluşturmak istersin?",
-      "existing": {
-        "title": "Mevcut Çalışma Alanı",
-        "description": "Sunucumda zaten bir çalışma alanım var, sadece proje listesine eklemek istiyorum"
-      },
-      "new": {
-        "title": "Yeni Çalışma Alanı",
-        "description": "Yeni bir çalışma alanı oluştur, istersen bir GitHub deposundan klonla"
-      }
-    },
     "step2": {
-      "existingPath": "Çalışma Alanı Yolu",
       "newPath": "Çalışma Alanı Yolu",
-      "existingPlaceholder": "/mevcut/calisma-alani/yolu",
       "newPlaceholder": "/yeni/calisma-alani/yolu",
-      "existingHelp": "Mevcut çalışma alanı dizinine giden tam yol",
       "newHelp": "Çalışma alanı dizinine giden tam yol",
       "githubUrl": "GitHub URL'si (İsteğe Bağlı)",
       "githubPlaceholder": "https://github.com/kullanici/depo",
@@ -181,7 +166,6 @@
     },
     "step3": {
       "reviewConfig": "Yapılandırmanı Gözden Geçir",
-      "existingWorkspace": "Mevcut Çalışma Alanı",
       "newWorkspace": "Yeni Çalışma Alanı",
       "path": "Yol:",
       "cloneFrom": "Şuradan Klonla:",
@@ -190,7 +174,6 @@
       "usingProvidedToken": "Girilen token kullanılıyor",
       "noAuthentication": "Kimlik doğrulama yok",
       "sshKey": "SSH Anahtarı",
-      "existingInfo": "Çalışma alanı proje listene eklenecek ve Claude/Cursor oturumları için kullanılabilir olacak.",
       "newWithClone": "Depo bu klasöre klonlanacak.",
       "newEmpty": "Çalışma alanı proje listene eklenecek ve Claude/Cursor oturumları için kullanılabilir olacak.",
       "cloningRepository": "Depo klonlanıyor..."
@@ -204,7 +187,6 @@
       "cloning": "Klonlanıyor..."
     },
     "errors": {
-      "selectType": "Lütfen mevcut çalışma alanın olduğunu mu yoksa yeni oluşturmak mı istediğini seç",
       "providePath": "Lütfen bir çalışma alanı yolu gir",
       "failedToCreate": "Çalışma alanı oluşturulamadı",
       "failedToCreateFolder": "Klasör oluşturulamadı"

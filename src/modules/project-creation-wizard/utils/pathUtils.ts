@@ -46,3 +46,10 @@ export const joinFolderPath = (basePath: string, folderName: string): string => 
     normalizedBasePath.includes('\\') && !normalizedBasePath.includes('/') ? '\\' : '/';
   return `${normalizedBasePath}${separator}${folderName.trim()}`;
 };
+
+// Same rule as the server's clone: the URL's last segment, without trailing slashes or ".git", inside the chosen folder.
+export const getCloneTargetPath = (workspacePath: string, githubUrl: string): string => {
+  const sanitizedUrl = githubUrl.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const repoName = sanitizedUrl.split('/').pop() || 'repository';
+  return joinFolderPath(workspacePath, repoName);
+};

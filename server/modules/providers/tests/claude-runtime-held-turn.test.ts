@@ -30,7 +30,7 @@ import {
   stopClaudeSDKTask,
 } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { chatRunRegistry, connectedClients } from '@/modules/websocket/index.js';
-import type { NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
+import type { NormalizedMessage, ProviderRuntimeContext, ScheduleHoldRecord } from '@/shared/types.js';
 
 /**
  * A turn that has completed while its process is held open for background
@@ -4656,5 +4656,215 @@ test('a process launched skipping permissions may switch to bypassPermissions fo
     });
   } finally {
     await finish(held, next ? [next.run] : []);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A permission mode the CLI changes on its own, as Claude leaves plan mode.
+// ---------------------------------------------------------------------------
+
+/** What CLI 2.1.312 writes whenever its permission mode changes, by a switch sent to it or on its own. */
+const permissionModeStatus = (mode: string) => ({
+  type: 'system', subtype: 'status', status: null, permissionMode: mode, uuid: randomUUID(), session_id: NATIVE_ID,
+});
+
+/**
+ * Claude calls ExitPlanMode in the turn under way and the user approves the
+ * plan, asked through the run of that turn (`writer`). The CLI then runs the
+ * tool, which takes it back to the mode it had before plan mode (`mode`),
+ * and reports that mode ahead of the tool's result.
+ */
+async function leavePlanMode(held: HeldRun, writer: Writer, mode = 'default'): Promise<void> {
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  const input = { plan: '1. Fix the failing test' };
+  const asked = () => writer.sent.filter((message) => message.kind === 'permission_request' && message.toolName === 'ExitPlanMode');
+  const before = asked().length;
+  held.script.emit(toolUse('toolu_exit_plan', 'ExitPlanMode', input));
+  const answer = canUseTool('ExitPlanMode', input, {});
+  await waitUntil(() => asked().length === before + 1);
+  claudeRuntime.permissions.resolve(String(asked()[before]?.requestId), { allow: true });
+  assert.equal((await answer).behavior, 'allow');
+  held.script.emit(permissionModeStatus(mode));
+  held.script.emit(toolResult('toolu_exit_plan', 'User has approved your plan. You can now start coding.'));
+  await flush();
+}
+
+/**
+ * Whether the run's permission checks ask the user before `tool`, through
+ * the run of the turn under way (`writer`), rather than allow it; the
+ * question is answered no.
+ */
+async function asksBefore(canUseTool: CanUseTool, writer: Writer, tool: string): Promise<boolean> {
+  const asked = () => writer.sent.filter((message) => message.kind === 'permission_request');
+  const before = asked().length;
+  const answer = canUseTool(tool, {}, {});
+  await flush();
+  const request = asked()[before];
+  if (request) {
+    claudeRuntime.permissions.resolve(String(request.requestId), { allow: false });
+  }
+  await answer;
+  return request?.toolName === tool;
+}
+
+test('once Claude leaves plan mode with an approved ExitPlanMode, the held process is weighed in the mode the CLI reports, and a turn switched for itself goes back to that mode', async () => {
+  // A loop started in plan mode.
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { permissionMode: 'plan', ...toolsSettings([], [], false) });
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  const plan = (permissionMode: string) => claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, permissionMode }, INHERIT_UNSET);
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    assert.deepEqual(await plan('default'), { ...STILL_HELD, switches: ['permissionMode'] }, 'in plan mode, a turn in the default mode switches it');
+
+    // The job fires, and in its turn Claude leaves plan mode.
+    held.script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+    held.script.emit(init());
+    await leavePlanMode(held, held.first);
+    held.script.emit(result());
+    await flush();
+    assert.equal(held.script.released(), false, 'the job still holds the process');
+
+    assert.deepEqual(await plan('default'), STILL_HELD, 'a turn in the default mode switches nothing');
+    assert.deepEqual(await plan('plan'), { ...STILL_HELD, switches: ['permissionMode'] }, 'one in plan mode switches it');
+    assert.equal(await asksBefore(canUseTool, held.first, 'WebFetch'), true, 'what plan mode allows is asked about again');
+    const stop = await claudeRuntime.stopScheduledWork(held.sessionId, 'cron:b2148320');
+    assert.equal(stop.status, 'turn');
+    assert.deepEqual(stop.status === 'turn' ? stop.options : null, { inheritUnset: true }, 'the stop turn needs no switch out of plan mode');
+
+    // A message in the default mode, its switches for its turn alone, goes in as it is.
+    const plain = await runHandedOverTurn(held, 'Fix it', () => {}, { permissionMode: 'default', ...INHERIT_UNSET, ...RESTORE });
+    runs.push(plain.run);
+    assert.deepEqual(switchCalls(held), [], 'nothing is switched, nor back into plan mode after it');
+
+    // One in plan mode runs in it, and the process goes back to the default mode after it.
+    const planned = await runHandedOverTurn(held, 'Plan the next step', () => {
+      held.script.emit(permissionModeStatus('plan'));
+    }, { permissionMode: 'plan', ...INHERIT_UNSET, ...RESTORE });
+    runs.push(planned.run);
+    held.script.emit(permissionModeStatus('default'));
+    await flush();
+    assert.deepEqual(switchCalls(held), ['setPermissionMode:plan', 'setPermissionMode:default']);
+    assert.deepEqual(await plan('default'), STILL_HELD);
+    assert.equal(await asksBefore(canUseTool, planned.writer, 'WebFetch'), true);
+    assert.equal(held.script.released(), false);
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a turn switched into plan mode for itself that Claude leaves with an approved ExitPlanMode asks before tools from then on, and the process goes back to its own mode after it', async () => {
+  const held = await startHeldRun(announcingPrompt((script) => createCronJob(script, 'b2148320')), { permissionMode: 'acceptEdits', ...toolsSettings([], [], false) });
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  const restored: unknown[] = [];
+  const next = sendNext(held, 'Plan the fix, then make it', {
+    permissionMode: 'plan', ...INHERIT_UNSET, ...RESTORE,
+    onSwitchesRestored: (switchedBack: unknown) => { restored.push(switchedBack); },
+  });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(permissionModeStatus('plan'));
+    held.script.emit(echo(promptUuid(held, 1), 'Plan the fix, then make it'));
+    await flush();
+    assert.equal(await asksBefore(canUseTool, next.writer, 'WebFetch'), false, 'in plan mode, what plan mode allows is allowed');
+
+    // The CLI goes back to the mode it had before plan mode.
+    await leavePlanMode(held, next.writer, 'acceptEdits');
+    assert.equal(await asksBefore(canUseTool, next.writer, 'WebFetch'), true, 'the rest of the turn asks');
+
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    await flush();
+    assert.deepEqual(switchCalls(held), ['setPermissionMode:plan', 'setPermissionMode:acceptEdits'], 'switched back after the turn');
+    assert.deepEqual(restored, [{ model: null, permissionMode: 'acceptEdits' }]);
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, permissionMode: 'acceptEdits' }, INHERIT_UNSET),
+      STILL_HELD,
+    );
+    assert.equal(held.script.released(), false, 'the job still holds the process');
+  } finally {
+    await finish(held, [next.run]);
+  }
+});
+
+/** A context that keeps every record of a hold for scheduled work the run saves, in order. */
+function createSavedHoldsContext() {
+  const saved: ScheduleHoldRecord[] = [];
+  const context = createContext({ scheduleHolds: { save: (record) => { saved.push(record); }, remove: () => {} } });
+  const launchMode = () => {
+    const launchOptions = saved[saved.length - 1]?.launchOptions;
+    return launchOptions ? { permissionMode: launchOptions.permissionMode, skipPermissions: launchOptions.skipPermissions } : null;
+  };
+  return { context, launchMode };
+}
+
+test('a loop started in plan mode skipping permissions that Claude takes out of plan mode asks before tools: neither the stop turn, nor a turn that inherits the settings, nor the record of the hold asks for bypassPermissions', async () => {
+  const { context, launchMode } = createSavedHoldsContext();
+  const held = await startHeldRun(
+    announcingPrompt((script) => { createCronJob(script, 'b2148320'); createCronJob(script, 'c3159431'); }),
+    { permissionMode: 'plan', ...toolsSettings([], [], true) },
+    { context },
+  );
+  const canUseTool = held.script.options()?.canUseTool as CanUseTool;
+  const runs: Array<Promise<unknown>> = [];
+  try {
+    assert.deepEqual(launchMode(), { permissionMode: 'plan', skipPermissions: true });
+
+    // A job fires, and in its turn Claude leaves plan mode for the default mode.
+    held.script.emit(lifecycle(randomUUID(), 'started', { wakeup_source: 'schedule_wakeup' }));
+    held.script.emit(init());
+    await leavePlanMode(held, held.first);
+    held.script.emit(result());
+    await flush();
+    assert.deepEqual(launchMode(), { permissionMode: 'default', skipPermissions: false }, 'a revived loop launches in the default mode');
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd }, INHERIT_UNSET),
+      STILL_HELD,
+      'a turn that inherits every setting switches nothing',
+    );
+
+    // The user stops one of the two jobs.
+    const stop = await claudeRuntime.stopScheduledWork(held.sessionId, 'cron:b2148320');
+    const stopOptions = stop.status === 'turn' ? stop.options : null;
+    assert.deepEqual(stopOptions, { inheritUnset: true });
+    const stopTurn = await runHandedOverTurn(held, 'Cancel the job', () => {}, stopOptions ?? {});
+    runs.push(stopTurn.run);
+    assert.deepEqual(switchCalls(held), [], 'the stop turn runs in the default mode, and leaves the process in it');
+    assert.equal(await asksBefore(canUseTool, stopTurn.writer, 'Bash'), true, 'the next fire asks before tools');
+
+    // The user still skips permissions: a turn that says so switches to bypassPermissions.
+    assert.deepEqual(
+      await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd, permissionMode: 'default', ...toolsSettings([], [], true) }, INHERIT_UNSET),
+      { ...STILL_HELD, switches: ['permissionMode'] },
+    );
+    assert.equal(held.script.released(), false, 'the other job still holds the process');
+  } finally {
+    await finish(held, runs);
+  }
+});
+
+test('a message in plan mode, switches for its turn alone, that Claude takes out of plan mode leaves a process launched skipping permissions in the default mode, asking before tools', async () => {
+  const { context, launchMode } = createSavedHoldsContext();
+  const held = await startHeldRun(
+    announcingPrompt((script) => createCronJob(script, 'b2148320')),
+    { permissionMode: 'plan', ...toolsSettings([], [], true) },
+    { context },
+  );
+  const next = sendNext(held, 'Plan the fix, then make it', { permissionMode: 'plan', ...INHERIT_UNSET, ...RESTORE });
+  try {
+    await waitUntil(() => held.script.prompts.length === 2);
+    held.script.emit(echo(promptUuid(held, 1), 'Plan the fix, then make it'));
+    await leavePlanMode(held, next.writer);
+    held.script.emit(resultFor([promptUuid(held, 1)]));
+    await waitUntil(() => next.settled());
+    await flush();
+
+    assert.deepEqual(switchCalls(held), [], 'the turn switched nothing, so the mode Claude left it in stays');
+    assert.deepEqual(launchMode(), { permissionMode: 'default', skipPermissions: false });
+    assert.deepEqual(await claudeRuntime.planHandOver(held.sessionId, { sessionId: held.sessionId, cwd: held.cwd }, INHERIT_UNSET), STILL_HELD);
+    const stop = await claudeRuntime.stopScheduledWork(held.sessionId, 'cron:b2148320');
+    assert.deepEqual(stop.status === 'turn' ? stop.options : null, { inheritUnset: true });
+    assert.equal(held.script.released(), false, 'the job still holds the process');
+  } finally {
+    await finish(held, [next.run]);
   }
 });

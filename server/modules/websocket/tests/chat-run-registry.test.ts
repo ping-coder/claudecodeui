@@ -929,6 +929,67 @@ test('listRecentRunEnds lists ends oldest first and forgets them after 10 minute
   });
 });
 
+test('listSendRefusals hands a session the refusals kept for a user oldest first, for an hour, at most 100 across sessions, whatever becomes of its runs', async () => {
+  await withIsolatedDatabase(() => {
+    let now = 1_800_000_000_000;
+    const clock = mock.method(Date, 'now', () => now);
+    try {
+      const start = now;
+      chatRunRegistry.keepSendRefusal('app-a', 1, { kind: 'send_refused', clientRequestId: 'a1' });
+      now = start + 1_000;
+      chatRunRegistry.keepSendRefusal('app-b', 1, { kind: 'send_refused', clientRequestId: 'b1' });
+      now = start + 2_000;
+      chatRunRegistry.keepSendRefusal('app-a', 1, { kind: 'send_refused', clientRequestId: 'a2' });
+      const idsOf = (appSessionId: string, userId: string | number | null = 1) => chatRunRegistry
+        .listSendRefusals(appSessionId, userId)
+        .map((frame) => (frame as { clientRequestId?: string }).clientRequestId);
+      assert.deepEqual(idsOf('app-a'), ['a1', 'a2']);
+      assert.deepEqual(idsOf('app-b'), ['b1']);
+      assert.deepEqual(idsOf('app-c'), []);
+      // Another user's subscribe gets none of them.
+      assert.deepEqual(idsOf('app-a', 2), []);
+      assert.deepEqual(idsOf('app-a', null), []);
+
+      // No run of the session is needed, nor dropped by a run coming and going.
+      sessionsDb.createAppSession('app-a', 'claude', '/workspace/demo');
+      const run = chatRunRegistry.startRun({
+        appSessionId: 'app-a',
+        provider: 'claude',
+        providerSessionId: null,
+        connection: null,
+        userId: null,
+      });
+      assert.ok(run);
+      run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'native', exitCode: 0 });
+      assert.deepEqual(idsOf('app-a'), ['a1', 'a2']);
+
+      // An hour old is still kept; a millisecond more is not.
+      now = start + 60 * 60 * 1000;
+      assert.deepEqual(idsOf('app-a'), ['a1', 'a2']);
+      now += 1;
+      assert.deepEqual(idsOf('app-a'), ['a2']);
+      assert.deepEqual(idsOf('app-b'), ['b1']);
+
+      // Past 100, the oldest go first, whichever session they are about.
+      chatRunRegistry.clearAll();
+      assert.deepEqual(idsOf('app-a'), []);
+      for (let index = 0; index < 101; index += 1) {
+        chatRunRegistry.keepSendRefusal(index === 0 ? 'app-b' : 'app-a', 1, { kind: 'send_refused', clientRequestId: `r${index}` });
+      }
+      assert.deepEqual(idsOf('app-b'), []);
+      const kept = idsOf('app-a');
+      assert.equal(kept.length, 100);
+      assert.equal(kept[0], 'r1');
+      assert.equal(kept.at(-1), 'r100');
+
+      chatRunRegistry.clearAll();
+      assert.deepEqual(idsOf('app-a'), []);
+    } finally {
+      clock.mock.restore();
+    }
+  });
+});
+
 test('abortRun aborts a running run through the runtime and completes it as aborted; with no run running it does nothing', async () => {
   await withIsolatedDatabase(async () => {
     const aborts: string[] = [];

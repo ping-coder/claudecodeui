@@ -129,8 +129,17 @@ async function withGateway(
   }
 }
 
-/** The handler is async and the socket listener does not await it. */
-const settle = () => new Promise((resolve) => { setTimeout(resolve, 30); });
+/**
+ * The handler is async and the socket listener does not await it: waits until
+ * what the test expects has happened (a run, a frame), polling up to 2 s, so a
+ * slow machine does not fail it. A fixed 30 ms wait did, under load.
+ */
+const settle = async (done: () => boolean) => {
+  const deadline = Date.now() + 2000;
+  while (!done() && Date.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+  }
+};
 
 test('an edit resumes through the turn before the one being replaced', async () => {
   await withGateway('claude', async ({ socket, runs }) => {
@@ -140,7 +149,7 @@ test('an edit resumes through the turn before the one being replaced', async () 
       anchorId: 'e-u2',
       content: 'a better second prompt',
     }));
-    await settle();
+    await settle(() => runs.length >= 1);
 
     assert.equal(runs.length, 1);
     assert.equal(runs[0].command, 'a better second prompt');
@@ -159,7 +168,7 @@ test('an edit that carries acceptProcessSettings runs without it: only the sched
       content: 'a better second prompt',
       options: { effort: 'max', acceptProcessSettings: true },
     }));
-    await settle();
+    await settle(() => runs.length >= 1);
 
     assert.equal(runs.length, 1);
     assert.equal('acceptProcessSettings' in runs[0].options, false);
@@ -175,7 +184,7 @@ test('editing the first prompt starts the conversation over', async () => {
       anchorId: 'e-u1',
       content: 'a better first prompt',
     }));
-    await settle();
+    await settle(() => runs.length >= 1);
 
     assert.equal(runs.length, 1);
     assert.equal(runs[0].options.resumeAnchorId, undefined);
@@ -191,7 +200,7 @@ test('every subscribed client is told to drop the superseded turns', async () =>
       anchorId: 'e-u2',
       content: 'replacement',
     }));
-    await settle();
+    await settle(() => socket.frames.some((frame) => frame.kind === 'history_truncated'));
 
     const truncation = socket.frames.find((frame) => frame.kind === 'history_truncated');
     assert.ok(truncation, 'a history_truncated frame is emitted');
@@ -209,7 +218,7 @@ test('an edit without an anchor is refused', async () => {
       sessionId: SESSION_ID,
       content: 'no anchor',
     }));
-    await settle();
+    await settle(() => socket.frames.at(-1)?.code === 'ANCHOR_REQUIRED');
 
     assert.equal(runs.length, 0);
     assert.equal(socket.frames.at(-1)?.code, 'ANCHOR_REQUIRED');
@@ -224,7 +233,7 @@ test('an anchor the transcript does not hold is refused', async () => {
       anchorId: 'not-in-transcript',
       content: 'replacement',
     }));
-    await settle();
+    await settle(() => socket.frames.at(-1)?.code === 'ANCHOR_NOT_FOUND');
 
     assert.equal(runs.length, 0);
     assert.equal(socket.frames.at(-1)?.code, 'ANCHOR_NOT_FOUND');
@@ -239,7 +248,7 @@ test('a provider that cannot re-run from a point is refused rather than sending 
       anchorId: 'e-u2',
       content: 'replacement',
     }));
-    await settle();
+    await settle(() => socket.frames.at(-1)?.code === 'EDIT_NOT_SUPPORTED');
 
     assert.equal(runs.length, 0);
     assert.equal(socket.frames.at(-1)?.code, 'EDIT_NOT_SUPPORTED');
@@ -263,7 +272,7 @@ test('a refused send never rewinds the conversation', async () => {
         sessionId: SESSION_ID,
         content: 'a turn that is already running',
       }));
-      await settle();
+      await settle(() => runs.length >= 1);
       assert.equal(runs.length, 1);
 
       socket.emit('message', JSON.stringify({
@@ -272,7 +281,7 @@ test('a refused send never rewinds the conversation', async () => {
         anchorId: 'turn-b',
         content: 'an edit that arrives too late',
       }));
-      await settle();
+      await settle(() => socket.frames.at(-1)?.code === 'RUN_IN_PROGRESS');
     } finally {
       sessionsService.rewindSessionForEdit = realRewind;
     }
@@ -304,7 +313,7 @@ test('a provider that has to branch to rewind is rewound before the run, not dur
         anchorId: 'turn-b',
         content: 'a better second prompt',
       }));
-      await settle();
+      await settle(() => runs.length >= 1);
     } finally {
       sessionsService.rewindSessionForEdit = realRewind;
     }

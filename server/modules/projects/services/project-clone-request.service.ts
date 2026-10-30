@@ -5,6 +5,8 @@ export type PendingCloneRequest = {
   githubUrl: string;
   githubTokenId: number | null;
   newGithubToken: string | null;
+  templateId: string | null;
+  locale: string | null;
 };
 
 export type PendingCloneRequests = {

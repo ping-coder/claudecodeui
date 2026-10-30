@@ -11,7 +11,7 @@ import { ChatInstancesProvider } from '@/modules/chat/context/ChatInstancesConte
 import { SessionProtectionProvider, useSessionProtectionActions } from '@/shared/context/SessionProtectionContext';
 import { WorkspacePaneProvider } from '@/shared/context/WorkspacePaneContext';
 import { resetChatDrafts } from '@/shared/chatDrafts';
-import type { BackgroundSendPrompt, OwnInsert, PendingInsert, Project, ProjectSession, ServerEvent, WorkspacePaneSide } from '@/shared/types';
+import type { BackgroundSendPrompt, OwnInsert, PendingInsert, Project, ProjectSession, ScheduledWorkSummary, ServerEvent, WorkspacePaneSide } from '@/shared/types';
 
 /**
  * The real chats, composer state included, on one socket: an insert typed in
@@ -332,6 +332,167 @@ describe('a send the server refuses to run beside the background work', () => {
     await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
     assert.equal(composerText('left'), 'and check the logs');
     assert.equal(page.sent.filter(({ message }) => message.type === 'chat.send').length, 1);
+  });
+});
+
+describe('a send whose run fails at the hand-over, the loop\'s fire having started a task while it waited', () => {
+  const loop: ScheduledWorkSummary = {
+    id: 'cron:b2148320',
+    kind: 'cron',
+    toolUseId: 'toolu_cron_1',
+    prompt: 'check CI',
+    startedAt: 1,
+    nextFireAt: 300_001,
+    recurring: true,
+    holdUntil: 691_200_001,
+    cron: '*/5 * * * *',
+  };
+  const failure = 'Not sent: the turn Claude ran on its own meanwhile started work a new process would stop.';
+
+  it('comes back in the pane that sent it once the run is over, and the dialog lists the work as the page hears of it', async () => {
+    await renderWorkspace(['left', 'right']);
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [], [loop]);
+    });
+
+    const textarea = pane('left').getByRole('textbox', { name: 'Message' });
+    fireEvent.change(textarea, { target: { value: 'and check the logs' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    const sends = () => page.sent.filter(({ message }) => message.type === 'chat.send');
+    await waitFor(() => assert.equal(sends().length, 1));
+    assert.equal((sends()[0]?.message.options as Record<string, unknown> | undefined)?.keepBackgroundWork, true);
+    assert.deepEqual(transcript('left'), ['and check the logs']);
+
+    // The run: its turn waited for the loop's fire, which started a task, so
+    // the runtime failed it rather than stop that task; then the refusal.
+    dispatch({ kind: 'error', id: 'e1', sessionId: 'session-a', seq: 1, code: 'HAND_OVER_FAILED', reason: 'work-started', changes: ['effort'], content: failure });
+    dispatch({ kind: 'complete', id: 'c1', sessionId: 'session-a', seq: 2, exitCode: 1 });
+    dispatch({
+      kind: 'send_refused',
+      sessionId: 'session-a',
+      reason: 'HAND_OVER_FAILED',
+      changes: ['effort'],
+      content: 'and check the logs',
+      clientRequestId: sends()[0]?.message.clientRequestId,
+    });
+
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'changes: effort'));
+    assert.equal(backgroundSendPrompt('right'), 'closed');
+    assert.deepEqual(transcript('left'), [failure], 'the echo goes, the failure stays');
+    assert.equal(composerText('left'), 'and check the logs');
+    const dialog = () => {
+      const [only, ...others] = Array.from(document.body.querySelectorAll<HTMLElement>('[role="dialog"]'));
+      assert.equal(others.length, 0);
+      assert.ok(only, 'a dialog is open');
+      return within(only);
+    };
+    assert.equal(dialog().queryByRole('button', { name: 'Queue' }) === null, true, 'the loop alone leaves nothing to queue behind');
+
+    // The page hears of the task the fire started.
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [
+        { taskId: 'b1', toolUseId: 'toolu_bash', taskType: 'local_bash', description: 'Run the e2e suite', startedAt: 2 },
+      ], [loop]);
+    });
+    await waitFor(() => assert.equal(dialog().queryByText('Command Run the e2e suite') === null, false));
+    fireEvent.click(dialog().getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
+    await settle();
+    assert.equal(composerText('left'), '');
+    assert.equal(sends().length, 1, 'queued, not sent again');
+  });
+
+  it('comes back as well when the page reconnected while the turn waited for the fire', async () => {
+    await renderWorkspace(['left', 'right']);
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [], [loop]);
+    });
+
+    const textarea = pane('left').getByRole('textbox', { name: 'Message' });
+    fireEvent.change(textarea, { target: { value: 'and check the logs' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    const sends = () => page.sent.filter(({ message }) => message.type === 'chat.send');
+    await waitFor(() => assert.equal(sends().length, 1));
+
+    // The socket drops while the turn waits. Back online, the chats re-read
+    // the session and subscribe again; the run is still under way.
+    dispatch({ kind: 'websocket_reconnected' });
+    await settle();
+    assert.equal(page.sent.some(({ message }) => message.type === 'chat.subscribe'), true);
+    dispatch({ kind: 'chat_subscribed', sessionId: 'session-a', isProcessing: true, lastSeq: 0, pendingPermissions: [] });
+    await settle();
+    assert.equal(composerText('left'), '', 'the message is still out');
+
+    // The new socket watches the run, and hears its end and the refusal.
+    dispatch({ kind: 'error', id: 'e1', sessionId: 'session-a', seq: 1, code: 'HAND_OVER_FAILED', reason: 'work-started', changes: ['effort'], content: failure });
+    dispatch({ kind: 'complete', id: 'c1', sessionId: 'session-a', seq: 2, exitCode: 1 });
+    dispatch({
+      kind: 'send_refused',
+      sessionId: 'session-a',
+      reason: 'HAND_OVER_FAILED',
+      changes: ['effort'],
+      content: 'and check the logs',
+      clientRequestId: sends()[0]?.message.clientRequestId,
+    });
+
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'changes: effort'));
+    assert.equal(backgroundSendPrompt('right'), 'closed');
+    assert.deepEqual(transcript('left'), [failure], 'the echo goes, the failure stays');
+    assert.equal(composerText('left'), 'and check the logs');
+
+    fireEvent.click(pane('left').getByRole('button', { name: 'Cancel the prompt' }));
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
+    assert.equal(composerText('left'), 'and check the logs');
+    assert.equal(sends().length, 1);
+  });
+
+  it('comes back once the page subscribes again when it was offline as the run failed, and the same refusal on a later subscribe changes nothing', async () => {
+    await renderWorkspace(['left', 'right']);
+    act(() => {
+      activity.actions?.markSessionBackground('session-a', [], [loop]);
+    });
+
+    const textarea = pane('left').getByRole('textbox', { name: 'Message' });
+    fireEvent.change(textarea, { target: { value: 'and check the logs' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    const sends = () => page.sent.filter(({ message }) => message.type === 'chat.send');
+    await waitFor(() => assert.equal(sends().length, 1));
+    const refusal = {
+      kind: 'send_refused',
+      sessionId: 'session-a',
+      reason: 'HAND_OVER_FAILED',
+      changes: ['effort'],
+      content: 'and check the logs',
+      clientRequestId: sends()[0]?.message.clientRequestId,
+    };
+
+    // The page was offline while the turn waited and failed, so it heard
+    // neither the run's end nor the refusal. Back online, the chats subscribe
+    // again: the run is over, and the server sends the refusal it kept after
+    // the ack.
+    dispatch({ kind: 'websocket_reconnected' });
+    await settle();
+    assert.equal(page.sent.some(({ message }) => message.type === 'chat.subscribe'), true);
+    dispatch({ kind: 'chat_subscribed', sessionId: 'session-a', isProcessing: false, lastSeq: 2, pendingPermissions: [] });
+    dispatch(refusal);
+
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'changes: effort'));
+    assert.equal(backgroundSendPrompt('right'), 'closed');
+    assert.deepEqual(transcript('left'), [], 'the echo goes');
+    assert.equal(composerText('left'), 'and check the logs');
+
+    fireEvent.click(pane('left').getByRole('button', { name: 'Cancel the prompt' }));
+    await waitFor(() => assert.equal(backgroundSendPrompt('left'), 'closed'));
+
+    // The next subscribe brings the same refusal again, already answered.
+    dispatch({ kind: 'chat_subscribed', sessionId: 'session-a', isProcessing: false, lastSeq: 2, pendingPermissions: [] });
+    dispatch(refusal);
+    await settle();
+    assert.equal(backgroundSendPrompt('left'), 'closed');
+    assert.equal(backgroundSendPrompt('right'), 'closed');
+    assert.equal(composerText('left'), 'and check the logs', 'not put back a second time');
+    assert.equal(sends().length, 1);
   });
 });
 

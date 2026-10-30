@@ -162,6 +162,17 @@ export class ChatSessionWriter {
   }
 
   /**
+   * Sends one of the gateway's own frames to every open socket watching the
+   * run, outside the run's stream: no `seq`, no session id remap, nothing in
+   * the replay buffer. For an answer to the request that started the run that
+   * comes only once the run is over, when a reconnect may have replaced the
+   * socket that asked with one that subscribed meanwhile.
+   */
+  sendToAudience(frame: object): void {
+    this.forward(frame);
+  }
+
+  /**
    * Called by a provider runtime (today only Claude's) when the background work
    * a completed turn left behind has finished and the CLI's follow-up turn has
    * reported, right where it sends the `run.background_completed` notification.
@@ -224,7 +235,7 @@ export class ChatSessionWriter {
     this.options.onProviderSessionId(providerSessionId);
   }
 
-  private forward(message: NormalizedMessage): void {
+  private forward(message: object): void {
     const payload = JSON.stringify(message);
 
     // Sending is also when dead sockets get collected: a refreshed tab leaves
