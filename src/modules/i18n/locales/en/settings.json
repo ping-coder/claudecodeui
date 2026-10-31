@@ -167,6 +167,43 @@
       "dismissed": "Notifications were not allowed. Click Enable notifications again and choose Allow when the browser asks.",
       "failed": "Couldn't turn on push notifications for this browser. Try again later."
     },
+    "test": {
+      "title": "Test notifications",
+      "description": "Sends one notification from this page and, if push is on for this browser, one through push, then says what became of each.",
+      "send": "Send test notification",
+      "notificationTitle": "CloudCLI test",
+      "localBody": "Sent by this page. If you see this, system notifications work.",
+      "pushBody": "Sent through push. If you see this, push works.",
+      "localLabel": "This page:",
+      "pushLabel": "Push:",
+      "local": {
+        "posted": "Posted a system notification from this page.",
+        "denied": "Notifications are blocked for this site, so nothing was posted.",
+        "dismissed": "Notifications were not allowed, so nothing was posted.",
+        "unsupported": "This browser cannot show system notifications here.",
+        "noServiceWorker": "No service worker is running for this page. Reload the page and try again.",
+        "failed": "The browser refused the notification: {{reason}}"
+      },
+      "push": {
+        "notSubscribed": "Push is not on for this browser, so no push was sent.",
+        "notRegistered": "The server doesn't have this browser's push subscription and couldn't save it again. Turn push off and on again.",
+        "serverUnreachable": "Couldn't reach CloudCLI to send the test push.",
+        "serverError": "CloudCLI couldn't send the test push (HTTP {{status}}).",
+        "reregistered": "The server couldn't push to this browser's subscription, so it was set up again.",
+        "accepted": "The push service accepted the test push ({{status}}). It should arrive within seconds.",
+        "accountOff": "Finished tasks won't be pushed here, though: push is off for your account, as happens when it is turned off on another device. Turn push off and on again above to switch it back on.",
+        "unreachable": "Couldn't reach the push service: {{detail}}",
+        "rejected": "The push service refused the test push ({{status}}): {{detail}}",
+        "dropped": "That subscription no longer works and was removed. Turn push on again."
+      },
+      "help": {
+        "title": "No banner?",
+        "intro": "A notification can be posted and still show no banner. Check these:",
+        "mac": "macOS: System Settings → Notifications → Google Chrome (or your browser): turn on Allow notifications and choose Banners or Alerts. Focus and Do Not Disturb hide banners too.",
+        "windows": "Windows: Settings → System → Notifications: turn on Google Chrome (or your browser) and Show notification banners. Turn off Do not disturb (Focus assist on Windows 10).",
+        "browser": "Browser: notifications must be allowed for {{origin}} (the icon left of the address bar). Each address counts on its own: localhost and 127.0.0.1 are two sites."
+      }
+    },
     "desktop": {
       "title": "Notify this desktop app",
       "enable": "Enable notifications",

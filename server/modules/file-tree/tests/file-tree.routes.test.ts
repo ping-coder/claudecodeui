@@ -75,7 +75,7 @@ test('project files route uses the File Tree API namespace and forwards the proj
     assert.deepEqual(await response.json(), []);
   });
 
-  assert.deepEqual(inputs, [['project-1', { respectGitignore: false, markIgnored: false }]]);
+  assert.deepEqual(inputs, [['project-1', { respectGitignore: false, markIgnored: false, fresh: false }]]);
 });
 
 test('project files route requests gitignore filtering when explicitly enabled', async () => {
@@ -95,7 +95,7 @@ test('project files route requests gitignore filtering when explicitly enabled',
     assert.equal(response.status, 200);
   });
 
-  assert.deepEqual(inputs, [['project-1', { respectGitignore: true, markIgnored: false }]]);
+  assert.deepEqual(inputs, [['project-1', { respectGitignore: true, markIgnored: false, fresh: false }]]);
 });
 
 test('project files route asks for gitignored entries to be marked when requested', async () => {
@@ -115,7 +115,27 @@ test('project files route asks for gitignored entries to be marked when requeste
     assert.equal(response.status, 200);
   });
 
-  assert.deepEqual(inputs, [['project-1', { respectGitignore: true, markIgnored: true }]]);
+  assert.deepEqual(inputs, [['project-1', { respectGitignore: true, markIgnored: true, fresh: false }]]);
+});
+
+test('project files route asks for the mounts to be walked again when the user refreshed', async () => {
+  const inputs: Parameters<FileTreeServices['listProjectFiles']>[] = [];
+  const services = createFakeServices({
+    listProjectFiles: async (...input) => {
+      inputs.push(input);
+      return [];
+    },
+  });
+
+  await withFileTreeServer(services, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/file-tree/projects/project-1/files?respectGitignore=true&markIgnored=true&fresh=true`,
+    );
+
+    assert.equal(response.status, 200);
+  });
+
+  assert.deepEqual(inputs, [['project-1', { respectGitignore: true, markIgnored: true, fresh: true }]]);
 });
 
 test('create route parses the transport payload before invoking the service', async () => {

@@ -36,7 +36,21 @@ export function createProjectMountsRouter(dependencies: ProjectMountsRouterDepen
   router.get(
     '/mount-browse',
     asyncHandler(async (req, res) => {
-      res.json(createApiSuccessResponse(await dependencies.browseMountTargets(readQueryString(req.query.path))));
+      // The folder browser drops a listing when the user opens another
+      // folder first; the checks on a network share stop with the request
+      // instead of running to their time limit for no one.
+      const abortController = new AbortController();
+      res.on('close', () => {
+        if (!res.writableFinished) {
+          abortController.abort();
+        }
+      });
+      const listing = await dependencies.browseMountTargets(readQueryString(req.query.path), {
+        signal: abortController.signal,
+      });
+      if (!abortController.signal.aborted) {
+        res.json(createApiSuccessResponse(listing));
+      }
     }),
   );
 

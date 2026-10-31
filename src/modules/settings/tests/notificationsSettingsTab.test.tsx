@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
@@ -258,6 +258,40 @@ test('the desktop app shows no system notification row', () => {
   assert.equal(hasButton(ALLOW_NOTIFICATIONS), false);
   assert.equal(hasSwitch('Sound'), true);
   assert.equal(hasSwitch('Banner'), true);
+});
+
+test('a browser gets the test card after the push card; the desktop app, which notifies natively, does not', () => {
+  renderTab();
+
+  const testHeading = screen.getByRole('heading', { name: 'Test notifications' });
+  const webPushHeading = screen.getByRole('heading', { name: 'Notify this browser' });
+  assert.equal(precedes(webPushHeading, testHeading), true);
+  assert.equal(hasButton('Send test notification'), true);
+  cleanup();
+
+  renderTab({ isDesktop: true, pushPermission: 'unsupported' });
+  assert.equal(hasHeading('Test notifications'), false);
+  assert.equal(hasButton('Send test notification'), false);
+});
+
+test('the test card asks for the permission through Settings, so the system switch follows the answer', async () => {
+  const browserRequest = vi.fn(async () => 'granted' as const);
+  vi.stubGlobal('Notification', { permission: 'default', requestPermission: browserRequest });
+  try {
+    const props = renderTab({ pushPermission: 'default' });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Send test notification' }));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+
+    assert.equal(vi.mocked(props.onRequestNotificationPermission).mock.calls.length, 1);
+    assert.equal(browserRequest.mock.calls.length, 0);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test('the push card explains itself and the events card is named for push and desktop', () => {

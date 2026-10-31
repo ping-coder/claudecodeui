@@ -13,6 +13,8 @@ export {
   notifyBackgroundWorkCompleted,
   // Used by the server entrypoint to give run-end dedupe the websocket module's run registry, for reports that do not name their run.
   setNotificationRunLookup,
+  // Used by Settings to send the notifications tab's test push to one browser.
+  sendTestWebPush,
 } from '@/modules/notifications/services/notification-orchestrator.service.js';
 export {
   registerDesktopNotificationClient,

@@ -11,8 +11,11 @@ import { test } from 'vitest';
  *
  * A push for a finished task can land while a CloudCLI page is chiming for the same task.
  * With a CloudCLI window focused the push must therefore be silent; with none focused it
- * keeps its sound. Every push still shows a notification, and the other codes and the
- * notification click behave as before.
+ * keeps its sound. Silent drops the sound only: every push renotifies, so one that replaces
+ * the session's last notification (same tag) still pops a banner on macOS and Windows.
+ * Every push still shows a notification, and the other codes and the notification click
+ * behave as before. When the browser replaces the push subscription, the worker keeps one
+ * with the same key and tells the open pages, which save it on the server.
  */
 
 // Resolved from this file's path rather than with `new URL(…, import.meta.url)`: under
@@ -61,14 +64,17 @@ const windowClient = ({ focused }: { focused: boolean }): WindowClientStub => {
 const loadServiceWorker = ({
   windowClients = [],
   matchAllError = null,
+  subscribeError = null,
 }: {
   windowClients?: WindowClientStub[];
   matchAllError?: Error | null;
+  subscribeError?: Error | null;
 } = {}) => {
   const listeners = new Map<string, (event: unknown) => void>();
   const shown: ShownNotification[] = [];
   const matchAllQueries: unknown[] = [];
   const openedUrls: string[] = [];
+  const subscribeCalls: unknown[] = [];
 
   const clients = {
     matchAll: async (query: unknown) => {
@@ -94,6 +100,15 @@ const loadServiceWorker = ({
     registration: {
       showNotification: async (title: string, options: Record<string, unknown>) => {
         shown.push({ title, options });
+      },
+      pushManager: {
+        subscribe: async (options: unknown) => {
+          subscribeCalls.push(options);
+          if (subscribeError) {
+            throw subscribeError;
+          }
+          return { endpoint: 'https://push.example/new' };
+        },
       },
     },
     location: { origin: ORIGIN },
@@ -131,7 +146,7 @@ const loadServiceWorker = ({
     },
   });
 
-  return { dispatch, push, shown, matchAllQueries, openedUrls };
+  return { dispatch, push, shown, matchAllQueries, openedUrls, subscribeCalls };
 };
 
 /** A push shaped like the server's notification orchestrator builds it. */
@@ -157,7 +172,7 @@ const audibleOptions = (code: string) => ({
   renotify: true,
 });
 
-test('a run.stopped push is shown silently while a CloudCLI window is focused', async () => {
+test('a run.stopped push is shown silently, banner and all, while a CloudCLI window is focused', async () => {
   const worker = loadServiceWorker({
     windowClients: [windowClient({ focused: false }), windowClient({ focused: true })],
   });
@@ -169,7 +184,7 @@ test('a run.stopped push is shown silently while a CloudCLI window is focused', 
   assert.deepEqual(worker.shown[0].options, {
     ...audibleOptions('run.stopped'),
     silent: true,
-    renotify: false,
+    renotify: true,
   });
   // Uncontrolled windows count too: a page loaded before this worker took over still chimes.
   assert.deepEqual(worker.matchAllQueries, [{ type: 'window', includeUncontrolled: true }]);
@@ -183,7 +198,7 @@ test('run.failed and run.background_completed pushes are silent while a window i
 
     assert.equal(worker.shown.length, 1, code);
     assert.equal(worker.shown[0].options.silent, true, code);
-    assert.equal(worker.shown[0].options.renotify, false, code);
+    assert.equal(worker.shown[0].options.renotify, true, code);
   }
 });
 
@@ -252,4 +267,41 @@ test('a notification click opens a window on the session when none is open', asy
   });
 
   assert.deepEqual(worker.openedUrls, ['/session/session-1']);
+});
+
+test('a replaced push subscription is kept with the same key and the open pages are told to save it', async () => {
+  const pages = [windowClient({ focused: false }), windowClient({ focused: true })];
+  const worker = loadServiceWorker({ windowClients: pages });
+  const applicationServerKey = new Uint8Array([4, 1, 2, 3]).buffer;
+
+  // Dropped with no replacement: the worker subscribes again with the old key.
+  await worker.dispatch('pushsubscriptionchange', {
+    oldSubscription: { endpoint: 'https://push.example/old', options: { applicationServerKey } },
+    newSubscription: null,
+  });
+  assert.equal(worker.subscribeCalls.length, 1);
+  assert.deepEqual(worker.subscribeCalls[0], { userVisibleOnly: true, applicationServerKey });
+  for (const page of pages) {
+    assert.deepEqual(page.messages, [{ type: 'push:subscription-changed' }]);
+  }
+
+  // Replaced by the browser: nothing to subscribe, the pages are still told.
+  await worker.dispatch('pushsubscriptionchange', {
+    oldSubscription: { endpoint: 'https://push.example/old', options: { applicationServerKey } },
+    newSubscription: { endpoint: 'https://push.example/new' },
+  });
+  assert.equal(worker.subscribeCalls.length, 1);
+  assert.equal(pages[0].messages.length, 2);
+});
+
+test('the pages are told of a lost subscription even when subscribing again fails', async () => {
+  const page = windowClient({ focused: false });
+  const worker = loadServiceWorker({ windowClients: [page], subscribeError: new Error('permission revoked') });
+
+  await worker.dispatch('pushsubscriptionchange', {
+    oldSubscription: { endpoint: 'https://push.example/old', options: { applicationServerKey: new Uint8Array([4]).buffer } },
+    newSubscription: null,
+  });
+
+  assert.deepEqual(page.messages, [{ type: 'push:subscription-changed' }]);
 });

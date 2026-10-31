@@ -1876,6 +1876,13 @@ export type MountCallOutcome<T> =
  */
 export type MountCall = { gated: boolean };
 
+/**
+ * A mount added, removed or repaired, as the projects module's mounts
+ * service tells those who listen (the File Tree, which then lists the
+ * mount's contents afresh rather than from its last walk).
+ */
+export type ProjectMountChange = { projectId: string; mountId: string };
+
 // ---------------------------
 //----------------- PROJECT TEMPLATE TYPES ------------
 /**
@@ -2459,12 +2466,14 @@ export type FileTreeMountsGateway = {
    * up on a call still waiting for its turn. `slow` marks a call that takes
    * as long as a folder is big (reading all its names), which may run well
    * past the time limit on a share that answers without the share counting
-   * as unreachable. The call is told whether the gate times it (`MountCall`).
+   * as unreachable. `background` marks a call of a walk: the gate lets the
+   * calls someone waits for (a file opened or saved) go first. The call is
+   * told whether the gate times it (`MountCall`).
    */
   runInMountTarget<T>(
     realPath: string,
     operation: (call: MountCall) => Promise<T>,
-    options?: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean },
+    options?: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean; background?: boolean },
   ): Promise<MountCallOutcome<T>>;
   /**
    * Whether the filesystem `absolutePath` is on is known not to answer now
@@ -2475,6 +2484,12 @@ export type FileTreeMountsGateway = {
    * while the target does not answer.
    */
   isShareUnreachable(absolutePath: string): Promise<boolean>;
+  /**
+   * Calls `listener` after each mount added, removed or repaired, so the
+   * File Tree lists that mount's contents afresh rather than from its last
+   * walk (see `listProjectFiles`).
+   */
+  onMountsChanged(listener: (change: ProjectMountChange) => void): void;
 };
 
 /**
@@ -2573,10 +2588,17 @@ export type FileTreeServices = {
    * are listed too, flagged `inMount`, under the hard exclusions only and on
    * a budget of 2,000 entries shared by all mounts; past it the mount is
    * flagged `truncated` instead of failing the request.
+   *
+   * The contents of a mount on a network share come from its last walk while
+   * that is recent, and a walk a few seconds old is followed by a new one
+   * behind the request, for the next listing; a change made here in the
+   * mount, or to the mount, has the next listing walk it again. `fresh` (the
+   * user asked for a refresh) waits for a new walk of every mount, or for the
+   * one already in progress, before answering.
    */
   listProjectFiles(
     projectId: string,
-    options?: { respectGitignore: boolean; markIgnored?: boolean },
+    options?: { respectGitignore: boolean; markIgnored?: boolean; fresh?: boolean },
   ): Promise<FileTreeNode[]>;
   /**
    * Finds the project's files that match `query`, for the command palette when the project is

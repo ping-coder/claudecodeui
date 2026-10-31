@@ -241,3 +241,178 @@ test('without mount points a share is guessed from the top folder', { timeout: 5
   assert.deepEqual(await gate.run('/data/x', answering('data')), { kind: 'done', value: 'data' });
   await releaseAll();
 });
+
+/** A call on `label` that answers when the test calls `answer`, noted in `started` when it starts. */
+function heldCall(started: string[], label: string) {
+  let answer = () => {};
+  return {
+    call: () => {
+      started.push(label);
+      return new Promise<string>((resolve) => {
+        answer = () => resolve(label);
+      });
+    },
+    answer: () => answer(),
+  };
+}
+
+/** Lets the event loop turn until `condition` holds, or gives up after many turns. */
+async function turnsUntil(condition: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !condition(); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test('a call someone waits for gets its turn before the background calls of a walk that waited longer', { timeout: 5_000 }, async () => {
+  const { gate, started, answering } = createTestGate();
+  const holder = heldCall(started, 'holder');
+  const holding = gate.run('/data/nas/a', holder.call);
+  await turnsUntil(() => started.includes('holder'));
+
+  // A walk's lstats queue up, then the user opens a file.
+  const walk = [
+    gate.run('/data/nas/b', answering('lstat-1'), { background: true }),
+    gate.run('/data/nas/c', answering('lstat-2'), { background: true }),
+  ];
+  const open = gate.run('/data/nas/d', answering('open'));
+  // And a probe, which is not a walk's either.
+  const probe = gate.run('/data/nas/e', answering('probe'));
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  holder.answer();
+
+  assert.deepEqual(await Promise.all([holding, open, probe, ...walk]), [
+    { kind: 'done', value: 'holder' },
+    { kind: 'done', value: 'open' },
+    { kind: 'done', value: 'probe' },
+    { kind: 'done', value: 'lstat-1' },
+    { kind: 'done', value: 'lstat-2' },
+  ]);
+  assert.deepEqual(started, ['holder', 'open', 'probe', 'lstat-1', 'lstat-2']);
+});
+
+test('on a share known to answer, a call someone waits for runs beside a folder read in the background, one such call for the whole server at a time', { timeout: 5_000 }, async () => {
+  const { gate, started, answering } = createTestGate();
+  // Both shares answered lately.
+  assert.deepEqual(await gate.run('/data/nas/x', answering('nas')), { kind: 'done', value: 'nas' });
+  assert.deepEqual(await gate.run('/data/x', answering('data')), { kind: 'done', value: 'data' });
+  const nasRead = heldCall(started, 'nas-read');
+  const dataRead = heldCall(started, 'data-read');
+  const nasReading = gate.run('/data/nas/big', nasRead.call, { slow: true, background: true });
+  const dataReading = gate.run('/data/big', dataRead.call, { slow: true, background: true });
+  await turnsUntil(() => started.includes('nas-read') && started.includes('data-read'));
+
+  // A file opened on the NAS meanwhile goes at once, beside its folder read.
+  const nasOpen = heldCall(started, 'nas-open');
+  const nasOpening = gate.run('/data/nas/notes.md', nasOpen.call);
+  await turnsUntil(() => started.includes('nas-open'));
+  // Another walk call on the NAS waits for the read; a file on the other
+  // share waits for the turn beside to be free, and takes it once it is.
+  const nasLstat = gate.run('/data/nas/y', answering('nas-lstat'), { background: true });
+  const dataOpening = gate.run('/data/notes.md', answering('data-open'));
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(started.includes('data-open'), false);
+  nasOpen.answer();
+  assert.deepEqual(await nasOpening, { kind: 'done', value: 'nas-open' });
+  assert.deepEqual(await dataOpening, { kind: 'done', value: 'data-open' });
+  assert.equal(started.includes('nas-lstat'), false);
+
+  nasRead.answer();
+  dataRead.answer();
+  assert.deepEqual(await Promise.all([nasReading, dataReading, nasLstat]), [
+    { kind: 'done', value: 'nas-read' },
+    { kind: 'done', value: 'data-read' },
+    { kind: 'done', value: 'nas-lstat' },
+  ]);
+});
+
+test('a folder read the user waits for never runs beside a folder read in the background, and files opened meanwhile still do', { timeout: 5_000 }, async () => {
+  const { gate, started, answering } = createTestGate();
+  assert.deepEqual(await gate.run('/data/nas/x', answering('nas')), { kind: 'done', value: 'nas' });
+  assert.deepEqual(await gate.run('/data/x', answering('data')), { kind: 'done', value: 'data' });
+  const nasRead = heldCall(started, 'nas-read');
+  const nasReading = gate.run('/data/nas/big', nasRead.call, { slow: true, background: true });
+  await turnsUntil(() => started.includes('nas-read'));
+
+  // The folder browser reads a NAS folder while the File Tree walks the
+  // NAS: it waits for the walk's read, and gives up busy, while a file
+  // opened meanwhile still goes beside the walk's read.
+  const browsing = gate.run('/data/nas/scans', answering('browse'), { slow: true });
+  assert.deepEqual(await gate.run('/data/nas/notes.md', answering('open')), { kind: 'done', value: 'open' });
+  assert.deepEqual(await browsing, { kind: 'busy' });
+
+  // With the turn beside taken by a file opened on the other share, beside
+  // its own walk's read, a browse and then a file on the NAS wait for it:
+  // once it is free, the file takes it, past the browse waiting ahead.
+  const dataRead = heldCall(started, 'data-read');
+  const dataReading = gate.run('/data/big', dataRead.call, { slow: true, background: true });
+  await turnsUntil(() => started.includes('data-read'));
+  const dataOpen = heldCall(started, 'data-open');
+  const dataOpening = gate.run('/data/notes.md', dataOpen.call);
+  await turnsUntil(() => started.includes('data-open'));
+  const browsingAgain = gate.run('/data/nas/scans', answering('browse-again'), { slow: true });
+  const nasOpening = gate.run('/data/nas/todo.md', answering('open-again'));
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(started.includes('open-again'), false);
+  dataOpen.answer();
+  assert.deepEqual(await dataOpening, { kind: 'done', value: 'data-open' });
+  assert.deepEqual(await nasOpening, { kind: 'done', value: 'open-again' });
+  assert.deepEqual(await browsingAgain, { kind: 'busy' });
+
+  nasRead.answer();
+  dataRead.answer();
+  assert.deepEqual(await Promise.all([nasReading, dataReading]), [
+    { kind: 'done', value: 'nas-read' },
+    { kind: 'done', value: 'data-read' },
+  ]);
+  assert.deepEqual(started, ['nas', 'data', 'nas-read', 'open', 'data-read', 'data-open', 'open-again']);
+});
+
+test('a share not seen answering runs nothing beside a folder read in the background, and nothing runs beside a read the user waits for', { timeout: 5_000 }, async () => {
+  const { gate, started, answering } = createTestGate();
+  const read = heldCall(started, 'read');
+  const reading = gate.run('/data/nas/big', read.call, { slow: true, background: true });
+  await turnsUntil(() => started.includes('read'));
+  assert.deepEqual(await gate.run('/data/nas/notes.md', answering('open')), { kind: 'busy' });
+  read.answer();
+  assert.deepEqual(await reading, { kind: 'done', value: 'read' });
+
+  // Seen answering now, but a folder read for the folder browser is not a background one.
+  const browse = heldCall(started, 'browse');
+  const browsing = gate.run('/data/nas/big', browse.call, { slow: true });
+  await turnsUntil(() => started.includes('browse'));
+  assert.deepEqual(await gate.run('/data/nas/notes.md', answering('open')), { kind: 'busy' });
+  browse.answer();
+  assert.deepEqual(await browsing, { kind: 'done', value: 'browse' });
+  assert.deepEqual(started, ['read', 'browse']);
+});
+
+test('a share that hangs during a folder read in the background keeps two calls at most, and the turn beside stays taken while it hangs', { timeout: 5_000 }, async () => {
+  const { gate, started, answering, hanging, releaseAll } = createTestGate();
+  assert.deepEqual(await gate.run('/data/nas/x', answering('nas')), { kind: 'done', value: 'nas' });
+  assert.deepEqual(await gate.run('/data/x', answering('data')), { kind: 'done', value: 'data' });
+  const reading = gate.run('/data/nas/big', hanging('read'), { slow: true, background: true });
+  await turnsUntil(() => started.includes('read'));
+
+  // The server went away: the call beside the read hangs too, and tells.
+  assert.deepEqual(await gate.run('/data/nas/notes.md', hanging('open')), { kind: 'unreachable' });
+  assert.deepEqual(await gate.run('/data/nas/other.md', answering('again')), { kind: 'unreachable' });
+  assert.deepEqual(await gate.run('/data/nas/y', answering('lstat'), { background: true }), { kind: 'unreachable' });
+
+  // Another share known to answer gets no call beside its own read while that one hangs.
+  const dataRead = heldCall(started, 'data-read');
+  const dataReading = gate.run('/data/big', dataRead.call, { slow: true, background: true });
+  await turnsUntil(() => started.includes('data-read'));
+  assert.deepEqual(await gate.run('/data/notes.md', answering('data-open')), { kind: 'busy' });
+  dataRead.answer();
+  assert.deepEqual(await dataReading, { kind: 'done', value: 'data-read' });
+
+  assert.deepEqual(started, ['nas', 'data', 'read', 'open', 'data-read']);
+  assert.deepEqual(await reading, { kind: 'unreachable' });
+  await releaseAll();
+});

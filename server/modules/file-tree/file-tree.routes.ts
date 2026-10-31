@@ -191,6 +191,9 @@ export function createFileTreeRouter(
     response.json(await services.listProjectFiles(readProjectId(request), {
       respectGitignore: request.query.respectGitignore === 'true',
       markIgnored: request.query.markIgnored === 'true',
+      // Sent only when the user asks for a refresh: the mounts on network
+      // shares are walked again rather than listed from their last walk.
+      fresh: request.query.fresh === 'true',
     }));
   }, logger));
 

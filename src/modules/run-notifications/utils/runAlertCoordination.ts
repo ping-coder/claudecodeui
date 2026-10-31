@@ -269,25 +269,10 @@ export const subscribeToSystemNotificationCta = (listener: (record: SystemNotifi
 };
 
 /**
- * Whether this browser holds a Web Push subscription with this origin's service worker, in which case push
- * delivers the finished run's system notification and the page posts none. False without a service worker
- * (plain http), without a registration, and on any error.
- */
-export const readBrowserPushSubscribed = async (): Promise<boolean> => {
-  try {
-    const registration = await navigator.serviceWorker?.getRegistration();
-    const subscription = await registration?.pushManager?.getSubscription();
-    return Boolean(subscription);
-  } catch {
-    return false;
-  }
-};
-
-/**
  * Posts a finished run's system notification through this origin's service worker registration (Android Chrome
  * and iOS home-screen apps allow no other way), so a click takes the existing notificationclick path that opens
  * the session. It never waits on `serviceWorker.ready`, which stays pending while no worker is active. Resolves to
- * whether it was posted: false without a registration, or when posting fails.
+ * 'posted', 'noServiceWorker' without a registration, or 'failed' when posting threw.
  */
 export const showRunAlertSystemNotification = async ({
   title,
@@ -303,11 +288,11 @@ export const showRunAlertSystemNotification = async ({
   data: { sessionId: string; provider: LLMProvider; code: string };
   /** True once this alert's burst has made its sound: the page chimed, or another claim within 1.5 s took the chime. */
   silent: boolean;
-}): Promise<boolean> => {
+}): Promise<'posted' | 'noServiceWorker' | 'failed'> => {
   try {
     const registration = await navigator.serviceWorker?.getRegistration();
     if (!registration) {
-      return false;
+      return 'noServiceWorker';
     }
 
     // `renotify` is missing from TypeScript's NotificationOptions, though browsers read it.
@@ -320,12 +305,15 @@ export const showRunAlertSystemNotification = async ({
       icon: '/logo-256.png',
       badge: '/logo-128.png',
       silent,
-      renotify: !silent,
+      // The tag names the session and outcome, so this replaces the session's last notification while it still
+      // sits in Notification Center or Action Center. Without renotify, macOS and Windows make that replacement
+      // without a banner: one banner per session, then none. Silent drops the sound only.
+      renotify: true,
     };
     await registration.showNotification(stripBidiIsolates(title), options);
-    return true;
+    return 'posted';
   } catch {
-    return false;
+    return 'failed';
   }
 };
 

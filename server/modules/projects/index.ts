@@ -13,12 +13,14 @@ export { restoreArchivedProject } from './services/project-delete.service.js';
 // listProjectMounts, PROJECT_MOUNTS_DIRECTORY_NAME: used by the File Tree to list mounts as folders, protect their links and read their targets.
 // runInMountTarget: used by the File Tree to make its calls in a mount's target through the mount gate, so a hung share cannot take the server's threads.
 // isMountShareUnreachable: used by the File Tree to refuse a read by a path outside every mount whose filesystem the mount gate knows to hang.
+// onProjectMountsChanged: used by the File Tree to stop listing a mount from its last walk once the mount is added, removed or repaired.
 // detachProjectMountLinks: used by the Worktrees module to take a worktree's mount links (and those of projects inside it) out before git deletes it, and put them back when git does not.
 export {
   detachProjectMountLinks,
   isMountShareUnreachable,
   listProjectMountDirectories,
   listProjectMounts,
+  onProjectMountsChanged,
   PROJECT_MOUNTS_DIRECTORY_NAME,
   runInMountTarget,
 } from './services/project-mounts.service.js';

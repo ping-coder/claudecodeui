@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { isPushSubscriptionMadeWithKey, urlBase64ToUint8Array } from '@/shared/systemNotifications';
 import type { PushSubscribeOutcome } from '@/shared/types';
 
 type PushSubscribeFailure = Exclude<PushSubscribeOutcome, 'subscribed'>;
@@ -39,17 +40,6 @@ function waitForServiceWorker(): Promise<ServiceWorkerRegistration | null> {
       },
     );
   });
-}
-
-function urlBase64ToUint8Array(base64String: string): Uint8Array {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
 }
 
 export function useWebPush(): WebPushState {
@@ -121,8 +111,13 @@ export function useWebPush(): WebPushState {
       }
 
       // What the browser holds, read just before subscribe(), which hands it back when it was made
-      // with the same key.
-      const held = await registration.pushManager.getSubscription().catch(() => null);
+      // with the same key. One made with another key (an older VAPID key of this server, or another
+      // server at this address) takes no push from here, and subscribe() refuses to replace it.
+      let held = await registration.pushManager.getSubscription().catch(() => null);
+      if (held && !isPushSubscriptionMadeWithKey(held, publicKey)) {
+        await held.unsubscribe().catch(() => false);
+        held = null;
+      }
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(publicKey).buffer as ArrayBuffer,

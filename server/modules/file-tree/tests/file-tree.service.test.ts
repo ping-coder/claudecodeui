@@ -17,6 +17,7 @@ import type {
   FileTreeServices,
   FileTreeStats,
   ProjectMount,
+  ProjectMountChange,
 } from '@/shared/types.js';
 import { AppError, resolveReadOnlyRootPath, validateWorkspacePath } from '@/shared/utils.js';
 
@@ -111,12 +112,16 @@ const runMountCallsOnLocalDisk: FileTreeMountsGateway['runInMountTarget'] = asyn
 // Every filesystem answers, as far as the mount gate knows.
 const noShareHangs: FileTreeMountsGateway['isShareUnreachable'] = async () => false;
 
+// No mount is added, removed or repaired while the test runs.
+const ignoreMountChanges: FileTreeMountsGateway['onMountsChanged'] = () => {};
+
 // A project without mounts, which is what every test that does not set any up runs with.
 const noMounts: FileTreeMountsGateway = {
   directoryName: 'mounts',
   listProjectMounts: async () => [],
   runInMountTarget: runMountCallsDirectly,
   isShareUnreachable: noShareHangs,
+  onMountsChanged: ignoreMountChanges,
 };
 
 function createDependencies(
@@ -1375,6 +1380,7 @@ async function withMountedProject(
       listProjectMounts: async () => [mount],
       runInMountTarget: runMountCallsDirectly,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     };
     await run({ projectRoot, targetRoot, linkPath, mount, mountsGateway });
   } finally {
@@ -1482,6 +1488,7 @@ test('listProjectFiles cuts a big mount short on its own budget instead of faili
       listProjectMounts: async () => [mount],
       runInMountTarget: runMountCallsDirectly,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -1508,6 +1515,7 @@ test('listProjectFiles shows a mount whose target is gone as a broken folder wit
       listProjectMounts: async () => [brokenMount],
       runInMountTarget: runMountCallsDirectly,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     });
     const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
 
@@ -1591,6 +1599,7 @@ test('a file inside the project opens by its absolute path while the disk it sha
         asked += 1;
         return true;
       },
+      onMountsChanged: ignoreMountChanges,
     });
     const absolutePath = path.join(projectRoot, 'src', 'index.ts');
 
@@ -1746,6 +1755,7 @@ test('listProjectFiles answers in time when a share inside a mount hangs, and li
       listProjectMounts: async () => [mount],
       runInMountTarget: mountCalls.runInMountTarget,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -1795,6 +1805,7 @@ test('reads and changes in a mount whose target does not answer are refused with
       listProjectMounts: async () => [offline],
       runInMountTarget: runMountCallsDirectly,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
   const unreachable = (error: unknown) => error instanceof AppError
@@ -1829,6 +1840,7 @@ test('a read in a mount whose share stops answering comes back 503 in time', { t
         return { kind: 'unreachable' };
       },
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     });
 
     await assert.rejects(
@@ -1900,6 +1912,7 @@ test('a read by the real path of a mount reached through a link is refused with 
       runInMountTarget: runMountCallsDirectly,
       // The mount's probe hung on /mnt/nas.
       isShareUnreachable: async (absolutePath) => absolutePath === '/mnt/nas' || absolutePath.startsWith('/mnt/nas/'),
+      onMountsChanged: ignoreMountChanges,
     },
     workspace: {
       rootPath: projectRoot,
@@ -1987,6 +2000,7 @@ test('a folder in a mount on a network share is read as names in one slow call, 
         return runMountCallsDirectly(realPath, operation, options);
       },
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -2050,6 +2064,7 @@ test('on a local disk a folder in a mount is streamed, and the walk stops readin
       listProjectMounts: async () => [mount],
       runInMountTarget: runMountCallsOnLocalDisk,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -2104,6 +2119,7 @@ test('no folder in a mount is read once the mounts\' budget is used up', async (
       listProjectMounts: async () => [mount],
       runInMountTarget: runMountCallsDirectly,
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -2154,6 +2170,7 @@ test('the walk stops waiting for a slow folder read at its time limit, and lists
         return runMountCallsDirectly(realPath, operation, options);
       },
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     },
   });
 
@@ -2191,6 +2208,7 @@ test('a read or a change in a mount asks the gate to follow the links below the 
         return runMountCallsDirectly(realPath, operation, options);
       },
       isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
     });
     const realTarget = mount.realTargetPath ?? '';
 
@@ -2201,5 +2219,570 @@ test('a read or a change in a mount asks the gate to follow the links below the 
 
     assert.equal(asked.length > 0, true);
     assert.equal(asked.every((call) => call.followLinksBelow === realTarget), true, JSON.stringify(asked));
+  });
+});
+
+/**
+ * A project whose one mount, `mounts/data`, is a folder on a network share
+ * (`gated`; a local disk otherwise), with a clock the test moves. `folders`
+ * holds what the share has, by folder path under the link, a folder's name
+ * ending in `/`; a file saved in the mount joins its folder. Notes every
+ * folder read in the mount and every call made into it, holds the folder
+ * reads while `holdReads` is set, and answers every call `unreachable` while
+ * `shareDown` is.
+ */
+function createNetworkMountFixture(options: { gated?: boolean } = {}) {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const linkPath = path.join(mountsDirectory, 'data');
+  const clock = { now: 0 };
+  const folders = new Map<string, string[]>([[linkPath, ['notes.md']]]);
+  const folderReads: string[] = [];
+  const mountCalls: Array<{ realPath: string; background: boolean }> = [];
+  const state = { shareDown: false, holdReads: false };
+  const heldReads: Array<() => void> = [];
+  const listeners: Array<(change: ProjectMountChange) => void> = [];
+  const mount: ProjectMount = {
+    mountId: 'mount-data',
+    name: 'data',
+    linkPath: 'mounts/data',
+    targetPath: '/nas/data',
+    realTargetPath: '/nas/data',
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  };
+  const mounts = [mount];
+  const isFolder = (candidatePath: string) => candidatePath === mountsDirectory
+    || (folders.get(path.dirname(candidatePath)) ?? []).includes(`${path.basename(candidatePath)}/`);
+  const readFolder = async (directoryPath: string) => {
+    folderReads.push(directoryPath);
+    if (state.holdReads) {
+      await new Promise<void>((resolve) => {
+        heldReads.push(resolve);
+      });
+    }
+    return folders.get(directoryPath) ?? [];
+  };
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(isFolder(candidatePath), 0o644),
+    openDirectory: async function* (directoryPath) {
+      if (directoryPath === projectRoot) {
+        yield createDirectoryEntry('mounts', true);
+        return;
+      }
+      if (directoryPath === mountsDirectory) {
+        yield createDirectoryEntry('data', false);
+        return;
+      }
+      for (const name of await readFolder(directoryPath)) {
+        yield createDirectoryEntry(name.replace(/\/$/, ''), name.endsWith('/'));
+      }
+    },
+    readDirectoryNames: async (directoryPath) => (await readFolder(directoryPath)).map((name) => name.replace(/\/$/, '')),
+    writeTextFile: async (filePath) => {
+      const names = folders.get(path.dirname(filePath)) ?? [];
+      if (!names.includes(path.basename(filePath))) {
+        folders.set(path.dirname(filePath), [...names, path.basename(filePath)].sort());
+      }
+    },
+  });
+  const runOnShare = options.gated === false ? runMountCallsOnLocalDisk : runMountCallsDirectly;
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    now: () => clock.now,
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => mounts,
+      runInMountTarget: async (realPath, operation, callOptions) => {
+        mountCalls.push({ realPath, background: callOptions?.background === true });
+        return state.shareDown ? { kind: 'unreachable' } : runOnShare(realPath, operation, callOptions);
+      },
+      isShareUnreachable: noShareHangs,
+      onMountsChanged: (listener) => {
+        listeners.push(listener);
+      },
+    },
+  });
+  return {
+    linkPath,
+    clock,
+    folders,
+    folderReads,
+    mountCalls,
+    state,
+    mount,
+    mounts,
+    /** The mount's node in the explorer's listing of `projectId`. */
+    async list(listOptions: { fresh?: boolean; projectId?: string } = {}) {
+      const tree = await service.listProjectFiles(listOptions.projectId ?? 'project-1', {
+        respectGitignore: false,
+        markIgnored: true,
+        fresh: listOptions.fresh,
+      });
+      return findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+    },
+    /** Saves `name` in the mount's top folder, as the editor does. */
+    async save(name: string) {
+      await service.saveTextFile('project-1', path.join(linkPath, name), 'text');
+    },
+    releaseReads() {
+      state.holdReads = false;
+      heldReads.splice(0).forEach((release) => release());
+    },
+    announce(change: ProjectMountChange) {
+      listeners.forEach((listener) => listener(change));
+    },
+  };
+}
+
+const namesOf = (node: FileTreeNode | undefined) => node?.children?.map((child) => child.name);
+
+/** Lets the event loop turn until `condition` holds, or gives up after many turns. */
+async function turnsUntil(condition: () => boolean | Promise<boolean>): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !(await condition()); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Lets the event loop turn a few times, so the calls already made get as far as they can. */
+async function letTurnsPass(): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test('a mount on a network share is listed from its last walk while that is fresh, with no call into the share', async () => {
+  const fixture = createNetworkMountFixture();
+  // Two listings at once (the explorer and the palette) share one walk.
+  const [explorer, palette] = await Promise.all([fixture.list(), fixture.list()]);
+  assert.deepEqual(namesOf(explorer), ['notes.md']);
+  assert.deepEqual(namesOf(palette), ['notes.md']);
+  assert.equal(fixture.folderReads.length, 1);
+  const callsAfterWalk = fixture.mountCalls.length;
+
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  fixture.clock.now = 9_000;
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md']);
+  assert.equal(fixture.mountCalls.length, callsAfterWalk);
+  // Every call of a walk lets the calls someone waits for go first.
+  assert.equal(fixture.mountCalls.every((call) => call.background), true);
+});
+
+test('a minute after the last walk a listing answers with it at once and has the mount walked again behind it, once', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  await fixture.list();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  fixture.clock.now = 60_000;
+  fixture.state.holdReads = true;
+
+  // Answered while the new walk is held up on the share.
+  const [first, second] = await Promise.all([fixture.list(), fixture.list()]);
+  assert.deepEqual(namesOf(first), ['notes.md']);
+  assert.deepEqual(namesOf(second), ['notes.md']);
+  await turnsUntil(() => fixture.folderReads.length === 2);
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md']);
+  assert.equal(fixture.folderReads.length, 2);
+
+  fixture.releaseReads();
+  fixture.clock.now = 62_000;
+  await turnsUntil(async () => namesOf(await fixture.list())?.length === 2);
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 2);
+});
+
+test('listings half a minute apart walk a mount on a network share once a minute at most', async () => {
+  const fixture = createNetworkMountFixture();
+  const walkedAt: number[] = [];
+  for (let listing = 0; listing <= 10; listing += 1) {
+    fixture.clock.now = listing * 30_000;
+    const readsBefore = fixture.folderReads.length;
+    await fixture.list();
+    // The walk behind a listing is done before the next one.
+    await letTurnsPass();
+    if (fixture.folderReads.length > readsBefore) {
+      walkedAt.push(fixture.clock.now);
+    }
+  }
+  // The first listing waits for its walk; the others answer with the last
+  // one, and every other one has the mount walked again behind it.
+  assert.deepEqual(walkedAt, [0, 60_000, 120_000, 180_000, 240_000, 300_000]);
+});
+
+test('past the max age a listing waits for a new walk, and so does one the user asked for', async () => {
+  const fixture = createNetworkMountFixture();
+  await fixture.list();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  fixture.clock.now = 5 * 60_000;
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'todo.md']);
+
+  fixture.folders.set(fixture.linkPath, ['todo.md']);
+  fixture.clock.now += 1_000;
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'todo.md']);
+  assert.deepEqual(namesOf(await fixture.list({ fresh: true })), ['todo.md']);
+  assert.equal(fixture.folderReads.length, 3);
+});
+
+test('a walk cut short by the share keeps the whole walk before it until that is past the max age, and is tried again once per fresh window past a minute', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'videos/']);
+  fixture.folders.set(path.join(fixture.linkPath, 'videos'), ['clip.mp4']);
+  const whole = await fixture.list();
+  assert.deepEqual(namesOf(whole), ['videos', 'notes.md']);
+
+  fixture.state.shareDown = true;
+  fixture.clock.now = 60_000;
+  const callsBefore = fixture.mountCalls.length;
+  assert.deepEqual(namesOf(await fixture.list()), ['videos', 'notes.md']);
+  await turnsUntil(() => fixture.mountCalls.length > callsBefore);
+  // The walk behind it found the share gone; the whole walk stays, and is not tried again at once.
+  fixture.clock.now = 65_000;
+  const afterTry = await fixture.list();
+  assert.deepEqual(namesOf(afterTry), ['videos', 'notes.md']);
+  assert.equal(afterTry?.truncated, undefined);
+  assert.deepEqual(namesOf(findNode(afterTry?.children ?? [], 'videos')), ['clip.mp4']);
+  const callsAfterTry = fixture.mountCalls.length;
+  assert.equal(callsAfterTry, callsBefore + 1);
+
+  fixture.clock.now = 70_000;
+  await fixture.list();
+  await turnsUntil(() => fixture.mountCalls.length > callsAfterTry);
+  assert.equal(fixture.mountCalls.length, callsAfterTry + 1);
+
+  // Too old to stand for the mount now: the listing waits, and lists what the share gave.
+  fixture.clock.now = 5 * 60_000;
+  const cutShort = await fixture.list();
+  assert.deepEqual(cutShort?.children, []);
+  assert.equal(cutShort?.truncated, true);
+  fixture.state.shareDown = false;
+  fixture.clock.now += 1_000;
+  assert.equal((await fixture.list())?.truncated, true);
+});
+
+test('a walk the share left unanswered is walked again behind the first listing past the fresh window', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.state.shareDown = true;
+  assert.equal((await fixture.list())?.truncated, true);
+  fixture.state.shareDown = false;
+
+  fixture.clock.now = 5_000;
+  assert.equal((await fixture.list())?.truncated, true);
+  await letTurnsPass();
+  assert.equal(fixture.folderReads.length, 0);
+
+  // Not a minute: what the walk lacks is the share's hiccup, not the mount's size.
+  fixture.clock.now = 10_000;
+  assert.equal((await fixture.list())?.truncated, true);
+  await turnsUntil(() => fixture.folderReads.length === 1);
+  await letTurnsPass();
+  const whole = await fixture.list();
+  assert.deepEqual(namesOf(whole), ['notes.md']);
+  assert.equal(whole?.truncated, undefined);
+});
+
+test('a walk cut short by its time limit is walked again a minute later, like a whole one', { timeout: 5_000 }, async (t) => {
+  const fixture = createNetworkMountFixture();
+  fixture.state.holdReads = true;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const listing = fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 1);
+  t.mock.timers.tick(5_000);
+  assert.equal((await listing)?.truncated, true);
+  t.mock.timers.reset();
+  fixture.releaseReads();
+
+  // A share too slow to walk in time would otherwise be read for five
+  // seconds behind every listing ten seconds apart.
+  fixture.clock.now = 15_000;
+  await fixture.list();
+  await letTurnsPass();
+  assert.equal(fixture.folderReads.length, 1);
+
+  fixture.clock.now = 60_000;
+  await fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 2);
+  assert.equal(fixture.folderReads.length, 2);
+});
+
+test('a mount on a local disk is walked for every listing', async () => {
+  const fixture = createNetworkMountFixture({ gated: false });
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md']);
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 2);
+});
+
+test('a walk kept for one project or target is never listed for another', async () => {
+  const fixture = createNetworkMountFixture();
+  await fixture.list();
+  assert.equal(fixture.folderReads.length, 1);
+  await fixture.list({ projectId: 'project-2' });
+  assert.equal(fixture.folderReads.length, 2);
+  // The mount's target now resolves elsewhere (a link in its path changed).
+  fixture.mounts[0] = { ...fixture.mount, realTargetPath: '/nas/other' };
+  await fixture.list();
+  assert.equal(fixture.folderReads.length, 3);
+  assert.equal(fixture.mountCalls.at(-1)?.realPath.startsWith('/nas/other'), true);
+});
+
+test('a mount added, removed or repaired is walked again, and a walk in progress then is not kept', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  await fixture.list();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  fixture.announce({ projectId: 'project-1', mountId: 'other-mount' });
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md']);
+  fixture.announce({ projectId: 'project-1', mountId: 'mount-data' });
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 2);
+
+  // Repaired while a listing walks it: that listing still gets all the walk
+  // finds, but the walk is not kept, and the next listing walks it again.
+  fixture.announce({ projectId: 'project-1', mountId: 'mount-data' });
+  fixture.state.holdReads = true;
+  const listing = fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 3);
+  fixture.announce({ projectId: 'project-1', mountId: 'mount-data' });
+  fixture.folders.set(fixture.linkPath, ['todo.md']);
+  fixture.releaseReads();
+  const answered = await listing;
+  assert.deepEqual(namesOf(answered), ['todo.md']);
+  assert.equal(answered?.truncated, undefined);
+  assert.deepEqual(namesOf(await fixture.list()), ['todo.md']);
+  assert.equal(fixture.folderReads.length, 4);
+});
+
+test('listings that wait for a walk all get the whole of it when a refresh or a save comes meanwhile', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+
+  // Refresh all with the tree open in two panes: both ask for a fresh listing at once, and share one walk.
+  const [left, right] = await Promise.all([fixture.list({ fresh: true }), fixture.list({ fresh: true })]);
+  assert.deepEqual(namesOf(left), ['notes.md', 'todo.md']);
+  assert.equal(left?.truncated, undefined);
+  assert.deepEqual(namesOf(right), ['notes.md', 'todo.md']);
+  assert.equal(right?.truncated, undefined);
+  assert.equal(fixture.folderReads.length, 1);
+
+  // The palette waits for a walk when the user presses Refresh.
+  fixture.clock.now = 5 * 60_000;
+  fixture.state.holdReads = true;
+  const palette = fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 2);
+  const refresh = fixture.list({ fresh: true });
+  await letTurnsPass();
+  fixture.releaseReads();
+  assert.deepEqual(namesOf(await palette), ['notes.md', 'todo.md']);
+  assert.deepEqual(namesOf(await refresh), ['notes.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 2);
+
+  // A file saved in the mount while the explorer waits for a walk, which
+  // the editor does not list again after.
+  fixture.clock.now = 10 * 60_000;
+  fixture.state.holdReads = true;
+  const explorer = fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 3);
+  await fixture.save('plan.md');
+  fixture.releaseReads();
+  const answered = await explorer;
+  assert.deepEqual(namesOf(answered), ['notes.md', 'plan.md', 'todo.md']);
+  assert.equal(answered?.truncated, undefined);
+  // That walk may have read the folder before the save: it is not kept.
+  fixture.clock.now += 1_000;
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'plan.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 4);
+});
+
+test('a listing of a mount on a local disk gets the whole walk when a file is saved there meanwhile', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture({ gated: false });
+  fixture.state.holdReads = true;
+  const explorer = fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 1);
+  await fixture.save('plan.md');
+  fixture.releaseReads();
+  const answered = await explorer;
+  assert.deepEqual(namesOf(answered), ['notes.md', 'plan.md']);
+  assert.equal(answered?.truncated, undefined);
+});
+
+test('a walk behind a listing that nobody waits for stops at a change, and makes no more calls into the share', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  await fixture.list();
+  fixture.clock.now = 60_000;
+  fixture.state.holdReads = true;
+  await fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 2);
+
+  const callsBeforeSave = fixture.mountCalls.length;
+  await fixture.save('plan.md');
+  fixture.releaseReads();
+  await letTurnsPass();
+  // The save's own call, and no lstat of the walk that was stopped.
+  assert.equal(fixture.mountCalls.length, callsBeforeSave + 1);
+  assert.deepEqual(namesOf(await fixture.list()), ['notes.md', 'plan.md', 'todo.md']);
+  assert.equal(fixture.folderReads.length, 3);
+});
+
+test('a refresh that joins a walk behind an earlier listing gets the whole of it when a file is saved meanwhile', { timeout: 5_000 }, async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  await fixture.list();
+  fixture.clock.now = 60_000;
+  fixture.state.holdReads = true;
+  await fixture.list();
+  await turnsUntil(() => fixture.folderReads.length === 2);
+
+  const refresh = fixture.list({ fresh: true });
+  await letTurnsPass();
+  await fixture.save('plan.md');
+  fixture.releaseReads();
+  const answered = await refresh;
+  assert.deepEqual(namesOf(answered), ['notes.md', 'plan.md', 'todo.md']);
+  assert.equal(answered?.truncated, undefined);
+  assert.equal(fixture.folderReads.length, 2);
+});
+
+test('a refresh cut short by the share leaves the whole walk kept for the listings after it', async () => {
+  const fixture = createNetworkMountFixture();
+  fixture.folders.set(fixture.linkPath, ['notes.md', 'todo.md']);
+  await fixture.list();
+
+  fixture.state.shareDown = true;
+  fixture.clock.now = 1_000;
+  const refreshed = await fixture.list({ fresh: true });
+  assert.deepEqual(refreshed?.children, []);
+  assert.equal(refreshed?.truncated, true);
+
+  fixture.state.shareDown = false;
+  fixture.clock.now = 3_000;
+  const callsBefore = fixture.mountCalls.length;
+  const next = await fixture.list();
+  assert.deepEqual(namesOf(next), ['notes.md', 'todo.md']);
+  assert.equal(next?.truncated, undefined);
+  assert.equal(fixture.mountCalls.length, callsBefore);
+});
+
+test('after a change a walk cut short answers its own listing only, and the next listing walks again', async () => {
+  const fixture = createNetworkMountFixture();
+  await fixture.list();
+  await fixture.save('todo.md');
+
+  fixture.state.shareDown = true;
+  fixture.clock.now = 1_000;
+  const cutShort = await fixture.list();
+  assert.deepEqual(cutShort?.children, []);
+  assert.equal(cutShort?.truncated, true);
+
+  fixture.state.shareDown = false;
+  fixture.clock.now = 2_000;
+  const next = await fixture.list();
+  assert.deepEqual(namesOf(next), ['notes.md', 'todo.md']);
+  assert.equal(next?.truncated, undefined);
+  assert.equal(fixture.folderReads.length, 2);
+});
+
+test('what a listing shows of all its mounts stays within their budget when their walks are kept', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const mountsDirectory = path.join(projectRoot, 'mounts');
+  const mountNamed = (name: string): ProjectMount => ({
+    mountId: `mount-${name}`,
+    name,
+    linkPath: `mounts/${name}`,
+    targetPath: `/nas/${name}`,
+    realTargetPath: `/nas/${name}`,
+    status: 'ok',
+    createdAt: '2026-10-30T00:00:00.000Z',
+  });
+  const frames = Array.from({ length: 1_500 }, (_value, index) => `frame-${index}.png`);
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    lstat: async (candidatePath) => createStats(candidatePath === mountsDirectory, 0o644),
+    openDirectory: createDirectoryReader((directoryPath) => {
+      if (directoryPath === projectRoot) {
+        return [createDirectoryEntry('mounts', true)];
+      }
+      return directoryPath === mountsDirectory ? [createDirectoryEntry('a', false), createDirectoryEntry('b', false)] : [];
+    }),
+    readDirectoryNames: async () => frames,
+  });
+  const service = createFileTreeService({
+    ...createDependencies(fileSystem, projectRoot),
+    mounts: {
+      directoryName: 'mounts',
+      listProjectMounts: async () => [mountNamed('a'), mountNamed('b')],
+      runInMountTarget: runMountCallsDirectly,
+      isShareUnreachable: noShareHangs,
+      onMountsChanged: ignoreMountChanges,
+    },
+  });
+  const listMounts = async () => findNode(
+    await service.listProjectFiles('project-1', { respectGitignore: false, markIgnored: true }),
+    'mounts',
+  )?.children ?? [];
+
+  for (const listing of ['walked', 'kept', 'kept again']) {
+    const mounts = await listMounts();
+    const shown = mounts.reduce((total, node) => total + (node.children?.length ?? 0), 0);
+    assert.equal(shown, 2_000, listing);
+    assert.equal(mounts.some((node) => node.truncated === true), true, listing);
+    assert.equal(mounts.some((node) => node.children?.length === 1_500 && node.truncated === undefined), true, listing);
+  }
+});
+
+test('a change made here in a mount has the next listing walk it again', async () => {
+  await withMountedProject(async ({ projectRoot, targetRoot, linkPath, mountsGateway }) => {
+    await fsPromises.writeFile(path.join(targetRoot, 'notes.md'), 'notes');
+    let announce: (change: ProjectMountChange) => void = () => {};
+    const service = createRealFileSystemService(projectRoot, projectRoot, {
+      ...mountsGateway,
+      onMountsChanged: (listener) => {
+        announce = listener;
+      },
+    });
+    const listMount = async () => {
+      const tree = await service.listProjectFiles('project-1', { respectGitignore: true, markIgnored: true });
+      const dataNode = findNode(findNode(tree, 'mounts')?.children ?? [], 'data');
+      return (dataNode?.children ?? []).map((node) => node.name);
+    };
+    assert.deepEqual(await listMount(), ['notes.md']);
+
+    // Changed outside CloudCLI: the walk kept still stands for the mount.
+    await fsPromises.writeFile(path.join(targetRoot, 'agent.log'), 'written by an agent');
+    assert.deepEqual(await listMount(), ['notes.md']);
+
+    await service.createEntry({ projectId: 'project-1', parentPath: linkPath, name: 'drafts', type: 'directory' });
+    assert.deepEqual(await listMount(), ['drafts', 'agent.log', 'notes.md']);
+    await service.createEntry({ projectId: 'project-1', parentPath: linkPath, name: 'todo.md', type: 'file' });
+    assert.deepEqual(await listMount(), ['drafts', 'agent.log', 'notes.md', 'todo.md']);
+    await service.renameEntry({ projectId: 'project-1', oldPath: path.join(linkPath, 'todo.md'), newName: 'done.md' });
+    assert.deepEqual(await listMount(), ['drafts', 'agent.log', 'done.md', 'notes.md']);
+    await service.deleteEntry({ projectId: 'project-1', targetPath: path.join(linkPath, 'agent.log') });
+    assert.deepEqual(await listMount(), ['drafts', 'done.md', 'notes.md']);
+
+    await fsPromises.writeFile(path.join(targetRoot, 'late.md'), 'late');
+    await service.saveTextFile('project-1', path.join(linkPath, 'drafts', 'plan.md'), 'plan');
+    assert.deepEqual(await listMount(), ['drafts', 'done.md', 'late.md', 'notes.md']);
+
+    const uploadDirectory = await fsPromises.mkdtemp(path.join(testDirectory, 'file-tree-upload-'));
+    try {
+      const temporaryPath = path.join(uploadDirectory, 'upload-1');
+      await fsPromises.writeFile(temporaryPath, 'scan');
+      await service.storeUploadedFiles({
+        projectId: 'project-1',
+        targetPath: linkPath,
+        relativePaths: ['scan.pdf'],
+        requestedFileCount: 1,
+        files: [{ originalName: 'scan.pdf', temporaryPath, size: 4, mimeType: 'application/pdf' }],
+      });
+    } finally {
+      await fsPromises.rm(uploadDirectory, { recursive: true, force: true });
+    }
+    assert.deepEqual(await listMount(), ['drafts', 'done.md', 'late.md', 'notes.md', 'scan.pdf']);
+
+    // A change to the mount itself (repaired, say).
+    await fsPromises.writeFile(path.join(targetRoot, 'after-repair.md'), 'back');
+    assert.deepEqual(await listMount(), ['drafts', 'done.md', 'late.md', 'notes.md', 'scan.pdf']);
+    announce({ projectId: 'project-1', mountId: 'mount-1' });
+    assert.deepEqual(await listMount(), ['drafts', 'after-repair.md', 'done.md', 'late.md', 'notes.md', 'scan.pdf']);
   });
 });

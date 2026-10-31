@@ -228,34 +228,156 @@ function buildNotificationPayload(event) {
   };
 }
 
+/**
+ * How long one request to a push service may take, from start to answer. web-push
+ * waits forever by default, and its `timeout` option is only how long the socket
+ * may sit idle, which a service that answers a little at a time never runs out;
+ * so deliverWebPush holds the send to this deadline itself as well.
+ */
+const WEB_PUSH_TIMEOUT_MS = 10_000;
+
+/** What the deadline in deliverWebPush settles with when it comes first. */
+const WEB_PUSH_DEADLINE_PASSED = Symbol('web push deadline passed');
+
+/**
+ * A failure is logged at most once per this long for each push service host and
+ * status; the next line says how many came in between. A dropped subscription is
+ * always logged, as that happens once per subscription.
+ */
+const WEB_PUSH_FAILURE_LOG_INTERVAL_MS = 10 * 60 * 1000;
+
+/** The longest part of a push service's answer that reaches the log. */
+const WEB_PUSH_FAILURE_DETAIL_LENGTH = 160;
+
+/**
+ * A 403 that says the subscription was made with another VAPID key: FCM's
+ * wording, and Apple's reason code. Such a subscription never takes a push from
+ * this server again, so it goes like an expired one.
+ */
+const VAPID_MISMATCH_PATTERN = /do not correspond to the credentials used to create the subscriptions|VapidPkHashMismatch/i;
+
+// Per `${host} ${status}`: when its last line was logged and how many failures were not.
+const webPushFailureLog = new Map();
+
+/** The push service's host (fcm.googleapis.com, web.push.apple.com): the endpoint's path names the browser and stays out of the log. */
+function readPushServiceHost(endpoint) {
+  try {
+    return new URL(endpoint).host || 'unknown';
+  } catch {
+    return 'invalid-endpoint';
+  }
+}
+
+/** Control characters and line breaks would split the log line; the text is cut short too. */
+function cleanLogDetail(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .trim()
+    .slice(0, WEB_PUSH_FAILURE_DETAIL_LENGTH);
+}
+
+function shouldDropSubscription(statusCode, body) {
+  return statusCode === 404 || statusCode === 410 || (statusCode === 403 && VAPID_MISMATCH_PATTERN.test(body));
+}
+
+function logWebPushFailure({ host, statusCode, detail, dropped }) {
+  const key = `${host} ${statusCode ?? 'network'}`;
+  const now = Date.now();
+  const entry = webPushFailureLog.get(key);
+  if (!dropped && entry && now - entry.loggedAt < WEB_PUSH_FAILURE_LOG_INTERVAL_MS) {
+    entry.suppressed += 1;
+    return;
+  }
+
+  const suppressed = entry?.suppressed ?? 0;
+  webPushFailureLog.set(key, { loggedAt: now, suppressed: 0 });
+  const answer = statusCode === null ? `no answer (${detail || 'unknown error'})` : `${statusCode} ${JSON.stringify(detail)}`;
+  const parts = [`[web-push] push to ${host} failed: ${answer}`];
+  if (dropped) {
+    parts.push('subscription dropped');
+  }
+  if (suppressed > 0) {
+    parts.push(`${suppressed} more like it since the last line`);
+  }
+  console.warn(parts.join('; '));
+}
+
+/**
+ * Sends one push to one stored subscription and resolves to how the push service
+ * answered: accepted with its status, or failed with its status (null when it
+ * never answered, or not within WEB_PUSH_TIMEOUT_MS) and a short detail. A
+ * subscription the service calls gone, or made with another VAPID key, is removed.
+ */
+async function deliverWebPush(subscription, serializedPayload) {
+  const host = readPushServiceHost(subscription.endpoint);
+  let deadlineTimer;
+  const deadline = new Promise((resolve) => {
+    deadlineTimer = setTimeout(() => resolve(WEB_PUSH_DEADLINE_PASSED), WEB_PUSH_TIMEOUT_MS);
+  });
+  try {
+    const response = await Promise.race([
+      webPush.sendNotification(
+        {
+          endpoint: subscription.endpoint,
+          keys: {
+            p256dh: subscription.keys_p256dh,
+            auth: subscription.keys_auth
+          }
+        },
+        serializedPayload,
+        { timeout: WEB_PUSH_TIMEOUT_MS }
+      ),
+      deadline
+    ]);
+    if (response === WEB_PUSH_DEADLINE_PASSED) {
+      // The request may still answer later; nothing waits for that answer.
+      logWebPushFailure({ host, statusCode: null, detail: 'timeout', dropped: false });
+      return { accepted: false, statusCode: null, host, detail: 'timeout', dropped: false };
+    }
+    return { accepted: true, statusCode: Number.isInteger(response?.statusCode) ? response.statusCode : null, host };
+  } catch (error) {
+    const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : null;
+    const body = typeof error?.body === 'string' ? error.body : '';
+    const dropped = statusCode !== null && shouldDropSubscription(statusCode, body);
+    if (dropped) {
+      pushSubscriptionsDb.removeSubscription(subscription.endpoint);
+    }
+    const detail = cleanLogDetail(statusCode === null ? error?.code || error?.message || error : body);
+    logWebPushFailure({ host, statusCode, detail, dropped });
+    return { accepted: false, statusCode, host, detail, dropped };
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
+}
+
 function sendWebPushPayload(userId, payload) {
   const subscriptions = pushSubscriptionsDb.getSubscriptions(userId);
   if (!subscriptions.length) return Promise.resolve();
 
   const serializedPayload = JSON.stringify(payload);
-  return Promise.allSettled(
-    subscriptions.map((sub) =>
-      webPush.sendNotification(
-        {
-          endpoint: sub.endpoint,
-          keys: {
-            p256dh: sub.keys_p256dh,
-            auth: sub.keys_auth
-          }
-        },
-        serializedPayload
-      )
-    )
-  ).then((results) => {
-    results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        const statusCode = result.reason?.statusCode;
-        if (statusCode === 410 || statusCode === 404) {
-          pushSubscriptionsDb.removeSubscription(subscriptions[index].endpoint);
-        }
-      }
-    });
-  });
+  return Promise.all(subscriptions.map((subscription) => deliverWebPush(subscription, serializedPayload)));
+}
+
+/**
+ * Sends Settings' test push to one subscription of the user, whatever their
+ * channel and event switches say, and resolves to the push service's answer (see
+ * `deliverWebPush`); null when the user holds no subscription with this endpoint.
+ * The worker shows it with sound and a banner like any push that is not a run's.
+ *
+ * @param {{ userId: number, endpoint: string, title: string, body: string }} test
+ */
+async function sendTestWebPush({ userId, endpoint, title, body }) {
+  const subscription = pushSubscriptionsDb.getPushSubscriptionForUser(userId, endpoint);
+  if (!subscription) {
+    return null;
+  }
+
+  const payload = {
+    title,
+    body,
+    data: { sessionId: null, provider: null, code: 'push.test', tag: 'cloudcli:test:push' }
+  };
+  return deliverWebPush(subscription, JSON.stringify(payload));
 }
 
 const notificationChannels = [
@@ -388,5 +510,6 @@ export {
   notifyUserIfEnabled,
   notifyRunStopped,
   notifyRunFailed,
-  notifyBackgroundWorkCompleted
+  notifyBackgroundWorkCompleted,
+  sendTestWebPush
 };

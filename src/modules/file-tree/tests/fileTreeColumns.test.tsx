@@ -125,6 +125,19 @@ test('a rename in the detailed view gets the whole row', async () => {
   assert.equal(row?.style.gridTemplateColumns, 'auto minmax(0, 1fr)');
 });
 
+test('the project root\'s row sits above the labels, outside the scroller and its grid, in every view', async () => {
+  await renderTree(1152);
+  const rootRow = () => screen.getByText('demo').closest('[data-file-tree-root]');
+  assert.equal(rootRow()?.closest('.overflow-auto') === null, true);
+  assert.deepEqual(headerLabels(), ['Name', 'Size', 'Modified', 'Permissions']);
+  assert.equal(rowCellCount('package.json'), 4);
+
+  for (const view of ['Simple view', 'Compact view', 'Detailed view']) {
+    fireEvent.click(screen.getByTitle(view));
+    assert.equal(rootRow() !== null, true, view);
+  }
+});
+
 test('the toolbar wraps rather than clipping the view switch', async () => {
   await renderTree(200);
   const titleRow = screen.getByRole('heading', { name: 'Files' }).parentElement;

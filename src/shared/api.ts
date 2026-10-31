@@ -4,7 +4,7 @@ import {
   storeAuthToken,
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
-import type { BrowserFullscreenReport } from '@/shared/types';
+import type { BrowserFullscreenReport, NotificationDeliveryReport } from '@/shared/types';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
@@ -265,9 +265,11 @@ export const api = {
     repair: (projectId: string, mountId: string) =>
       post(`/api/projects/${encodeURIComponent(projectId)}/mounts/${encodeURIComponent(mountId)}/repair`),
     // The subfolders a mount may point at, under the mount rules rather than the workspace's:
-    // { data: { path, parent, directories } }. Without a path it lists the home folder.
-    browse: (dirPath: string | null = null) =>
-      get(`/api/projects/mount-browse${query({ path: dirPath })}`),
+    // { data: { path, parent, directories, truncated? } }, `truncated` ({ checked, total }) when a
+    // folder on a network share was too large or slow to check every entry. Without a path it
+    // lists the home folder; aborting `signal` stops the server's checks too.
+    browse: (dirPath: string | null = null, signal?: AbortSignal) =>
+      get(`/api/projects/mount-browse${query({ path: dirPath })}`, { signal }),
   },
   // A clone is two requests: the details (GitHub token included) go in this
   // POST body, and the returned `cloneId` is all the progress stream's URL
@@ -362,13 +364,15 @@ export const api = {
   // Entries matching the project's .gitignore are left out, which the @ mention
   // list and bare file-name links expect. `markIgnored` lists them instead,
   // flagged `isIgnored` and never walked, for the explorer and the palette.
+  // `fresh`, for a refresh the user asked for, walks the mounts on network
+  // shares again instead of taking their last walk.
   getFiles: (
     projectId: string,
-    { markIgnored = false }: { markIgnored?: boolean } = {},
+    { markIgnored = false, fresh = false }: { markIgnored?: boolean; fresh?: boolean } = {},
     options: ApiRequestOptions = {},
   ) =>
     get(
-      `/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true, markIgnored })}`,
+      `/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true, markIgnored, fresh })}`,
       options,
     ),
   // The best `limit` matches of a search over the project's files, for the
@@ -668,6 +672,14 @@ export const api = {
       subscribe: (subscription: { endpoint?: string; keys?: unknown }) =>
         post('/api/settings/push/subscribe', subscription),
       unsubscribe: (endpoint: string) => post('/api/settings/push/unsubscribe', { endpoint }),
+      // Whether the server holds this browser's subscription: `{ registered }`.
+      status: (endpoint: string) => post('/api/settings/push/status', { endpoint }),
+      // Saves a subscription the server lacks, or its replacement, without the preference change and
+      // the "enabled" push that subscribe makes.
+      resync: (subscription: { endpoint?: string; keys?: unknown; previousEndpoint?: string }) =>
+        post('/api/settings/push/resync', subscription),
+      // Settings' test push to this one endpoint: `{ delivery: TestPushDelivery }`, 404 when the server lacks it.
+      test: (payload: { endpoint: string; title: string; body: string }) => post('/api/settings/push/test', payload),
     },
   },
 
@@ -719,8 +731,10 @@ export const api = {
     // read it too: running version, install mode and deployment environment.
     health: () => fetch('/health'),
     update: () => post('/api/system/update'),
-    // One line of browser diagnostics for the server log (the fullscreen outcome); best effort.
-    reportClientDiagnostics: (report: BrowserFullscreenReport) => post('/api/system/client-diagnostics', report),
+    // One line of browser diagnostics for the server log (a fullscreen outcome, a system-notification
+    // decision); best effort.
+    reportClientDiagnostics: (report: BrowserFullscreenReport | NotificationDeliveryReport) =>
+      post('/api/system/client-diagnostics', report),
   },
 };
 

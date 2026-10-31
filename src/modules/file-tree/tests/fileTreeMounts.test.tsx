@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import { i18n } from '@/modules/i18n';
@@ -108,6 +109,15 @@ const openMenu = (name: string) => {
 };
 
 const closeMenu = () => fireEvent.keyDown(document, { key: 'Escape' });
+
+const menuLabels = () => screen.getAllByRole('menuitem').map((item) => item.textContent ?? '');
+
+// The project root's menu, from its row or from the empty area around the rows.
+const ROOT_MENU = ['New File', 'New Folder', 'Upload Files', 'Mount Folder…', 'Copy Path', 'Refresh'];
+
+// The project root's own row, above the scroller, and its ⋯ button.
+const rootRow = () => screen.getByText('demo').closest('[data-file-tree-root]') as HTMLElement;
+const rootActionsButton = () => screen.getByRole('button', { name: 'More actions for demo' });
 
 beforeEach(() => {
   getFiles.mockReset();
@@ -409,8 +419,7 @@ test('the empty area\'s menu and the header both open the mount dialog', async (
   // Right-clicking the scroller around the rows opens the root menu, which now offers mounting.
   const scroller = screen.getByText('README.md').closest('.overflow-auto') as HTMLElement;
   fireEvent.contextMenu(scroller, { clientX: 20, clientY: 200 });
-  const rootItems = screen.getAllByRole('menuitem').map((item) => item.textContent ?? '');
-  assert.deepEqual(rootItems, ['New File', 'New Folder', 'Upload Files', 'Mount Folder…', 'Refresh']);
+  assert.deepEqual(menuLabels(), ROOT_MENU);
   fireEvent.click(screen.getByRole('menuitem', { name: 'Mount Folder…' }));
   await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
   fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -420,13 +429,135 @@ test('the empty area\'s menu and the header both open the mount dialog', async (
   await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
 });
 
-test('a right-click inside a row\'s open menu does not open the empty area\'s menu on top of it', async () => {
+test('the project root has a row of its own, named after the project, whose menu offers mounting', async () => {
+  await renderTree();
+  assert.equal(rootRow().getAttribute('title'), ROOT);
+
+  fireEvent.contextMenu(screen.getByText('demo'), { clientX: 20, clientY: 20 });
+  assert.deepEqual(menuLabels(), ROOT_MENU);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Mount Folder…' }));
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
+});
+
+test('the root row\'s ⋯ opens the same menu where a touch screen has no right-click, and closes it again', async () => {
+  await renderTree();
+  const button = rootActionsButton();
+  // Shown on hover or focus where there is a mouse, always on a touch screen.
+  assert.equal(button.className.includes('[@media(pointer:coarse)]:opacity-100'), true);
+  assert.equal(button.getAttribute('aria-expanded'), 'false');
+
+  // detail: 1 is a click with a pointer behind it.
+  fireEvent.click(button, { detail: 1 });
+  assert.equal(button.getAttribute('aria-expanded'), 'true');
+  assert.deepEqual(menuLabels(), ROOT_MENU);
+  fireEvent.mouseDown(button);
+  fireEvent.click(button, { detail: 1 });
+  assert.equal(screen.queryByRole('menu') === null, true);
+
+  fireEvent.click(button, { detail: 1 });
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Mount Folder…' }));
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
+});
+
+test('from the keyboard the root menu takes focus and Escape gives it back; Shift+F10 and the menu key open it too', async () => {
+  await renderTree();
+  const button = rootActionsButton();
+
+  // Enter or Space clicks the button with no pointer behind the click (detail 0).
+  button.focus();
+  fireEvent.click(button);
+  assert.equal(document.activeElement === screen.getByRole('menuitem', { name: 'New File' }), true);
+  closeMenu();
+  assert.equal(screen.queryByRole('menu') === null, true);
+  assert.equal(document.activeElement === button, true);
+
+  fireEvent.keyDown(button, { key: 'F10', shiftKey: true });
+  assert.deepEqual(menuLabels(), ROOT_MENU);
+  closeMenu();
+  fireEvent.keyDown(button, { key: 'ContextMenu' });
+  assert.deepEqual(menuLabels(), ROOT_MENU);
+
+  // An item picked from the keyboard gives focus back too, rather than dropping it on the page.
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh' }));
+  assert.equal(screen.queryByRole('menu') === null, true);
+  assert.equal(document.activeElement === button, true);
+});
+
+test('a menu closes once focus leaves it, so one opened from the keyboard never sits beside another', async () => {
+  await renderTree();
+  const button = rootActionsButton();
+
+  // Tabbing on to the ⋯ closes the empty area's menu, so Enter there leaves one menu and the arrows walk it.
+  const scroller = screen.getByText('README.md').closest('.overflow-auto') as HTMLElement;
+  fireEvent.contextMenu(scroller, { clientX: 20, clientY: 200 });
+  act(() => button.focus());
+  assert.equal(screen.queryByRole('menu') === null, true);
+  fireEvent.click(button);
+  assert.equal(screen.getAllByRole('menu').length, 1);
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: 'New File' }), { key: 'ArrowDown' });
+  assert.equal(document.activeElement === screen.getByRole('menuitem', { name: 'New Folder' }), true);
+
+  // Back on the ⋯ it stays open, so a press there, which takes focus with it, still closes it.
+  fireEvent.mouseDown(button);
+  act(() => button.focus());
+  assert.equal(button.getAttribute('aria-expanded'), 'true');
+  fireEvent.click(button, { detail: 1 });
+  assert.equal(screen.queryByRole('menu') === null, true);
+
+  // Moving on to the search box closes it, and the arrows are the box's again.
+  fireEvent.click(button);
+  const search = screen.getByPlaceholderText('Search files and folders...');
+  act(() => search.focus());
+  assert.equal(screen.queryByRole('menu') === null, true);
+  assert.equal(fireEvent.keyDown(search, { key: 'ArrowDown' }), true);
+});
+
+test('Copy Path on the root row copies the project\'s folder', async () => {
+  const writeText = vi.fn(async () => undefined);
+  vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+  await renderTree();
+
+  fireEvent.contextMenu(screen.getByText('demo'), { clientX: 20, clientY: 20 });
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Copy Path' }));
+  await waitFor(() => assert.equal(writeText.mock.calls.length, 1));
+  assert.deepEqual(writeText.mock.calls[0], [ROOT]);
+});
+
+test('the root row stays when the tree failed to load, is empty or matches no search, so mounting is still a right-click away', async () => {
+  getFiles.mockResolvedValueOnce(json({ error: 'This project has too many files to list.' }, 413));
+  const failed = render(<FileTree selectedProject={project} />);
+  await waitFor(() => assert.equal(screen.queryByText('This project has too many files to list.') !== null, true));
+  fireEvent.contextMenu(screen.getByText('demo'), { clientX: 20, clientY: 20 });
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Mount Folder…' }));
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
+  failed.unmount();
+
+  getFiles.mockResolvedValueOnce(json([]));
+  const empty = render(<FileTree selectedProject={project} />);
+  await waitFor(() => assert.equal(screen.queryByText('No files found') !== null, true));
+  fireEvent.click(rootActionsButton(), { detail: 1 });
+  assert.deepEqual(menuLabels(), ROOT_MENU);
+  empty.unmount();
+
+  await renderTree();
+  fireEvent.change(screen.getByPlaceholderText('Search files and folders...'), { target: { value: 'no-such-file' } });
+  await waitFor(() => assert.equal(screen.queryByText('No matches found') !== null, true));
+  assert.equal(rootRow() !== null, true);
+});
+
+test('a right-click or the menu key inside a row\'s open menu does not open the empty area\'s menu on top of it', async () => {
   await renderTree();
 
   openMenu('README.md');
   // The row's menu sits inside the empty area's menu wrapper; the right-click stays with the open menu.
   const notPrevented = fireEvent.contextMenu(screen.getByRole('menuitem', { name: 'Rename' }), { clientX: 30, clientY: 30 });
   assert.equal(notPrevented, false);
+  assert.equal(screen.getAllByRole('menu').length, 1);
+  assert.deepEqual(screen.getAllByRole('menuitem').map((item) => item.textContent ?? ''), ['Rename', 'Delete', 'Copy Path', 'Download']);
+
+  // So do Shift+F10 and the menu key.
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Rename' }), { key: 'F10', shiftKey: true });
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Rename' }), { key: 'ContextMenu' });
   assert.equal(screen.getAllByRole('menu').length, 1);
   assert.deepEqual(screen.getAllByRole('menuitem').map((item) => item.textContent ?? ''), ['Rename', 'Delete', 'Copy Path', 'Download']);
 });
@@ -452,4 +583,52 @@ test('a root .gitignore rule matching mounts/ neither greys out nor closes the m
   assert.equal(rowOf('videos').getAttribute('title'), 'Mounted folder → /mnt/media/videos');
   fireEvent.click(screen.getByText('videos'));
   await waitFor(() => assert.equal(screen.queryByText('cut.mp4') !== null, true));
+});
+
+const asksForFreshWalk = (call: unknown[] | undefined) => (call?.[1] as { fresh?: boolean } | undefined)?.fresh === true;
+
+test('a refresh the user asks for has the mounts walked again; the reload after an unmount does not', async () => {
+  await renderTree();
+  assert.equal(getFiles.mock.calls.length, 1);
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[0]), false);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[1]), true);
+
+  openMenu('videos');
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh' }));
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 3));
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[2]), true);
+
+  openMenu('videos');
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Unmount' }));
+  const confirmation = screen.getByText('Unmount videos?').closest('.fixed') as HTMLElement;
+  fireEvent.click(within(confirmation).getByRole('button', { name: 'Unmount' }));
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 4));
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[3]), false);
+});
+
+test('refreshing the tab or the whole workspace has the mounts walked again', async () => {
+  const { rerender } = render(<FileTree selectedProject={project} refreshToken={0} />);
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[0]), false);
+
+  rerender(<FileTree selectedProject={project} refreshToken={1} />);
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
+  assert.equal(asksForFreshWalk(getFiles.mock.calls[1]), true);
+});
+
+test('a tree shown after a refresh it missed has the mounts walked again on its first load, StrictMode\'s second mount run too', async () => {
+  const missed = render(<StrictMode><FileTree selectedProject={project} refreshToken={1} freshFirstLoad /></StrictMode>);
+  await waitFor(() => assert.equal(screen.queryByText('mounts') !== null, true));
+  assert.equal(getFiles.mock.calls.length, 2);
+  assert.equal(getFiles.mock.calls.every(asksForFreshWalk), true);
+  missed.unmount();
+
+  getFiles.mockClear();
+  render(<StrictMode><FileTree selectedProject={project} refreshToken={1} freshFirstLoad={false} /></StrictMode>);
+  await waitFor(() => assert.equal(screen.queryByText('mounts') !== null, true));
+  assert.equal(getFiles.mock.calls.length, 2);
+  assert.equal(getFiles.mock.calls.some(asksForFreshWalk), false);
 });

@@ -31,6 +31,7 @@ import FileTreeBody from '@/modules/file-tree/FileTreeBody';
 import FileTreeDetailedColumns from '@/modules/file-tree/FileTreeDetailedColumns';
 import FileTreeHeader from '@/modules/file-tree/FileTreeHeader';
 import FileTreeLoadingState from '@/modules/file-tree/FileTreeLoadingState';
+import FileTreeRootRow from '@/modules/file-tree/FileTreeRootRow';
 import FileTreeUploadProgress from '@/modules/file-tree/FileTreeUploadProgress';
 import ImageViewer from '@/modules/file-tree/ImageViewer';
 import MountFolderDialog from '@/modules/file-tree/MountFolderDialog';
@@ -82,14 +83,16 @@ type FileTreeProps = {
   revealDirectory?: DirectoryRevealRequest | null;
   // The workspace pane's refresh token: when it moves, the tree reloads behind the rows already shown.
   refreshToken?: number;
+  // The token moved while the tree was not on screen: its first load lists afresh, as that refresh asked.
+  freshFirstLoad?: boolean;
 };
 
 /** Exported through the file-tree barrel; the project-workspace module renders it as the Files sidebar tab. */
-export default function FileTree({ selectedProject, onFileOpen, revealDirectory, refreshToken }: FileTreeProps) {
+export default function FileTree({ selectedProject, onFileOpen, revealDirectory, refreshToken, freshFirstLoad }: FileTreeProps) {
   const { t } = useTranslation();
   const [selectedImage, setSelectedImage] = useState<FileTreeImageSelection | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  // Whether the mount dialog is open; the header button and the empty area's menu open it.
+  // Whether the mount dialog is open; the header button and the root's menu open it.
   const [mountDialogOpen, setMountDialogOpen] = useState(false);
   // The mount root whose Unmount, picked from its menu, waits for confirmation.
   const [unmountCandidate, setUnmountCandidate] = useState<FileTreeNode | null>(null);
@@ -109,14 +112,20 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     }
   }, [toast]);
 
-  const { files, loading, refreshing, error, refreshFiles } = useFileTreeData(selectedProject);
-  useRefreshSignal(refreshToken, refreshFiles);
+  // A refresh the user asks for (the header's button, a Refresh menu item, the tab's or the
+  // workspace's refresh, also one that landed while another view was shown) lists the mounts on
+  // network shares afresh; the reloads after a change made here do not need to, as the server
+  // already knows of it.
+  const { files, loading, refreshing, error, refreshFiles, refreshFilesFresh } = useFileTreeData(selectedProject, { freshFirstLoad });
+  useRefreshSignal(refreshToken, refreshFilesFresh);
   const { viewMode, changeViewMode } = useFileTreeViewMode();
   const { expandedDirs, toggleDirectory, expandDirectories, collapseAll } = useExpandedDirectories();
   const { searchQuery, setSearchQuery, filteredFiles } = useFileTreeSearch({
     files,
     expandDirectories,
   });
+
+  const projectRoot = selectedProject?.path || selectedProject?.fullPath || '';
 
   // The reveal request already served, so a later tree refresh does not fold
   // the folders open again over a collapse the user has since made.
@@ -126,7 +135,6 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
   // A request that arrives before the tree finds no folder and is retried when
   // `files` lands.
   useEffect(() => {
-    const projectRoot = selectedProject?.path || selectedProject?.fullPath;
     if (!revealDirectory || !projectRoot || revealedRef.current === revealDirectory) {
       return;
     }
@@ -139,7 +147,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     // not recorded as expanded: it cannot open, and the record would open it
     // on a refresh once it stops being ignored.
     expandDirectories(folders.filter((folder) => !isClosedFolder(folder)).map((folder) => folder.path));
-  }, [revealDirectory, selectedProject?.path, selectedProject?.fullPath, expandDirectories, files]);
+  }, [revealDirectory, projectRoot, expandDirectories, files]);
 
   // File operations
   const operations = useFileTreeOperations({
@@ -184,13 +192,22 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     }
   }, [repairMount]);
 
-  const handleCopyTargetPath = useCallback(async (item: FileTreeNode) => {
-    const copied = item.mount ? await copyTextToClipboard(item.mount.targetPath) : false;
+  // copyTextToClipboard still copies where the Clipboard API is missing, as on a plain-HTTP server.
+  const copyPath = useCallback(async (path: string) => {
+    const copied = await copyTextToClipboard(path);
     showToast(
       copied ? t('fileTree.toast.pathCopied', 'Path copied to clipboard') : t('fileTree.toast.copyFailed', 'Failed to copy path'),
       copied ? 'success' : 'error',
     );
   }, [showToast, t]);
+
+  const handleCopyTargetPath = useCallback((item: FileTreeNode) => {
+    void copyPath(item.mount?.targetPath ?? '');
+  }, [copyPath]);
+
+  const handleCopyRootPath = useCallback(() => {
+    void copyPath(projectRoot);
+  }, [copyPath, projectRoot]);
 
   const handleConfirmUnmount = useCallback(() => {
     const mount = unmountCandidate?.mount;
@@ -282,6 +299,16 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
     [t],
   );
 
+  // The project root's menu, the same from its row and from the empty area around the rows.
+  const rootMenuActions = {
+    onNewFile: (path: string) => operations.handleStartCreate(path, 'file'),
+    onNewFolder: (path: string) => operations.handleStartCreate(path, 'directory'),
+    onUpload: handleUploadToFolder,
+    onRefresh: refreshFilesFresh,
+    onMountFolder: selectedProject ? openMountDialog : undefined,
+    onCopyRootPath: projectRoot ? handleCopyRootPath : undefined,
+  };
+
   // The mount the item up for deletion lives in, if any: its files are the real ones, outside the project.
   const deleteMountRoot = operations.deleteConfirmation.item
     ? findContainingMount(files, operations.deleteConfirmation.item.path)
@@ -332,7 +359,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
         onNewFile={() => operations.handleStartCreate('', 'file')}
         onNewFolder={() => operations.handleStartCreate('', 'directory')}
         onMountFolder={selectedProject ? openMountDialog : undefined}
-        onRefresh={refreshFiles}
+        onRefresh={refreshFilesFresh}
         onCollapseAll={collapseAll}
         loading={loading || refreshing}
         operationLoading={operationLoading}
@@ -342,14 +369,18 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
 
       <FileTreeUploadProgress upload={upload.uploadProgress} />
 
+      {/* Outside the scroller and the states in it: the root's menu is always one right-click or tap away. */}
+      {selectedProject && (
+        <FileTreeRootRow
+          name={selectedProject.displayName || projectRoot}
+          path={projectRoot}
+          isDropTarget={upload.isDragOver && !upload.dropTarget}
+          {...rootMenuActions}
+        />
+      )}
+
       {/* The empty area's menu: rows open their own and stop the event, so this one only opens around them. */}
-      <FileContextMenu
-        onNewFile={(path) => operations.handleStartCreate(path, 'file')}
-        onNewFolder={(path) => operations.handleStartCreate(path, 'directory')}
-        onUpload={handleUploadToFolder}
-        onRefresh={refreshFiles}
-        onMountFolder={selectedProject ? openMountDialog : undefined}
-      >
+      <FileContextMenu {...rootMenuActions}>
         <ScrollArea className="flex-1 px-2 py-1">
           {/* Inside the scroller, so a vertical scrollbar narrows the labels and the rows alike. */}
           {viewMode === 'detailed' && filteredFiles.length > 0 && (
@@ -408,7 +439,7 @@ export default function FileTree({ selectedProject, onFileOpen, revealDirectory,
             onCopyPath={operations.handleCopyPath}
             onDownload={operations.handleDownload}
             onUpload={handleUploadToFolder}
-            onRefresh={refreshFiles}
+            onRefresh={refreshFilesFresh}
             onUnmount={setUnmountCandidate}
             onRepairMount={handleRepairMount}
             onCopyTargetPath={handleCopyTargetPath}

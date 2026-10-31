@@ -1,4 +1,14 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Copy, Download, FileText, FolderPlus, FolderSymlink, Pencil, RefreshCw, Trash2, Unlink, Upload, Wrench, type LucideIcon } from 'lucide-react';
 
@@ -51,6 +61,28 @@ function calculateViewportSafePosition(clientX: number, clientY: number): Contex
   return { left: Math.max(VIEWPORT_PADDING, safeX), top };
 }
 
+// A menu opened from the keyboard or a button hangs below the element, from its start edge
+// towards the end of the line, as one opened by a right-click does from the pointer.
+function calculatePositionBelow(element: Element): ContextMenuPosition {
+  const rect = element.getBoundingClientRect();
+  return calculateViewportSafePosition(isRtl() ? rect.right : rect.left, rect.bottom);
+}
+
+// A text box (the new item or rename input) keeps the browser's own menu, with paste and spelling.
+const isInTextBox = (target: EventTarget) =>
+  target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null;
+
+// The keys that open a context menu from the keyboard.
+const isContextMenuKey = (event: ReactKeyboardEvent) => event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
+
+/** Spread onto a button that opens the menu, such as the ⋯ on the project root's row. */
+export type ContextMenuTriggerProps = {
+  ref: (element: HTMLButtonElement | null) => void;
+  'aria-haspopup': 'menu';
+  'aria-expanded': boolean;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+};
+
 // A right-click inside an open menu stays with it. A row's menu sits inside the empty area's menu
 // wrapper, so the event would otherwise open that menu on top of this one.
 const keepContextMenuInMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -58,9 +90,20 @@ const keepContextMenuInMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
   event.stopPropagation();
 };
 
+// So do Shift+F10 and the menu key. Other keys go on to the document, where the menu listens for
+// the arrows and Escape.
+const keepContextMenuKeyInMenu = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+  if (isContextMenuKey(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+};
+
 /**
  * Rendered by FileTreeNode to show the right-click actions available on one file or directory row,
- * and by FileTree, without an item, for the empty area around the rows.
+ * and, without an item, by FileTreeRootRow and by FileTree for the empty area around the rows: the
+ * project root's menu. Shift+F10 or the menu key opens it too, below the focused element. Children
+ * given as a function get the props of a button that opens it, for touch screens with no right-click.
  */
 export default function FileContextMenu({
   children,
@@ -77,11 +120,12 @@ export default function FileContextMenu({
   onRepairMount,
   onCopyTargetPath,
   onMountFolder,
+  onCopyRootPath,
   holdsMounts = false,
   isLoading = false,
   className = '',
 }: {
-  children: ReactNode;
+  children: ReactNode | ((trigger: ContextMenuTriggerProps) => ReactNode);
   item?: FileTreeNode | null;
   onRename?: (item: FileTreeNode) => void;
   onDelete?: (item: FileTreeNode) => void;
@@ -95,8 +139,10 @@ export default function FileContextMenu({
   onUnmount?: (item: FileTreeNode) => void;
   onRepairMount?: (item: FileTreeNode) => void;
   onCopyTargetPath?: (item: FileTreeNode) => void;
-  // The empty area's and the mounts/ folder's menus: open the mount dialog.
+  // The root's and the mounts/ folder's menus: open the mount dialog.
   onMountFolder?: () => void;
+  // The root's menu: copy the project folder's own path.
+  onCopyRootPath?: () => void;
   // The item is mounts/ while the project has mounts (findMountsFolderPath): it holds only the links.
   holdsMounts?: boolean;
   isLoading?: boolean;
@@ -106,27 +152,60 @@ export default function FileContextMenu({
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<ContextMenuPosition>({ left: 0, top: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
+  // The button given to children as a function, if they rendered it.
+  const [triggerElement, setTriggerElement] = useState<HTMLButtonElement | null>(null);
+  // The element a menu opened from the keyboard came from: the menu takes focus, and Escape gives it back.
+  const [keyboardOpener, setKeyboardOpener] = useState<HTMLElement | null>(null);
 
   const closeContextMenu = useCallback(() => {
     setIsMenuOpen(false);
   }, []);
 
   const openContextMenuAtCursor = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-    // A text box (the new item or rename input) keeps the browser's own menu, with paste and spelling.
-    if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')) {
+    if (isInTextBox(event.target)) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
 
+    setKeyboardOpener(null);
     setMenuPosition(calculateViewportSafePosition(event.clientX, event.clientY));
     setIsMenuOpen(true);
   }, []);
 
+  const openContextMenuBelow = useCallback((element: HTMLElement, fromKeyboard: boolean) => {
+    setKeyboardOpener(fromKeyboard ? element : null);
+    setMenuPosition(calculatePositionBelow(element));
+    setIsMenuOpen(true);
+  }, []);
+
+  const openContextMenuFromKeyboard = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!isContextMenuKey(event) || !(event.target instanceof HTMLElement) || isInTextBox(event.target)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    openContextMenuBelow(event.target, true);
+  }, [openContextMenuBelow]);
+
+  const toggleContextMenuFromTrigger = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    // The click is the button's, not the row's around it.
+    event.stopPropagation();
+    if (isMenuOpen) {
+      closeContextMenu();
+      return;
+    }
+    // A click with no pointer behind it (detail 0) came from Enter or Space, or a screen reader.
+    openContextMenuBelow(event.currentTarget, event.detail === 0);
+  }, [closeContextMenu, isMenuOpen, openContextMenuBelow]);
+
   const runMenuActionAndClose = useCallback((action?: () => void) => {
+    // The picked item goes with the menu, so focus would drop to the page. It goes back first,
+    // so an action that moves it on (a dialog, the new item's input) still has the last word.
+    keyboardOpener?.focus();
     closeContextMenu();
     action?.();
-  }, [closeContextMenu]);
+  }, [closeContextMenu, keyboardOpener]);
 
   const menuActions = useMemo<ContextMenuAction[]>(() => {
     if (item?.type === 'file') {
@@ -289,24 +368,37 @@ export default function FileContextMenu({
     return [
       ...createActions(''),
       ...mountFolderActions,
+      ...(onCopyRootPath
+        ? [
+            {
+              key: 'copyPath',
+              icon: Copy,
+              label: t('fileTree.context.copyPath', 'Copy Path'),
+              onSelect: onCopyRootPath,
+              showDividerBefore: true,
+            },
+          ]
+        : []),
       {
         key: 'refresh',
         icon: RefreshCw,
         label: t('fileTree.context.refresh', 'Refresh'),
         onSelect: onRefresh,
-        showDividerBefore: true,
+        showDividerBefore: !onCopyRootPath,
       },
     ];
-  }, [holdsMounts, item, onCopyPath, onCopyTargetPath, onDelete, onDownload, onMountFolder, onNewFile, onNewFolder, onRefresh, onRename, onRepairMount, onUnmount, onUpload, t]);
+  }, [holdsMounts, item, onCopyPath, onCopyRootPath, onCopyTargetPath, onDelete, onDownload, onMountFolder, onNewFile, onNewFolder, onRefresh, onRename, onRepairMount, onUnmount, onUpload, t]);
 
   useEffect(() => {
     if (!isMenuOpen) {
       return;
     }
 
-    const handleOutsideMouseDown = (event: MouseEvent) => {
+    // A press on the button that opened the menu, or the focus it takes, is left to its click, which closes it.
+    const closeIfOutside = (event: Event) => {
       const menuElement = menuRef.current;
-      if (menuElement && !menuElement.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (menuElement && !menuElement.contains(target) && !triggerElement?.contains(target)) {
         closeContextMenu();
       }
     };
@@ -314,17 +406,28 @@ export default function FileContextMenu({
     const handleEscapeKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         closeContextMenu();
+        keyboardOpener?.focus();
       }
     };
 
-    document.addEventListener('mousedown', handleOutsideMouseDown);
+    document.addEventListener('mousedown', closeIfOutside);
+    // The keyboard never presses outside: Tab moving on, or another menu opened from the keyboard
+    // taking focus, closes this one, which would otherwise keep answering the arrows from anywhere.
+    document.addEventListener('focusin', closeIfOutside);
     document.addEventListener('keydown', handleEscapeKeyDown);
 
     return () => {
-      document.removeEventListener('mousedown', handleOutsideMouseDown);
+      document.removeEventListener('mousedown', closeIfOutside);
+      document.removeEventListener('focusin', closeIfOutside);
       document.removeEventListener('keydown', handleEscapeKeyDown);
     };
-  }, [closeContextMenu, isMenuOpen]);
+  }, [closeContextMenu, isMenuOpen, keyboardOpener, triggerElement]);
+
+  useEffect(() => {
+    if (isMenuOpen && keyboardOpener) {
+      menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus();
+    }
+  }, [isMenuOpen, keyboardOpener]);
 
   useEffect(() => {
     if (!isMenuOpen) {
@@ -366,8 +469,15 @@ export default function FileContextMenu({
 
   return (
     <>
-      <div onContextMenu={openContextMenuAtCursor} className={cn('contents', className)}>
-        {children}
+      <div onContextMenu={openContextMenuAtCursor} onKeyDown={openContextMenuFromKeyboard} className={cn('contents', className)}>
+        {typeof children === 'function'
+          ? children({
+              ref: setTriggerElement,
+              'aria-haspopup': 'menu',
+              'aria-expanded': isMenuOpen,
+              onClick: toggleContextMenuFromTrigger,
+            })
+          : children}
       </div>
 
       {isMenuOpen && (
@@ -377,6 +487,7 @@ export default function FileContextMenu({
           aria-label={t('fileTree.context.menuLabel', 'File context menu')}
           style={{ position: 'fixed', ...menuPosition, zIndex: 9999 }}
           onContextMenu={keepContextMenuInMenu}
+          onKeyDown={keepContextMenuKeyInMenu}
           className={cn(
             'min-w-[180px] py-1 px-1',
             'bg-popover border border-border rounded-lg shadow-lg',

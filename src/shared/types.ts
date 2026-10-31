@@ -516,11 +516,12 @@ export type ServerEvent = {
 /** Progress state of a single queue row, driving the indicator the Queue primitive renders. */
 export type QueueItemStatus = 'completed' | 'in_progress' | 'pending';
 
-/** One folder as the FolderBrowserModal primitive shows it: the path the endpoint resolved, its parent when the endpoint says (null at a root it may not leave; left out, the modal works it out from the path) and its subfolders. Each caller adapts its own browse endpoint to this shape. */
+/** One folder as the FolderBrowserModal primitive shows it: the path the endpoint resolved, its parent when the endpoint says (null at a root it may not leave; left out, the modal works it out from the path), its subfolders, and a remark the caller wants shown with them, already in the user's language (such as that not every subfolder is listed). Each caller adapts its own browse endpoint to this shape. */
 export type FolderBrowseResult = {
   path: string;
   parent?: string | null;
   folders: FolderSuggestion[];
+  notice?: string;
 };
 
 // ---------------------------
@@ -2049,6 +2050,67 @@ export type BrowserFullscreenReport = {
   dpr: number;
   /** userAgentData.platform, else navigator.platform; at most 40 characters. */
   platform: string;
+};
+
+/**
+ * Whether the server can push to this browser, as the shared push registration check finds it.
+ * 'registered': the server holds this browser's endpoint, and the subscription was made with the
+ * server's current VAPID key. 'unknown': the browser holds a subscription the server lacks.
+ * 'staleKey': the subscription was made with another VAPID key. 'unchecked': the server could not
+ * say. 'none': no subscription; 'unsupported': no service worker or no push here.
+ */
+export type PushRegistrationStatus = 'unsupported' | 'none' | 'registered' | 'unknown' | 'staleKey' | 'unchecked';
+
+/**
+ * Why a page did what it did about a system notification. 'away': posted it, the user away from the
+ * page. 'test': Settings' test. 'pushRegistered': left it to push. 'desktopNotifies' / 'desktopOff':
+ * in the desktop app, with its native notifications on or off. The others say why nothing was posted.
+ */
+export type NotificationDeliveryReason =
+  | 'away'
+  | 'test'
+  | 'pushRegistered'
+  | 'desktopNotifies'
+  | 'desktopOff'
+  | 'onPage'
+  | 'switchOff'
+  | 'noPermission'
+  | 'unsupported'
+  | 'noServiceWorker'
+  | 'postFailed';
+
+/**
+ * One line of notification diagnostics: what the tab that claimed a finished run's alert (or Settings'
+ * test) did about the system notification, and the browser state behind it. Logged by the server's
+ * system module as a single `[client-diag] notification` line; no endpoint, title or session goes in it.
+ */
+export type NotificationDeliveryReport = {
+  event: 'notification';
+  /** 'posted': the page posted one. 'push': left to push. 'desktop': left to the desktop app. 'skipped': none. */
+  outcome: 'posted' | 'push' | 'desktop' | 'skipped';
+  reason: NotificationDeliveryReason;
+  permission: NotificationPermission | 'unsupported';
+  visibility: 'visible' | 'hidden';
+  /** document.hasFocus() when it decided. */
+  focused: boolean;
+  push: PushRegistrationStatus;
+  /** Whether the posted notification was silent; absent when none was posted. */
+  silent?: boolean;
+  /** userAgentData.platform, else navigator.platform; at most 40 characters. */
+  platform: string;
+};
+
+/**
+ * What Settings' test push came to: the push service accepted it (with its status) or not (with its
+ * status, null when it never answered, and the start of its answer). A subscription the service
+ * called gone, or made with another VAPID key, has been dropped on the server.
+ */
+export type TestPushDelivery = {
+  accepted: boolean;
+  statusCode: number | null;
+  host: string;
+  detail?: string;
+  dropped?: boolean;
 };
 
 /** One side of the split workspace; 'right' exists only while the workspace is split. */

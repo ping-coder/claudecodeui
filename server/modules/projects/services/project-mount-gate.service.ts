@@ -25,6 +25,19 @@ const UNREACHABLE_SHARE_RETRY_MS = 30_000;
 const PROVEN_SHARE_MS = 10 * 60_000;
 const MAXIMUM_UNPROVEN_CALLS = 2;
 
+// A whole folder read in the background (the File Tree's walk of a mount)
+// can hold its share's turn for many seconds on a big folder. A short call
+// someone waits for on a share known to answer does not wait that out: it
+// runs beside the read, so the share then has two calls going, and if the
+// share hangs right then, both keep their thread. That is never more than
+// two threads for one share, and this many such calls for the whole server
+// at a time, so shares that hang together take at most one thread more than
+// one call each would. A folder read someone waits for (the folder browser's)
+// never runs beside: it would hold the turn beside for as long as its folder
+// is big, and a file opened meanwhile on any share a walk holds would find no
+// turn, and come back busy.
+const MAXIMUM_CALLS_BESIDE_BACKGROUND = 1;
+
 // Filesystems of a local disk or of memory. Their calls answer, or fail, in
 // time: it is a network share (nfs, cifs, a FUSE filesystem such as sshfs)
 // whose calls hang for as long as its server is gone. Calls on one of these
@@ -58,21 +71,38 @@ type MountGateDependencies = {
   logWarning(message: string): void;
 };
 
-/** Why a wait for a slot ended. `rejected`: the share stopped answering meanwhile. */
-type SlotTurn = 'acquired' | 'timeout' | 'aborted' | 'rejected';
+/**
+ * Why a wait for a slot ended. `rejected`: the share stopped answering
+ * meanwhile. `beside`: the call runs beside the one holding the slot, on a
+ * turn of its own (see mayRunBesideBackground).
+ */
+type SlotTurn = 'acquired' | 'timeout' | 'aborted' | 'rejected' | 'beside';
 
-type SlotWaiter = { settle(turn: SlotTurn): void };
+/**
+ * Who a call is for. `interactive`: someone waits for it (a file opened,
+ * read or saved, a probe, the folder browser). `background`: one of the many
+ * calls of a walk, which nobody waits for one by one. An interactive call
+ * gets its turn before every background call that waits.
+ */
+type CallPriority = 'interactive' | 'background';
+
+/** `slow`: a whole folder read (see run), which never takes a turn beside a background call. */
+type SlotWaiter = { priority: CallPriority; slow: boolean; settle(turn: SlotTurn): void };
 
 type SlotPool = {
-  /** Takes a free slot at once, when one is free and nobody waits; never waits. */
-  tryAcquire(): boolean;
-  acquire(waitMs: number, signal?: AbortSignal): Promise<SlotTurn>;
+  /** Takes a free slot at once, when one is free and nobody waits ahead; never waits. */
+  tryAcquire(priority?: CallPriority): boolean;
+  acquire(waitMs: number, signal?: AbortSignal, priority?: CallPriority, slow?: boolean): Promise<SlotTurn>;
   release(): void;
   rejectWaiting(): void;
+  /** Settles the first interactive waiter that is not slow with `beside`; false when none waits. */
+  passBeside(): boolean;
 };
 
 type ShareState = {
   slot: SlotPool;
+  /** Whether the call holding the slot is a whole folder read in the background (see MAXIMUM_CALLS_BESIDE_BACKGROUND). */
+  slotHeldBySlowBackgroundCall: boolean;
   /** Calls of this share that did not answer in time and have not answered since. */
   hungCalls: number;
   /** No new call before this time (monotonic), after a call timed out. */
@@ -85,27 +115,34 @@ type ShareState = {
 type ShareLocation = { share: string; local: boolean };
 
 /**
- * A pool of `capacity` slots handed out first come, first served. A waiter
- * gives up after `waitMs`, when its signal aborts, or when the pool rejects
- * every waiter at once.
+ * A pool of `capacity` slots handed out first come, first served, except
+ * that interactive waiters go before background ones. A waiter gives up
+ * after `waitMs`, when its signal aborts, or when the pool rejects every
+ * waiter at once.
  */
 function createSlotPool(capacity: number): SlotPool {
   let used = 0;
+  // Interactive waiters first, then background ones, each in the order they came.
   const waiters: SlotWaiter[] = [];
 
+  /** Whether a call of `priority` has to let a waiter go first. */
+  function hasWaiterAhead(priority: CallPriority): boolean {
+    return priority === 'background' ? waiters.length > 0 : waiters[0]?.priority === 'interactive';
+  }
+
   return {
-    tryAcquire() {
-      if (used < capacity && waiters.length === 0) {
+    tryAcquire(priority = 'interactive') {
+      if (used < capacity && !hasWaiterAhead(priority)) {
         used += 1;
         return true;
       }
       return false;
     },
-    acquire(waitMs, signal) {
+    acquire(waitMs, signal, priority = 'interactive', slow = false) {
       if (signal?.aborted) {
         return Promise.resolve('aborted');
       }
-      if (used < capacity && waiters.length === 0) {
+      if (used < capacity && !hasWaiterAhead(priority)) {
         used += 1;
         return Promise.resolve('acquired');
       }
@@ -113,6 +150,8 @@ function createSlotPool(capacity: number): SlotPool {
         let timer: NodeJS.Timeout | undefined;
         const onAbort = () => waiter.settle('aborted');
         const waiter: SlotWaiter = {
+          priority,
+          slow,
           settle(turn) {
             const index = waiters.indexOf(waiter);
             if (index === -1) {
@@ -124,7 +163,14 @@ function createSlotPool(capacity: number): SlotPool {
             resolve(turn);
           },
         };
-        waiters.push(waiter);
+        const firstBackgroundWaiter = priority === 'interactive'
+          ? waiters.findIndex((other) => other.priority === 'background')
+          : -1;
+        if (firstBackgroundWaiter === -1) {
+          waiters.push(waiter);
+        } else {
+          waiters.splice(firstBackgroundWaiter, 0, waiter);
+        }
         timer = setTimeout(() => waiter.settle('timeout'), waitMs);
         signal?.addEventListener('abort', onAbort, { once: true });
       });
@@ -142,6 +188,15 @@ function createSlotPool(capacity: number): SlotPool {
       for (const waiter of [...waiters]) {
         waiter.settle('rejected');
       }
+    },
+    passBeside() {
+      // A slow waiter is passed over: it waits for the slot itself.
+      const next = waiters.find((waiter) => waiter.priority === 'interactive' && !waiter.slow);
+      if (!next) {
+        return false;
+      }
+      next.settle('beside');
+      return true;
     },
   };
 }
@@ -241,12 +296,21 @@ function isSameOrInside(candidatePath: string, parentPath: string): boolean {
  *   thread; the calls behind it wait, and come back busy.
  * - A call waits for its share's turn at most the time limit, then comes
  *   back `busy`; so does a call whose signal aborts while it waits.
+ * - A background call (`background`: the File Tree's walk of a mount, many
+ *   calls nobody waits for one by one) waits behind every interactive call,
+ *   so a file the user opens or saves never queues behind a walk's calls,
+ *   only behind the one call running. On a share known to answer, an
+ *   interactive call that is not slow does not wait for a whole folder read
+ *   in the background either: it runs beside it (see
+ *   MAXIMUM_CALLS_BESIDE_BACKGROUND).
  * - Calls on shares not known to answer lately share MAXIMUM_UNPROVEN_CALLS
  *   slots (see PROVEN_SHARE_MS).
  */
 export function createMountGate(dependencies: MountGateDependencies) {
   const shares = new Map<string, ShareState>();
   const unprovenSlots = createSlotPool(MAXIMUM_UNPROVEN_CALLS);
+  // Taken at once or not at all: a call that finds none free waits for its share's turn.
+  const besideSlots = createSlotPool(MAXIMUM_CALLS_BESIDE_BACKGROUND);
   let mountPoints: { list: MachineMountPoint[] | null; readAt: number } | null = null;
   let mountPointsRead: Promise<MachineMountPoint[] | null> | null = null;
 
@@ -293,7 +357,7 @@ export function createMountGate(dependencies: MountGateDependencies) {
   function shareState(share: string): ShareState {
     let state = shares.get(share);
     if (!state) {
-      state = { slot: createSlotPool(1), hungCalls: 0, retryAt: 0, answeredAt: null };
+      state = { slot: createSlotPool(1), slotHeldBySlowBackgroundCall: false, hungCalls: 0, retryAt: 0, answeredAt: null };
       shares.set(share, state);
     }
     return state;
@@ -306,6 +370,37 @@ export function createMountGate(dependencies: MountGateDependencies) {
   /** Whether calls on the share come back `unreachable` without being started (see run). */
   function isShareUnreachable(state: ShareState, retryNow: boolean): boolean {
     return state.hungCalls > 0 || (!retryNow && dependencies.monotonicNow() < state.retryAt);
+  }
+
+  /**
+   * Whether an interactive call that is not slow, finding its share's slot
+   * taken, may run beside the call holding it, on one of the
+   * MAXIMUM_CALLS_BESIDE_BACKGROUND turns: while a whole folder read in the
+   * background holds the slot of a share known to answer. A share not known
+   * to answer may be one that hangs, and would keep both threads. Behind a
+   * background call that reads one entry an interactive call waits for that
+   * call alone, as it goes before the rest.
+   */
+  function mayRunBesideBackground(state: ShareState): boolean {
+    return state.slotHeldBySlowBackgroundCall && isProven(state, dependencies.monotonicNow());
+  }
+
+  /**
+   * Hands a turn beside a background call, once one is free, to the first
+   * interactive call that is not slow waiting on a share where it may run
+   * beside (see mayRunBesideBackground), so a second click on a share does
+   * not wait out its folder read just because the first one took the turn.
+   */
+  function passBesideTurn(): void {
+    for (const state of shares.values()) {
+      if (!mayRunBesideBackground(state)) {
+        continue;
+      }
+      if (!besideSlots.tryAcquire() || state.slot.passBeside()) {
+        return;
+      }
+      besideSlots.release();
+    }
   }
 
   return {
@@ -334,12 +429,13 @@ export function createMountGate(dependencies: MountGateDependencies) {
     /**
      * Runs `operation`, a filesystem call on `locationPath` (where it really
      * is, links resolved as far as known), under the rules above, and tells
-     * it whether it is gated (see `MountCall`).
+     * it whether it is gated (see `MountCall`). A call is interactive unless
+     * `background` says it is one of a walk's (see CallPriority).
      */
     async run<T>(
       locationPath: string,
       operation: (call: MountCall) => Promise<T>,
-      options: { retryNow?: boolean; signal?: AbortSignal; slow?: boolean } = {},
+      options: { retryNow?: boolean; signal?: AbortSignal; slow?: boolean; background?: boolean } = {},
     ): Promise<MountCallOutcome<T>> {
       const { share, local } = await locateShare(locationPath);
       if (local) {
@@ -354,34 +450,57 @@ export function createMountGate(dependencies: MountGateDependencies) {
       if (isUnreachable()) {
         return { kind: 'unreachable' };
       }
+      const priority: CallPriority = options.background === true ? 'background' : 'interactive';
 
       // A free slot is taken without a turn of the event loop, so a call
       // starts its time limit before any call that comes after it starts
       // waiting: one that waits behind a call that hangs is then told the
       // share is unreachable, rather than give up first and come back busy,
       // which would say nothing about the share. Behind a slow call it does
-      // give up first, and comes back busy.
-      const turn = !options.signal?.aborted && state.slot.tryAcquire()
-        ? 'acquired'
-        : await state.slot.acquire(dependencies.timeoutMs, options.signal);
+      // give up first, and comes back busy, unless it may run beside it.
+      let turn: SlotTurn;
+      if (!options.signal?.aborted && state.slot.tryAcquire(priority)) {
+        turn = 'acquired';
+      } else if (
+        !options.signal?.aborted
+        && priority === 'interactive'
+        && options.slow !== true
+        && mayRunBesideBackground(state)
+        && besideSlots.tryAcquire()
+      ) {
+        turn = 'beside';
+      } else {
+        turn = await state.slot.acquire(dependencies.timeoutMs, options.signal, priority, options.slow === true);
+      }
       if (turn === 'rejected') {
         return { kind: 'unreachable' };
       }
-      if (turn !== 'acquired') {
+      if (turn !== 'acquired' && turn !== 'beside') {
         return { kind: 'busy' };
       }
+      const runsBesideBackground = turn === 'beside';
+      const releaseTurn = () => {
+        if (runsBesideBackground) {
+          besideSlots.release();
+          passBesideTurn();
+        } else {
+          state.slotHeldBySlowBackgroundCall = false;
+          state.slot.release();
+        }
+      };
       // The share may have stopped answering while this call waited.
       if (isUnreachable()) {
-        state.slot.release();
+        releaseTurn();
         return { kind: 'unreachable' };
       }
       let holdsUnprovenSlot = false;
-      if (!isProven(state, dependencies.monotonicNow())) {
-        const unprovenTurn = !options.signal?.aborted && unprovenSlots.tryAcquire()
+      // A call beside a background one runs on a share known to answer only.
+      if (!runsBesideBackground && !isProven(state, dependencies.monotonicNow())) {
+        const unprovenTurn = !options.signal?.aborted && unprovenSlots.tryAcquire(priority)
           ? 'acquired'
-          : await unprovenSlots.acquire(dependencies.timeoutMs, options.signal);
+          : await unprovenSlots.acquire(dependencies.timeoutMs, options.signal, priority);
         if (unprovenTurn !== 'acquired') {
-          state.slot.release();
+          releaseTurn();
           return { kind: 'busy' };
         }
         holdsUnprovenSlot = true;
@@ -390,8 +509,11 @@ export function createMountGate(dependencies: MountGateDependencies) {
         if (holdsUnprovenSlot) {
           unprovenSlots.release();
         }
-        state.slot.release();
+        releaseTurn();
       };
+      if (!runsBesideBackground) {
+        state.slotHeldBySlowBackgroundCall = priority === 'background' && options.slow === true;
+      }
 
       let call: Promise<MountCallOutcome<T>>;
       try {

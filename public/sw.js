@@ -72,7 +72,8 @@ self.addEventListener('activate', event => {
 });
 
 // Pushes for a finished task. While a CloudCLI window is focused, that page chimes for
-// the task itself (run-notifications), so these pushes are shown without a sound of their own.
+// the task itself (run-notifications), so these pushes are shown without a sound of their own;
+// the banner still shows.
 const RUN_PUSH_CODES = new Set(['run.stopped', 'run.failed', 'run.background_completed']);
 
 // True when any CloudCLI window of this origin has focus, also one this worker does not
@@ -103,6 +104,9 @@ self.addEventListener('push', event => {
     badge: '/logo-128.png',
     data: payload.data || {},
     tag: payload.data?.tag || `${payload.data?.sessionId || 'global'}:${payload.data?.code || 'default'}`,
+    // The tag names the session and outcome, so a push replaces the session's last notification
+    // while it still sits in Notification Center or Action Center. Without renotify, macOS and
+    // Windows make that replacement without a banner: one banner per session, then none.
     renotify: true
   };
 
@@ -111,9 +115,34 @@ self.addEventListener('push', event => {
   event.waitUntil((async () => {
     if (RUN_PUSH_CODES.has(payload.data?.code) && await hasFocusedWindow()) {
       options.silent = true;
-      options.renotify = false;
     }
     await self.registration.showNotification(payload.title || 'CloudCLI', options);
+  })());
+});
+
+// The browser replaced or dropped this worker's push subscription (Firefox does it now and
+// then, other browsers when the push service expires one). The worker cannot tell the server: API
+// calls carry the sign-in token a page keeps in localStorage, out of a worker's reach. So it
+// makes sure the browser still holds a subscription with the same key and asks the open pages
+// to check it with the server, which saves it again; with no page open, the next page load does.
+self.addEventListener('pushsubscriptionchange', event => {
+  event.waitUntil((async () => {
+    try {
+      const applicationServerKey = event.oldSubscription?.options?.applicationServerKey;
+      if (!event.newSubscription && applicationServerKey) {
+        await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+      }
+    } catch {
+      // The pages find no subscription, or one the server lacks, and post their own notifications.
+    }
+    try {
+      const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of windowClients) {
+        client.postMessage({ type: 'push:subscription-changed' });
+      }
+    } catch {
+      // Each page checks again on its next load or when it comes back into view.
+    }
   })());
 });
 

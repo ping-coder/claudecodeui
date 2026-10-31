@@ -11,6 +11,7 @@ import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js'
 import {
   isMountShareUnreachable,
   listProjectMounts,
+  onProjectMountsChanged,
   PROJECT_MOUNTS_DIRECTORY_NAME,
   runInMountTarget,
 } from '@/modules/projects/index.js';
@@ -83,6 +84,9 @@ const fileTreeMounts: FileTreeMountsGateway = {
   listProjectMounts: (projectId) => listProjectMounts(projectId),
   runInMountTarget: (realPath, operation, options) => runInMountTarget(realPath, operation, options),
   isShareUnreachable: (absolutePath) => isMountShareUnreachable(absolutePath),
+  onMountsChanged: (listener) => {
+    onProjectMountsChanged(listener);
+  },
 };
 
 /**

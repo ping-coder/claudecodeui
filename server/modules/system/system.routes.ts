@@ -21,7 +21,7 @@ export function createSystemRouter(
     }
   });
 
-  // One browser diagnostics report (the fullscreen outcome) becomes one server log line.
+  // One browser diagnostics report (a fullscreen outcome, a system-notification decision) becomes one server log line.
   router.post('/client-diagnostics', (request, response) => {
     const result = clientDiagnosticsService.record({
       userId: (request as AuthenticatedRequest).user?.id ?? null,

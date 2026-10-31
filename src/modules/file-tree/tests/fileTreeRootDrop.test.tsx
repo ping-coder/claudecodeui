@@ -110,3 +110,18 @@ test('deeper file rows and folder rows still upload into their folder', async ()
   assert.equal(dragOverRow('src'), 'Drop files to upload to "src"');
   assert.equal(await dropOnRow('src'), `${ROOT}/src`);
 });
+
+test('a file dropped onto the project root\'s row goes into the root, even straight after a folder row', async () => {
+  await renderTree();
+  const rootRow = () => screen.getByText('demo').closest('[data-file-tree-root]') as HTMLElement;
+  const rootRowLit = () => rootRow().className.includes('ring-blue-500/40');
+
+  // Over a folder the drop is aimed at it, and the root row is not lit.
+  assert.equal(dragOverRow('src'), 'Drop files to upload to "src"');
+  assert.equal(rootRowLit(), false);
+
+  // Over the root row it is aimed at the root again, and the row lights up to say so.
+  assert.equal(dragOverRow('demo'), 'Drop files to upload');
+  assert.equal(rootRowLit(), true);
+  assert.equal(await dropOnRow('demo'), '');
+});

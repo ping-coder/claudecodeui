@@ -6,7 +6,6 @@ import {
   claimRunAlert,
   markRunAlertsSeen,
   mergeSystemNotificationCta,
-  readBrowserPushSubscribed,
   readSeenRunAlertKeys,
   readSystemNotificationCta,
   showRunAlertSystemNotification,
@@ -214,7 +213,7 @@ test('the system notification goes through getRegistration, never serviceWorker.
     data: { sessionId: 'session-a', provider: 'claude' as const, code: 'run.stopped' },
     silent: true,
   };
-  assert.equal(await showRunAlertSystemNotification(notification), true);
+  assert.equal(await showRunAlertSystemNotification(notification), 'posted');
   assert.deepEqual(posted, [{
     title: 'Fix login bug',
     options: {
@@ -224,18 +223,26 @@ test('the system notification goes through getRegistration, never serviceWorker.
       icon: '/logo-256.png',
       badge: '/logo-128.png',
       silent: true,
-      renotify: false,
+      // Silent drops the sound, never the banner of a notification that replaces the session's last one.
+      renotify: true,
     },
   }]);
 
+  registration = {
+    showNotification: async () => {
+      throw new TypeError('No notification permission has been granted for this origin.');
+    },
+  };
+  assert.equal(await showRunAlertSystemNotification(notification), 'failed');
+
   registration = undefined;
-  assert.equal(await showRunAlertSystemNotification({ ...notification, silent: false }), false);
+  assert.equal(await showRunAlertSystemNotification({ ...notification, silent: false }), 'noServiceWorker');
   assert.equal(posted.length, 1);
   assert.equal(isReadyRead, false);
 
   // No service worker at all (plain http).
   delete (navigator as unknown as Record<string, unknown>).serviceWorker;
-  assert.equal(await showRunAlertSystemNotification(notification), false);
+  assert.equal(await showRunAlertSystemNotification(notification), 'noServiceWorker');
 });
 
 test('a system notification from a right-to-left interface goes out without bidi isolates', async () => {
@@ -259,23 +266,3 @@ test('a system notification from a right-to-left interface goes out without bidi
   assert.deepEqual(posted, [{ title: 'Stage · Fix login bug', body: 'הושלם · demo-app' }]);
 });
 
-test('push counts as subscribed only when the registration holds a subscription', async () => {
-  let subscription: unknown = { endpoint: 'https://push.example/abc' };
-  defineNavigatorProperty('serviceWorker', {
-    getRegistration: async () => ({ pushManager: { getSubscription: async () => subscription } }),
-  });
-  assert.equal(await readBrowserPushSubscribed(), true);
-
-  subscription = null;
-  assert.equal(await readBrowserPushSubscribed(), false);
-
-  defineNavigatorProperty('serviceWorker', {
-    getRegistration: async () => {
-      throw new Error('worker gone');
-    },
-  });
-  assert.equal(await readBrowserPushSubscribed(), false);
-
-  delete (navigator as unknown as Record<string, unknown>).serviceWorker;
-  assert.equal(await readBrowserPushSubscribed(), false);
-});

@@ -141,6 +141,7 @@
     "uploadFailed": "上传失败",
     "uploadedCount_other": "已上传 {{uploaded}}/{{total}} 个文件",
     "ignoredByGitignore": "匹配 .gitignore 规则",
+    "rootActions": "{{name}} 的更多操作",
     "context": {
       "rename": "重命名",
       "delete": "删除",
@@ -216,6 +217,7 @@
       "adoptableHint": "这些链接已经在 mounts 目录里（比如在终端里建的），登记后就能在这里管理。",
       "adopt": "登记",
       "truncated": "挂载的文件夹太大或响应太慢，没有全部列出。",
+      "browseIncomplete": "没有列出全部文件夹：这个文件夹太大或读取太慢，限时内只检查了 {{total}} 项中的 {{checked}} 项。仍然可以在「要挂载的文件夹」里直接输入路径。",
       "nodeTitle": "挂载的文件夹 → {{target}}",
       "nodeWarningTitle": "挂载的文件夹 → {{target}}。{{status}}：右键点击可以修复。",
       "nodeBrokenTitle": "挂载已失效 → {{target}}。{{status}}：右键点击可以修复或卸载。",
@@ -249,6 +251,7 @@
         "repairSpotTaken": "mounts/{{name}} 现在是一个真实的文件或文件夹，不是链接了。先把它移走再修复，或者卸载。",
         "targetNotFound": "这个文件夹不存在，或者没有响应（可能是离线的网络共享）。",
         "browseUnavailable": "打不开这个文件夹：它不存在、没有响应（可能是离线的网络共享），或者没有读取权限。",
+        "targetBusy": "暂时没法检查这个文件夹：它所在的网络共享正忙（比如正在读取一个很大的文件夹），或者被离线的网络共享拖住了。请稍后再试。",
         "targetNotDirectory": "这个路径不是文件夹。",
         "targetForbidden": "系统目录、~/.ssh 这类私密目录，以及包含它们的目录都不能挂载。主目录也不行，请选它下面的文件夹。",
         "targetLoop": "不能挂载项目本身、项目里的文件夹，或包含项目的上级文件夹。",

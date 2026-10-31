@@ -402,6 +402,40 @@ test('repair points a link that went elsewhere back at the target, and refuses a
   });
 });
 
+test('those listening hear of every mount added, adopted, repaired, removed or released with its project, and only while they listen', async () => {
+  await withProject(async ({ sandbox, projectRoot, projectId, targetRoot }) => {
+    const changes: string[] = [];
+    const stopListening = service.onMountsChanged((change) => {
+      changes.push(`${change.projectId === projectId ? 'project' : change.projectId}:${change.mountId}`);
+    });
+    try {
+      const mount = await service.createMount(projectId, { name: 'data', targetPath: targetRoot });
+      assert.deepEqual(changes, [`project:${mount.mountId}`]);
+      await unlink(path.join(projectRoot, 'mounts', 'data'));
+      await service.repairMount(projectId, mount.mountId);
+      // A failed mount is no change.
+      await assert.rejects(service.createMount(projectId, { name: 'data', targetPath: targetRoot }), rejectsWith('MOUNT_NAME_TAKEN', 409));
+      const elsewhere = path.join(sandbox, 'elsewhere');
+      await mkdir(elsewhere);
+      await symlink(elsewhere, path.join(projectRoot, 'mounts', 'other'));
+      const adopted = await service.adoptMount(projectId, { name: 'other' });
+      await service.removeMount(projectId, mount.mountId);
+      await service.releaseProjectMounts(projectId, projectRoot);
+      assert.deepEqual(changes, [
+        `project:${mount.mountId}`,
+        `project:${mount.mountId}`,
+        `project:${adopted.mountId}`,
+        `project:${mount.mountId}`,
+        `project:${adopted.mountId}`,
+      ]);
+    } finally {
+      stopListening();
+    }
+    await service.createMount(projectId, { name: 'again', targetPath: targetRoot });
+    assert.equal(changes.length, 5);
+  });
+});
+
 test('the listing reports what is wrong with each mount', async () => {
   await withProject(async ({ sandbox, projectRoot, projectId }) => {
     const makeTarget = async (name: string) => {
@@ -1335,10 +1369,12 @@ test('the folder browser reads a folder on a network share as names through the 
     const namesRead: string[] = [];
     let hangs = false;
     let answerHungRead = () => {};
+    const clock = { now: 0 };
     const browser = createProjectMountsService({
       homeDirectory,
       targetProbeTimeoutMs: 100,
       slowCallTimeoutMs: 500,
+      monotonicNow: () => clock.now,
       listMountPoints: async () => [{ path: '/', local: true }, { path: nas, local: false }],
       logWarning: () => {},
       readFolderNames: async (folderPath) => {
@@ -1360,6 +1396,7 @@ test('the folder browser reads a folder on a network share as names through the 
     assert.deepEqual(namesRead, [nas]);
 
     // A folder whose read does not answer costs the request a time limit.
+    clock.now = 20_000;
     hangs = true;
     await assert.rejects(browser.browseMountTargets(path.join(nas, 'scans')), rejectsWith('MOUNT_TARGET_NOT_FOUND', 400));
     assert.deepEqual(namesRead, [nas, path.join(nas, 'scans')]);
@@ -1372,14 +1409,318 @@ test('the folder browser reads a folder on a network share as names through the 
     // Once that read has answered, the user browsing again is not held to
     // the wait after the share's time-out: the folder's entries get their
     // lstats. (A link is probed where it leads, as a listing probes it.)
+    // The first listing is no longer kept by then.
     hangs = false;
     answerHungRead();
     await new Promise((resolve) => setImmediate(resolve));
+    clock.now = 31_000;
     const again = await browser.browseMountTargets(nas);
+    assert.deepEqual(namesRead, [nas, path.join(nas, 'scans'), nas]);
     assert.deepEqual(
       again.directories.map((directory) => directory.name).filter((name) => name !== 'latest'),
       ['models', 'scans'],
     );
+  });
+});
+
+/**
+ * A folder browser for which `nas` is a network share, with a clock the test
+ * moves. It records every folder whose names it reads and every entry it
+ * lstats on the share (by its path from `nas`). `onReadNames` runs before
+ * each read, with the folder's path, and `onLstat` before each lstat, with
+ * the entry's name; either holds its call up until the promise it returns
+ * settles. The lstat itself is read at once, so a held one answers within
+ * the turn it is let go.
+ */
+function createShareBrowser(
+  nas: string,
+  options: {
+    typeCheckTimeMs?: number;
+    targetProbeTimeoutMs?: number;
+    onReadNames?: (folderPath: string) => void | Promise<void>;
+    onLstat?: (name: string) => void | Promise<void>;
+  } = {},
+) {
+  const clock = { now: 0 };
+  const namesRead: string[] = [];
+  const lstatted: string[] = [];
+  const browser = createProjectMountsService({
+    homeDirectory,
+    monotonicNow: () => clock.now,
+    listMountPoints: async () => [{ path: '/', local: true }, { path: nas, local: false }],
+    logWarning: () => {},
+    ...(options.typeCheckTimeMs === undefined ? {} : { browseTypeCheckTimeMs: options.typeCheckTimeMs }),
+    ...(options.targetProbeTimeoutMs === undefined ? {} : { targetProbeTimeoutMs: options.targetProbeTimeoutMs }),
+    readFolderNames: async (folderPath) => {
+      namesRead.push(folderPath);
+      await options.onReadNames?.(folderPath);
+      return readdir(folderPath);
+    },
+    lstatEntry: async (entryPath) => {
+      lstatted.push(path.relative(nas, entryPath));
+      await options.onLstat?.(path.basename(entryPath));
+      return fs.lstatSync(entryPath);
+    },
+  });
+  return { browser, clock, namesRead, lstatted };
+}
+
+const namesOf = (listing: { directories: Array<{ name: string }> }) => listing.directories.map((directory) => directory.name);
+
+test('on a network share the folder browser checks the likely folders first, and lists what it found when its time is up', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    for (const folder of ['scans', 'models', 'release-2.1', 'clips.old', '.cache']) {
+      await mkdir(path.join(nas, folder), { recursive: true });
+    }
+    for (const file of ['b.csv', 'a.jpg', '.DS_Store', 'README']) {
+      await writeFile(path.join(nas, file), 'not a folder');
+    }
+
+    // Names without a file extension first, then names with one, hidden names last.
+    const unhurried = createShareBrowser(nas);
+    const complete = await unhurried.browser.browseMountTargets(nas);
+    assert.deepEqual(unhurried.lstatted, ['models', 'README', 'release-2.1', 'scans', 'a.jpg', 'b.csv', 'clips.old', '.cache', '.DS_Store']);
+    assert.deepEqual(namesOf(complete), ['clips.old', 'models', 'release-2.1', 'scans', '.cache']);
+    assert.equal(complete.truncated, undefined);
+
+    // A second per check: the time limit leaves room for three, and the
+    // listing says how many of the folder's names were checked.
+    const slow = createShareBrowser(nas, {
+      typeCheckTimeMs: 2_500,
+      onLstat: () => {
+        slow.clock.now += 1_000;
+      },
+    });
+    const cut = await slow.browser.browseMountTargets(nas);
+    assert.deepEqual(slow.lstatted, ['models', 'README', 'release-2.1']);
+    assert.deepEqual(namesOf(cut), ['models', 'release-2.1']);
+    assert.deepEqual(cut.truncated, { checked: 3, total: 9 });
+  });
+});
+
+test('a folder on a network share is listed from memory for a while, also through a link; a local folder is read every time', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    const nasLink = path.join(sandbox, 'nas-link');
+    const local = path.join(sandbox, 'local');
+    await mkdir(path.join(nas, 'scans', '2024'), { recursive: true });
+    await mkdir(path.join(nas, 'models'));
+    await mkdir(path.join(local, 'a'), { recursive: true });
+    await symlink(nas, nasLink);
+    const share = createShareBrowser(nas);
+
+    await share.browser.browseMountTargets(nas);
+    const inside = await share.browser.browseMountTargets(path.join(nas, 'scans'));
+    assert.deepEqual(namesOf(inside), ['2024']);
+    const checks = share.lstatted.length;
+
+    // Going back up, or through a link to the same folder, reads nothing:
+    // a folder made meanwhile shows up once the listing is no longer kept.
+    await mkdir(path.join(nas, 'datasets'));
+    share.clock.now = 29_000;
+    const back = await share.browser.browseMountTargets(inside.parent ?? '');
+    assert.deepEqual(namesOf(back), ['models', 'scans']);
+    const throughLink = await share.browser.browseMountTargets(nasLink);
+    assert.deepEqual([throughLink.path, namesOf(throughLink)], [nas, ['models', 'scans']]);
+    assert.deepEqual(share.namesRead, [nas, path.join(nas, 'scans')]);
+    assert.equal(share.lstatted.length, checks);
+
+    share.clock.now = 30_000;
+    assert.deepEqual(namesOf(await share.browser.browseMountTargets(nasLink)), ['datasets', 'models', 'scans']);
+    assert.deepEqual(share.namesRead, [nas, path.join(nas, 'scans'), nas]);
+
+    assert.deepEqual(namesOf(await share.browser.browseMountTargets(local)), ['a']);
+    await mkdir(path.join(local, 'b'));
+    assert.deepEqual(namesOf(await share.browser.browseMountTargets(local)), ['a', 'b']);
+  });
+});
+
+test('a browse whose request is closed stops its checks, probes no link, and its listing is not kept', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    for (const folder of ['a', 'b', 'c', 'd']) {
+      await mkdir(path.join(nas, folder), { recursive: true });
+    }
+    await symlink(path.join(nas, 'c'), path.join(nas, 'a-link'));
+    const closed = new AbortController();
+    const share = createShareBrowser(nas, {
+      onLstat: (name) => {
+        if (name === 'b') {
+          closed.abort();
+        }
+      },
+    });
+
+    const listing = await share.browser.browseMountTargets(nas, { signal: closed.signal });
+    assert.deepEqual(share.lstatted, ['a', 'a-link', 'b']);
+    assert.deepEqual(namesOf(listing), ['a', 'b']);
+    assert.deepEqual(listing.truncated, { checked: 3, total: 5 });
+
+    // The next request reads the folder again, and probes the link.
+    const again = await share.browser.browseMountTargets(nas);
+    assert.deepEqual(namesOf(again), ['a', 'a-link', 'b', 'c', 'd']);
+    assert.deepEqual(share.namesRead, [nas, nas]);
+  });
+});
+
+test('a listing a share left incomplete for a moment, by not answering or by being busy with another call, is read again on the next visit', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    for (const folder of ['a', 'b', 'c', 'd', path.join('links', 'x')]) {
+      await mkdir(path.join(nas, folder), { recursive: true });
+    }
+    await symlink(path.join(nas, 'links', 'x'), path.join(nas, 'links', 'x-link'));
+    const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+    const folders = ['a', 'b', 'c', 'd', 'links'];
+
+    // The lstat of b runs past the time limit (a disk spinning up), so the
+    // share reads as not answering and c, d and links come back unchecked.
+    let answerB = () => {};
+    let bHangs = true;
+    const stalled = createShareBrowser(nas, {
+      targetProbeTimeoutMs: 100,
+      onLstat: (name) => (name === 'b' && bHangs
+        ? new Promise<void>((resolve) => {
+          answerB = resolve;
+        })
+        : undefined),
+    });
+    const stalledListing = await stalled.browser.browseMountTargets(nas);
+    assert.deepEqual([namesOf(stalledListing), stalledListing.truncated], [['a'], { checked: 1, total: 5 }]);
+    bHangs = false;
+    answerB();
+    await nextTurn();
+    stalled.clock.now = 1_000;
+    const afterStall = await stalled.browser.browseMountTargets(nas);
+    assert.deepEqual([namesOf(afterStall), afterStall.truncated], [folders, undefined]);
+    assert.deepEqual(stalled.namesRead, [nas, nas]);
+
+    // Another folder read someone waits for takes the share's turn after the
+    // lstat of `contendAfter`: the folder browser's read of another folder,
+    // for a second tab say, made here through runInMountTarget with the same
+    // shape (slow, not a walk's). Nothing runs beside it, so the checks after
+    // it, and the probe of a link, find no turn in time.
+    let contendAfter: string | null = 'a';
+    let answerOtherRead = () => {};
+    let otherRead: Promise<unknown> = Promise.resolve();
+    const contended = createShareBrowser(nas, {
+      targetProbeTimeoutMs: 100,
+      onLstat: async (name) => {
+        if (name !== contendAfter) {
+          return;
+        }
+        contendAfter = null;
+        otherRead = contended.browser.runInMountTarget(nas, () => new Promise<void>((resolve) => {
+          answerOtherRead = resolve;
+        }), { slow: true });
+        // It waits for the share's turn before this lstat gives the turn up.
+        await nextTurn();
+      },
+    });
+    const busyListing = await contended.browser.browseMountTargets(nas);
+    assert.deepEqual([namesOf(busyListing), busyListing.truncated], [['a'], { checked: 1, total: 5 }]);
+    answerOtherRead();
+    await otherRead;
+    contended.clock.now = 1_000;
+    assert.deepEqual(namesOf(await contended.browser.browseMountTargets(nas)), folders);
+    assert.deepEqual(contended.namesRead, [nas, nas]);
+
+    contendAfter = 'x-link';
+    const links = path.join(nas, 'links');
+    const busyLink = await contended.browser.browseMountTargets(links);
+    assert.deepEqual([namesOf(busyLink), busyLink.truncated], [['x'], undefined]);
+    answerOtherRead();
+    await otherRead;
+    contended.clock.now = 2_000;
+    assert.deepEqual(namesOf(await contended.browser.browseMountTargets(links)), ['x', 'x-link']);
+    assert.deepEqual(contended.namesRead, [nas, nas, links, links]);
+  });
+});
+
+test('while the File Tree walks a network share, the folder browser checks a folder beside the walk, but reads none beside it', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    for (const folder of ['a', 'b', 'c', 'd', path.join('links', 'x')]) {
+      await mkdir(path.join(nas, folder), { recursive: true });
+    }
+    await symlink(path.join(nas, 'c'), path.join(nas, 'c-link'));
+    await symlink(path.join(nas, 'links', 'x'), path.join(nas, 'links', 'x-link'));
+    const notes = path.join(nas, 'a', 'notes.md');
+    await writeFile(notes, 'notes');
+    const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+    // The File Tree's walk of a mount on the share reads a big folder after
+    // the lstat of a, as a walk reads one: slow, in the background. It holds
+    // the share's turn until the test lets it answer.
+    let walkStarted = false;
+    let answerWalkRead = () => {};
+    let walkRead: Promise<unknown> = Promise.resolve();
+    const share = createShareBrowser(nas, {
+      targetProbeTimeoutMs: 100,
+      onLstat: async (name) => {
+        if (name !== 'a' || walkStarted) {
+          return;
+        }
+        walkStarted = true;
+        walkRead = share.browser.runInMountTarget(nas, () => new Promise<void>((resolve) => {
+          answerWalkRead = resolve;
+        }), { slow: true, background: true });
+        // It waits for the share's turn before this lstat gives the turn up.
+        await nextTurn();
+      },
+    });
+    // The checks after it, and the probe of the link, run beside the walk's
+    // read: the listing is whole.
+    const listing = await share.browser.browseMountTargets(nas);
+    assert.deepEqual([namesOf(listing), listing.truncated], [['a', 'b', 'c', 'c-link', 'd', 'links'], undefined]);
+
+    // A folder not listed lately is read in one slow call, which waits for
+    // the walk's read rather than run beside it: the browser says the share
+    // is busy. A file the File Tree opens there meanwhile runs beside it.
+    const links = path.join(nas, 'links');
+    const busyBrowse = share.browser.browseMountTargets(links);
+    assert.deepEqual(await share.browser.runInMountTarget(notes, () => readFile(notes, 'utf8')), { kind: 'done', value: 'notes' });
+    await assert.rejects(busyBrowse, rejectsWith('MOUNT_TARGET_BUSY', 400));
+
+    answerWalkRead();
+    await walkRead;
+    assert.deepEqual(namesOf(await share.browser.browseMountTargets(links)), ['x', 'x-link']);
+    assert.deepEqual(share.namesRead, [nas, links]);
+  });
+});
+
+test('while a slow read holds a network share, a folder listed lately opens from memory, and another says the share is busy', { timeout: 10_000 }, async () => {
+  await withProject(async ({ sandbox }) => {
+    const nas = path.join(sandbox, 'nas');
+    const huge = path.join(nas, 'huge');
+    await mkdir(huge, { recursive: true });
+    await mkdir(path.join(nas, 'small'));
+    let answerHugeRead = () => {};
+    const share = createShareBrowser(nas, {
+      targetProbeTimeoutMs: 100,
+      onReadNames: (folderPath) => (folderPath === huge
+        ? new Promise<void>((resolve) => {
+          answerHugeRead = resolve;
+        })
+        : undefined),
+    });
+    await share.browser.browseMountTargets(nas);
+
+    // The user opens a huge folder, and goes back up before its names came:
+    // no probe, which would wait behind that read.
+    const hugeListing = share.browser.browseMountTargets(huge);
+    while (share.namesRead.length < 2) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(namesOf(await share.browser.browseMountTargets(nas)), ['huge', 'small']);
+    // A folder not listed lately waits for the share's turn, then is
+    // refused as busy, not as missing.
+    await assert.rejects(share.browser.browseMountTargets(path.join(nas, 'small')), rejectsWith('MOUNT_TARGET_BUSY', 400));
+
+    answerHugeRead();
+    assert.deepEqual(namesOf(await hugeListing), []);
+    assert.deepEqual(share.namesRead, [nas, huge]);
   });
 });
 

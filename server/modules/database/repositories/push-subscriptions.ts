@@ -41,6 +41,17 @@ export const pushSubscriptionsDb = {
       .all(userId) as PushSubscriptionLookupRow[];
   },
 
+  /** Returns the user's subscription with this endpoint; null when the user holds none with it. */
+  getPushSubscriptionForUser(userId: number, endpoint: string): PushSubscriptionLookupRow | null {
+    const db = getConnection();
+    const row = db
+      .prepare(
+        'SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE user_id = ? AND endpoint = ?'
+      )
+      .get(userId, endpoint) as PushSubscriptionLookupRow | undefined;
+    return row ?? null;
+  },
+
   /** Deletes one subscription by endpoint. */
   deletePushSubscription(endpoint: string): void {
     const db = getConnection();

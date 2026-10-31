@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 
 /**
  * Calls `onRefresh` each time `token` changes after mount, never on mount itself: a view that mounts
- * after a refresh already loads fresh data. `token` is a counter that only moves forward (the workspace's
+ * after a refresh already loads fresh data. One whose first load may come from what its server keeps
+ * has to be told to load afresh instead (WorkspaceMain does so for FileTree, whose server keeps the
+ * walks of mounts on network shares). `token` is a counter that only moves forward (the workspace's
  * refresh token for a pane); undefined stands for "no refresh signal" and never fires. The latest
  * `onRefresh` runs, so it may read current state without being stable. Used by project-workspace's
  * WorkspaceMain and the views it shows (file-tree's FileTree, git-panel's GitPanel and its Compare and

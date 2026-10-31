@@ -47,5 +47,8 @@ export function createSettingsRouter(
   router.post('/push/unsubscribe', respond((req) => service.unsubscribeFromPush(
     userId(req), req.body?.endpoint,
   )));
+  router.post('/push/status', respond((req) => service.getPushStatus(userId(req), req.body?.endpoint)));
+  router.post('/push/resync', respond((req) => service.resyncPushSubscription(userId(req), req.body ?? {})));
+  router.post('/push/test', respond((req) => service.sendTestPush(userId(req), req.body ?? {})));
   return router;
 }

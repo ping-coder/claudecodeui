@@ -34,6 +34,15 @@ const CAUSES = ['desktopApp', 'iframe', 'noApi'] as const;
 const DISPLAY_MODES = ['browser', 'minimal-ui', 'standalone', 'fullscreen', 'window-controls-overlay', 'picture-in-picture', 'unknown'] as const;
 const KEYBOARD_LOCKS = ['requested', 'locked', 'failed', 'unsupported', 'insecure', 'notRequested'] as const;
 
+const NOTIFICATION_OUTCOMES = ['posted', 'push', 'desktop', 'skipped'] as const;
+const NOTIFICATION_REASONS = [
+  'away', 'test', 'pushRegistered', 'desktopNotifies', 'desktopOff', 'onPage', 'switchOff', 'noPermission',
+  'unsupported', 'noServiceWorker', 'postFailed',
+] as const;
+const NOTIFICATION_PERMISSIONS = ['granted', 'denied', 'default', 'unsupported'] as const;
+const VISIBILITY_STATES = ['visible', 'hidden'] as const;
+const PUSH_REGISTRATIONS = ['unsupported', 'none', 'registered', 'unknown', 'staleKey', 'unchecked'] as const;
+
 class InvalidDiagnosticsError extends Error {}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
@@ -119,9 +128,33 @@ const formatFullscreenLine = (environment: string, userId: number | string | nul
 };
 
 /**
+ * Formats one system-notification decision as a single log line: what the page did about a
+ * finished run's alert (or the Settings test), why, and the browser state that decided it, so a
+ * "no banner" report can be traced. Whitelisted fields only, like the fullscreen line.
+ */
+const formatNotificationLine = (environment: string, userId: number | string | null, userAgent: string | undefined, body: Record<string, unknown>): string => {
+  const fields = [
+    `env=${environment}`,
+    `user=${userId ?? 'unknown'}`,
+    `outcome=${pickEnum(body.outcome, NOTIFICATION_OUTCOMES, 'outcome')}`,
+    `reason=${pickEnum(body.reason, NOTIFICATION_REASONS, 'reason')}`,
+    `permission=${pickEnum(body.permission, NOTIFICATION_PERMISSIONS, 'permission')}`,
+    `visibility=${pickEnum(body.visibility, VISIBILITY_STATES, 'visibility')}`,
+    `focus=${yesNo(pickBoolean(body.focused, 'focused'))}`,
+    `push=${pickEnum(body.push, PUSH_REGISTRATIONS, 'push')}`,
+    ...(body.silent === undefined ? [] : [`silent=${yesNo(pickBoolean(body.silent, 'silent'))}`]),
+    `platform=${JSON.stringify(cleanText(body.platform, MAX_PLATFORM_LENGTH))}`,
+    `ua=${JSON.stringify(cleanText(userAgent, MAX_USER_AGENT_LENGTH))}`,
+  ];
+  return `[client-diag] notification ${fields.join(' ')}`;
+};
+
+/**
  * Creates the service behind POST /api/system/client-diagnostics, which turns a browser's report
  * into one server log line so a problem seen on the user's machine can be read from the server's
- * log. Only the 'fullscreen' event exists. Each user gets MAX_REPORTS_PER_WINDOW reports a minute.
+ * log. Two events exist: 'fullscreen' (how a fullscreen request ended) and 'notification' (what
+ * a finished run's alert did about a system notification). Each user gets MAX_REPORTS_PER_WINDOW
+ * reports a minute, both events together.
  */
 export function createClientDiagnosticsService(dependencies: ClientDiagnosticsDependencies) {
   // Per user: when the current one-minute window started and how many reports came in it.
@@ -145,12 +178,13 @@ export function createClientDiagnosticsService(dependencies: ClientDiagnosticsDe
   return {
     /** Validates and logs one report; the route turns the result into the response status. */
     record(input: ClientDiagnosticsInput): ClientDiagnosticsResult {
-      if (!isRecord(input.body) || input.body.event !== 'fullscreen') {
+      if (!isRecord(input.body) || (input.body.event !== 'fullscreen' && input.body.event !== 'notification')) {
         return { status: 400, code: 'INVALID_DIAGNOSTICS', message: 'Unknown diagnostics event' };
       }
+      const formatLine = input.body.event === 'fullscreen' ? formatFullscreenLine : formatNotificationLine;
       let line: string;
       try {
-        line = formatFullscreenLine(dependencies.environment, input.userId, input.userAgent, input.body);
+        line = formatLine(dependencies.environment, input.userId, input.userAgent, input.body);
       } catch (error) {
         if (error instanceof InvalidDiagnosticsError) {
           return { status: 400, code: 'INVALID_DIAGNOSTICS', message: error.message };

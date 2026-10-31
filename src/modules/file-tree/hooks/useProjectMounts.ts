@@ -13,6 +13,8 @@ const MOUNT_ERROR_KEYS: Record<string, string> = {
   MOUNT_NOT_FOUND: 'fileTree.mounts.errors.alreadyRemoved',
   // Also sent for a folder that does not answer in time (an offline network share): the copy covers both.
   MOUNT_TARGET_NOT_FOUND: 'fileTree.mounts.errors.targetNotFound',
+  // The folder could not be checked for want of a turn on its share (a slow read of a big folder holds it).
+  MOUNT_TARGET_BUSY: 'fileTree.mounts.errors.targetBusy',
   MOUNT_TARGET_NOT_DIRECTORY: 'fileTree.mounts.errors.targetNotDirectory',
   MOUNT_TARGET_FORBIDDEN: 'fileTree.mounts.errors.targetForbidden',
   MOUNT_TARGET_LOOP: 'fileTree.mounts.errors.targetLoop',
@@ -111,7 +113,7 @@ export type UseProjectMountsResult = {
   unmount: (mount: MountRef) => Promise<void>;
   repairMount: (mount: MountRef) => Promise<void>;
   // Lists folders a mount may point at, for the folder browser.
-  browseFolders: (folderPath: string | null) => Promise<FolderBrowseResult>;
+  browseFolders: (folderPath: string | null, options?: { signal?: AbortSignal }) => Promise<FolderBrowseResult>;
 };
 
 /**
@@ -260,12 +262,20 @@ export function useProjectMounts({ projectId, dialogOpen, onChanged, showToast }
     }, { keys: REPAIR_ERROR_KEYS, name });
   }, [projectId, runRowAction, t]);
 
-  const browseFolders = useCallback(async (folderPath: string | null): Promise<FolderBrowseResult> => {
+  const browseFolders = useCallback(async (folderPath: string | null, options: { signal?: AbortSignal } = {}): Promise<FolderBrowseResult> => {
     try {
-      const { data } = await readApiJson<{ data: { path: string; parent: string | null; directories?: FolderSuggestion[] } }>(
-        await api.mounts.browse(folderPath),
-      );
-      return { path: data.path, parent: data.parent, folders: data.directories ?? [] };
+      const { data } = await readApiJson<{
+        data: { path: string; parent: string | null; directories?: FolderSuggestion[]; truncated?: { checked: number; total: number } };
+      }>(await api.mounts.browse(folderPath, options.signal));
+      return {
+        path: data.path,
+        parent: data.parent,
+        folders: data.directories ?? [],
+        // A folder on a network share too large or slow to check every entry in time.
+        notice: data.truncated
+          ? t('fileTree.mounts.browseIncomplete', { checked: data.truncated.checked, total: data.truncated.total })
+          : undefined,
+      };
     } catch (error) {
       throw new Error(describeMountError(error, t, { keys: BROWSE_ERROR_KEYS }));
     }

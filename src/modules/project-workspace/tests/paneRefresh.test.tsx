@@ -13,7 +13,8 @@ import type { Project, ProjectSession } from '@/shared/types';
  * chat hears a new refresh trigger without remounting, a clean editor rereads its file while one with
  * unsaved edits keeps them and says so, the editor keeps the browser's full screen, a terminal mounts
  * again and reconnects on its own (never through its restart), the other views reload without
- * remounting (Tasks only while on screen) and a plugin tab mounts its code again. Refresh all reaches
+ * remounting (Tasks only while on screen), a plugin tab mounts its code again and the file tree, which
+ * no refresh reaches under another view, lists afresh when shown again after one. Refresh all reaches
  * every mounted pane and asks for the project list once, single-flight. Runs the real project state,
  * pane group, panes, WorkspaceMain, file tree, code editor and StandaloneShell; the chat, the terminal,
  * CodeMirror and the other heavy views are stand-ins.
@@ -262,6 +263,8 @@ const refreshAllButton = () => screen.getByRole('button', { name: 'Refresh all' 
 // Strings rather than nodes: a failed assertion on a jsdom node walks the whole tree.
 const editorValues = () => screen.queryAllByLabelText<HTMLTextAreaElement>('code').map((editor) => editor.value);
 const hasText = (text: string) => screen.queryByText(text) !== null;
+/** Whether a getFiles call asked for the mounts on network shares to be walked again. */
+const asksForFreshWalk = (call: unknown[]) => (call[1] as { fresh?: boolean } | undefined)?.fresh === true;
 
 /** Opens src/app.ts from the chat of `sessionId` and waits for the editor to show what the disk holds. */
 const openFileFromChat = async (sessionId: string) => {
@@ -352,6 +355,24 @@ test('refreshing a tab reloads its file tree behind the rows on screen and has i
   assert.equal(chatLifecycle.mounts, chatMountsBefore, 'the same chat instance');
   assert.equal(chatLifecycle.unmounts, 0);
   assert.equal(projectsResponse.mock.calls.length, 1, 'a tab refresh asks for no project list');
+});
+
+test('the file tree shown again after a refresh that landed under another view lists its mounts afresh; shown again without one, it does not', async () => {
+  await renderWorkspace();
+  run(() => panes().actions.openSession(rowOf(ALPHA, 'a1'), { view: 'files' }));
+  await waitFor(() => assert.equal(hasText('README.md'), true));
+  const tabKey = panes().layout.left.activeTabKey as string;
+
+  run(() => panes().actions.setTabView('left', tabKey, 'chat'));
+  fireEvent.click(refreshTabButton('left'));
+  run(() => panes().actions.setTabView('left', tabKey, 'files'));
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
+  await waitFor(() => assert.equal(hasText('README.md'), true));
+
+  run(() => panes().actions.setTabView('left', tabKey, 'chat'));
+  run(() => panes().actions.setTabView('left', tabKey, 'files'));
+  await waitFor(() => assert.equal(getFiles.mock.calls.length, 3));
+  assert.deepEqual(getFiles.mock.calls.map(asksForFreshWalk), [false, true, false]);
 });
 
 test('a clean editor rereads its file on refresh; one with unsaved edits keeps them, is not reread and says so', async () => {

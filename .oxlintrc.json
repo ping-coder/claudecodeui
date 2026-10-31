@@ -101,6 +101,7 @@
           "src/shared/userSettings.ts",
           "src/shared/chatDrafts.ts",
           "src/shared/browserFullscreen.ts",
+          "src/shared/systemNotifications.ts",
           "src/shared/syntaxHighlighter.ts",
           "src/shared/direction.ts"
         ],

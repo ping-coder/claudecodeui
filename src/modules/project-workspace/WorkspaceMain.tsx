@@ -182,6 +182,20 @@ function WorkspaceMain({
     }
   });
 
+  // The Files view is unmounted under every other view, so a refresh that lands meanwhile never reaches its
+  // tree, whose first load would then get the mounts' last walk from the server. The token it was left at
+  // tells it, once shown again, to list afresh when a refresh landed since. Updated while rendering, so the
+  // tree mounts with it already set.
+  const filesShown = activeTab === 'files';
+  const [filesView, setFilesView] = useState({ shown: filesShown, refreshToken, freshFirstLoad: false });
+  if (filesView.shown !== filesShown) {
+    setFilesView({
+      shown: filesShown,
+      refreshToken,
+      freshFirstLoad: filesShown && refreshToken !== filesView.refreshToken,
+    });
+  }
+
   const {
     editingFile,
     editorWidth,
@@ -345,6 +359,7 @@ function WorkspaceMain({
                   onFileOpen={handleFileOpen}
                   revealDirectory={revealDirectory}
                   refreshToken={refreshToken}
+                  freshFirstLoad={filesView.freshFirstLoad}
                 />
               </div>
             )}

@@ -8,6 +8,7 @@ import { Button } from '@/shared/ui';
 import { playChatCompletionSound } from '@/shared/utils';
 import type { NotificationPreferencesState, NotificationPreferencesStatus, PushSubscribeOutcome } from '@/shared/types';
 import SettingsToggle from '@/modules/settings/SettingsToggle';
+import NotificationTestCard from '@/modules/settings/tabs/NotificationTestCard';
 
 type NotificationsSettingsTabProps = {
   notificationPreferences: NotificationPreferencesState;
@@ -61,7 +62,7 @@ function PageAlertRow({ icon: Icon, label, description, toggle, children }: Page
   );
 }
 
-/** Rendered by Settings for the "notifications" tab, covering the alerts shown while CloudCLI is open, notification channels and events. */
+/** Rendered by Settings for the "notifications" tab, covering the alerts shown while CloudCLI is open, notification channels, a test and events. */
 export default function NotificationsSettingsTab({
   notificationPreferences,
   notificationPreferencesStatus = 'ready',
@@ -364,6 +365,14 @@ export default function NotificationsSettingsTab({
             </div>
           )}
         </div>
+      )}
+
+      {/* The desktop app posts its own native notifications, so the page's test has nothing to try there. */}
+      {!isDesktop && (
+        <NotificationTestCard
+          onRequestNotificationPermission={onRequestNotificationPermission}
+          isAccountPushOff={notificationPreferencesReady && !notificationPreferences.channels.webPush}
+        />
       )}
 
       <div className="space-y-4 rounded-lg border border-border bg-card p-4">

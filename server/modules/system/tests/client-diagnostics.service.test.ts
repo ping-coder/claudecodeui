@@ -97,3 +97,50 @@ test('each user gets 20 reports a minute; the limit is logged once and resets', 
   advance(60_000);
   assert.equal(record(service, REPORT).status, 204);
 });
+
+const NOTIFICATION_REPORT = {
+  event: 'notification',
+  outcome: 'posted',
+  reason: 'away',
+  permission: 'granted',
+  visibility: 'hidden',
+  focused: false,
+  push: 'unknown',
+  silent: true,
+  platform: 'Windows',
+};
+
+test('a notification report becomes one log line with what the page did and why', () => {
+  const { service, lines } = createService();
+
+  assert.deepEqual(record(service, { ...NOTIFICATION_REPORT, endpoint: 'https://fcm.googleapis.com/fcm/send/secret' }, 'Mozilla/5.0 (Windows NT 10.0) Chrome/156'), { status: 204 });
+
+  assert.deepEqual(lines, ['[client-diag] notification env=staging user=1 outcome=posted reason=away permission=granted '
+    + 'visibility=hidden focus=no push=unknown silent=yes platform="Windows" ua="Mozilla/5.0 (Windows NT 10.0) Chrome/156"']);
+
+  // `silent` is left out when the report has none: nothing was posted.
+  record(service, { ...NOTIFICATION_REPORT, outcome: 'push', reason: 'pushRegistered', push: 'registered', silent: undefined });
+  assert.equal(lines[1].includes('outcome=push reason=pushRegistered'), true);
+  assert.equal(lines[1].includes('silent='), false);
+});
+
+test('a notification report with an unknown outcome, reason or push state is refused', () => {
+  const { service, lines } = createService();
+
+  assert.equal(record(service, { ...NOTIFICATION_REPORT, outcome: 'maybe' }).status, 400);
+  assert.equal(record(service, { ...NOTIFICATION_REPORT, reason: 'because\n[client-diag] fake' }).status, 400);
+  assert.equal(record(service, { ...NOTIFICATION_REPORT, push: 'yes' }).status, 400);
+  assert.equal(record(service, { ...NOTIFICATION_REPORT, focused: 'no' }).status, 400);
+  assert.equal(record(service, { ...NOTIFICATION_REPORT, visibility: undefined }).status, 400);
+  assert.equal(lines.length, 0);
+});
+
+test('notification and fullscreen reports share the 20 a minute', () => {
+  const { service } = createService();
+
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(record(service, REPORT).status, 204);
+    assert.equal(record(service, NOTIFICATION_REPORT).status, 204);
+  }
+  assert.equal(record(service, NOTIFICATION_REPORT).status, 429);
+});

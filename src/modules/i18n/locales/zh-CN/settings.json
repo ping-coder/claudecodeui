@@ -167,6 +167,43 @@
       "dismissed": "没有获得通知权限。请再次点击「启用通知」，并在浏览器询问时选择允许。",
       "failed": "无法为此浏览器开启推送通知，请稍后重试。"
     },
+    "test": {
+      "title": "测试通知",
+      "description": "从本页发一条通知；此浏览器开了推送的话，再通过推送发一条，然后告诉你各自的结果。",
+      "send": "发送测试通知",
+      "notificationTitle": "CloudCLI 测试",
+      "localBody": "由本页发出。看到这条，说明系统通知正常。",
+      "pushBody": "通过推送发出。看到这条，说明推送正常。",
+      "localLabel": "本页：",
+      "pushLabel": "推送：",
+      "local": {
+        "posted": "已从本页发出系统通知。",
+        "denied": "此网站的通知已被阻止，没有发出。",
+        "dismissed": "没有获得通知权限，没有发出。",
+        "unsupported": "此浏览器在这里无法显示系统通知。",
+        "noServiceWorker": "本页没有在运行的 Service Worker，请刷新页面后再试。",
+        "failed": "浏览器拒绝了这条通知：{{reason}}"
+      },
+      "push": {
+        "notSubscribed": "此浏览器没有开推送，所以没有发推送。",
+        "notRegistered": "服务器没有此浏览器的推送订阅，重新保存也失败了。请把推送关掉再打开。",
+        "serverUnreachable": "连不上 CloudCLI，测试推送没有发出。",
+        "serverError": "CloudCLI 没能发出测试推送（HTTP {{status}}）。",
+        "reregistered": "服务器推不到此浏览器原来的推送订阅，已重新登记。",
+        "accepted": "推送服务已收下测试推送（{{status}}），几秒内应该就到。",
+        "accountOff": "不过任务完成时不会推送到这里：你的账号关掉了推送，在另一台设备上关推送就会这样。在上面把推送关掉再打开，就能重新开启。",
+        "unreachable": "连不上推送服务：{{detail}}",
+        "rejected": "推送服务拒收了测试推送（{{status}}）：{{detail}}",
+        "dropped": "这个订阅已经失效，已删除。请重新打开推送。"
+      },
+      "help": {
+        "title": "没有弹出横幅？",
+        "intro": "通知发出了也可能不弹横幅，请检查下面几处：",
+        "mac": "macOS：系统设置 → 通知 → Google Chrome（或你用的浏览器）：打开「允许通知」，提醒样式选「横幅」或「提醒」。专注模式和勿扰模式也会挡住横幅。",
+        "windows": "Windows：设置 → 系统 → 通知：打开 Google Chrome（或你用的浏览器）和「显示通知横幅」。关掉「请勿打扰」（Windows 10 上叫「专注助手」）。",
+        "browser": "浏览器：{{origin}} 的通知要设为允许（点地址栏左边的图标）。每个地址单独算，localhost 和 127.0.0.1 是两个网站。"
+      }
+    },
     "desktop": {
       "title": "通知此桌面应用",
       "enable": "启用通知",

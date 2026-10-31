@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import type { Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -13,6 +14,7 @@ import type {
   MountCall,
   MountCallOutcome,
   ProjectMount,
+  ProjectMountChange,
   ProjectMountDirectory,
   ProjectMountRecord,
   ProjectMountStatus,
@@ -41,6 +43,24 @@ const MAXIMUM_MOUNT_NAME_LENGTH = 100;
 // at most this many folders, so a folder with millions of files still answers.
 const MAXIMUM_BROWSE_ENTRIES_READ = 20_000;
 const MAXIMUM_BROWSE_DIRECTORIES = 2_000;
+
+// On a network share the folder browser learns each entry's type from an
+// lstat of its own, one at a time (see listSharedFolderEntries): a folder of
+// many thousand files would take minutes. It stops checking after this long
+// and lists the folders found by then, saying the list is incomplete.
+const BROWSE_TYPE_CHECK_TIME_MS = 3_000;
+
+// A name with a short extension holding a letter (photo.jpg, data.csv, but
+// not v1.2 or 2024.01) is most likely a file. On a network share the browser
+// checks such names after the others, and hidden ones last, so the folders
+// show up before the time limit.
+const FILE_LIKE_NAME_PATTERN = /\.(?=[a-z0-9]*[a-z])[a-z0-9]{1,5}$/i;
+
+// The folder browser lists a folder on a network share again from memory for
+// this long, so going back up does not read it again; it keeps this many
+// such listings at most.
+const BROWSE_LISTING_TTL_MS = 30_000;
+const MAXIMUM_KEPT_BROWSE_LISTINGS = 50;
 
 // No git command here should take long; the limit only matters when git
 // waits on something that never comes.
@@ -141,6 +161,11 @@ type ProjectMountsServiceDependencies = {
    */
   readFolderNames(folderPath: string): Promise<string[]>;
   /**
+   * The lstat of one entry of a folder on a network share, which tells the
+   * folder browser whether it is a folder or a link (see readFolderNames).
+   */
+  lstatEntry(entryPath: string): Promise<Pick<Stats, 'isDirectory' | 'isSymbolicLink'>>;
+  /**
    * The machine's mount points, which tell the mount gate which share a path
    * is on and whether that is a local disk's; null where they cannot be read.
    */
@@ -149,6 +174,8 @@ type ProjectMountsServiceDependencies = {
   targetProbeTimeoutMs: number;
   /** The same for a call that reads every name in a folder (SLOW_CALL_TIMEOUT_MS). */
   slowCallTimeoutMs: number;
+  /** How long the folder browser checks entry types in a folder on a network share (BROWSE_TYPE_CHECK_TIME_MS). */
+  browseTypeCheckTimeMs: number;
   /** Milliseconds on a clock that never goes back; times calls into targets. */
   monotonicNow(): number;
   createMountId(): string;
@@ -190,6 +217,20 @@ type FolderProbe = { realPath: string; isDirectory: boolean };
 
 /** A folder, or a link that may lead to one, that the folder browser found in the folder it lists. */
 type BrowseEntry = { name: string; path: string; isSymbolicLink: boolean };
+
+/** What the folder browser lists in a folder (GET /mount-browse). */
+type BrowseListing = {
+  path: string;
+  parent: string | null;
+  directories: Array<{ name: string; path: string }>;
+  /**
+   * Set when not every entry's type was checked (a folder on a network share
+   * too large or too slow to check in time, see listSharedFolderEntries):
+   * how many of the folder's names were checked, of how many. The folders
+   * among the others are not listed.
+   */
+  truncated?: { checked: number; total: number };
+};
 
 /**
  * What probing a target found; `unreachable` when it did not answer in time
@@ -304,9 +345,11 @@ const defaultDependencies: ProjectMountsServiceDependencies = {
     return { realPath, isDirectory: (await fs.stat(realPath)).isDirectory() };
   },
   readFolderNames: (folderPath) => fs.readdir(folderPath),
+  lstatEntry: (entryPath) => fs.lstat(entryPath),
   listMountPoints: readMachineMountPoints,
   targetProbeTimeoutMs: TARGET_PROBE_TIMEOUT_MS,
   slowCallTimeoutMs: SLOW_CALL_TIMEOUT_MS,
+  browseTypeCheckTimeMs: BROWSE_TYPE_CHECK_TIME_MS,
   monotonicNow: () => performance.now(),
   createMountId: () => randomUUID(),
   now: () => new Date(),
@@ -321,11 +364,16 @@ function mountError(message: string, code: string, statusCode = 400): AppError {
   return new AppError(message, { code, statusCode });
 }
 
-/** A folder whose probe the mount gate did not start in time (see `TargetProbe`): worth another try soon. */
+/**
+ * A folder whose probe or read the mount gate did not start in time (see
+ * `TargetProbe`): worth another try soon. A code of its own, as the folder
+ * may well be there (a slow read of a big folder on its share holds the
+ * share's turn).
+ */
 function folderBusy(folderPath: string): AppError {
   return mountError(
     `Folder could not be checked in time (its disk is busy, or offline network shares hold up the checks); try again shortly: ${folderPath}`,
-    'MOUNT_TARGET_NOT_FOUND',
+    'MOUNT_TARGET_BUSY',
   );
 }
 
@@ -425,6 +473,26 @@ function expandHomePath(inputPath: string, homeDirectory: string): string {
 }
 
 /**
+ * The first `limit` of a folder's `names` in the order the folder browser
+ * checks their types on a network share: names that look like folders, then
+ * those that look like files (FILE_LIKE_NAME_PATTERN), then hidden ones,
+ * each group in the order the browser lists folders, so a list cut short by
+ * the time limit holds folders, and the first ones in that order.
+ */
+function orderForTypeChecks(names: string[], limit: number): string[] {
+  const groups: string[][] = [[], [], []];
+  for (const name of names) {
+    groups[name.startsWith('.') ? 2 : FILE_LIKE_NAME_PATTERN.test(name) ? 1 : 0].push(name);
+  }
+  const ordered: string[] = [];
+  for (const group of groups) {
+    const taken = group.slice(0, limit - ordered.length).sort((left, right) => left.localeCompare(right));
+    ordered.push(...taken);
+  }
+  return ordered;
+}
+
+/**
  * The name of a mount: one folder name that every platform accepts, and
  * neither the sentinel's nor `.git`.
  */
@@ -491,6 +559,23 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
   // busy reads as.
   const pendingTargetProbes = new Map<string, Promise<TargetProbe>>();
   const lastAnswers = new Map<string, FolderProbe | null>();
+  // Who hears of a mount added, removed or repaired (see onMountsChanged).
+  const mountChangeListeners = new Set<(change: ProjectMountChange) => void>();
+
+  /** Tells every listener of `change`; one that throws is logged and does not stop the others. */
+  function announceMountChange(change: ProjectMountChange): void {
+    for (const listener of mountChangeListeners) {
+      try {
+        listener(change);
+      } catch (error) {
+        dependencies.logWarning('[project-mounts] A listener of mount changes failed:', error);
+      }
+    }
+  }
+
+  // The folder browser's listings of folders on network shares, by
+  // comparable path (the path asked for, and the realpath), oldest first.
+  const keptListings = new Map<string, { listing: BrowseListing; expiresAt: number }>();
 
   function rememberAnswer(key: string, answer: FolderProbe | null): void {
     lastAnswers.delete(key);
@@ -556,30 +641,80 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
    * path (a share mounted on it is a share of its own), one after another,
    * as the gate runs one call at a time on a share anyway. Asked by the
    * user like the folder's probe, so a time-out moments ago does not stop
-   * them. An entry whose lstat does not answer is left out, like a link
-   * whose probe does not; once the share stops answering, the rest come
-   * back at once.
+   * them. The likely folders go first (orderForTypeChecks), and the checks
+   * stop after the browse time limit, or once `signal` aborts (the request
+   * was closed), so a folder of many files still answers in time. An entry
+   * whose lstat does not answer is left out, like a link whose probe does
+   * not; once the share stops answering, the rest come back at once.
+   * `checked` counts the names whose type is known, or that are refused
+   * anyway; `missed`, those whose lstat did not answer in time or found no
+   * turn (other calls held the share), which says nothing about the folder.
+   *
+   * Reading the types with the names (withFileTypes) spares the lstats only
+   * on a share that reports types. For an entry whose type it does not
+   * report, Node lstats the entry itself: on the event loop (opendir), on
+   * several threadpool threads at once (fs.promises.readdir), or, with
+   * readdirSync in a worker thread, every entry of the folder one after
+   * another in the folder's own order, with nothing to show before the last
+   * one and nothing at all if one lstat fails.
    */
   async function listSharedFolderEntries(
     realPath: string,
     names: string[],
     blockedPaths: BlockedPaths,
-  ): Promise<BrowseEntry[]> {
+    signal?: AbortSignal,
+  ): Promise<{ entries: BrowseEntry[]; checked: number; missed: number }> {
     const entries: BrowseEntry[] = [];
-    for (const name of names.slice(0, MAXIMUM_BROWSE_ENTRIES_READ)) {
-      if (entries.length >= MAXIMUM_BROWSE_DIRECTORIES) {
+    let checked = 0;
+    let missed = 0;
+    const deadline = dependencies.monotonicNow() + dependencies.browseTypeCheckTimeMs;
+    for (const name of orderForTypeChecks(names, MAXIMUM_BROWSE_ENTRIES_READ)) {
+      if (entries.length >= MAXIMUM_BROWSE_DIRECTORIES || signal?.aborted || dependencies.monotonicNow() >= deadline) {
         break;
       }
       const entryPath = path.join(realPath, name);
       if (isBrowseForbidden(entryPath, blockedPaths)) {
+        checked += 1;
         continue;
       }
-      const lstat = await gate.run(entryPath, () => fs.lstat(entryPath), { retryNow: true });
+      const lstat = await gate.run(entryPath, () => dependencies.lstatEntry(entryPath), { retryNow: true, signal });
+      if (lstat.kind === 'done' || lstat.kind === 'failed') {
+        checked += 1;
+      } else {
+        missed += 1;
+      }
       if (lstat.kind === 'done' && (lstat.value.isDirectory() || lstat.value.isSymbolicLink())) {
         entries.push({ name, path: entryPath, isSymbolicLink: lstat.value.isSymbolicLink() });
       }
     }
-    return entries;
+    return { entries, checked, missed };
+  }
+
+  /** The listing of a folder on a network share kept under `folderPath` (see BROWSE_LISTING_TTL_MS), or null. */
+  function readKeptListing(folderPath: string): BrowseListing | null {
+    const key = comparablePath(folderPath);
+    const kept = keptListings.get(key);
+    if (kept && dependencies.monotonicNow() < kept.expiresAt) {
+      return kept.listing;
+    }
+    keptListings.delete(key);
+    return null;
+  }
+
+  /** Keeps `listing` under each of `folderPaths`, forgetting the oldest past MAXIMUM_KEPT_BROWSE_LISTINGS. */
+  function keepListing(folderPaths: string[], listing: BrowseListing): void {
+    const expiresAt = dependencies.monotonicNow() + BROWSE_LISTING_TTL_MS;
+    for (const folderPath of folderPaths) {
+      const key = comparablePath(folderPath);
+      keptListings.delete(key);
+      keptListings.set(key, { listing, expiresAt });
+    }
+    for (const key of keptListings.keys()) {
+      if (keptListings.size <= MAXIMUM_KEPT_BROWSE_LISTINGS) {
+        break;
+      }
+      keptListings.delete(key);
+    }
   }
 
   /**
@@ -660,7 +795,7 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
     candidatePath: string,
     resolvedPrefix: string,
     operation: (call: MountCall) => Promise<T>,
-    options: { retryNow?: boolean; signal?: AbortSignal; slow?: boolean } = {},
+    options: { retryNow?: boolean; signal?: AbortSignal; slow?: boolean; background?: boolean } = {},
   ): Promise<MountCallOutcome<T>> {
     const target = normalizeProjectPath(path.resolve(candidatePath));
     const prefix = normalizeProjectPath(path.resolve(resolvedPrefix));
@@ -1346,6 +1481,7 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
         await createLink(targetPath, linkPath);
         linkCreated = true;
         insertRecord(record);
+        announceMountChange({ projectId, mountId: record.mountId });
       } catch (error) {
         // Nothing of the failed mount stays: its link, and the mounts folder
         // and sentinel prepared for it when no other mount needs them (a
@@ -1384,6 +1520,7 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
         createdAt: dependencies.now().toISOString(),
       };
       insertRecord(record);
+      announceMountChange({ projectId, mountId: record.mountId });
       return reconcileOne(projectRoot, record);
     },
 
@@ -1397,6 +1534,7 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
       const record = requireMount(projectId, mountId);
       const linkRemoved = await removeOwnLink(linkPathOf(projectRoot, record.name), record.targetPath);
       dependencies.mounts.delete(record.mountId);
+      announceMountChange({ projectId, mountId: record.mountId });
       if (dependencies.mounts.listByProject(projectId).length === 0) {
         await removeEmptyMountsDirectory(projectRoot);
       }
@@ -1430,19 +1568,21 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
       if (link.kind === 'missing' || !isSamePath(link.target, record.targetPath)) {
         await createLink(record.targetPath, linkPath);
       }
+      // Repaired, most often after its share was away a while: what it
+      // holds may have changed meanwhile.
+      announceMountChange({ projectId, mountId: record.mountId });
       return reconcileOne(projectRoot, record);
     },
 
     /**
      * GET /mount-browse: the folders in `inputPath` (the home folder when
      * empty) for picking a target. System folders and sensitive home folders
-     * are left out and refused; the folders above them can be browsed.
+     * are left out and refused; the folders above them can be browsed. A
+     * folder on a network share listed lately is listed from memory (see
+     * BROWSE_LISTING_TTL_MS). `signal` aborts when the request is closed:
+     * the checks stop, and the listing is not kept.
      */
-    async browseMountTargets(inputPath: string | null): Promise<{
-      path: string;
-      parent: string | null;
-      directories: Array<{ name: string; path: string }>;
-    }> {
+    async browseMountTargets(inputPath: string | null, options: { signal?: AbortSignal } = {}): Promise<BrowseListing> {
       const requestedPath = inputPath?.trim()
         ? expandHomePath(inputPath.trim(), dependencies.homeDirectory)
         : dependencies.homeDirectory;
@@ -1454,6 +1594,12 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
       const blockedPaths = await readBlockedPaths();
       if (isBrowseForbidden(normalizedPath, blockedPaths)) {
         throw forbidden();
+      }
+      // Before the probe, which waits behind a slow read on the same share
+      // (the folder the user just left, say).
+      const kept = readKeptListing(normalizedPath);
+      if (kept) {
+        return kept;
       }
 
       const folder = await probeTarget(normalizedPath, { retryNow: true });
@@ -1473,6 +1619,11 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
       if (isBrowseForbidden(realPath, blockedPaths)) {
         throw forbidden();
       }
+      // Reached through a link, or by another spelling, before.
+      const keptByRealPath = readKeptListing(realPath);
+      if (keptByRealPath) {
+        return keptByRealPath;
+      }
 
       // Read through the gate on the folder's share. On a local disk it is
       // streamed. On a network share opendir would run a synchronous lstat
@@ -1484,7 +1635,7 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
         async (call): Promise<{ entries: BrowseEntry[] } | { names: string[] }> => (call.gated
           ? { names: await dependencies.readFolderNames(realPath) }
           : { entries: await listLocalFolderEntries(realPath, blockedPaths) }),
-        { retryNow: true, slow: true },
+        { retryNow: true, slow: true, signal: options.signal },
       );
       if (read.kind === 'unreachable') {
         throw mountError(`Folder does not answer (an offline network share?): ${realPath}`, 'MOUNT_TARGET_NOT_FOUND');
@@ -1499,23 +1650,36 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
           details: read.error instanceof Error ? read.error.message : String(read.error),
         });
       }
-      const entries = 'entries' in read.value
-        ? read.value.entries
-        : await listSharedFolderEntries(realPath, read.value.names, blockedPaths);
+      let entries: BrowseEntry[];
+      let truncated: BrowseListing['truncated'];
+      let missedChecks = 0;
+      if ('entries' in read.value) {
+        entries = read.value.entries;
+      } else {
+        const { names } = read.value;
+        const checks = await listSharedFolderEntries(realPath, names, blockedPaths, options.signal);
+        entries = checks.entries;
+        missedChecks = checks.missed;
+        if (checks.checked < names.length) {
+          truncated = { checked: checks.checked, total: names.length };
+        }
+      }
+      const aborted = options.signal?.aborted === true;
       // Links are resolved together and through the probe, so links into a
       // share that hangs cost the request one time limit, not one each. Each
       // is probed on the share it leads to (runWhereItLands, from this
       // folder, which is resolved already), so a link into a dead share never
-      // counts against the share of this folder.
-      const listed = await Promise.all(entries.map(async (entry) => {
-        if (!entry.isSymbolicLink) {
-          return true;
-        }
-        const linked = await probeTarget(entry.path, { resolvedPrefix: realPath });
-        return linked.kind === 'directory' && !isBrowseForbidden(linked.realPath, blockedPaths);
-      }));
+      // counts against the share of this folder. None is probed for a
+      // request closed meanwhile, whose listing nobody reads.
+      const linkProbes = await Promise.all(entries.map((entry) => (entry.isSymbolicLink && !aborted
+        ? probeTarget(entry.path, { resolvedPrefix: realPath })
+        : null)));
       const directories = entries
-        .filter((_entry, index) => listed[index])
+        .filter((entry, index) => {
+          const linked = linkProbes[index];
+          return !entry.isSymbolicLink
+            || (linked?.kind === 'directory' && !isBrowseForbidden(linked.realPath, blockedPaths));
+        })
         .map((entry) => ({ name: entry.name, path: entry.path }));
 
       directories.sort((left, right) => {
@@ -1527,11 +1691,21 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
         return left.name.localeCompare(right.name);
       });
 
-      return {
+      const listing: BrowseListing = {
         path: realPath,
         parent: isFilesystemRoot(realPath) ? null : path.dirname(realPath),
         directories,
+        ...(truncated ? { truncated } : {}),
       };
+      // Kept only when every check answered: entries left out because the
+      // share stopped answering for a moment, or other calls held its turn,
+      // say nothing about the folder, and the next visit reads it again.
+      const answered = missedChecks === 0
+        && linkProbes.every((linked) => linked?.kind !== 'unreachable' && linked?.kind !== 'busy');
+      if ('names' in read.value && !aborted && answered) {
+        keepListing([normalizedPath, realPath], listing);
+      }
+      return listing;
     },
 
     /**
@@ -1573,14 +1747,16 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
      * known to hold no link, the target's realpath), the links in the rest
      * are followed first, so the call runs on the share it lands on (see
      * runWhereItLands). `signal` gives up on a call still waiting for its
-     * turn; `slow` gives a whole folder read the slow call time limit.
+     * turn; `slow` gives a whole folder read the slow call time limit;
+     * `background` marks a call of a walk, which lets calls someone waits
+     * for go first.
      */
     runInMountTarget<T>(
       realPath: string,
       operation: (call: MountCall) => Promise<T>,
-      options: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean } = {},
+      options: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean; background?: boolean } = {},
     ): Promise<MountCallOutcome<T>> {
-      const gateOptions = { signal: options.signal, slow: options.slow };
+      const gateOptions = { signal: options.signal, slow: options.slow, background: options.background };
       return options.followLinksBelow === undefined
         ? gate.run(realPath, operation, gateOptions)
         : runWhereItLands(realPath, options.followLinksBelow, operation, gateOptions);
@@ -1592,6 +1768,18 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
      */
     isShareUnreachable(absolutePath: string): Promise<boolean> {
       return gate.isUnreachable(absolutePath);
+    },
+
+    /**
+     * Calls `listener` after each mount added (created or adopted), removed
+     * (unmounted, or released with its project) or repaired. Returns what
+     * stops it.
+     */
+    onMountsChanged(listener: (change: ProjectMountChange) => void): () => void {
+      mountChangeListeners.add(listener);
+      return () => {
+        mountChangeListeners.delete(listener);
+      };
     },
 
     /**
@@ -1610,6 +1798,9 @@ export function createProjectMountsService(dependencyOverrides: Partial<ProjectM
         }
       }
       dependencies.mounts.deleteByProject(projectId);
+      for (const record of records) {
+        announceMountChange({ projectId, mountId: record.mountId });
+      }
       if (records.length > 0) {
         await removeEmptyMountsDirectory(projectRoot);
       }
@@ -1704,7 +1895,7 @@ export function listProjectMounts(projectId: string): Promise<ProjectMount[]> {
 export function runInMountTarget<T>(
   realPath: string,
   operation: (call: MountCall) => Promise<T>,
-  options?: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean },
+  options?: { signal?: AbortSignal; followLinksBelow?: string; slow?: boolean; background?: boolean },
 ): Promise<MountCallOutcome<T>> {
   return projectMountsService.runInMountTarget(realPath, operation, options);
 }
@@ -1716,6 +1907,15 @@ export function runInMountTarget<T>(
  */
 export function isMountShareUnreachable(absolutePath: string): Promise<boolean> {
   return projectMountsService.isShareUnreachable(absolutePath);
+}
+
+/**
+ * Tells `listener` of every mount added, removed or repaired, for the File
+ * Tree, which then lists that mount's contents afresh. See the service
+ * method `onMountsChanged`.
+ */
+export function onProjectMountsChanged(listener: (change: ProjectMountChange) => void): () => void {
+  return projectMountsService.onMountsChanged(listener);
 }
 
 /**

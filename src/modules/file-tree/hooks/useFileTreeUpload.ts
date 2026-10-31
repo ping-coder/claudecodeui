@@ -441,7 +441,8 @@ export const useFileTreeUpload = ({
   }, []);
 
   // Item rows stop propagation of their own dragover, so reaching this handler
-  // means the cursor is over empty space and the drop should target the root.
+  // means the cursor is over empty space, the root's row or the header, and the
+  // drop should target the root.
   const handleDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();

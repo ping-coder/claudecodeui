@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { mock } from 'node:test';
@@ -10,6 +11,7 @@ import {
   closeConnection,
   initializeDatabase,
   notificationPreferencesDb,
+  pushSubscriptionsDb,
   sessionsDb,
   userDb,
 } from '@/modules/database/index.js';
@@ -24,8 +26,15 @@ import {
   notifyBackgroundWorkCompleted,
   notifyRunFailed,
   notifyRunStopped,
+  sendTestWebPush,
   setNotificationRunLookup,
 } from '../services/notification-orchestrator.service.js';
+
+// The orchestrator's own web-push instance (one module cache for import and require), stubbed per
+// test so nothing leaves the process. The package ships no type declarations.
+const webPush = createRequire(import.meta.url)('web-push') as {
+  sendNotification: (subscription: { endpoint: string }, payload: string, options?: unknown) => Promise<unknown>;
+};
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -309,6 +318,215 @@ test('late failures and finished background work are named by their own run too'
     } finally {
       disconnect();
       clock.mock.restore();
+    }
+  });
+});
+
+/** The error web-push rejects with when a push service answers outside 2xx. */
+const pushServiceError = (statusCode: number, body: string) => Object.assign(new Error('Received unexpected response code'), {
+  name: 'WebPushError',
+  statusCode,
+  body,
+  headers: {},
+});
+
+/** A user with Web Push on for every event and one stored subscription per endpoint given. */
+function pushUser(username: string, endpoints: string[]): number {
+  const userId = Number(userDb.createUser(username, 'password-hash').id);
+  notificationPreferencesDb.updatePreferences(userId, {
+    channels: { webPush: true, desktop: false },
+    events: { actionRequired: true, stop: true, error: true },
+  });
+  for (const endpoint of endpoints) {
+    pushSubscriptionsDb.saveSubscription(userId, endpoint, 'p256dh-key', 'auth-key');
+  }
+  return userId;
+}
+
+const storedEndpoints = (userId: number) => pushSubscriptionsDb.getSubscriptions(userId).map((row) => row.endpoint).sort();
+
+test('the test push goes to the one endpoint named, of this user only, and returns the push service\'s answer', async () => {
+  await withIsolatedDatabase(async () => {
+    const userId = pushUser('push-test-owner', ['https://fcm.googleapis.com/fcm/send/mine', 'https://fcm.googleapis.com/fcm/send/second']);
+    pushUser('push-test-other', ['https://fcm.googleapis.com/fcm/send/theirs']);
+    const sent: Array<{ endpoint: string; payload: unknown; options: unknown }> = [];
+    const send = mock.method(webPush, 'sendNotification', async (subscription: { endpoint: string }, payload: string, options: unknown) => {
+      sent.push({ endpoint: subscription.endpoint, payload: JSON.parse(payload), options });
+      return { statusCode: 201, body: '', headers: {} };
+    });
+    try {
+      const delivery = await sendTestWebPush({ userId, endpoint: 'https://fcm.googleapis.com/fcm/send/mine', title: 'CloudCLI test', body: 'Through push' });
+
+      assert.deepEqual(delivery, { accepted: true, statusCode: 201, host: 'fcm.googleapis.com' });
+      assert.deepEqual(sent, [{
+        endpoint: 'https://fcm.googleapis.com/fcm/send/mine',
+        payload: {
+          title: 'CloudCLI test',
+          body: 'Through push',
+          data: { sessionId: null, provider: null, code: 'push.test', tag: 'cloudcli:test:push' },
+        },
+        // A push service that never answers fails the send instead of holding it forever.
+        options: { timeout: 10_000 },
+      }]);
+
+      assert.equal(await sendTestWebPush({ userId, endpoint: 'https://fcm.googleapis.com/fcm/send/theirs', title: 't', body: 'b' }), null);
+      assert.equal(await sendTestWebPush({ userId, endpoint: 'https://fcm.googleapis.com/fcm/send/unknown', title: 't', body: 'b' }), null);
+      assert.equal(sent.length, 1);
+    } finally {
+      send.mock.restore();
+    }
+  });
+});
+
+test('a failed push is logged with the push service host and status, never the endpoint; gone and mismatched subscriptions are dropped', async () => {
+  await withIsolatedDatabase(async () => {
+    const endpoints = {
+      gone: 'https://gone.push.example/send/secret-gone',
+      mismatch: 'https://fcm.googleapis.com/fcm/send/secret-mismatch',
+      appleMismatch: 'https://web.push.apple.com/secret-apple',
+      badToken: 'https://forbidden.push.example/send/secret-forbidden',
+      unreachable: 'https://unreachable.push.example/send/secret-unreachable',
+    };
+    const userId = pushUser('push-failures', Object.values(endpoints));
+    const answers: Record<string, () => never> = {
+      [endpoints.gone]: () => { throw pushServiceError(410, 'push subscription has unsubscribed or expired.\n'); },
+      [endpoints.mismatch]: () => {
+        throw pushServiceError(403, 'the VAPID credentials in the authorization header do not correspond to the credentials used to create the subscriptions.\n');
+      },
+      [endpoints.appleMismatch]: () => { throw pushServiceError(403, '{"reason":"VapidPkHashMismatch"}'); },
+      [endpoints.badToken]: () => { throw pushServiceError(403, '{"reason":"BadJwtToken"}'); },
+      [endpoints.unreachable]: () => { throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }); },
+    };
+    const send = mock.method(webPush, 'sendNotification', async (subscription: { endpoint: string }) => answers[subscription.endpoint]());
+    const warn = mock.method(console, 'warn', () => undefined);
+    try {
+      const results = [];
+      for (const endpoint of Object.values(endpoints)) {
+        results.push(await sendTestWebPush({ userId, endpoint, title: 't', body: 'b' }));
+      }
+
+      assert.deepEqual(results.map((result) => [result?.accepted, result?.statusCode, result?.dropped]), [
+        [false, 410, true],
+        [false, 403, true],
+        [false, 403, true],
+        [false, 403, false],
+        [false, null, false],
+      ]);
+      assert.deepEqual(storedEndpoints(userId), [endpoints.badToken, endpoints.unreachable].sort());
+
+      const lines = warn.mock.calls.map((call) => String(call.arguments[0]));
+      assert.deepEqual(lines, [
+        '[web-push] push to gone.push.example failed: 410 "push subscription has unsubscribed or expired."; subscription dropped',
+        '[web-push] push to fcm.googleapis.com failed: 403 "the VAPID credentials in the authorization header do not correspond to the credentials used to create the subscriptions."; subscription dropped',
+        '[web-push] push to web.push.apple.com failed: 403 "{\\"reason\\":\\"VapidPkHashMismatch\\"}"; subscription dropped',
+        '[web-push] push to forbidden.push.example failed: 403 "{\\"reason\\":\\"BadJwtToken\\"}"',
+        '[web-push] push to unreachable.push.example failed: no answer (ECONNREFUSED)',
+      ]);
+      assert.equal(lines.some((line) => line.includes('secret')), false);
+    } finally {
+      send.mock.restore();
+      warn.mock.restore();
+    }
+  });
+});
+
+test('repeated failures of one push service and status are logged once per 10 minutes, with a count of the rest', async () => {
+  await withIsolatedDatabase(async () => {
+    let now = 5_000_000;
+    const clock = mock.method(Date, 'now', () => now);
+    const endpoint = 'https://busy.push.example/send/one';
+    const userId = pushUser('push-busy', [endpoint]);
+    const send = mock.method(webPush, 'sendNotification', async () => { throw pushServiceError(429, 'slow down'); });
+    const warn = mock.method(console, 'warn', () => undefined);
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        await sendTestWebPush({ userId, endpoint, title: 't', body: 'b' });
+        now += 60_000;
+      }
+      assert.equal(warn.mock.callCount(), 1);
+
+      now += 10 * 60_000;
+      await sendTestWebPush({ userId, endpoint, title: 't', body: 'b' });
+      assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0]), [
+        '[web-push] push to busy.push.example failed: 429 "slow down"',
+        '[web-push] push to busy.push.example failed: 429 "slow down"; 2 more like it since the last line',
+      ]);
+      // Neither gone nor mismatched: the subscription stays.
+      assert.deepEqual(storedEndpoints(userId), [endpoint]);
+    } finally {
+      clock.mock.restore();
+      send.mock.restore();
+      warn.mock.restore();
+    }
+  });
+});
+
+test('a push service that never answers fails the push after 10 seconds in all, whatever the socket does', async () => {
+  await withIsolatedDatabase(async () => {
+    const endpoint = 'https://silent.push.example/send/secret-silent';
+    const userId = pushUser('push-silent', [endpoint]);
+    // Never settles, as a send does whose push service trickles its answer
+    // and so never leaves the socket idle long enough for web-push's timeout.
+    const send = mock.method(webPush, 'sendNotification', () => new Promise(() => {}));
+    const warn = mock.method(console, 'warn', () => undefined);
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      let settled = false;
+      const delivery = sendTestWebPush({ userId, endpoint, title: 't', body: 'b' });
+      void delivery.then(() => {
+        settled = true;
+      });
+      mock.timers.tick(9_999);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(settled, false);
+
+      mock.timers.tick(1);
+      assert.deepEqual(await delivery, {
+        accepted: false,
+        statusCode: null,
+        host: 'silent.push.example',
+        detail: 'timeout',
+        dropped: false,
+      });
+      assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0]), [
+        '[web-push] push to silent.push.example failed: no answer (timeout)',
+      ]);
+      // Not answering says nothing about the subscription: it stays.
+      assert.deepEqual(storedEndpoints(userId), [endpoint]);
+    } finally {
+      mock.timers.reset();
+      send.mock.restore();
+      warn.mock.restore();
+    }
+  });
+});
+
+test('a finished run\'s push that the push service calls gone is logged and its subscription dropped', async () => {
+  await withIsolatedDatabase(async () => {
+    const userId = pushUser('push-run-end', ['https://expired.push.example/send/run', 'https://fcm.googleapis.com/fcm/send/alive']);
+    const sent: string[] = [];
+    const send = mock.method(webPush, 'sendNotification', async (subscription: { endpoint: string }) => {
+      sent.push(subscription.endpoint);
+      if (subscription.endpoint.includes('expired')) {
+        throw pushServiceError(410, 'expired');
+      }
+      return { statusCode: 201 };
+    });
+    const warn = mock.method(console, 'warn', () => undefined);
+    try {
+      notifyRunStopped({ userId, provider: 'claude', sessionId: 'push-run-end-session', runStartedAt: 42 });
+      for (let tick = 0; tick < 20 && storedEndpoints(userId).length > 1; tick += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      assert.deepEqual(sent.sort(), ['https://expired.push.example/send/run', 'https://fcm.googleapis.com/fcm/send/alive']);
+      assert.deepEqual(storedEndpoints(userId), ['https://fcm.googleapis.com/fcm/send/alive']);
+      assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0]), [
+        '[web-push] push to expired.push.example failed: 410 "expired"; subscription dropped',
+      ]);
+    } finally {
+      send.mock.restore();
+      warn.mock.restore();
     }
   });
 });

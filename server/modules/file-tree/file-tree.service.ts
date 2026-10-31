@@ -11,6 +11,7 @@ import type {
   FileTreeServices,
   FileTreeStats,
   FileTreeUploadedFile,
+  MountCall,
   MountCallOutcome,
   ProjectMount,
 } from '@/shared/types.js';
@@ -75,18 +76,53 @@ const FILE_SEARCH_SLICE_MS = 10;
 // Most matches one search returns; the command palette renders at most 100.
 const MAXIMUM_FILE_SEARCH_RESULTS = 200;
 
-// The contents of all mounts of one listing share this many entries. Past it
-// a mount is cut short and flagged `truncated`: a big mount never makes the
-// project too large to open.
+// A walk of a mount lists at most this many of its entries, and a listing
+// shows at most this many of all its mounts together. Past it a mount is cut
+// short and flagged `truncated`: a big mount never makes the project too
+// large to open. Each mount is walked on a budget of its own, so the walk
+// kept of it stands for the mount whatever was walked beside it; a listing
+// of several big mounts then reads more entries than it shows. On one share
+// their walks take turns for MOUNT_WALK_TIME_LIMIT_MS at most, behind every
+// call someone waits for there, and the walks kept spare the share the
+// listings after.
 const MAXIMUM_MOUNT_TREE_ENTRIES = 2_000;
 
-// A listing lists what is in its mounts for at most this long, then flags
-// the mounts not done `truncated`: a slow network share never holds up the
-// explorer, not even with a folder read that runs on past it. Every call in
-// a mount goes through the projects module's mount gate besides, so a share
-// that hangs costs a call its time limit, not a request that never answers
-// and a thread for each entry.
+// A walk of a mount's contents runs for at most this long, then flags the
+// mount `truncated`: a slow network share never holds up the explorer, not
+// even with a folder read that runs on past it. Every call in a mount goes
+// through the projects module's mount gate besides, so a share that hangs
+// costs a call its time limit, not a request that never answers and a
+// thread for each entry.
 const MOUNT_WALK_TIME_LIMIT_MS = 5_000;
+
+// The contents of a mount on a network share are kept from one listing to
+// the next (see listMountContents). Walked again for every listing (the
+// explorer and the palette both list the project, and every change in it
+// lists it again), they kept the share busy with the same folder reads, and
+// the files the user opened there waited behind them. For this long after a
+// walk, or a try at one, a listing takes its contents as they are, without
+// touching the share.
+const MOUNT_CONTENTS_FRESH_MS = 10_000;
+
+// Once the last walk is this old, a listing still answers with it at once,
+// and has the mount walked again behind it, for the next listing. Walked
+// again past the fresh window, a mount was still read in full on almost
+// every listing at the pace someone works (switching to Files, the palette,
+// an @ mention, a file saved). A walk the share left unanswered (busy, or
+// not answering) is walked again past the fresh window all the same: what it
+// lacks is a passing hiccup, not the size of the mount.
+const MOUNT_CONTENTS_REVALIDATE_MS = 60_000;
+
+// Past this age a listing waits for a new walk, as it would with none kept.
+// A change made outside CloudCLI (by an agent, say) shows in the listing
+// after the first one a minute past the last walk, or past this age at the
+// latest; a refresh the user asks for shows it at once.
+const MOUNT_CONTENTS_MAX_AGE_MS = 5 * 60_000;
+
+// The walks kept hold this many entries between them, ten mounts at a
+// walk's budget; past it the one listed longest ago is forgotten. Each walk
+// counts one more for its mount, so a great many empty ones cannot pile up.
+const MAXIMUM_KEPT_MOUNT_ENTRIES = 10 * MAXIMUM_MOUNT_TREE_ENTRIES;
 
 // The largest file readTextFile reads into memory; the editor reports bigger
 // ones as too large to open.
@@ -99,7 +135,7 @@ const MOUNTS_SENTINEL_FILE_NAME = '.gitignore';
 // How many entries of a directory in a mount have their lstat asked for at
 // once. A directory read there comes as names alone, and its entries' types
 // come from these calls, so a huge directory costs no more of them than the
-// mounts' budget has room for, give or take one turn.
+// mount's budget has room for, give or take one turn.
 const MOUNT_ENTRY_LSTAT_BATCH = 64;
 
 // Whether this platform's disks usually match file names case-insensitively
@@ -141,23 +177,78 @@ type FileTreeMountListing = {
 };
 
 // The mount a walk is in: its link, where its target really is (every call
-// in it goes through the mount gate by that path), and the flag to raise
-// when not all of it gets listed.
+// in it goes through the mount gate by that path), and what the walk learns
+// on the way: whether not all of it got listed (`truncated`), whether that
+// was for the share or the time limit rather than the budget (`cutShort`),
+// whether the share left a call unanswered before the time limit
+// (`unanswered`), and whether its calls ran under the gate's time limits, as
+// they do on a network share (`gated`; null while no call has run).
 type FileTreeMountPlace = {
   linkPath: string;
   realTargetPath: string;
   truncated: boolean;
+  cutShort: boolean;
+  unanswered: boolean;
+  gated: boolean | null;
 };
 
-// How a listing treats the mounts while it walks: whether it lists their
-// contents at all, the budget all of them share, the signal that ends their
-// walk when its time is up, and the mount the walk is in, if any.
+// How a listing treats the mounts while it walks: the project, whether it
+// lists their contents at all, whether it walks them again rather than take
+// the walks kept (`fresh`, see listMountContents), the budget all of them
+// share, the signal that ends their walk when its time is up, and the mount
+// the walk is in, if any.
 type FileTreeMountWalk = {
+  projectId: string;
   listing: FileTreeMountListing;
   walkContents: boolean;
+  fresh: boolean;
   remainingEntries: FileTreeEntryBudget;
   timeLimit: AbortSignal;
   insideMount: FileTreeMountPlace | null;
+};
+
+// The contents of a mount as one walk listed them: the tree under its link,
+// how many entries it holds, and what the walk learned (see
+// FileTreeMountPlace).
+type MountContents = {
+  children: FileTreeNode[];
+  entryCount: number;
+  truncated: boolean;
+  cutShort: boolean;
+  unanswered: boolean;
+  gated: boolean | null;
+};
+
+// Which mount a walk is of: the project, the mount, and where its target
+// really is, by which a change made in it is matched (outdateMountContentsAt).
+type MountContentsScope = {
+  projectId: string;
+  mountId: string;
+  realTargetPath: string;
+};
+
+// A walk of a mount on a network share kept for the listings after it, when
+// it started (dependencies.now()), when the last walk of the mount started,
+// kept or not (`triedAt`), and whether something changed in the mount since
+// (`outdated`; see outdateMountContents). Its tree is handed to every listing
+// as it is, and never changed.
+type KeptMountContents = MountContentsScope & {
+  contents: MountContents;
+  walkedAt: number;
+  triedAt: number;
+  outdated: boolean;
+};
+
+// A walk of a mount in progress, which the listings that come meanwhile
+// share, and whether a listing waits for it (`awaited`), rather than it only
+// running behind one. Once something changes in the mount it is `stale`:
+// shared no further and not kept, and stopped (`stop`) unless a listing
+// waits for it.
+type MountContentsWalk = MountContentsScope & {
+  awaited: boolean;
+  stale: boolean;
+  stop: AbortController;
+  done: Promise<MountContents>;
 };
 
 // Where a path the File Tree reads or writes lies in a mount whose link
@@ -279,6 +370,66 @@ function applyEntryStats(item: FileTreeNode, stats: FileTreeStats): void {
 function realPathInMount(place: FileTreeMountPlace, linkedPath: string): string {
   const relativePath = path.relative(place.linkPath, linkedPath);
   return relativePath ? path.join(place.realTargetPath, relativePath) : place.realTargetPath;
+}
+
+/** Notes on `place` whether a call in its mount ran under the mount gate's time limits (see `MountCall`). */
+function noteMountCall(place: FileTreeMountPlace, call: MountCall): void {
+  place.gated = place.gated === true || call.gated;
+}
+
+/** Flags `place` truncated, and cut short as well when the walk's time is up, not only its budget. */
+function stopMountWalk(place: FileTreeMountPlace, timeLimit: AbortSignal): void {
+  place.truncated = true;
+  if (timeLimit.aborted) {
+    place.cutShort = true;
+  }
+}
+
+/**
+ * The first `count` entries of a mount's contents, level by level (the top
+ * folder first, as a walk spends its budget), as copies, so the walk kept
+ * stays whole for the listings after.
+ */
+function cutMountContents(nodes: FileTreeNode[], count: number): FileTreeNode[] {
+  const top: FileTreeNode[] = [];
+  let left = count;
+  let level = nodes.map((node) => ({ node, into: top }));
+  while (level.length > 0 && left > 0) {
+    const nextLevel: typeof level = [];
+    for (const { node, into } of level) {
+      if (left <= 0) {
+        break;
+      }
+      left -= 1;
+      const copy: FileTreeNode = { ...node };
+      if (node.children) {
+        const children: FileTreeNode[] = [];
+        copy.children = children;
+        nextLevel.push(...node.children.map((child) => ({ node: child, into: children })));
+      }
+      into.push(copy);
+    }
+    level = nextLevel;
+  }
+  return top;
+}
+
+/**
+ * Charges `contents`, a mount's, to what a listing's mounts have left between
+ * them (`remainingEntries`): whole while they fit, else cut to what is left
+ * (cutMountContents) and flagged `truncated`.
+ */
+function chargeMountContents(
+  contents: MountContents,
+  remainingEntries: FileTreeEntryBudget,
+): { children: FileTreeNode[]; truncated: boolean } {
+  if (contents.entryCount <= remainingEntries.visible) {
+    remainingEntries.visible -= contents.entryCount;
+    return { children: contents.children, truncated: contents.truncated };
+  }
+  const children = cutMountContents(contents.children, remainingEntries.visible);
+  remainingEntries.visible = 0;
+  return { children, truncated: true };
 }
 
 /** The names of a directory's entries, as it streams them. */
@@ -480,6 +631,17 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     : 1;
   const { acquire, release } = createConcurrencyLimiter(concurrencyLimit);
 
+  // The walks of mounts on network shares kept for the listings after them,
+  // the one listed longest ago first, and the walks of mounts in progress,
+  // by the same key (see listMountContents).
+  const keptMountContents = new Map<string, KeptMountContents>();
+  const mountContentsWalks = new Map<string, MountContentsWalk>();
+
+  // A mount added, removed or repaired is walked again by the next listing.
+  dependencies.mounts.onMountsChanged((change) => outdateMountContents(
+    (scope) => scope.projectId === change.projectId && scope.mountId === change.mountId,
+  ));
+
   async function resolveProjectRoot(projectId: string): Promise<string> {
     const projectRoot = await dependencies.projects.getProjectPathById(projectId);
     if (!projectRoot) {
@@ -553,7 +715,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
   /**
    * Reads one directory inside a mount, under the hard exclusions only and
-   * on the mounts' budget: like collectListedEntries, but every call goes
+   * on the mount's budget: like collectListedEntries, but every call goes
    * through the mount gate (by where the directory really is) instead of the
    * listing's own limiter, so a share that hangs costs this read its time
    * limit, and running out of the budget flags the mount `truncated` rather
@@ -566,7 +728,8 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
    * slow call (readDirectoryNames, never opendir, see `FileTreeFileSystem`),
    * which the walk stops waiting for at its time limit. Either way each
    * entry's type and metadata come from its lstat, MOUNT_ENTRY_LSTAT_BATCH
-   * entries at a time.
+   * entries at a time. All of them are background calls to the gate, so a
+   * file the user opens on the share meanwhile does not wait behind them.
    */
   async function collectMountEntries(
     directoryPath: string,
@@ -575,13 +738,14 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     timeLimit: AbortSignal,
   ): Promise<FileTreeListedEntry[]> {
     if (remainingEntries.visible <= 0 || timeLimit.aborted) {
-      place.truncated = true;
+      stopMountWalk(place, timeLimit);
       return [];
     }
     const read = await stopWaitingOnAbort(
       dependencies.mounts.runInMountTarget(
         realPathInMount(place, directoryPath),
         async (call): Promise<Iterable<string> | AsyncIterable<string> | null> => {
+          noteMountCall(place, call);
           // Other folders may have used up the budget while this one waited for its turn.
           if (remainingEntries.visible <= 0) {
             return null;
@@ -590,7 +754,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
             ? fileSystem.readDirectoryNames(directoryPath)
             : streamEntryNames(fileSystem.openDirectory(directoryPath));
         },
-        { signal: timeLimit, slow: true },
+        { signal: timeLimit, slow: true, background: true },
       ),
       timeLimit,
     );
@@ -600,6 +764,15 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     }
     if (read.kind !== 'done' || read.value === null) {
       place.truncated = true;
+      // Not the budget: the share did not answer, or the walk's time ran out first.
+      if (read.kind !== 'done') {
+        place.cutShort = true;
+        place.unanswered = place.unanswered || !timeLimit.aborted;
+      }
+      // Only a call under the gate's time limits comes back unreachable.
+      if (read.kind === 'unreachable') {
+        place.gated = true;
+      }
       return [];
     }
 
@@ -608,7 +781,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     try {
       for await (const name of read.value) {
         if (remainingEntries.visible <= 0 || timeLimit.aborted) {
-          place.truncated = true;
+          stopMountWalk(place, timeLimit);
           return listedEntries;
         }
         names.push(name);
@@ -634,9 +807,10 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
   /**
    * Adds `names`, entries of `directoryPath` in a mount, to `listedEntries`,
-   * each with its lstat through the mount gate, as far as the mounts' budget
+   * each with its lstat through the mount gate, as far as the mount's budget
    * goes. False when not all of them could be listed: the budget ran out
-   * (the walks of other folders share it), or an lstat did not answer.
+   * (the walks of other folders share it), or an lstat did not answer,
+   * which cuts the walk short.
    */
   async function listMountEntries(
     directoryPath: string,
@@ -650,8 +824,11 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       const entryPath = path.join(directoryPath, name);
       return dependencies.mounts.runInMountTarget(
         realPathInMount(place, entryPath),
-        () => fileSystem.lstat(entryPath),
-        { signal: timeLimit },
+        (call) => {
+          noteMountCall(place, call);
+          return fileSystem.lstat(entryPath);
+        },
+        { signal: timeLimit, background: true },
       );
     }));
     let complete = true;
@@ -660,6 +837,11 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       if (lstat.kind === 'unreachable' || lstat.kind === 'busy') {
         // Its type is not known, so it is left out, and the rest with it.
         complete = false;
+        place.cutShort = true;
+        place.unanswered = place.unanswered || !timeLimit.aborted;
+        if (lstat.kind === 'unreachable') {
+          place.gated = true;
+        }
         continue;
       }
       // An entry whose lstat failed is still listed, as a file without metadata.
@@ -746,29 +928,22 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       }
 
       if (mount && mountWalk) {
-        // Walked through the link, so every path stays under the project, on
-        // the mounts' own budget and with only the hard exclusions: the
-        // project's .gitignore says nothing about a folder outside it.
         if (
           mountWalk.walkContents
           && WALKABLE_MOUNT_STATUSES.has(mount.status)
           && mount.realTargetPath !== null
           && currentDepth < maximumDepth
         ) {
-          const mountState: FileTreeMountPlace = {
-            linkPath: itemPath,
-            realTargetPath: mount.realTargetPath,
-            truncated: false,
-          };
-          item.children = await buildFileTree(
+          const contents = await listMountContents(
+            mount,
+            mount.realTargetPath,
             itemPath,
             maximumDepth,
-            currentDepth + 1,
-            includeEntryByHardExclusions,
-            mountWalk.remainingEntries,
-            { ...mountWalk, insideMount: mountState },
+            currentDepth,
+            mountWalk,
           );
-          if (mountState.truncated) {
+          item.children = contents.children;
+          if (contents.truncated) {
             item.truncated = true;
           }
         }
@@ -796,6 +971,265 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       left.name,
       right.type === 'directory',
       right.name,
+    ));
+  }
+
+  /**
+   * The contents of `mount`, whose link is `linkPath`, for one listing:
+   * walked through the mount gate on a budget of their own
+   * (walkMountContents), then charged to what the listing's mounts have left
+   * between them (chargeMountContents).
+   *
+   * A walk that ran on a network share is kept (keepMountContents). A
+   * listing takes the walk kept as it is; once that is
+   * MOUNT_CONTENTS_REVALIDATE_MS old (MOUNT_CONTENTS_FRESH_MS, when the share
+   * left it unanswered) it takes it too, and has the mount
+   * walked again behind it for the next listing, though never within
+   * MOUNT_CONTENTS_FRESH_MS of the last try; past MOUNT_CONTENTS_MAX_AGE_MS
+   * after the walk kept, once something changed in the mount since, or when
+   * the listing is `fresh` (the user asked for a refresh), it waits for a
+   * new walk, as it would with none kept. The walk kept stays meanwhile,
+   * for keepMountContents to weigh the new one against: a refresh cut short
+   * by the share answers the user who asked for it, not the listings after.
+   * A mount on a local disk is walked every time: its walk costs little and
+   * holds up nothing.
+   *
+   * Listings that come while a mount is walked share that walk, whether a
+   * listing waits for it or it runs behind one (walkMountContentsOnce). So
+   * does a `fresh` one: that walk started after the last change made here,
+   * and a few seconds ago at most, and a second walk beside it would only
+   * wait for the share's turn behind it.
+   */
+  async function listMountContents(
+    mount: ProjectMount,
+    realTargetPath: string,
+    linkPath: string,
+    maximumDepth: number,
+    currentDepth: number,
+    mountWalk: FileTreeMountWalk,
+  ): Promise<{ children: FileTreeNode[]; truncated: boolean }> {
+    const scope: MountContentsScope = { projectId: mountWalk.projectId, mountId: mount.mountId, realTargetPath };
+    // All a walk depends on: whose mount it is, its link, its target and how
+    // deep it goes. The listing's .gitignore options are not among them: a
+    // mount is walked under the hard exclusions alone.
+    const key = JSON.stringify([scope.projectId, scope.mountId, linkPath, realTargetPath, maximumDepth - currentDepth]);
+    const walk = (timeLimit: AbortSignal) => walkMountContents(
+      realTargetPath,
+      linkPath,
+      maximumDepth,
+      currentDepth,
+      mountWalk,
+      timeLimit,
+    );
+    const kept = keptMountContents.get(key);
+    const now = dependencies.now();
+    if (!kept || kept.outdated || mountWalk.fresh || now - kept.walkedAt >= MOUNT_CONTENTS_MAX_AGE_MS) {
+      return chargeMountContents(await walkMountContentsOnce(key, scope, walk, mountWalk.timeLimit), mountWalk.remainingEntries);
+    }
+    // Listed again: the last one to be forgotten.
+    keptMountContents.delete(key);
+    keptMountContents.set(key, kept);
+    const revalidateAfterMs = kept.contents.unanswered ? MOUNT_CONTENTS_FRESH_MS : MOUNT_CONTENTS_REVALIDATE_MS;
+    if (now - kept.walkedAt >= revalidateAfterMs && now - kept.triedAt >= MOUNT_CONTENTS_FRESH_MS) {
+      walkMountContentsOnce(key, scope, walk, null).catch((error: unknown) => {
+        dependencies.logger.error(`Error listing the mounted folder "${mount.name}"`, error);
+      });
+    }
+    return chargeMountContents(kept.contents, mountWalk.remainingEntries);
+  }
+
+  /**
+   * Walks the contents of the mount whose link is `linkPath`, its target
+   * really at `realTargetPath`, until `timeLimit`. Walked through the link,
+   * so every path stays under the project, on a budget of their own and
+   * with only the hard exclusions: the project's .gitignore says nothing
+   * about a folder outside it.
+   */
+  async function walkMountContents(
+    realTargetPath: string,
+    linkPath: string,
+    maximumDepth: number,
+    currentDepth: number,
+    mountWalk: FileTreeMountWalk,
+    timeLimit: AbortSignal,
+  ): Promise<MountContents> {
+    const place: FileTreeMountPlace = {
+      linkPath,
+      realTargetPath,
+      truncated: false,
+      cutShort: false,
+      unanswered: false,
+      gated: null,
+    };
+    const remainingEntries: FileTreeEntryBudget = { visible: MAXIMUM_MOUNT_TREE_ENTRIES, ignored: 0 };
+    const children = await buildFileTree(
+      linkPath,
+      maximumDepth,
+      currentDepth + 1,
+      includeEntryByHardExclusions,
+      remainingEntries,
+      { ...mountWalk, remainingEntries, timeLimit, insideMount: place },
+    );
+    return {
+      children,
+      entryCount: MAXIMUM_MOUNT_TREE_ENTRIES - remainingEntries.visible,
+      truncated: place.truncated,
+      cutShort: place.cutShort,
+      unanswered: place.unanswered,
+      gated: place.gated,
+    };
+  }
+
+  /**
+   * The walk of the mount at `key` in progress, or else a new one: `walk`,
+   * run for MOUNT_WALK_TIME_LIMIT_MS at most, and no longer than
+   * `listingTimeLimit`, the time limit of the listing that waits for it
+   * (null for a walk behind a listing). A listing that shares a walk came
+   * after the one it is for, so it never waits past its own time limit.
+   * What the walk finds is kept (keepMountContents), unless the mount
+   * changed meanwhile; the listings that wait for it get it either way.
+   */
+  function walkMountContentsOnce(
+    key: string,
+    scope: MountContentsScope,
+    walk: (timeLimit: AbortSignal) => Promise<MountContents>,
+    listingTimeLimit: AbortSignal | null,
+  ): Promise<MountContents> {
+    const inProgress = mountContentsWalks.get(key);
+    if (inProgress) {
+      if (listingTimeLimit) {
+        inProgress.awaited = true;
+      }
+      return inProgress.done;
+    }
+    const walkedAt = dependencies.now();
+    const stop = new AbortController();
+    const stopWalk = () => stop.abort();
+    const timer = setTimeout(stopWalk, MOUNT_WALK_TIME_LIMIT_MS);
+    if (listingTimeLimit?.aborted) {
+      stopWalk();
+    } else {
+      listingTimeLimit?.addEventListener('abort', stopWalk, { once: true });
+    }
+    const walkInProgress: Omit<MountContentsWalk, 'done'> = {
+      ...scope,
+      awaited: listingTimeLimit !== null,
+      stale: false,
+      stop,
+    };
+    const done = (async (): Promise<MountContents> => {
+      try {
+        const contents = await walk(stop.signal);
+        if (!walkInProgress.stale) {
+          keepMountContents(key, scope, contents, walkedAt);
+        }
+        return contents;
+      } finally {
+        clearTimeout(timer);
+        listingTimeLimit?.removeEventListener('abort', stopWalk);
+        if (mountContentsWalks.get(key) === walkInProgress) {
+          mountContentsWalks.delete(key);
+        }
+      }
+    })();
+    mountContentsWalks.set(key, Object.assign(walkInProgress, { done }));
+    return done;
+  }
+
+  /**
+   * Keeps `contents`, a walk of the mount at `key` that started at
+   * `walkedAt`, for the listings after it, when its calls ran on a network
+   * share. A walk cut short, by the share or by its time limit, is kept too,
+   * truncated as it is, rather than have every listing wait on the share
+   * again; but it never takes the place of a whole walk kept that is not
+   * past MOUNT_CONTENTS_MAX_AGE_MS, which tells more of the mount. That
+   * holds for one outdated by a change since as well: no listing takes it,
+   * each walks the mount again until a walk gets through, and one cut short
+   * meanwhile (waiting for the share's turn, say, which a walk stopped for
+   * the change holds until its folder read answers) answers its own listing
+   * alone. A walk cut only by its budget lists the mount as it is, and
+   * replaces any. A walk not kept still counts as a try, so a share too slow
+   * to walk in time is walked behind a listing once per
+   * MOUNT_CONTENTS_FRESH_MS at most, not behind every one.
+   */
+  function keepMountContents(key: string, scope: MountContentsScope, contents: MountContents, walkedAt: number): void {
+    if (contents.gated === false) {
+      // On a local disk (now), so walked afresh every time.
+      keptMountContents.delete(key);
+      return;
+    }
+    const kept = keptMountContents.get(key);
+    if (
+      // Its time was up before any call ran: it tells nothing of the mount.
+      contents.gated === null
+      || (
+        contents.cutShort
+        && kept !== undefined
+        && !kept.contents.cutShort
+        && dependencies.now() - kept.walkedAt < MOUNT_CONTENTS_MAX_AGE_MS
+      )
+    ) {
+      if (kept) {
+        kept.triedAt = walkedAt;
+      }
+      return;
+    }
+    keptMountContents.delete(key);
+    keptMountContents.set(key, { ...scope, contents, walkedAt, triedAt: walkedAt, outdated: false });
+
+    let keptEntries = 0;
+    for (const other of keptMountContents.values()) {
+      keptEntries += other.contents.entryCount + 1;
+    }
+    for (const [oldestKey, oldest] of keptMountContents) {
+      if (keptEntries <= MAXIMUM_KEPT_MOUNT_ENTRIES) {
+        break;
+      }
+      keptMountContents.delete(oldestKey);
+      keptEntries -= oldest.contents.entryCount + 1;
+    }
+  }
+
+  /**
+   * After a change in every mount that `matches`: its walks kept are
+   * outdated, so the next listing walks it again (listMountContents), yet
+   * they still stand against a walk cut short meanwhile (keepMountContents);
+   * its walks in progress are stale, shared and kept no more. A listing
+   * already waiting for one still gets all it finds, as it would have had
+   * the change come a moment later; stopped, the walk would leave it the
+   * mount empty. A walk only behind a listing is stopped, so it makes no
+   * more calls into the share for a tree nobody will see.
+   */
+  function outdateMountContents(matches: (scope: MountContentsScope) => boolean): void {
+    for (const kept of keptMountContents.values()) {
+      if (matches(kept)) {
+        kept.outdated = true;
+      }
+    }
+    for (const [key, walk] of mountContentsWalks) {
+      if (matches(walk)) {
+        walk.stale = true;
+        mountContentsWalks.delete(key);
+        if (!walk.awaited) {
+          walk.stop.abort();
+        }
+      }
+    }
+  }
+
+  /**
+   * After a change made here in a mount, at `location` (null outside every
+   * mount), outdates the walks of every mount it touches: the change lies in
+   * its target, or its target lies in what changed, as two projects may
+   * mount the same folder.
+   */
+  function outdateMountContentsAt(location: FileTreeMountLocation | null): void {
+    if (!location) {
+      return;
+    }
+    outdateMountContents((scope) => (
+      isSameOrInsidePath(location.realPath, scope.realTargetPath)
+      || isSameOrInsidePath(scope.realTargetPath, location.realPath)
     ));
   }
 
@@ -1314,6 +1748,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           ENOENT: { message: 'File or directory not found', statusCode: 404 },
           EACCES: { message: 'Permission denied', statusCode: 403 },
         });
+      } finally {
+        // Its size and time have changed, or the file is new.
+        outdateMountContentsAt(location);
       }
 
       return { success: true, path: resolvedPath, message: 'File saved successfully' };
@@ -1339,10 +1776,12 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           createMountAwareEntryFilter(mountListing, includeEntry ?? includeEntryByFallbackDirectoryNames),
           undefined,
           {
+            projectId,
             listing: mountListing,
             // Only the explorer's listing (which the palette shares) lists what
             // is in a mount; the @ mention list sees the mount as a folder.
             walkContents: options?.markIgnored === true,
+            fresh: options?.fresh === true,
             remainingEntries: { visible: MAXIMUM_MOUNT_TREE_ENTRIES, ignored: 0 },
             timeLimit: mountWalkTimeLimit.signal,
             insideMount: null,
@@ -1481,6 +1920,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           EACCES: { message: 'Permission denied', statusCode: 403 },
           ENOENT: { message: 'Parent directory not found', statusCode: 404 },
         });
+      } finally {
+        // Even a create that failed may have made the folders above it.
+        outdateMountContentsAt(location);
       }
 
       return {
@@ -1527,6 +1969,8 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           ENOENT: { message: 'File or directory not found', statusCode: 404 },
           EXDEV: { message: 'Cannot move across different filesystems', statusCode: 400 },
         });
+      } finally {
+        outdateMountContentsAt(location);
       }
 
       return {
@@ -1568,6 +2012,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           ENOENT: { message: 'File or directory not found', statusCode: 404 },
           ENOTEMPTY: { message: 'Directory is not empty', statusCode: 400 },
         });
+      } finally {
+        // A folder whose delete failed part way has lost some of what it held.
+        outdateMountContentsAt(location);
       }
 
       const entryType = stats.isDirectory() ? 'directory' as const : 'file' as const;
@@ -1584,6 +2031,9 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         throw createFileTreeError('No files provided', 400, 'UPLOAD_FILES_REQUIRED');
       }
 
+      // Where the files go in a mount, if they do; its walks are outdated
+      // however far the upload got.
+      let location: FileTreeMountLocation | null = null;
       try {
         const projectRoot = await resolveProjectRoot(input.projectId);
         const normalizedProjectRoot = path.resolve(projectRoot);
@@ -1593,7 +2043,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         const resolvedTargetDirectory = path.resolve(normalizedProjectRoot, input.targetPath) === normalizedProjectRoot
           ? normalizedProjectRoot
           : resolvePathInsideProject(projectRoot, input.targetPath);
-        const location = await locateInMountLink(input.projectId, projectRoot, resolvedTargetDirectory);
+        location = await locateInMountLink(input.projectId, projectRoot, resolvedTargetDirectory);
 
         try {
           await callOnPath(location, () => fileSystem.access(resolvedTargetDirectory));
@@ -1651,6 +2101,8 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         if (error instanceof AppError) throw error;
         dependencies.logger.error(`Error uploading files: ${readErrorMessage(error)}`, error);
         throw error;
+      } finally {
+        outdateMountContentsAt(location);
       }
     },
   };

@@ -10,7 +10,13 @@ type UseFileTreeDataResult = {
   /** A reload of a tree already on screen, which stays up meanwhile. */
   refreshing: boolean;
   error: string | null;
+  /** Lists the tree again after a change made here, which the server already knows of. */
   refreshFiles: () => void;
+  /**
+   * Lists the tree again because the user asked to: the server walks the mounts on network shares
+   * again too, rather than answer with their last walk.
+   */
+  refreshFilesFresh: () => void;
 };
 
 const DEFAULT_LOAD_ERROR = 'Unable to load the file tree for this project.';
@@ -30,7 +36,15 @@ function readResponseErrorMessage(responseBody: string): string | null {
   }
 }
 
-export function useFileTreeData(selectedProject: Project | null): UseFileTreeDataResult {
+type UseFileTreeDataOptions = {
+  /** The first listing is fresh, as refreshFilesFresh's are: set when a refresh landed while the tree was not on screen. */
+  freshFirstLoad?: boolean;
+};
+
+export function useFileTreeData(
+  selectedProject: Project | null,
+  { freshFirstLoad = false }: UseFileTreeDataOptions = {},
+): UseFileTreeDataResult {
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   // A reload behind a tree already shown: the header's refresh icon spins while the rows, an open
@@ -41,8 +55,16 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
   const abortControllerRef = useRef<AbortController | null>(null);
   // The project whose tree is on screen; a reload of that same project keeps it up instead of the loading state.
   const shownProjectIdRef = useRef<string | null>(null);
+  // Whether the next listing is one the user asked for (refreshFilesFresh), or the first one after a refresh
+  // the tree missed.
+  const freshRequestedRef = useRef(freshFirstLoad);
 
   const refreshFiles = useCallback(() => {
+    setRefreshKey((prev) => prev + 1);
+  }, []);
+
+  const refreshFilesFresh = useCallback(() => {
+    freshRequestedRef.current = true;
     setRefreshKey((prev) => prev + 1);
   }, []);
 
@@ -53,6 +75,7 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
 
     if (!projectId) {
       shownProjectIdRef.current = null;
+      freshRequestedRef.current = false;
       setFiles([]);
       setLoading(false);
       setRefreshing(false);
@@ -60,6 +83,8 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
       return;
     }
     const isReload = shownProjectIdRef.current === projectId;
+    const fresh = freshRequestedRef.current;
+    freshRequestedRef.current = false;
 
     // Abort previous request
     if (abortControllerRef.current) {
@@ -69,6 +94,9 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
 
     // Track mount state so aborted or late responses do not enqueue stale state updates.
     let isActive = true;
+    // A fresh listing cut short before the server answered (StrictMode's second mount run, or a reload
+    // right behind it) leaves the next listing fresh instead.
+    let answered = false;
 
     const fetchFiles = async () => {
       if (isActive) {
@@ -84,9 +112,10 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
         // such as CLAUDE.md stay reachable from the explorer.
         const response = await api.getFiles(
           projectId,
-          { markIgnored: true },
+          { markIgnored: true, fresh },
           { signal: abortControllerRef.current!.signal },
         );
+        answered = true;
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -129,6 +158,9 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
     return () => {
       isActive = false;
       abortControllerRef.current?.abort();
+      if (fresh && !answered) {
+        freshRequestedRef.current = true;
+      }
     };
   }, [selectedProject?.projectId, refreshKey]);
 
@@ -138,5 +170,6 @@ export function useFileTreeData(selectedProject: Project | null): UseFileTreeDat
     refreshing,
     error,
     refreshFiles,
+    refreshFilesFresh,
   };
 }

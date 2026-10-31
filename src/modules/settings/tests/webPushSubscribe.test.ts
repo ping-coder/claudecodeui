@@ -239,6 +239,35 @@ test('a subscription made in place of an expired one is dropped when saving it f
   assert.equal(browser.subscription === null, true, 'the browser holds no subscription the server lacks');
 });
 
+test('a subscription made with another VAPID key is dropped first, so subscribing with this server\'s key can work', async () => {
+  stubNotification('granted', 'granted');
+  // Made against an older key: the browser refuses to subscribe with a new key while it holds this one.
+  const staleSubscription = {
+    ...browserSubscription,
+    endpoint: 'https://push.example.test/stale-key',
+    options: { applicationServerKey: new Uint8Array([4, 9, 9, 9]).buffer },
+    unsubscribe: vi.fn(async () => {
+      browser.subscription = null;
+      return true;
+    }),
+  };
+  browser.subscription = staleSubscription;
+  pushManager.subscribe.mockImplementation(async () => {
+    if (browser.subscription) {
+      throw new DOMException('A subscription with a different applicationServerKey already exists', 'InvalidStateError');
+    }
+    return subscribeInBrowser();
+  });
+  const { result } = renderHook(() => useWebPush());
+
+  const outcome = await subscribeWith(result);
+
+  assert.equal(outcome, 'subscribed');
+  assert.equal(staleSubscription.unsubscribe.mock.calls.length, 1);
+  assert.deepEqual(server.subscriptions, [{ endpoint: ENDPOINT, keys: { p256dh: 'p256dh-key', auth: 'auth-key' } }]);
+  assert.equal(result.current.isSubscribed, true);
+});
+
 test('turning push off clears the reason an earlier attempt failed', async () => {
   const requestPermission = stubNotification('default');
   const { result } = renderHook(() => useWebPush());

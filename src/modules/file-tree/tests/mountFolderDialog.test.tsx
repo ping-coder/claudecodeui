@@ -476,6 +476,25 @@ test('a folder the browser cannot open is not said to be missing', async () => {
   assert.equal(screen.queryByText(/That folder doesn't exist/) === null, true);
 });
 
+test('a folder whose share is busy with another read is said to be busy, not missing', async () => {
+  const BUSY_TEXT = "That folder couldn't be checked in time: its network share is busy (reading a large folder, say), or offline shares are holding up the checks. Try again in a moment.";
+  const dialog = await openDialog();
+  createMount.mockImplementationOnce(async () => refusal('MOUNT_TARGET_BUSY'));
+  fillForm(dialog, { target: '/mnt/nas', name: 'nas' });
+  submit(dialog);
+  await waitFor(() => assert.equal(alertText(dialog), BUSY_TEXT));
+
+  browseMounts.mockImplementation(async (folderPath: string | null) => (folderPath === '/mnt/nas/small'
+    ? refusal('MOUNT_TARGET_BUSY')
+    : json({ success: true, data: { path: '/mnt/nas', parent: '/mnt', directories: [{ name: 'small', path: '/mnt/nas/small' }] } })));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Browse folders' }));
+  await waitFor(() => assert.equal(screen.queryByText('small') !== null, true));
+  assert.equal(screen.queryByText(BUSY_TEXT) === null, true);
+  fireEvent.click(screen.getByText('small'));
+  await waitFor(() => assert.equal(screen.queryByText(BUSY_TEXT) !== null, true));
+  assert.equal(screen.queryByText(/can't be opened/) === null, true);
+});
+
 test('a folder on a share that does not answer is not said to be missing', async () => {
   const dialog = await openDialog();
   // How the server refuses a target whose probe timed out.
@@ -499,19 +518,74 @@ test('the folder browser lists folders under the mount rules and names the mount
   fireEvent.click(within(dialog).getByRole('button', { name: 'Browse folders' }));
   await waitFor(() => assert.equal(screen.queryByText('media') !== null, true));
   // No folder typed yet: the endpoint's default folder, the home folder.
-  assert.deepEqual(browseMounts.mock.calls[0], [null]);
+  assert.equal(browseMounts.mock.calls[0][0], null);
   // The mount browse endpoint has no folder creation.
   assert.equal(screen.queryByTitle('Create new folder') === null, true);
 
   fireEvent.click(screen.getByText('media'));
   await waitFor(() => assert.equal(screen.queryByText('Big Clips') !== null, true));
-  assert.deepEqual(browseMounts.mock.calls[1], ['/mnt/media']);
+  assert.equal(browseMounts.mock.calls[1][0], '/mnt/media');
 
   fireEvent.click(screen.getByRole('button', { name: 'Select' }));
   await waitFor(() => assert.equal(screen.queryByRole('dialog') !== null, true));
   const reopened = screen.getByRole('dialog');
   assert.equal((within(reopened).getByLabelText('Folder to mount') as HTMLInputElement).value, '/mnt/media/Big Clips');
   assert.equal((within(reopened).getByLabelText('Name') as HTMLInputElement).value, 'Big Clips');
+});
+
+test('opening another folder before a listing came back aborts it, and its late answer never replaces the newer listing', async () => {
+  const slowMedia = heldAnswer();
+  browseMounts.mockImplementation(async (folderPath: string | null) => {
+    if (folderPath === '/mnt/media') {
+      return slowMedia.promise;
+    }
+    if (folderPath === '/mnt/archive') {
+      return json({ success: true, data: { path: '/mnt/archive', parent: '/mnt', directories: [{ name: 'Old Reels', path: '/mnt/archive/Old Reels' }] } });
+    }
+    return json({
+      success: true,
+      data: { path: '/home/u', parent: '/home', directories: [{ name: 'media', path: '/mnt/media' }, { name: 'archive', path: '/mnt/archive' }] },
+    });
+  });
+  const dialog = await openDialog();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Browse folders' }));
+  await waitFor(() => assert.equal(screen.queryByText('media') !== null, true));
+
+  // The folder shown stays usable while a slow one loads.
+  fireEvent.click(screen.getByText('media'));
+  await waitFor(() => assert.equal(browseMounts.mock.calls.length, 2));
+  fireEvent.click(screen.getByText('archive'));
+  await waitFor(() => assert.equal(screen.queryByText('Old Reels') !== null, true));
+  assert.equal((browseMounts.mock.calls[1][1] as AbortSignal).aborted, true);
+  assert.equal((browseMounts.mock.calls[2][1] as AbortSignal).aborted, false);
+
+  slowMedia.send(json({ success: true, data: { path: '/mnt/media', parent: '/mnt', directories: [{ name: 'Big Clips', path: '/mnt/media/Big Clips' }] } }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(screen.queryByText('Big Clips') === null, true);
+  assert.equal(screen.queryByText('Old Reels') !== null, true);
+});
+
+test('a listing cut short on a slow share says so, and that the path can still be typed', async () => {
+  browseMounts.mockImplementation(async () => json({
+    success: true,
+    data: {
+      path: '/mnt/nas',
+      parent: '/mnt',
+      directories: [{ name: 'scans', path: '/mnt/nas/scans' }],
+      truncated: { checked: 1200, total: 48000 },
+    },
+  }));
+  const dialog = await openDialog();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Browse folders' }));
+  await waitFor(() => assert.equal(screen.queryByText('scans') !== null, true));
+  assert.equal(
+    screen.queryByText('Not every folder is listed: this folder is large or slow to read, and 1200 of its 48000 items were checked in time. You can still type the path in "Folder to mount".') !== null,
+    true,
+  );
+
+  await i18n.changeLanguage('zh-CN');
+  fireEvent.click(screen.getByText('..'));
+  await waitFor(() => assert.equal(screen.queryByText(/限时内只检查了 48000 项中的 1200 项/) !== null, true));
 });
 
 test('a name the user typed is kept when a folder is picked', async () => {

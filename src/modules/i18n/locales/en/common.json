@@ -142,6 +142,7 @@
     "uploadedCount_one": "Uploaded {{uploaded}} of {{total}} file",
     "uploadedCount_other": "Uploaded {{uploaded}} of {{total}} files",
     "ignoredByGitignore": "Matches a .gitignore rule",
+    "rootActions": "More actions for {{name}}",
     "context": {
       "rename": "Rename",
       "delete": "Delete",
@@ -219,6 +220,7 @@
       "adoptableHint": "These links are already in mounts/ (made in a terminal, say). Register one to manage it here.",
       "adopt": "Register",
       "truncated": "Not every file is listed: the mounted folder is too large or too slow to list in full.",
+      "browseIncomplete": "Not every folder is listed: this folder is large or slow to read, and {{checked}} of its {{total}} items were checked in time. You can still type the path in \"Folder to mount\".",
       "nodeTitle": "Mounted folder → {{target}}",
       "nodeWarningTitle": "Mounted folder → {{target}}. {{status}}: right-click to repair.",
       "nodeBrokenTitle": "Broken mount → {{target}}. {{status}}: right-click to repair or unmount.",
@@ -252,6 +254,7 @@
         "repairSpotTaken": "mounts/{{name}} is now a real file or folder, not the link. Move it out of the way and repair again, or unmount.",
         "targetNotFound": "That folder doesn't exist or doesn't answer (an offline network share?).",
         "browseUnavailable": "This folder can't be opened: it doesn't exist, doesn't answer (an offline network share?), or you aren't allowed to read it.",
+        "targetBusy": "That folder couldn't be checked in time: its network share is busy (reading a large folder, say), or offline shares are holding up the checks. Try again in a moment.",
         "targetNotDirectory": "That path is not a folder.",
         "targetForbidden": "System folders, private folders such as ~/.ssh, and folders that contain them can't be mounted. For your home folder, pick a folder inside it.",
         "targetLoop": "The folder can't be the project itself, a folder inside it, or a folder that contains it.",

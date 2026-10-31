@@ -14,12 +14,33 @@ import type * as SharedUtils from '@/shared/utils';
  * one sound: one chime, and silent notifications after it. The page stays quiet when the sound is off, for a
  * catch-up alert, when the desktop app notifies natively, and when push will deliver while the user is away. The
  * page posts a system notification only when the user is away, the permission is granted, their switch is on, and
- * neither push nor the desktop app will. Away from the page, the claimer first reads the preferences and the push
- * subscription again unless they are a few seconds old, and alerts on its own when that read is slow or fails.
+ * neither push nor the desktop app will. Push counts only when the server holds this browser's subscription: one
+ * the server lacks leaves the alert to the page and is replaced in the background while the Web Push channel is
+ * on. Away from the page, the claimer first reads the preferences, and the server's word on the subscription, again
+ * unless they are a few seconds old, and alerts on its own when a read is slow or fails; on the page the chime waits
+ * on neither. Every decision is reported to the server log.
  */
 
-const sound = vi.hoisted(() => ({ chimes: 0, primes: 0, mirroredSettings: [] as boolean[] }));
-const server = vi.hoisted(() => ({ preferences: null as unknown, preferenceReads: 0, responseDelayMs: 0 }));
+const sound = vi.hoisted(() => ({
+  chimes: 0,
+  primes: 0,
+  mirroredSettings: [] as boolean[],
+  // Runs as a chime plays, for a test where the user leaves the page meanwhile.
+  onChime: null as null | (() => void),
+}));
+const server = vi.hoisted(() => ({
+  preferences: null as unknown,
+  preferenceReads: 0,
+  responseDelayMs: 0,
+  // The push subscriptions the server holds, by endpoint, and how it answers about them.
+  registeredEndpoints: new Set<string>(),
+  statusReads: 0,
+  statusDelayMs: 0,
+  resyncOk: true,
+  resyncs: [] as unknown[],
+  // What the page sent to the server log.
+  reports: [] as Array<Record<string, unknown>>,
+}));
 const deployment = vi.hoisted(() => ({ environment: null as string | null }));
 
 vi.mock('@/shared/utils', async (importOriginal) => {
@@ -32,6 +53,7 @@ vi.mock('@/shared/utils', async (importOriginal) => {
         return false;
       }
       sound.chimes += 1;
+      sound.onChime?.();
       return true;
     },
     primeNotificationSound: () => {
@@ -59,6 +81,31 @@ vi.mock('@/shared/api', () => ({
         return preferences
           ? { ok: true, json: async () => ({ success: true, preferences }) }
           : { ok: false, json: async () => ({}) };
+      },
+      push: {
+        vapidPublicKey: async () => ({ ok: true, json: async () => ({ publicKey: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' }) }),
+        status: async (endpoint: string) => {
+          server.statusReads += 1;
+          if (server.statusDelayMs > 0) {
+            await new Promise((resolve) => {
+              setTimeout(resolve, server.statusDelayMs);
+            });
+          }
+          return { ok: true, json: async () => ({ success: true, registered: server.registeredEndpoints.has(endpoint) }) };
+        },
+        resync: async (subscription: { endpoint: string }) => {
+          server.resyncs.push(subscription);
+          if (server.resyncOk) {
+            server.registeredEndpoints.add(subscription.endpoint);
+          }
+          return { ok: server.resyncOk, json: async () => ({}) };
+        },
+      },
+    },
+    system: {
+      reportClientDiagnostics: async (report: Record<string, unknown>) => {
+        server.reports.push(report);
+        return { ok: true };
       },
     },
   },
@@ -88,8 +135,38 @@ const pageState = { visible: true, focused: true };
 const randomSpread = { value: 0 };
 const serviceWorker = {
   subscription: null as unknown,
+  // How many subscriptions pushManager.subscribe() has made, which numbers their endpoints.
+  subscriptionsMade: 0,
   notifications: [] as Array<{ title: string; options: Record<string, unknown> }>,
+  messageListeners: new Set<(event: MessageEvent) => void>(),
 };
+
+const PUSH_ENDPOINT = 'https://push.example/abc';
+
+/** A push subscription with `endpoint`; unsubscribing leaves the browser without one. */
+const subscriptionWith = (endpoint: string) => ({
+  endpoint,
+  toJSON: () => ({ endpoint, keys: { p256dh: 'p256dh-key', auth: 'auth-key' } }),
+  unsubscribe: async () => {
+    serviceWorker.subscription = null;
+    return true;
+  },
+});
+
+/** This browser subscribed to push, with `registered` saying whether the server holds the subscription too. */
+const subscribeBrowser = ({ registered = true, endpoint = PUSH_ENDPOINT }: { registered?: boolean; endpoint?: string } = {}) => {
+  serviceWorker.subscription = subscriptionWith(endpoint);
+  if (registered) {
+    server.registeredEndpoints.add(endpoint);
+  }
+};
+
+/** The subscriptions the page saved on the server again, as `endpoint` and the `previousEndpoint` each replaced. */
+const resyncedEndpoints = () => (server.resyncs as Array<{ endpoint: string; previousEndpoint?: string }>)
+  .map(({ endpoint, previousEndpoint }) => ({ endpoint, previousEndpoint }));
+
+/** The reports sent to the server log, as `outcome:reason`. */
+const reportedDecisions = () => server.reports.map((report) => `${report.outcome}:${report.reason}`);
 
 const alertOf = (sessionId: string, overrides: Partial<RunAlert> = {}): RunAlert => {
   const outcome: RunAlertOutcome = overrides.outcome ?? 'done';
@@ -145,14 +222,23 @@ beforeEach(() => {
   sound.chimes = 0;
   sound.primes = 0;
   sound.mirroredSettings.length = 0;
+  sound.onChime = null;
   server.preferences = preferencesWith();
   server.preferenceReads = 0;
   server.responseDelayMs = 0;
+  server.registeredEndpoints.clear();
+  server.statusReads = 0;
+  server.statusDelayMs = 0;
+  server.resyncOk = true;
+  server.resyncs.length = 0;
+  server.reports.length = 0;
   deployment.environment = null;
   pageState.visible = true;
   pageState.focused = true;
   serviceWorker.subscription = null;
+  serviceWorker.subscriptionsMade = 0;
   serviceWorker.notifications.length = 0;
+  serviceWorker.messageListeners.clear();
 
   Object.defineProperty(document, 'visibilityState', {
     configurable: true,
@@ -166,11 +252,27 @@ beforeEach(() => {
     configurable: true,
     value: {
       getRegistration: async () => ({
-        pushManager: { getSubscription: async () => serviceWorker.subscription },
+        pushManager: {
+          getSubscription: async () => serviceWorker.subscription,
+          // Hands back the subscription held, as browsers do when asked with its key; else makes a new one.
+          subscribe: async () => {
+            if (!serviceWorker.subscription) {
+              serviceWorker.subscriptionsMade += 1;
+              serviceWorker.subscription = subscriptionWith(`https://push.example/fresh-${serviceWorker.subscriptionsMade}`);
+            }
+            return serviceWorker.subscription;
+          },
+        },
         showNotification: async (title: string, options: Record<string, unknown>) => {
           serviceWorker.notifications.push({ title, options });
         },
       }),
+      addEventListener: (_type: string, listener: (event: MessageEvent) => void) => {
+        serviceWorker.messageListeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: MessageEvent) => void) => {
+        serviceWorker.messageListeners.delete(listener);
+      },
     },
   });
   vi.stubGlobal('Notification', { permission: 'granted', requestPermission: async () => 'granted' });
@@ -318,7 +420,7 @@ test('a desktop bridge that cannot report its state counts as the desktop app wi
 });
 
 test('when push will deliver the alert the page chimes only while the user is on it', async () => {
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   const view = await renderEffects();
 
@@ -356,7 +458,7 @@ test('the system notification needs the claim, the user away, the permission, th
       icon: '/logo-256.png',
       badge: '/logo-128.png',
       silent: true,
-      renotify: false,
+      renotify: true,
     },
   }]);
   serviceWorker.notifications.length = 0;
@@ -379,7 +481,7 @@ test('the system notification needs the claim, the user away, the permission, th
   assert.equal(serviceWorker.notifications.length, 0);
 
   // Push will deliver it.
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   view = await renderEffects();
   await announce(view, alertOf('f'));
@@ -394,7 +496,7 @@ test('the system notification needs the claim, the user away, the permission, th
   assert.equal(serviceWorker.notifications.length, 0);
 });
 
-test('the system notification is silent once the burst has made its sound', async () => {
+test('the system notification is silent once the burst has made its sound, and still renotifies', async () => {
   pageState.focused = false;
   const view = await renderEffects();
 
@@ -413,8 +515,8 @@ test('the system notification is silent once the burst has made its sound', asyn
     silent: options.silent,
     renotify: options.renotify,
   })), [
-    { tag: 'claude:a:run.stopped', silent: true, renotify: false },
-    { tag: 'claude:b:run.failed', silent: true, renotify: false },
+    { tag: 'claude:a:run.stopped', silent: true, renotify: true },
+    { tag: 'claude:b:run.failed', silent: true, renotify: true },
     { tag: 'claude:c:run.background_completed', silent: false, renotify: true },
   ]);
 });
@@ -431,7 +533,7 @@ test('a completion claimed within 1.5 s of another tab\'s chime posts a silent n
   assert.deepEqual(serviceWorker.notifications.map(({ options }) => ({
     silent: options.silent,
     renotify: options.renotify,
-  })), [{ silent: true, renotify: false }]);
+  })), [{ silent: true, renotify: true }]);
 });
 
 test('the title leads with the environment label and is cut to 80 characters', async () => {
@@ -469,7 +571,7 @@ test('the server\'s sound setting is mirrored on mount; on the page, the prefere
 });
 
 test('away from the page, a delivery reads the preferences again first once they are over 5 s old', async () => {
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   const view = await renderEffects();
   pageState.focused = false;
@@ -498,7 +600,7 @@ test('away from the page, push turned on since the last read takes the alert ove
   pageState.focused = false;
 
   // The user turns push on in Settings: this browser subscribes, and the server pushes the event from now on.
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   await flush(20_000);
   await announce(view, alertOf('a'));
@@ -510,7 +612,7 @@ test('away from the page, push turned on since the last read takes the alert ove
 });
 
 test('a read that takes over 1.5 s, or fails, leaves the alert to the page, whatever the last answer said', async () => {
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   const view = await renderEffects();
   pageState.focused = false;
@@ -540,7 +642,7 @@ test('a delivery waits on the read announce has started rather than making its o
   const view = await renderEffects();
   pageState.focused = false;
   // Push turned on since the read on mount, and the server slow to answer.
-  serviceWorker.subscription = { endpoint: 'https://push.example/abc' };
+  subscribeBrowser();
   server.preferences = preferencesWith({ webPush: true });
   server.responseDelayMs = 1000;
   await flush(61_000);
@@ -563,4 +665,239 @@ test('every pointerdown and keydown primes the sound', async () => {
   view.unmount();
   fireEvent.pointerDown(document.body);
   assert.equal(sound.primes, 3);
+});
+
+test('a subscription the server lacks leaves the alert to the page, and is replaced quietly while push is wanted', async () => {
+  // Push was turned on on another device, so the account's channel is on; this browser's subscription is one the
+  // server never got, or dropped. It is replaced by a new one, which the server fails to save at first.
+  subscribeBrowser({ registered: false });
+  server.preferences = preferencesWith({ webPush: true });
+  server.resyncOk = false;
+  const view = await renderEffects();
+  pageState.focused = false;
+
+  assert.deepEqual(server.resyncs, [{
+    endpoint: 'https://push.example/fresh-1',
+    keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+    previousEndpoint: PUSH_ENDPOINT,
+  }]);
+  await announce(view, alertOf('a'));
+  assert.equal(sound.chimes, 1);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+  assert.deepEqual(server.reports.map(({ outcome, reason, push, silent }) => ({ outcome, reason, push, silent })), [
+    { outcome: 'posted', reason: 'away', push: 'unknown', silent: true },
+  ]);
+  // Tried once per page load, the new subscription included: the next alerts neither ask the server again nor make
+  // yet another subscription.
+  await flush(10_000);
+  await announce(view, alertOf('b'));
+  assert.equal(server.resyncs.length, 1);
+  assert.equal(serviceWorker.subscriptionsMade, 1);
+  view.unmount();
+
+  // The next page load sets it up, and from then on push carries the alert.
+  server.resyncOk = true;
+  const next = await renderEffects();
+  assert.deepEqual(resyncedEndpoints().at(-1), { endpoint: 'https://push.example/fresh-2', previousEndpoint: 'https://push.example/fresh-1' });
+  await flush(2000);
+  await announce(next, alertOf('c'));
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a', 'Title b']);
+  assert.equal(server.reports.at(-1)?.outcome, 'push');
+  assert.equal(server.reports.at(-1)?.push, 'registered');
+});
+
+test('away from the page, a subscription the server dropped since its last answer leaves the next alert to the page, and is replaced', async () => {
+  subscribeBrowser();
+  server.preferences = preferencesWith({ webPush: true });
+  const view = await renderEffects();
+  pageState.focused = false;
+
+  await announce(view, alertOf('a'));
+  assert.equal(serviceWorker.notifications.length, 0, 'push carries it');
+
+  // That push came back 410 and the server dropped the subscription. A minute on, the user is still in another app.
+  server.registeredEndpoints.delete(PUSH_ENDPOINT);
+  await flush(60_000);
+  await announce(view, alertOf('b'));
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title b']);
+  assert.equal(server.reports.at(-1)?.push, 'unknown');
+  // Replaced rather than saved again as it was: the push service had called that one gone.
+  assert.deepEqual(resyncedEndpoints(), [{ endpoint: 'https://push.example/fresh-1', previousEndpoint: PUSH_ENDPOINT }]);
+
+  await flush(10_000);
+  await announce(view, alertOf('c'));
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title b']);
+  assert.equal(server.reports.at(-1)?.outcome, 'push');
+});
+
+test('away from the page, a subscription saved since in Settings takes the alert over from the next completion', async () => {
+  // The server lacks the subscription and the Web Push channel is off, so nothing puts it right on load.
+  subscribeBrowser({ registered: false });
+  const view = await renderEffects();
+  pageState.focused = false;
+  await announce(view, alertOf('a'));
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+
+  // The user turns push on in Settings: the server saves this browser's subscription, and the channel is on.
+  server.registeredEndpoints.add(PUSH_ENDPOINT);
+  server.preferences = preferencesWith({ webPush: true });
+  await flush(20_000);
+  await announce(view, alertOf('b'));
+
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+  assert.equal(server.reports.at(-1)?.outcome, 'push');
+  assert.equal(server.reports.at(-1)?.push, 'registered');
+});
+
+test('on the page the chime waits on no request about the push subscription', async () => {
+  subscribeBrowser();
+  const view = await renderEffects();
+  assert.equal(server.statusReads, 1);
+  // Long after the last answer, with the server slow to give another.
+  await flush(11 * 60_000);
+  server.statusDelayMs = 1400;
+
+  await announce(view, alertOf('a'), 0);
+
+  assert.equal(sound.chimes, 1);
+  assert.equal(server.statusReads, 1);
+  assert.deepEqual(reportedDecisions(), ['skipped:onPage']);
+});
+
+test('a user who leaves the page while the chime plays gets the server asked then', async () => {
+  subscribeBrowser();
+  server.preferences = preferencesWith({ webPush: true });
+  const view = await renderEffects();
+  // The server has dropped the subscription since it last said it held it.
+  server.registeredEndpoints.delete(PUSH_ENDPOINT);
+  await flush(20_000);
+  sound.onChime = () => {
+    pageState.focused = false;
+  };
+
+  await announce(view, alertOf('a'));
+
+  assert.equal(sound.chimes, 1);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+  assert.equal(server.reports.at(-1)?.push, 'unknown');
+});
+
+test('a subscription the server lacks is left alone while the Web Push channel is off, or without permission', async () => {
+  subscribeBrowser({ registered: false });
+  let view = await renderEffects();
+  pageState.focused = false;
+
+  await announce(view, alertOf('a'));
+  assert.deepEqual(server.resyncs, []);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+  view.unmount();
+
+  server.preferences = preferencesWith({ webPush: true });
+  vi.stubGlobal('Notification', { permission: 'denied', requestPermission: async () => 'denied' });
+  view = await renderEffects();
+  await flush(2000);
+  assert.deepEqual(server.resyncs, []);
+});
+
+test('a server that does not answer about the subscription within 1.5 s leaves the alert to the page', async () => {
+  subscribeBrowser();
+  server.preferences = preferencesWith({ webPush: true });
+  const view = await renderEffects();
+  pageState.focused = false;
+  // Half a minute on, the server's last word is too old for a delivery away from the page, and it now takes 5 s to answer.
+  await flush(30_000);
+  server.statusDelayMs = 5000;
+
+  act(() => view.result.current.announce(alertOf('a')));
+  await flush(1700);
+  assert.equal(serviceWorker.notifications.length, 0);
+  await flush(200);
+  assert.deepEqual(serviceWorker.notifications.map(({ title }) => title), ['Title a']);
+  assert.equal(server.reports.at(-1)?.push, 'unchecked');
+});
+
+test('the server is asked again when the page comes back into view a minute on, and when the worker reports a new subscription', async () => {
+  subscribeBrowser();
+  const view = await renderEffects();
+  assert.equal(server.statusReads, 1);
+
+  const showPage = () => act(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await flush(30_000);
+  showPage();
+  await flush();
+  assert.equal(server.statusReads, 1, 'half a minute on: the answer still holds');
+
+  await flush(31_000);
+  showPage();
+  await flush();
+  assert.equal(server.statusReads, 2);
+
+  // The worker saw the browser replace the subscription: asked at once, and the new endpoint is the one checked.
+  subscribeBrowser({ endpoint: 'https://push.example/replaced', registered: false });
+  server.preferences = preferencesWith({ webPush: true });
+  serviceWorker.messageListeners.forEach((listener) => listener(new MessageEvent('message', { data: { type: 'push:subscription-changed' } })));
+  await flush();
+  assert.equal(server.statusReads >= 3, true);
+  assert.deepEqual(resyncedEndpoints(), [{ endpoint: 'https://push.example/fresh-1', previousEndpoint: 'https://push.example/replaced' }]);
+
+  view.unmount();
+  assert.equal(serviceWorker.messageListeners.size, 0, 'stops listening on unmount');
+});
+
+test('every decision about the system notification goes to the server log', async () => {
+  const view = await renderEffects();
+
+  // On the page: nothing to post.
+  await announce(view, alertOf('a'));
+  // Away, posted, silent after the chime.
+  pageState.focused = false;
+  await flush(2000);
+  await announce(view, alertOf('b'));
+  // The switch off, then no permission.
+  view.rerender({ systemNotificationsEnabled: false });
+  await announce(view, alertOf('c'));
+  view.rerender({ systemNotificationsEnabled: true });
+  vi.stubGlobal('Notification', { permission: 'default', requestPermission: async () => 'default' });
+  await announce(view, alertOf('d'));
+  vi.stubGlobal('Notification', { permission: 'granted', requestPermission: async () => 'granted' });
+  // Left to push.
+  subscribeBrowser();
+  server.preferences = preferencesWith({ webPush: true });
+  await flush(20_000);
+  await announce(view, alertOf('e'));
+
+  assert.deepEqual(reportedDecisions(), [
+    'skipped:onPage',
+    'posted:away',
+    'skipped:switchOff',
+    'skipped:noPermission',
+    'push:pushRegistered',
+  ]);
+  assert.deepEqual(server.reports[1], {
+    event: 'notification',
+    outcome: 'posted',
+    reason: 'away',
+    push: 'none',
+    silent: true,
+    permission: 'granted',
+    visibility: 'visible',
+    focused: false,
+    platform: (navigator.platform || '').slice(0, 40),
+  });
+  // Nothing about the run itself goes in a report.
+  assert.equal(JSON.stringify(server.reports).includes('Title'), false);
+});
+
+test('in the desktop app the decision is reported as the desktop app\'s, and a catch-up alert reports nothing', async () => {
+  setDesktopApp(true);
+  server.preferences = preferencesWith({ desktop: true });
+  const view = await renderEffects();
+  pageState.focused = false;
+
+  await announce(view, alertOf('a'));
+  await announce(view, alertOf('b', { isCatchUp: true }));
+
+  assert.deepEqual(reportedDecisions(), ['desktop:desktopNotifies']);
 });

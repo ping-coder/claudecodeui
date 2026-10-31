@@ -139,12 +139,18 @@ test('mount routes pass the project, the mount and the body through and wrap the
   ]);
 });
 
-test('mount-browse passes the path along, or nothing for the home folder', async () => {
+test('mount-browse passes the path along, or nothing for the home folder, and says when the listing was cut short', async () => {
   const paths: Array<string | null> = [];
-  const listing = { path: '/mnt', parent: '/', directories: [{ name: 'disk', path: '/mnt/disk' }] };
+  const listing = {
+    path: '/mnt',
+    parent: '/',
+    directories: [{ name: 'disk', path: '/mnt/disk' }],
+    truncated: { checked: 1_200, total: 48_000 },
+  };
   const dependencies = createDependencies({
-    browseMountTargets: async (inputPath) => {
+    browseMountTargets: async (inputPath, options) => {
       paths.push(inputPath);
+      assert.equal(options?.signal instanceof AbortSignal, true);
       return listing;
     },
   });
@@ -158,6 +164,35 @@ test('mount-browse passes the path along, or nothing for the home folder', async
   });
 
   assert.deepEqual(paths, ['/mnt', null]);
+});
+
+test('a mount-browse request the client gives up on aborts the browse', { timeout: 5_000 }, async () => {
+  let browseStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    browseStarted = resolve;
+  });
+  let browseEnded = () => {};
+  const ended = new Promise<void>((resolve) => {
+    browseEnded = resolve;
+  });
+  const dependencies = createDependencies({
+    browseMountTargets: async (_inputPath, options) => {
+      browseStarted();
+      // Answers only once the request is closed.
+      await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      browseEnded();
+      return { path: '/mnt/nas', parent: '/mnt', directories: [] };
+    },
+  });
+
+  await withMountsServer(dependencies, async (baseUrl) => {
+    const client = new AbortController();
+    const response = fetch(`${baseUrl}/api/projects/mount-browse?path=%2Fmnt%2Fnas`, { signal: client.signal });
+    await started;
+    client.abort();
+    await assert.rejects(response);
+    await ended;
+  });
 });
 
 test('a refused mount answers with the service\'s code and status', async () => {

@@ -8,6 +8,7 @@ import {
   createNotificationEvent,
   getPublicKey,
   notifyUserIfEnabled,
+  sendTestWebPush,
 } from '@/modules/notifications/index.js';
 
 import { createSettingsRouter } from './settings.routes.js';
@@ -42,8 +43,10 @@ const settingsService = createSettingsService({
     save: (userId, endpoint, p256dh, auth) =>
       pushSubscriptionsDb.saveSubscription(userId, endpoint, p256dh, auth),
     remove: (endpoint) => pushSubscriptionsDb.removeSubscription(endpoint),
+    isRegistered: (userId, endpoint) => pushSubscriptionsDb.getPushSubscriptionForUser(userId, endpoint) !== null,
   },
   getVapidPublicKey: getPublicKey,
+  sendTestPush: (test) => sendTestWebPush(test),
 });
 
 /** Settings router assembled for the authenticated server mount. */

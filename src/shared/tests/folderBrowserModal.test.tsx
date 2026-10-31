@@ -26,11 +26,11 @@ test('it starts at the given folder and goes up to the parent the endpoint repor
   render(<FolderBrowserModal isOpen onClose={() => undefined} onFolderSelected={() => undefined} browse={browse} initialPath="/mnt/media" />);
 
   await waitFor(() => assert.equal(screen.queryByText('clips') !== null, true));
-  assert.deepEqual(browse.mock.calls[0], ['/mnt/media']);
+  assert.equal(browse.mock.calls[0][0], '/mnt/media');
 
   fireEvent.click(screen.getByText('..'));
   await waitFor(() => assert.equal(screen.queryByText('media') !== null, true));
-  assert.deepEqual(browse.mock.calls[1], ['/mnt']);
+  assert.equal(browse.mock.calls[1][0], '/mnt');
   // The endpoint says /mnt is as high as it goes.
   assert.equal(screen.queryByText('..') === null, true);
 });
@@ -41,14 +41,14 @@ test('without a reported parent, the parent comes from the path', async () => {
 
   await waitFor(() => assert.equal(screen.queryByText('..') !== null, true));
   fireEvent.click(screen.getByText('..'));
-  await waitFor(() => assert.deepEqual(browse.mock.calls[1], ['/home/u']));
+  await waitFor(() => assert.equal(browse.mock.calls[1][0], '/home/u'));
 });
 
 test('a folder is created only through the caller, in the folder shown', async () => {
   const browse = vi.fn(async (folderPath: string | null) => listing(folderPath ?? '/home/u', null, []));
   const { unmount } = render(<FolderBrowserModal isOpen onClose={() => undefined} onFolderSelected={() => undefined} browse={browse} initialPath={null} />);
   await waitFor(() => assert.equal(browse.mock.calls.length, 1));
-  assert.deepEqual(browse.mock.calls[0], [null]);
+  assert.equal(browse.mock.calls[0][0], null);
   assert.equal(screen.queryByTitle('Create new folder') === null, true);
   unmount();
 
@@ -78,7 +78,48 @@ test('the endpoint\'s refusal is shown, and the folder asked for can still be le
   assert.equal(screen.queryByText('..') !== null, true);
 
   fireEvent.click(screen.getByText('..'));
-  await waitFor(() => assert.deepEqual(browse.mock.calls[1], ['/']));
+  await waitFor(() => assert.equal(browse.mock.calls[1][0], '/'));
   fireEvent.click(screen.getByRole('button', { name: 'Use this folder' }));
   assert.deepEqual(onFolderSelected.mock.calls[0], ['/', false]);
+});
+
+test('a folder opened before the last one answered aborts that listing, whose late answer is dropped', async () => {
+  let answerHugeFolder: (result: FolderBrowseResult) => void = () => undefined;
+  const browse = vi.fn((folderPath: string | null, _options: { signal: AbortSignal }) => {
+    if (folderPath === '/data/huge') {
+      return new Promise<FolderBrowseResult>((resolve) => {
+        answerHugeFolder = resolve;
+      });
+    }
+    if (folderPath === '/data/small') {
+      return Promise.resolve(listing('/data/small', '/data', ['kept']));
+    }
+    return Promise.resolve({ ...listing('/data', '/', ['huge', 'small']), notice: 'Only part of /data is listed.' });
+  });
+  render(<FolderBrowserModal isOpen onClose={() => undefined} onFolderSelected={() => undefined} browse={browse} initialPath="/data" />);
+  await waitFor(() => assert.equal(screen.queryByText('huge') !== null, true));
+  // What the endpoint says about the folder shown.
+  assert.equal(screen.queryByText('Only part of /data is listed.') !== null, true);
+
+  fireEvent.click(screen.getByText('huge'));
+  await waitFor(() => assert.equal(browse.mock.calls.length, 2));
+  fireEvent.click(screen.getByText('small'));
+  await waitFor(() => assert.equal(screen.queryByText('kept') !== null, true));
+  assert.equal(browse.mock.calls[1][1].signal.aborted, true);
+  assert.equal(screen.queryByText('Only part of /data is listed.') === null, true);
+
+  answerHugeFolder(listing('/data/huge', '/data', ['stale']));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(screen.queryByText('stale') === null, true);
+  assert.equal(screen.queryByText('kept') !== null, true);
+});
+
+test('closing the browser aborts the listing on its way', async () => {
+  const browse = vi.fn((_folderPath: string | null, _options: { signal: AbortSignal }) => new Promise<FolderBrowseResult>(() => undefined));
+  const { rerender } = render(<FolderBrowserModal isOpen onClose={() => undefined} onFolderSelected={() => undefined} browse={browse} initialPath="/data" />);
+  await waitFor(() => assert.equal(browse.mock.calls.length, 1));
+  assert.equal(browse.mock.calls[0][1].signal.aborted, false);
+
+  rerender(<FolderBrowserModal isOpen={false} onClose={() => undefined} onFolderSelected={() => undefined} browse={browse} initialPath="/data" />);
+  assert.equal(browse.mock.calls[0][1].signal.aborted, true);
 });
